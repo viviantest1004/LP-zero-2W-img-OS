@@ -64,37 +64,36 @@ qemu-system-aarch64 -M raspi3ap -kernel firmware/kernel8.img \
 ```
 `make qemu-log` 가 이 방식을 쓴다.
 
-## UTM SE (아이폰/아이패드)
+## UTM SE (아이폰/아이패드) — 사실상 안 된다
 
-UTM SE 는 QEMU 를 iOS 로 포팅한 것이다. iOS 가 JIT 를 막기 때문에
-**TCG 인터프리터**로만 돌아 매우 느리지만, 우리 펌웨어는 20KB 라
-문제되지 않는다.
+UTM SE 는 QEMU 를 iOS 로 포팅한 것이라 원리상 될 것 같지만,
+**라즈베리파이 머신 타입이 iOS UTM 에서 동작하지 않는다는 보고가 있다.**
 
-설정해야 할 것은 데스크탑과 같다:
+UTM 이슈 #6546 (UTM 4.5.3 / iOS 17, 작성 시점 기준 미해결):
 
-| 항목 | 값 |
-|---|---|
-| 아키텍처 | ARM64 (aarch64) |
-| 시스템 / 머신 | `raspi3ap` (없으면 `raspi3b`) |
-| 부팅 | `-kernel` 로 `kernel8.img` |
-| 디스플레이 | 콘솔/시리얼 + 그래픽 |
+> "All other architectures worked, but AARCH64 and ARM32,
+>  I found that only QEMU Virtual Machine worked"
 
-QEMU 인자로 직접 주면:
-```
--M raspi3ap -kernel kernel8.img -serial mon:stdio
-```
+즉 iOS UTM 의 ARM64 에서는 generic `virt` 머신만 쓸 수 있고
+`raspi*` 계열은 못 쓴다는 뜻이다.
 
-**주의할 점**
+**이게 왜 치명적인가**
 
-- `sdcard/lp-zero.img` 를 디스크로 붙이면 안 된다. 위에서 설명한 대로
-  부팅되지 않는다. `firmware/kernel8.img` 만 `-kernel` 로 준다.
-- UTM 의 UI 는 디스크/ISO 부팅을 전제로 만들어져 있어서, `-kernel` 을
-  주려면 "QEMU 추가 인자" 항목을 써야 한다.
-- UTM SE 가 빌드에 `raspi*` 머신을 포함했는지는 버전에 따라 다를 수 있다.
-  머신 목록에 없으면 이 방법은 쓸 수 없다.
+우리 펌웨어는 BCM2710 하드웨어 주소에 하드코딩되어 있다:
 
-아이폰에서 되긴 하지만 설정이 번거롭다. **가능하면 데스크탑 QEMU 를
-권한다** — 스크린샷 캡처, 디스어셈블 로그, gdb 연결이 전부 된다.
+| | 우리 펌웨어 (BCM2710) | QEMU `virt` 머신 |
+|---|---|---|
+| 페리페럴 베이스 | `0x3F000000` | 해당 없음 |
+| PL011 UART | `0x3F201000` | `0x09000000` |
+| 메일박스 | `0x3F00B880` | 없음 (VideoCore 자체가 없다) |
+
+`virt` 에서는 주소가 전부 다르고 메일박스라는 개념 자체가 없다.
+따라서 **`raspi*` 를 못 쓰면 우리 펌웨어는 아이폰에서 돌릴 수 없다.**
+`virt` 용으로 따로 포팅하면 돌긴 하겠지만, 그건 더 이상 라즈베리파이
+펌웨어가 아니다.
+
+**결론: 데스크탑 QEMU 를 쓴다.** `make qemu` 한 줄이고, 스크린샷 캡처와
+디스어셈블 로그, gdb 연결까지 전부 된다.
 
 ## 실기와 다른 점
 

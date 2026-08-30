@@ -91,8 +91,8 @@ make qemu-shot   # 부팅 화면 캡처 -> qemu-out/*.ppm
 
 **주의: SD 이미지는 에뮬레이터에서 부팅되지 않는다.** QEMU 는 VideoCore
 GPU 를 흉내내지 않아서 Broadcom 블롭이 실행될 수 없다. 대신
-`kernel8.img` 를 `-kernel` 로 직접 올린다. 자세한 내용과 UTM(아이폰) 설정은
-[에뮬레이션 문서](docs/03-emulation.md) 참조.
+`kernel8.img` 를 `-kernel` 로 직접 올린다. 자세한 내용은 [에뮬레이션 문서](docs/03-emulation.md) 참조.
+(아이폰 UTM 은 라즈베리파이 머신 타입을 못 써서 사실상 불가하다.)
 
 ## 빌드 요구사항
 
