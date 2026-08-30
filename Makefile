@@ -10,7 +10,7 @@
 #   make clean         정리
 
 .PHONY: all firmware userland initramfs kernel kernel-test blobs verify-blobs \
-        sdcard all-in-one qemu qemu-log qemu-shot disasm syms clean distclean help
+        sdcard sdcard-linux all-in-one qemu qemu-log qemu-shot disasm syms clean distclean help
 
 all: firmware
 
@@ -52,6 +52,10 @@ verify-blobs:
 sdcard: firmware
 	@./tools/mksdcard.sh
 
+# 우리가 빌드한 리눅스 커널을 부팅하는 SD 이미지
+sdcard-linux: kernel
+	@./tools/mksdcard.sh --linux
+
 all-in-one: blobs firmware sdcard
 
 # ── QEMU 에뮬레이션 (실기 없이 테스트) ──────────────────────────
@@ -87,7 +91,8 @@ help:
 	@echo "  make kernel-test   커널을 QEMU 에서 부팅 검증"
 	@echo "  make blobs         Broadcom GPU 펌웨어 다운로드"
 	@echo "  make verify-blobs  받은 블롭 체크섬 검증"
-	@echo "  make sdcard        부팅 가능한 SD 이미지 생성"
+	@echo "  make sdcard        SD 이미지 (베어메탈 펌웨어 부팅)"
+	@echo "  make sdcard-linux  SD 이미지 (우리 리눅스 커널 부팅)"
 	@echo "  make all-in-one    blobs + firmware + sdcard"
 	@echo "  make qemu          QEMU 에서 실행 (대화형)"
 	@echo "  make qemu-log      QEMU 실행 후 시리얼 로그"

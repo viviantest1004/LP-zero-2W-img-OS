@@ -6,3 +6,7 @@
 #   · tools/mksdcard.sh 가 SD 이미지를 만들 때 둘이 같은지 검사한다.
 #   · 이름을 바꾸려면 여기와 boot/config.txt 두 곳을 고친다.
 KERNEL_IMAGE := test_a_123_LPzero2W.img
+
+# 리눅스 커널 이미지 파일명 (make sdcard-linux 로 굽는 이미지).
+# 마찬가지로 boot/config-linux.txt 의 kernel= 과 일치해야 한다.
+LINUX_IMAGE := test_a_123_LPzero2W_linux.img

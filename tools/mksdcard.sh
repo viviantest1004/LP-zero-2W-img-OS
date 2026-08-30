@@ -6,6 +6,10 @@
 # 유저스페이스에서 직접 조작하고, MBR 은 파이썬으로 바이트를 찍는다.
 # 덕분에 컨테이너/CI 안에서도 그대로 돌아간다.
 #
+# 두 가지 모드가 있다:
+#   (기본)   베어메탈 펌웨어를 부팅하는 이미지
+#   --linux  우리가 빌드한 리눅스 커널을 부팅하는 이미지
+#
 # 결과: sdcard/lp-zero.img  (dd 로 SD카드에 그대로 쓰면 부팅됨)
 
 set -euo pipefail
@@ -16,6 +20,8 @@ source "${REPO_ROOT}/tools/common.sh"
 BLOB_DIR="${REPO_ROOT}/blobs"
 OUT_DIR="${REPO_ROOT}/sdcard"
 IMAGE="${OUT_DIR}/lp-zero.img"
+MODE=firmware
+[[ "${1:-}" == "--linux" ]] && MODE=linux
 PART_IMG="${OUT_DIR}/.boot-part.img"
 
 # 이미지 레이아웃
@@ -32,16 +38,28 @@ for t in mkfs.vfat mcopy python3 dd; do
 done
 
 # ── 입력 확인 ────────────────────────────────────────────────────
-KERNEL="${REPO_ROOT}/firmware/${KERNEL_IMAGE}"
-[[ -f "$KERNEL" ]] || die "firmware/${KERNEL_IMAGE} 가 없습니다. 먼저 'make firmware' 를 실행하세요."
+if [[ "$MODE" == "linux" ]]; then
+    KERNEL="${REPO_ROOT}/kernel/out/Image"
+    KERNEL_NAME="$LINUX_IMAGE"
+    CONFIG_SRC="${REPO_ROOT}/boot/config-linux.txt"
+    DTB="${REPO_ROOT}/kernel/out/bcm2710-rpi-zero-2-w.dtb"
+    [[ -f "$KERNEL" ]] || die "kernel/out/Image 가 없습니다. 'make kernel' 을 먼저 실행하세요."
+    [[ -f "$DTB" ]]    || die "kernel/out 에 Zero 2 W DTB 가 없습니다."
+else
+    KERNEL="${REPO_ROOT}/firmware/${KERNEL_IMAGE}"
+    KERNEL_NAME="$KERNEL_IMAGE"
+    CONFIG_SRC="${REPO_ROOT}/boot/config.txt"
+    DTB=""
+    [[ -f "$KERNEL" ]] || die "firmware/${KERNEL_IMAGE} 가 없습니다. 먼저 'make firmware' 를 실행하세요."
+fi
 
 # config.txt 의 kernel= 과 실제 파일명이 다르면 GPU 가 커널을 못 찾는다.
 # 그 경우 화면도 시리얼도 아무 것도 안 나와서 원인 찾기가 매우 어렵다.
 # 이미지를 굽기 전에 여기서 잡는다.
-CFG_KERNEL="$(sed -n 's/^[[:space:]]*kernel=\(.*\)$/\1/p' "${REPO_ROOT}/boot/config.txt" \
+CFG_KERNEL="$(sed -n 's/^[[:space:]]*kernel=\(.*\)$/\1/p' "$CONFIG_SRC" \
               | tail -1 | tr -d '"'"'[:space:]'"'"')"
-if [[ "$CFG_KERNEL" != "$KERNEL_IMAGE" ]]; then
-    die "이름 불일치: config.mk 는 '${KERNEL_IMAGE}', boot/config.txt 는 '${CFG_KERNEL}'.
+if [[ "$CFG_KERNEL" != "$KERNEL_NAME" ]]; then
+    die "이름 불일치: config.mk 는 '${KERNEL_NAME}', $(basename "$CONFIG_SRC") 는 '${CFG_KERNEL}'.
        둘을 같게 맞추세요. 다르면 부팅 시 아무 출력 없이 멈춥니다."
 fi
 
@@ -57,7 +75,7 @@ rm -f "$IMAGE" "$PART_IMG"
 PART_SECTORS=$(( IMAGE_MB * 1024 * 1024 / SECTOR_SIZE - PART_START_SECTOR ))
 PART_BYTES=$(( PART_SECTORS * SECTOR_SIZE ))
 
-echo "SD카드 이미지 생성 중 (${IMAGE_MB}MiB)"
+echo "SD카드 이미지 생성 중 (${IMAGE_MB}MiB, 모드: ${MODE})"
 log "부트 파티션: ${PART_SECTORS} 섹터 ($(( PART_BYTES / 1024 / 1024 ))MiB)"
 
 truncate -s "$PART_BYTES" "$PART_IMG"
@@ -73,10 +91,33 @@ for b in "${BLOBS[@]}"; do
 done
 
 log "복사: config.txt                          (GPU 부팅 설정)"
-mcopy -i "$PART_IMG" "${REPO_ROOT}/boot/config.txt" ::
+mcopy -i "$PART_IMG" "$CONFIG_SRC" ::config.txt
 
-log "복사: ${KERNEL_IMAGE}  (우리 펌웨어)"
-mcopy -i "$PART_IMG" "$KERNEL" ::
+log "복사: ${KERNEL_NAME}"
+mcopy -i "$PART_IMG" "$KERNEL" "::${KERNEL_NAME}"
+
+if [[ "$MODE" == "linux" ]]; then
+    log "복사: $(basename "$DTB")            (디바이스 트리)"
+    mcopy -i "$PART_IMG" "$DTB" ::
+
+    log "복사: cmdline.txt                        (커널 커맨드라인)"
+    mcopy -i "$PART_IMG" "${REPO_ROOT}/boot/cmdline.txt" ::
+
+    # disable-bt 오버레이가 있어야 PL011 이 헤더 핀으로 나온다.
+    # 없으면 부팅은 되는데 시리얼에 아무것도 안 보인다.
+    OVL_SRC="${REPO_ROOT}/kernel/out/overlays/disable-bt.dtbo"
+    if [[ -f "$OVL_SRC" ]]; then
+        mmd -i "$PART_IMG" ::overlays 2>/dev/null || true
+        mcopy -i "$PART_IMG" "$OVL_SRC" ::overlays/
+        log "복사: overlays/disable-bt.dtbo            (PL011 을 헤더 핀으로)"
+    else
+        echo ""
+        echo "  경고: disable-bt.dtbo 가 없습니다."
+        echo "        이 오버레이 없이는 PL011(ttyAMA0)이 블루투스에 물려 있어"
+        echo "        40핀 헤더의 시리얼 콘솔에 아무것도 나오지 않습니다."
+        echo ""
+    fi
+fi
 
 # ── 3. MBR 을 붙여 완성 ─────────────────────────────────────────
 log "MBR 작성 + 파티션 결합"

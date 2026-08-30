@@ -9,5 +9,15 @@ _read_kernel_image() {
     fi
 }
 
+_read_mk_var() {
+    local mk="${REPO_ROOT}/config.mk"
+    [[ -f "$mk" ]] || return 0
+    sed -n "s/^[[:space:]]*$1[[:space:]]*:*=[[:space:]]*\(.*\)$/\1/p" "$mk" \
+        | tail -1 | tr -d '[:space:]'
+}
+
 KERNEL_IMAGE="$(_read_kernel_image)"
 : "${KERNEL_IMAGE:=kernel8.img}"
+
+LINUX_IMAGE="$(_read_mk_var LINUX_IMAGE)"
+: "${LINUX_IMAGE:=Image}"

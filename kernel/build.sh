@@ -45,6 +45,14 @@ fi
 
 MAKE_ARGS=(-C "$LINUX_SRC" O="$BUILD_DIR" ARCH="$ARCH" CROSS_COMPILE="$CROSS")
 
+# CLEAN=1 이면 빌드 디렉터리를 비운다.
+# 설정을 바꿔 다시 빌드하면 이전 설정으로 만든 .o 가 남아 있어서,
+# 나중에 "무엇이 이미지를 키우나"를 오브젝트 크기로 재려 할 때 왜곡된다.
+if [[ "${CLEAN:-0}" == "1" ]]; then
+    step "빌드 디렉터리 비우기 (CLEAN=1)"
+    rm -rf "$BUILD_DIR"
+fi
+
 mkdir -p "$BUILD_DIR" "$OUT_DIR"
 
 # ── 1. 공식 defconfig ────────────────────────────────────────────
@@ -109,6 +117,17 @@ if [[ -f "$DTB_SRC" ]]; then
     echo "  DTB   $(stat -c%s "${OUT_DIR}/bcm2710-rpi-zero-2-w.dtb") bytes"
 else
     echo "  경고: Zero 2 W DTB 를 찾지 못했습니다"
+fi
+
+# disable-bt 오버레이. Zero 2 W 에서 PL011 을 40핀 헤더로 돌리는 데
+# 필요하다. 없으면 시리얼 콘솔이 나오지 않는다.
+OVL_DIR="${BUILD_DIR}/arch/arm64/boot/dts/overlays"
+if [[ -f "${OVL_DIR}/disable-bt.dtbo" ]]; then
+    mkdir -p "${OUT_DIR}/overlays"
+    cp "${OVL_DIR}/disable-bt.dtbo" "${OUT_DIR}/overlays/"
+    echo "  오버레이 disable-bt.dtbo"
+else
+    echo "  경고: disable-bt.dtbo 를 찾지 못했습니다 (시리얼 콘솔이 안 나올 수 있습니다)"
 fi
 
 IMG_SIZE=$(stat -c%s "${OUT_DIR}/Image")
