@@ -5,7 +5,7 @@
 GPU 부트ROM 이 요구하는 Broadcom 클로즈드 블롭 3개를 제외하면
 부팅 코드부터 드라이버, 부트로더, 유저랜드까지 전부 직접 작성한다.
 
-현재 상태: **부팅 + 화면 출력 동작.** 베어메탈 펌웨어가 부팅해서
+현재 상태: **리눅스 부팅까지 동작.** 자체 커널이 자체 유저랜드를 띄운다. 베어메탈 펌웨어가 부팅해서
 HDMI 화면에 스플래시를 띄우고, 시리얼과 화면 양쪽으로 보드 정보를 덤프한 뒤
 대화형 모니터를 띄운다. 이미지 크기 20KB. QEMU 로 검증 완료.
 
@@ -124,6 +124,10 @@ firmware/           베어메탈 펌웨어 (전부 직접 작성)
   include/splash.h    ★ 부팅 화면 문구는 여기서 고친다
   linker.ld           0x80000 고정 배치
 config.mk           ★ 커널 이미지 파일명 (config.txt 의 kernel= 과 일치해야 함)
+kernel/             최소 리눅스 커널 설정과 빌드
+  lp-zero.config      bcm2711_defconfig 에 덮어쓰는 조각
+  build.sh            빌드 + 조각 반영 전수 검증
+  test-qemu.sh        QEMU 부팅 검증
 userland/           자체 libc + init + 셸 (외부 libc 없음)
   libc/               crt0 부터 printf 까지 전부 직접
   init/               PID 1
@@ -141,6 +145,7 @@ docs/               로드맵 · 부팅 사슬 · 하드웨어 참조
 - [하드웨어 참조](docs/02-hardware.md) — 메모리 맵, 시리얼 배선, 512MB 제약
 - [에뮬레이션](docs/03-emulation.md) — QEMU / UTM 으로 실기 없이 테스트
 - [유저랜드](docs/04-userland.md) — 자체 libc · init · 셸, AArch64 시스템콜
+- [커널](docs/05-kernel.md) — 최소 리눅스 만들기, 37.7MB → 15.7MB 과정
 
 ## 라이선스
 
