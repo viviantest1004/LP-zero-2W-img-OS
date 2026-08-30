@@ -44,6 +44,18 @@ log "bin/: ${PROGRAMS[*]}"
 ln -sf bin/init "${ROOT_DIR}/init"
 log "/init -> bin/init"
 
+# /dev/console 장치 노드.
+# 커널은 init 실행 전에 이걸 열어 fd 0,1,2 로 준다. 없으면 init 이
+# 파일 디스크립터 하나 없이 시작해서 오류조차 출력하지 못한다.
+# (init 안에도 devtmpfs 마운트 후 다시 여는 안전장치가 있다)
+if [[ "$(id -u)" == "0" ]]; then
+    mknod -m 600 "${ROOT_DIR}/dev/console" c 5 1
+    mknod -m 666 "${ROOT_DIR}/dev/null"    c 1 3
+    log "dev/: console, null"
+else
+    log "경고: root 가 아니라 /dev/console 을 만들지 못했습니다"
+fi
+
 cat > "${ROOT_DIR}/etc/motd" <<'MOTD'
 LP-zero OS
 

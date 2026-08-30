@@ -9,8 +9,8 @@
 #   make qemu          QEMU 에서 펌웨어 실행
 #   make clean         정리
 
-.PHONY: all firmware userland initramfs blobs verify-blobs sdcard all-in-one \
-        qemu qemu-log qemu-shot disasm syms clean distclean help
+.PHONY: all firmware userland initramfs kernel kernel-test blobs verify-blobs \
+        sdcard all-in-one qemu qemu-log qemu-shot disasm syms clean distclean help
 
 all: firmware
 
@@ -25,6 +25,15 @@ userland:
 # 리눅스가 램디스크로 푸는 cpio 아카이브
 initramfs: userland
 	@cd userland && ./mkrootfs.sh --cpio
+
+# 최소 리눅스 커널. 유저랜드를 이미지에 내장한다.
+# 커널 소스 경로는 LINUX_SRC 로 바꿀 수 있다.
+kernel: initramfs
+	@./kernel/build.sh
+
+# 빌드한 커널을 QEMU 에서 부팅시켜 셸까지 올라오는지 확인
+kernel-test:
+	@./kernel/test-qemu.sh log
 
 disasm:
 	@$(MAKE) --no-print-directory -C firmware disasm
@@ -74,6 +83,8 @@ help:
 	@echo "  make firmware      펌웨어 이미지 빌드"
 	@echo "  make userland      자체 libc + init + 셸 빌드"
 	@echo "  make initramfs     rootfs 조립 + initramfs.cpio.gz"
+	@echo "  make kernel        최소 리눅스 커널 빌드 (유저랜드 내장)"
+	@echo "  make kernel-test   커널을 QEMU 에서 부팅 검증"
 	@echo "  make blobs         Broadcom GPU 펌웨어 다운로드"
 	@echo "  make verify-blobs  받은 블롭 체크섬 검증"
 	@echo "  make sdcard        부팅 가능한 SD 이미지 생성"

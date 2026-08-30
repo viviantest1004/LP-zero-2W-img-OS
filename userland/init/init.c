@@ -48,6 +48,28 @@ static void mount_filesystems(void)
     }
 }
 
+/* 콘솔을 stdin/stdout/stderr 에 붙인다.
+ *
+ * 커널은 init 을 실행하기 전에 /dev/console 을 열어 fd 0,1,2 로 준다.
+ * 그런데 initramfs 안에 /dev/console 장치 노드가 없으면 그 시도가 실패하고
+ * ("unable to open an initial console") init 은 fd 하나 없이 시작한다.
+ * 그 상태에서는 오류 메시지조차 어디로도 나가지 않아 원인 파악이 불가능하다.
+ *
+ * devtmpfs 를 마운트하고 나면 /dev/console 이 생기므로 직접 열어 붙인다. */
+static void setup_console(void)
+{
+    long fd = lp_open("/dev/console", O_RDWR, 0);
+    if (fd < 0)
+        return;             /* 여기서 실패하면 알릴 방법도 없다 */
+
+    lp_dup2((int)fd, STDIN_FILENO);
+    lp_dup2((int)fd, STDOUT_FILENO);
+    lp_dup2((int)fd, STDERR_FILENO);
+
+    if (fd > STDERR_FILENO)
+        lp_close((int)fd);
+}
+
 static void banner(void)
 {
     printf("\n");
@@ -95,9 +117,10 @@ int main(int argc, char **argv)
 
     /* PID 1 이 아니면(개발 중 직접 실행) 마운트를 건너뛴다.
      * 이미 마운트된 시스템에 다시 마운트하려 들면 곤란하다. */
-    if (is_pid1)
+    if (is_pid1) {
         mount_filesystems();
-    else
+        setup_console();
+    } else
         printf("init: pid 1 이 아니므로 마운트를 건너뜁니다 (테스트 모드)\n");
 
     banner();
