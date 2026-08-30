@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+#
+# mksdcard.sh - 부팅 가능한 SD카드 이미지를 만든다.
+#
+# root 권한도 loop 마운트도 쓰지 않는다. mtools 가 FAT 파일시스템을
+# 유저스페이스에서 직접 조작하고, MBR 은 파이썬으로 바이트를 찍는다.
+# 덕분에 컨테이너/CI 안에서도 그대로 돌아간다.
+#
+# 결과: sdcard/lp-zero.img  (dd 로 SD카드에 그대로 쓰면 부팅됨)
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BLOB_DIR="${REPO_ROOT}/blobs"
+OUT_DIR="${REPO_ROOT}/sdcard"
+IMAGE="${OUT_DIR}/lp-zero.img"
+PART_IMG="${OUT_DIR}/.boot-part.img"
+
+# 이미지 레이아웃
+IMAGE_MB=128            # 전체 이미지 크기
+PART_START_SECTOR=8192  # 4MiB 지점 - 라즈베리파이 표준 정렬
+SECTOR_SIZE=512
+VOLUME_LABEL="LPZERO"
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+log() { printf '  %s\n' "$*"; }
+
+for t in mkfs.vfat mcopy python3 dd; do
+    command -v "$t" >/dev/null 2>&1 || die "$t 가 필요합니다 (apt install mtools dosfstools)"
+done
+
+# ── 입력 확인 ────────────────────────────────────────────────────
+KERNEL="${REPO_ROOT}/firmware/kernel8.img"
+[[ -f "$KERNEL" ]] || die "firmware/kernel8.img 가 없습니다. 먼저 'make firmware' 를 실행하세요."
+
+BLOBS=(bootcode.bin start.elf fixup.dat)
+for b in "${BLOBS[@]}"; do
+    [[ -f "${BLOB_DIR}/${b}" ]] || die "blobs/${b} 가 없습니다. './tools/fetch-blobs.sh' 를 먼저 실행하세요."
+done
+
+mkdir -p "$OUT_DIR"
+rm -f "$IMAGE" "$PART_IMG"
+
+# ── 1. FAT32 부트 파티션 만들기 ──────────────────────────────────
+PART_SECTORS=$(( IMAGE_MB * 1024 * 1024 / SECTOR_SIZE - PART_START_SECTOR ))
+PART_BYTES=$(( PART_SECTORS * SECTOR_SIZE ))
+
+echo "SD카드 이미지 생성 중 (${IMAGE_MB}MiB)"
+log "부트 파티션: ${PART_SECTORS} 섹터 ($(( PART_BYTES / 1024 / 1024 ))MiB)"
+
+truncate -s "$PART_BYTES" "$PART_IMG"
+mkfs.vfat -F 32 -n "$VOLUME_LABEL" "$PART_IMG" >/dev/null
+
+# ── 2. 파일 복사 ────────────────────────────────────────────────
+# mtools 는 이미지 파일을 드라이브처럼 다룬다. 설정 파일 검사는 건너뛴다.
+export MTOOLS_SKIP_CHECK=1
+
+log "복사: bootcode.bin, start.elf, fixup.dat  (Broadcom GPU 펌웨어)"
+for b in "${BLOBS[@]}"; do
+    mcopy -i "$PART_IMG" "${BLOB_DIR}/${b}" ::
+done
+
+log "복사: config.txt                          (GPU 부팅 설정)"
+mcopy -i "$PART_IMG" "${REPO_ROOT}/boot/config.txt" ::
+
+log "복사: kernel8.img                         (우리 펌웨어)"
+mcopy -i "$PART_IMG" "$KERNEL" ::
+
+# ── 3. MBR 을 붙여 완성 ─────────────────────────────────────────
+log "MBR 작성 + 파티션 결합"
+
+truncate -s "${IMAGE_MB}M" "$IMAGE"
+dd if="$PART_IMG" of="$IMAGE" bs="$SECTOR_SIZE" seek="$PART_START_SECTOR" \
+   conv=notrunc status=none
+
+python3 - "$IMAGE" "$PART_START_SECTOR" "$PART_SECTORS" <<'PY'
+import sys, struct
+
+image, start, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+
+def chs(lba, heads=255, spt=63):
+    """LBA -> CHS. 1023 실린더를 넘으면 관례대로 최대값으로 고정한다."""
+    c, rem = divmod(lba, heads * spt)
+    h, s = divmod(rem, spt)
+    s += 1
+    if c > 1023:
+        c, h, s = 1023, 254, 63
+    return bytes([h & 0xFF, ((c >> 2) & 0xC0) | (s & 0x3F), c & 0xFF])
+
+entry = (
+    b"\x00"                    # 부트 플래그 (Pi 는 보지 않음)
+    + chs(start)               # 시작 CHS
+    + b"\x0C"                  # 파티션 타입 0x0C = FAT32 (LBA)
+    + chs(start + count - 1)   # 끝 CHS
+    + struct.pack("<I", start) # 시작 LBA
+    + struct.pack("<I", count) # 섹터 수
+)
+assert len(entry) == 16
+
+with open(image, "r+b") as f:
+    f.seek(446)
+    f.write(entry + b"\x00" * 48)   # 파티션 1 + 나머지 3개는 비움
+    f.seek(510)
+    f.write(b"\x55\xAA")            # MBR 시그니처
+PY
+
+rm -f "$PART_IMG"
+
+# ── 4. 결과 확인 ────────────────────────────────────────────────
+echo ""
+echo "완성: ${IMAGE}  ($(du -h "$IMAGE" | cut -f1))"
+echo ""
+echo "부트 파티션 내용:"
+mdir -i "${IMAGE}@@$(( PART_START_SECTOR * SECTOR_SIZE ))" :: 2>/dev/null | sed 's/^/  /'
+
+cat <<EOF
+
+SD카드에 굽기:
+  sudo dd if=${IMAGE} of=/dev/sdX bs=4M conv=fsync status=progress
+
+시리얼 콘솔 연결 (USB-TTL 어댑터):
+  Pi 헤더 8번 (GPIO14 TX) -> 어댑터 RX
+  Pi 헤더 10번(GPIO15 RX) -> 어댑터 TX
+  Pi 헤더 6번 (GND)       -> 어댑터 GND
+  screen /dev/ttyUSB0 115200      (또는 minicom / picocom)
+EOF

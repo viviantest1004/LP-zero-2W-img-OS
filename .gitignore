@@ -1,0 +1,19 @@
+# 빌드 산출물
+build/
+*.o
+*.d
+*.elf
+*.map
+*.img
+!.gitkeep
+
+# 다운로드받은 클로즈드 블롭 (재현 가능하므로 커밋하지 않는다)
+blobs/
+
+# SD카드 이미지 조립 결과
+sdcard/
+
+# 에디터
+.vscode/
+.idea/
+*.swp
