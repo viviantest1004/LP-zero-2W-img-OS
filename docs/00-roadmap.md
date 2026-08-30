@@ -41,10 +41,17 @@ GPU 가 ARM 을 `0x80000` 으로 던진 순간부터의 모든 것.
 
 - 예외 벡터 테이블 (동기 예외/IRQ/FIQ/SError × 4 EL)
 - BCM2710 인터럽트 컨트롤러 + ARM generic timer
-- **MMU + 페이지 테이블 + 캐시 활성화** ← 성능이 여기서 10배 이상 갈린다.
-  캐시를 안 켜면 Cortex-A53 이 제 속도의 5~10% 로 기어간다
+- MMU/캐시는 **리눅스를 올릴 계획이면 급하지 않다.** arm64 부팅 규약
+  (`Documentation/arm64/booting.rst`)이 커널 진입 시 MMU 가 꺼져 있을 것을
+  요구하고, 리눅스는 자기 페이지 테이블을 직접 만든다. 우리 펌웨어에서
+  캐시가 의미 있는 것은 SD 에서 커널을 읽는 일회성 구간 정도다.
 
 ### Phase 3 — SD/EMMC + FAT32 + 자체 부트로더
+
+> 순서 참고: 리눅스는 우리 부트로더 없이도 `start.elf` 가 직접 올릴 수
+> 있다. 커스텀 부트로더와 커스텀 유저랜드를 동시에 디버깅하지 않도록
+> **커널·유저랜드를 먼저 띄우고 이 단계를 나중에 끼워넣는다.**
+
 
 - EMMC 컨트롤러 드라이버 (SD 초기화 시퀀스, CMD/ACMD)
 - MBR 파싱 + FAT32 읽기
@@ -59,11 +66,20 @@ GPU 가 ARM 을 `0x80000` 으로 던진 순간부터의 모든 것.
 - initramfs 내장, 압축 최적화
 - 목표: 부팅 3~8초, idle RAM 20~40MB
 
-### Phase 5 — 커스텀 OS 유저랜드
+### Phase 5 — 커스텀 OS 유저랜드 ✅ 기반 완료
 
-- 자체 `init` (PID 1) — systemd 대신
-- 경량 서비스 매니저, 셸, 핵심 유틸리티
-- squashfs + overlayfs read-only 루트 (전원 뽑아도 안 깨진다)
+외부 libc 없이 `_start` 부터 전부 직접 작성했다.
+
+- 자체 libc — AArch64 시스템콜 직접 호출, crt0, string, stdio, malloc
+- 자체 `init` (PID 1) — 가상 파일시스템 마운트, 셸 감시·재시작, 좀비 수거
+- 자체 셸 — 내장 명령, PATH 탐색, 리다이렉션(`< > >>`), 파이프(`|`)
+- `cat`, `ls`
+
+**initramfs.cpio.gz = 7,693 바이트.** chroot 통합 테스트 통과.
+자세한 내용은 [유저랜드 문서](04-userland.md).
+
+남은 것: 유틸리티 추가, squashfs + overlayfs read-only 루트,
+서비스 매니저.
 
 ## UI 는 올릴 것인가
 

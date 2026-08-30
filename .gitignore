@@ -18,3 +18,5 @@ sdcard/
 .idea/
 *.swp
 qemu-out/
+userland/rootfs/
+userland/initramfs.cpio.gz

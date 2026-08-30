@@ -124,6 +124,11 @@ firmware/           베어메탈 펌웨어 (전부 직접 작성)
   include/splash.h    ★ 부팅 화면 문구는 여기서 고친다
   linker.ld           0x80000 고정 배치
 config.mk           ★ 커널 이미지 파일명 (config.txt 의 kernel= 과 일치해야 함)
+userland/           자체 libc + init + 셸 (외부 libc 없음)
+  libc/               crt0 부터 printf 까지 전부 직접
+  init/               PID 1
+  sh/                 셸 - 리다이렉션, 파이프
+  cat/  ls/           유틸리티
 boot/config.txt     GPU 부팅 설정
 tools/              블롭 다운로드, SD 이미지 생성, QEMU 실행, 폰트 굽기
 docs/               로드맵 · 부팅 사슬 · 하드웨어 참조
@@ -135,6 +140,7 @@ docs/               로드맵 · 부팅 사슬 · 하드웨어 참조
 - [부팅 사슬](docs/01-boot-chain.md) — 전원 ON 부터 우리 코드까지
 - [하드웨어 참조](docs/02-hardware.md) — 메모리 맵, 시리얼 배선, 512MB 제약
 - [에뮬레이션](docs/03-emulation.md) — QEMU / UTM 으로 실기 없이 테스트
+- [유저랜드](docs/04-userland.md) — 자체 libc · init · 셸, AArch64 시스템콜
 
 ## 라이선스
 
