@@ -90,6 +90,23 @@ bool mbox_prop(u32 tag, const u32 *req, u32 req_words,
     return true;
 }
 
+bool mbox_send(u32 *msg, u32 words)
+{
+    if (words > MBOX_BUF_WORDS)
+        return false;
+
+    for (u32 i = 0; i < words; i++)
+        mbox_buf[i] = msg[i];
+
+    if (!mbox_call(MBOX_CH_PROP))
+        return false;
+
+    for (u32 i = 0; i < words; i++)
+        msg[i] = mbox_buf[i];
+
+    return true;
+}
+
 /* ── 헬퍼들 ───────────────────────────────────────────────────── */
 
 u32 mbox_get_clock_rate(u32 clock_id)

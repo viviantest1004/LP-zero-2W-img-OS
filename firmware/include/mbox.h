@@ -38,6 +38,12 @@
 bool mbox_prop(u32 tag, const u32 *req, u32 req_words,
                u32 *resp, u32 resp_words);
 
+/* 여러 태그를 한 메시지로 보낸다 (프레임버퍼 설정처럼 원자적으로 처리돼야
+ * 하는 경우). 호출자가 msg 를 완전히 구성해야 한다:
+ *   msg[0] = 전체 바이트 크기, msg[1] = 0, ...태그들..., 마지막 워드 = 0
+ * 성공 시 응답이 msg 에 그대로 덮어써진다. */
+bool mbox_send(u32 *msg, u32 words);
+
 /* 자주 쓰는 것들 얇게 감싼 헬퍼. 실패 시 0 을 돌려준다. */
 u32  mbox_get_clock_rate(u32 clock_id);
 u32  mbox_get_max_clock_rate(u32 clock_id);

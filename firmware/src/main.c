@@ -14,6 +14,11 @@
 #include "timer.h"
 #include "mbox.h"
 #include "board.h"
+#include "fb.h"
+#include "console.h"
+#include "splash.h"
+#include "string.h"
+#include "font.h"
 
 #define FW_NAME     "LP-zero"
 #define FW_VERSION  "0.1.0-phase1"
@@ -29,6 +34,48 @@ static u32 current_el(void)
     u64 el;
     __asm__ volatile("mrs %0, CurrentEL" : "=r"(el));
     return (u32)(el >> 2) & 3u;
+}
+
+/* 화면에 부팅 스플래시를 그린다. 문구는 splash.h 에서 고친다.
+ * 프레임버퍼가 없으면(모니터 미연결 등) 조용히 넘어간다. */
+static void draw_splash(void)
+{
+    if (!fb.ready || !console_ready())
+        return;
+
+    u32 bg    = fb_rgb(SPLASH_COLOR_BG);
+    u32 bar   = fb_rgb(SPLASH_COLOR_BAR);
+    u32 title = fb_rgb(SPLASH_COLOR_TITLE);
+    u32 text  = fb_rgb(SPLASH_COLOR_TEXT);
+
+    fb_clear(bg);
+
+    /* 상단 띠 */
+    fb_fill_rect(0, 0, fb.width, 4, bar);
+
+    /* 제목 - 2배 확대해서 가운데 정렬 */
+    const char *t = SPLASH_TITLE;
+    u32 scale = 3;
+    u32 tw = (u32)strlen(t) * FONT_WIDTH * scale;
+    u32 tx = (fb.width > tw) ? (fb.width - tw) / 2 : 0;
+    console_draw_text_at(tx, 40, t, scale, title);
+
+    /* 부제 - 1배, 가운데 정렬 */
+    const char *sub = SPLASH_SUBTITLE;
+    u32 sw = (u32)strlen(sub) * FONT_WIDTH;
+    u32 sx = (fb.width > sw) ? (fb.width - sw) / 2 : 0;
+    console_draw_text_at(sx, 40 + FONT_HEIGHT * scale + 16, sub, 1, text);
+
+    /* 추가 줄들 */
+    static const char *lines[] = SPLASH_LINES;
+    u32 y = 40 + FONT_HEIGHT * scale + 16 + FONT_HEIGHT + 12;
+    for (u32 i = 0; lines[i]; i++) {
+        u32 lw = (u32)strlen(lines[i]) * FONT_WIDTH;
+        u32 lx = (fb.width > lw) ? (fb.width - lw) / 2 : 0;
+        console_draw_text_at(lx, y, lines[i], 1, text);
+        y += FONT_HEIGHT + 4;
+    }
+
 }
 
 static void print_banner(void)
@@ -146,14 +193,14 @@ static void dump_system_info(void)
 
 static void print_help(void)
 {
-    kprintf("\n명령:\n");
-    kprintf("  h  이 도움말\n");
-    kprintf("  i  시스템 정보 다시 출력\n");
-    kprintf("  t  SoC 온도\n");
-    kprintf("  c  클럭 현황\n");
-    kprintf("  u  부팅 후 경과 시간\n");
-    kprintf("  b  ACT LED 10회 깜빡임\n");
-    kprintf("  r  재부팅 (워치독)\n\n");
+    kprintf("\nCommands:\n");
+    kprintf("  h  this help\n");
+    kprintf("  i  print system info again\n");
+    kprintf("  t  SoC temperature\n");
+    kprintf("  c  clock status\n");
+    kprintf("  u  uptime since boot\n");
+    kprintf("  b  blink ACT LED 10 times\n");
+    kprintf("  r  reboot (watchdog)\n\n");
 }
 
 static void cmd_temperature(void)
@@ -162,7 +209,7 @@ static void cmd_temperature(void)
     if (t >= 0)
         kprintf("SoC: %u.%u C\n", (u32)t / 1000, ((u32)t % 1000) / 100);
     else
-        kprintf("온도 조회 실패\n");
+        kprintf("temperature read failed\n");
 }
 
 static void cmd_clocks(void)
@@ -182,19 +229,19 @@ static void cmd_uptime(void)
 
 static void cmd_blink(void)
 {
-    kprintf("ACT LED 깜빡이는 중...\n");
+    kprintf("blinking ACT LED...\n");
     for (u32 i = 0; i < 20; i++) {
         gpio_toggle(BOARD_ACT_LED_PIN);
         delay_ms(100);
     }
-    kprintf("완료\n");
+    kprintf("done\n");
 }
 
 /* 대화형 모니터. 시리얼로 한 글자씩 받아서 처리한다. */
 static void monitor(void) __attribute__((noreturn));
 static void monitor(void)
 {
-    kprintf("모니터 시작. 'h' 로 도움말.\n");
+    kprintf("monitor ready. press 'h' for help.\n");
 
     u64 last_beat = timer_get_us();
     bool led_on = false;
@@ -221,14 +268,14 @@ static void monitor(void)
         case 'u':           cmd_uptime();      break;
         case 'b':           cmd_blink();       break;
         case 'r':
-            kprintf("재부팅...\n");
+            kprintf("rebooting...\n");
             uart_flush();
             board_reset();
             /* 도달하지 않음 */
         case '\r': case '\n':
             break;
         default:
-            kprintf("알 수 없는 명령 '%c'. 'h' 로 도움말.\n", c);
+            kprintf("unknown command '%c'. press 'h' for help.\n", c);
             break;
         }
     }
@@ -241,6 +288,23 @@ void kernel_main(void)
 
     /* ACT LED 를 출력으로. 시리얼이 안 잡혀도 LED 로 살아있는지 안다. */
     gpio_set_function(BOARD_ACT_LED_PIN, GPIO_FUNC_OUTPUT);
+
+    /* 화면. 모니터가 없거나 gpu_mem 이 부족하면 실패하지만
+     * 시리얼은 이미 살아 있으므로 부팅은 계속된다. */
+    bool have_screen = fb_init(0, 0) && console_init();
+
+    if (have_screen) {
+        draw_splash();
+        /* 스플래시를 잠깐 보여준다. 이 사이 시리얼로는 이미 로그가 나간다.
+         * 시간은 splash.h 의 SPLASH_DWELL_MS 로 조절한다. */
+        uart_puts("[fb] showing splash...\n");
+        delay_ms(SPLASH_DWELL_MS);
+        console_clear();
+        kprintf("[fb] %ux%u %ubpp, pitch %u, %p\n\n",
+                fb.width, fb.height, fb.depth, fb.pitch, (void *)fb.pixels);
+    } else {
+        kprintf("[fb] no framebuffer - continuing on serial only\n\n");
+    }
 
     print_banner();
     dump_system_info();

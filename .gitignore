@@ -17,3 +17,4 @@ sdcard/
 .vscode/
 .idea/
 *.swp
+qemu-out/

@@ -2,7 +2,7 @@
  * 부동소수점은 지원하지 않는다 (커널 초기화 구간에서 FP 를 쓰면
  * 컨텍스트 저장 문제가 생기고, 코드도 훨씬 커진다). */
 #include "printf.h"
-#include "uart.h"
+#include "console.h"
 #include "string.h"
 
 #include <stdarg.h>
@@ -35,13 +35,13 @@ static void print_uint(u64 val, u32 base, bool upper, u32 width, bool zero_pad)
 
     /* 역순으로 쌓았으니 뒤에서부터 출력 */
     while (n--)
-        uart_putc(buf[n]);
+        kputc(buf[n]);
 }
 
 static void print_int(s64 val, u32 width, bool zero_pad)
 {
     if (val < 0) {
-        uart_putc('-');
+        kputc('-');
         /* -(-2^63) 은 오버플로다. 캐스팅 후 부호 반전으로 피한다. */
         u64 mag = (u64)(-(val + 1)) + 1;
         print_uint(mag, 10, false, width ? width - 1 : 0, zero_pad);
@@ -57,7 +57,7 @@ void kprintf(const char *fmt, ...)
 
     while (*fmt) {
         if (*fmt != '%') {
-            uart_putc(*fmt++);
+            kputc(*fmt++);
             continue;
         }
         fmt++;                          /* '%' 소비 */
@@ -77,15 +77,15 @@ void kprintf(const char *fmt, ...)
 
         switch (*fmt) {
         case 'c':
-            uart_putc((char)va_arg(ap, int));
+            kputc((char)va_arg(ap, int));
             break;
 
         case 's': {
             const char *s = va_arg(ap, const char *);
             if (!s) s = "(null)";
             usize len = strlen(s);
-            while (len < width) { uart_putc(' '); width--; }
-            uart_puts(s);
+            while (len < width) { kputc(' '); width--; }
+            while (*s) kputc(*s++);
             break;
         }
 
@@ -111,12 +111,13 @@ void kprintf(const char *fmt, ...)
             break;
 
         case 'p':
-            uart_puts("0x");
+                    kputc('0');
+            kputc('x');
             print_uint((u64)(uptr)va_arg(ap, void *), 16, false, 16, true);
             break;
 
         case '%':
-            uart_putc('%');
+            kputc('%');
             break;
 
         case '\0':                      /* 형식 문자열이 '%' 로 끝남 */
@@ -124,8 +125,8 @@ void kprintf(const char *fmt, ...)
             return;
 
         default:                        /* 모르는 지정자는 그대로 출력 */
-            uart_putc('%');
-            uart_putc(*fmt);
+            kputc('%');
+            kputc(*fmt);
             break;
         }
         fmt++;
