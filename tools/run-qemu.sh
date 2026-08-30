@@ -5,7 +5,7 @@
 # 중요: QEMU 는 VideoCore GPU 를 흉내내지 않는다. 그래서 SD카드
 # 이미지(sdcard/lp-zero.img)는 QEMU 에서 부팅되지 않는다 —
 # bootcode.bin / start.elf 가 실행될 GPU 자체가 없기 때문이다.
-# 대신 -kernel 로 kernel8.img 를 직접 올린다. ARM 쪽 코드는 동일하게 돈다.
+# 대신 -kernel 로 커널 이미지를 직접 올린다. ARM 쪽 코드는 동일하게 돈다.
 #
 # 머신: raspi3ap = Pi 3A+ (BCM2837, 512MB). Zero 2 W 와 SoC 계열과
 # 메모리 크기가 같아 가장 가깝다.
@@ -18,7 +18,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-KERNEL="${REPO_ROOT}/firmware/kernel8.img"
+# shellcheck source=tools/common.sh
+source "${REPO_ROOT}/tools/common.sh"
+KERNEL="${REPO_ROOT}/firmware/${KERNEL_IMAGE}"
 OUT_DIR="${REPO_ROOT}/qemu-out"
 MACHINE="raspi3ap"
 QEMU="${QEMU:-qemu-system-aarch64}"
@@ -27,7 +29,7 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 command -v "$QEMU" >/dev/null 2>&1 \
     || die "$QEMU 가 없습니다 (apt install qemu-system-arm)"
-[[ -f "$KERNEL" ]] || die "firmware/kernel8.img 가 없습니다. 'make firmware' 를 먼저."
+[[ -f "$KERNEL" ]] || die "firmware/${KERNEL_IMAGE} 가 없습니다. 'make firmware' 를 먼저."
 
 MODE="${1:-interactive}"
 mkdir -p "$OUT_DIR"

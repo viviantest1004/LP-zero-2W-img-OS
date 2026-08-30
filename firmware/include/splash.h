@@ -7,8 +7,13 @@
 #ifndef _SPLASH_H
 #define _SPLASH_H
 
-/* 큰 글씨로 나오는 제목 (2배 확대) */
-#define SPLASH_TITLE     "LP-zero"
+/* 큰 글씨로 나오는 제목.
+ * 화면 폭에 맞춰 아래 SPLASH_TITLE_MAX_SCALE 부터 1배까지 자동으로
+ * 줄어드니 길이를 신경 쓸 필요는 없다. */
+#define SPLASH_TITLE     "test_a_123_LPzero2W_img"
+
+/* 제목 확대 배율의 상한. 화면이 좁으면 자동으로 더 낮아진다. */
+#define SPLASH_TITLE_MAX_SCALE  3
 
 /* 제목 바로 아래 한 줄 */
 #define SPLASH_SUBTITLE  "Raspberry Pi Zero 2 W  /  BCM2710A1"

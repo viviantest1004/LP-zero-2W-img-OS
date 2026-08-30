@@ -34,8 +34,12 @@ sudo dd if=sdcard/lp-zero.img of=/dev/sdX bs=4M conv=fsync status=progress
 
 시리얼 콘솔 연결 후 (115200 8N1) 전원을 넣으면:
 
+> ⚠️ USB-TTL 어댑터는 **반드시 3.3V**. 5V 를 GPIO15 에 물리면 보드가 죽는다.
+> 구분법과 배선은 [하드웨어 문서](docs/02-hardware.md#시리얼-콘솔-배선-필수) 참조.
+
 ```
  LP-zero firmware 0.1.0-phase1
+ test_a_123_LPzero2W_img
  Raspberry Pi Zero 2 W / BCM2710A1 / Cortex-A53
 ================================================
 
@@ -56,7 +60,7 @@ sudo dd if=sdcard/lp-zero.img of=/dev/sdX bs=4M conv=fsync status=progress
 `firmware/include/splash.h` 한 파일만 고치면 된다.
 
 ```c
-#define SPLASH_TITLE     "LP-zero"                       // 큰 글씨
+#define SPLASH_TITLE     "test_a_123_LPzero2W_img"       // 큰 글씨 (폭에 맞춰 자동 축소)
 #define SPLASH_SUBTITLE  "Raspberry Pi Zero 2 W  /  BCM2710A1"
 #define SPLASH_LINES { \
     "bare-metal firmware, built from scratch", \
@@ -65,6 +69,10 @@ sudo dd if=sdcard/lp-zero.img of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 고치고 `make firmware && make sdcard`.
+
+**이미지 파일명**을 바꾸려면 `config.mk` 의 `KERNEL_IMAGE` 와
+`boot/config.txt` 의 `kernel=` **두 곳**을 같게 맞춘다. 어긋나면 GPU 가
+커널을 못 찾아 아무 출력 없이 멈춘다 — `make sdcard` 가 굽기 전에 검사한다.
 
 폰트는 ASCII(0x20~0x7E)만 구워져 있어서 **한글은 `?` 로 나온다.**
 한글이 필요하면 16x16 셀 글리프를 추가로 구워야 한다.
@@ -115,6 +123,7 @@ firmware/           베어메탈 펌웨어 (전부 직접 작성)
   src/string.c        memset/memcpy 등
   include/splash.h    ★ 부팅 화면 문구는 여기서 고친다
   linker.ld           0x80000 고정 배치
+config.mk           ★ 커널 이미지 파일명 (config.txt 의 kernel= 과 일치해야 함)
 boot/config.txt     GPU 부팅 설정
 tools/              블롭 다운로드, SD 이미지 생성, QEMU 실행, 폰트 굽기
 docs/               로드맵 · 부팅 사슬 · 하드웨어 참조

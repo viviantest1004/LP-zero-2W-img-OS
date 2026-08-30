@@ -11,6 +11,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tools/common.sh
+source "${REPO_ROOT}/tools/common.sh"
 BLOB_DIR="${REPO_ROOT}/blobs"
 OUT_DIR="${REPO_ROOT}/sdcard"
 IMAGE="${OUT_DIR}/lp-zero.img"
@@ -30,8 +32,18 @@ for t in mkfs.vfat mcopy python3 dd; do
 done
 
 # ── 입력 확인 ────────────────────────────────────────────────────
-KERNEL="${REPO_ROOT}/firmware/kernel8.img"
-[[ -f "$KERNEL" ]] || die "firmware/kernel8.img 가 없습니다. 먼저 'make firmware' 를 실행하세요."
+KERNEL="${REPO_ROOT}/firmware/${KERNEL_IMAGE}"
+[[ -f "$KERNEL" ]] || die "firmware/${KERNEL_IMAGE} 가 없습니다. 먼저 'make firmware' 를 실행하세요."
+
+# config.txt 의 kernel= 과 실제 파일명이 다르면 GPU 가 커널을 못 찾는다.
+# 그 경우 화면도 시리얼도 아무 것도 안 나와서 원인 찾기가 매우 어렵다.
+# 이미지를 굽기 전에 여기서 잡는다.
+CFG_KERNEL="$(sed -n 's/^[[:space:]]*kernel=\(.*\)$/\1/p' "${REPO_ROOT}/boot/config.txt" \
+              | tail -1 | tr -d '"'"'[:space:]'"'"')"
+if [[ "$CFG_KERNEL" != "$KERNEL_IMAGE" ]]; then
+    die "이름 불일치: config.mk 는 '${KERNEL_IMAGE}', boot/config.txt 는 '${CFG_KERNEL}'.
+       둘을 같게 맞추세요. 다르면 부팅 시 아무 출력 없이 멈춥니다."
+fi
 
 BLOBS=(bootcode.bin start.elf fixup.dat)
 for b in "${BLOBS[@]}"; do
@@ -63,7 +75,7 @@ done
 log "복사: config.txt                          (GPU 부팅 설정)"
 mcopy -i "$PART_IMG" "${REPO_ROOT}/boot/config.txt" ::
 
-log "복사: kernel8.img                         (우리 펌웨어)"
+log "복사: ${KERNEL_IMAGE}  (우리 펌웨어)"
 mcopy -i "$PART_IMG" "$KERNEL" ::
 
 # ── 3. MBR 을 붙여 완성 ─────────────────────────────────────────

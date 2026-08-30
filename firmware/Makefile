@@ -18,13 +18,16 @@ NM      ?= llvm-nm
 TARGET  := aarch64-none-elf
 CPU     := cortex-a53
 
+# 이미지 이름은 저장소 루트의 config.mk 에서 온다 (config.txt 와 공유)
+include ../config.mk
+
 SRCDIR  := src
 INCDIR  := include
 OBJDIR  := build
 
-IMAGE   := kernel8.img
-ELF     := $(OBJDIR)/kernel8.elf
-MAP     := $(OBJDIR)/kernel8.map
+IMAGE   := $(KERNEL_IMAGE)
+ELF     := $(OBJDIR)/$(basename $(IMAGE)).elf
+MAP     := $(OBJDIR)/$(basename $(IMAGE)).map
 
 # ── 컴파일 플래그 ────────────────────────────────────────────────
 #  -mcpu=cortex-a53      Zero 2 W 코어에 정확히 맞춘 스케줄링/명령어 선택
@@ -76,7 +79,7 @@ $(ELF): $(OBJS) linker.ld
 	@$(LD) $(LDFLAGS) $(OBJS) -o $@
 
 # start.elf 는 ELF 가 아니라 순수 바이너리를 기대한다.
-# 이름이 헷갈리지만 kernel8.img 는 헤더 없는 raw 이미지여야 한다.
+# 확장자가 .img 지만 헤더 없는 raw 바이너리여야 한다.
 $(IMAGE): $(ELF)
 	@echo "  OBJCOPY $@"
 	@$(OBJCOPY) -O binary $< $@
@@ -93,7 +96,9 @@ syms: $(ELF)
 	@$(NM) -n $(ELF)
 
 clean:
-	@rm -rf $(OBJDIR) $(IMAGE)
+	# 이름을 바꾼 뒤 예전 산출물이 남지 않도록 *.img 를 전부 지운다.
+	# 이 디렉터리에는 빌드 산출물만 있으므로 안전하다.
+	@rm -rf $(OBJDIR) $(IMAGE) *.img
 	@echo "  정리 완료"
 
 -include $(DEPS)

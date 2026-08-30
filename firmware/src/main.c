@@ -36,6 +36,9 @@ static u32 current_el(void)
     return (u32)(el >> 2) & 3u;
 }
 
+/* 스플래시 좌우 여백 (픽셀) */
+#define MARGIN  16
+
 /* 화면에 부팅 스플래시를 그린다. 문구는 splash.h 에서 고친다.
  * 프레임버퍼가 없으면(모니터 미연결 등) 조용히 넘어간다. */
 static void draw_splash(void)
@@ -53,22 +56,31 @@ static void draw_splash(void)
     /* 상단 띠 */
     fb_fill_rect(0, 0, fb.width, 4, bar);
 
-    /* 제목 - 2배 확대해서 가운데 정렬 */
-    const char *t = SPLASH_TITLE;
-    u32 scale = 3;
-    u32 tw = (u32)strlen(t) * FONT_WIDTH * scale;
+    /* 제목 - 화면 폭에 들어가는 가장 큰 배율을 고른다.
+     * 문구를 길게 바꿔도 화면 밖으로 넘치지 않는다. */
+    const char *t   = SPLASH_TITLE;
+    u32 tlen        = (u32)strlen(t);
+    u32 avail       = (fb.width > MARGIN * 2) ? fb.width - MARGIN * 2 : fb.width;
+    u32 scale       = SPLASH_TITLE_MAX_SCALE;
+
+    while (scale > 1 && tlen * FONT_WIDTH * scale > avail)
+        scale--;
+
+    u32 tw = tlen * FONT_WIDTH * scale;
     u32 tx = (fb.width > tw) ? (fb.width - tw) / 2 : 0;
     console_draw_text_at(tx, 40, t, scale, title);
+
+    u32 title_h = FONT_HEIGHT * scale;
 
     /* 부제 - 1배, 가운데 정렬 */
     const char *sub = SPLASH_SUBTITLE;
     u32 sw = (u32)strlen(sub) * FONT_WIDTH;
     u32 sx = (fb.width > sw) ? (fb.width - sw) / 2 : 0;
-    console_draw_text_at(sx, 40 + FONT_HEIGHT * scale + 16, sub, 1, text);
+    console_draw_text_at(sx, 40 + title_h + 16, sub, 1, text);
 
     /* 추가 줄들 */
     static const char *lines[] = SPLASH_LINES;
-    u32 y = 40 + FONT_HEIGHT * scale + 16 + FONT_HEIGHT + 12;
+    u32 y = 40 + title_h + 16 + FONT_HEIGHT + 12;
     for (u32 i = 0; lines[i]; i++) {
         u32 lw = (u32)strlen(lines[i]) * FONT_WIDTH;
         u32 lx = (fb.width > lw) ? (fb.width - lw) / 2 : 0;
@@ -88,6 +100,7 @@ static void print_banner(void)
     kprintf(" |_____|_|      /___||_|  \\___/   \n");
     kprintf("\n");
     kprintf(" %s firmware %s\n", FW_NAME, FW_VERSION);
+    kprintf(" %s\n", SPLASH_TITLE);
     kprintf(" Raspberry Pi Zero 2 W / BCM2710A1 / Cortex-A53\n");
     kprintf("================================================\n\n");
 }

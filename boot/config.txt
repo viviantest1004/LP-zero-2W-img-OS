@@ -2,12 +2,14 @@
 # 이 파일은 ARM 이 아니라 GPU 가 파싱한다. ARM 코어를 깨우기 전에 처리된다.
 
 # ── 필수 ────────────────────────────────────────────────────────
-# 64비트 모드. 이걸 켜야 start.elf 가 kernel8.img 를 찾고,
+# 64비트 모드. 이걸 켜야 start.elf 가 64비트 커널을 찾고,
 # ARM 코어를 AArch64 EL2 로 진입시킨다.
 arm_64bit=1
 
-# 로드할 이미지 파일명 (arm_64bit=1 의 기본값이지만 명시해둔다)
-kernel=kernel8.img
+# 로드할 이미지 파일명.
+# arm_64bit=1 의 기본값은 kernel8.img 지만 kernel= 로 바꿀 수 있다.
+# 반드시 config.mk 의 KERNEL_IMAGE 와 같아야 한다.
+kernel=test_a_123_LPzero2W.img
 
 # 커널 로드 주소. 우리 linker.ld 의 0x80000 과 반드시 일치해야 한다.
 kernel_address=0x80000
