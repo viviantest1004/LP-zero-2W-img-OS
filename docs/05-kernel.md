@@ -61,6 +61,35 @@ Ceph 분산 파일시스템, 메시 네트워크 라우팅, 가상 스위치가 
 `CONFIG_USB_SUPPORT=n`, `CONFIG_ETHERNET=n`, `CONFIG_DRM=n`,
 벤더별 `CONFIG_WLAN_VENDOR_*=n` 같은 것들이다.
 
+## ⚠️ `=n` 을 적어도 안 꺼지는 경우가 있다
+
+kconfig 의 `select` 는 **사용자 설정을 무시하고 심볼을 강제로 켠다.**
+그래서 조각에 `CONFIG_X=n` 을 적어도 다른 켜진 옵션이 `select X` 하고
+있으면 `y` 로 남는다. `# CONFIG_X is not set` 형태로 써도 마찬가지다.
+
+3차 빌드에서 조각 134개 중 109개만 반영되고 10개가 `=y` 로 남았다.
+선택자를 찾는 방법:
+
+```bash
+grep -rn --include='Kconfig*' 'select SCSI\b' /path/to/linux
+```
+
+실제로 찾아낸 것들:
+
+| 안 꺼지던 것 | 실제 원인 (이걸 꺼야 함) |
+|---|---|
+| `CEPH_LIB` | `BLK_DEV_RBD` (Ceph 블록 장치) |
+| `ZSTD_COMPRESS`, `LZ4_COMPRESS` | `CRYPTO_ZSTD`, `CRYPTO_LZ4`, `CRYPTO_LZO`, `CRYPTO_DEFLATE` |
+| `CGROUPS` | `CHECKPOINT_RESTORE`, `SCHED_AUTOGROUP` |
+| `SCSI` | **`ATA_OVER_ETH`, `ATALK`** |
+
+마지막 것이 인상적이다. **ATA over Ethernet 과 AppleTalk** 이 켜져 있어서
+SCSI 계층 전체를 끌고 오고 있었다. 범용 배포판 defconfig 가 어디까지
+담고 있는지 보여주는 예다.
+
+그래서 `build.sh` 는 병합 후 **조각의 모든 항목을 대조하고 반영되지 않은
+것을 전부 보고한다.** 조용히 무시되면 왜 이미지가 안 줄어드는지 알 수 없다.
+
 ## 무엇을 끄나
 
 Zero 2 W 의 하드웨어가 정해져 있다는 점이 근거다.
@@ -76,6 +105,10 @@ Zero 2 W 의 하드웨어가 정해져 있다는 점이 근거다.
 | `CONFIG_IPV6`, `CONFIG_NETFILTER` | IPv4 만 쓴다 |
 | `CONFIG_IIO`, `CONFIG_HWMON`, `CONFIG_W1` | 센서 미사용 |
 | `CONFIG_FTRACE`, `CONFIG_KPROBES`, 디버그 정보 | 이미지 크기를 크게 먹는다 |
+| `CONFIG_PCI` | **Zero 2 W 에 PCI 버스가 없다** (defconfig 가 Pi 4 의 PCIe 때문에 켜둔 것) |
+| `CONFIG_SCSI`, `CONFIG_BCACHEFS_FS` | 저장장치가 SD 하나뿐이고 파일시스템은 ext4 만 쓴다 |
+| `CONFIG_SECURITY`(LSM), `CONFIG_AUDIT` | 사용자가 하나뿐이라 강제접근제어를 쓸 일이 없다 |
+| `CONFIG_CGROUPS`, `CONFIG_NAMESPACES` | 컨테이너를 쓰지 않는다 |
 
 남기는 것은 `docs/00-roadmap.md` 의 저장 구조 절에 정리되어 있다.
 

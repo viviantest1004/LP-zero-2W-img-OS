@@ -85,23 +85,48 @@ AFTER_M=$(grep -c '=m$' "${BUILD_DIR}/.config" || true)
 AFTER_Y=$(grep -c '=y$' "${BUILD_DIR}/.config" || true)
 echo "    결과: =y ${AFTER_Y}개, =m ${AFTER_M}개"
 
-# 조각이 실제로 반영됐는지 확인. olddefconfig 가 의존성 때문에 되돌릴 수
-# 있으므로 중요한 항목은 직접 검사한다.
-check() {
-    if grep -qx "$1" "${BUILD_DIR}/.config"; then
-        echo "    OK   $1"
-    else
-        echo "    !!   $1 이 반영되지 않았습니다"
-        grep -E "^(# )?${1%%=*}[ =]" "${BUILD_DIR}/.config" | head -1 | sed 's/^/         현재: /'
-    fi
-}
-step "핵심 옵션 확인"
-check "# CONFIG_MODULES is not set"
-check "CONFIG_BLK_DEV_INITRD=y"
-check "CONFIG_EXT4_FS=y"
-check "CONFIG_VFAT_FS=y"
-check "CONFIG_SERIAL_AMBA_PL011_CONSOLE=y"
-check "CONFIG_DEVTMPFS=y"
+# 조각이 실제로 반영됐는지 전부 대조한다.
+#
+# kconfig 의 select 는 사용자 설정을 무시하고 심볼을 강제로 켠다. 그래서
+# 조각에 CONFIG_X=n 을 적어도 다른 켜진 옵션이 X 를 select 하면 y 로
+# 남는다. 이 경우 X 가 아니라 "X 를 select 하는 쪽"을 꺼야 한다.
+#
+# 조용히 무시되면 왜 이미지가 안 줄어드는지 알 수 없으므로 전부 보고한다.
+step "조각 반영 상태 대조"
+
+MISSED=0
+while read -r line; do
+    sym="${line%%=*}"
+    want="${line##*=}"
+    case "$want" in
+    n)
+        if grep -qx "${sym}=y" "${BUILD_DIR}/.config" 2>/dev/null; then
+            echo "    미반영(y)  ${sym}"
+            MISSED=$((MISSED + 1))
+        elif grep -qx "${sym}=m" "${BUILD_DIR}/.config" 2>/dev/null; then
+            echo "    미반영(m)  ${sym}"
+            MISSED=$((MISSED + 1))
+        fi
+        ;;
+    y)
+        grep -qx "${sym}=y" "${BUILD_DIR}/.config" 2>/dev/null || {
+            echo "    미반영      ${sym} (=y 를 원했음)"
+            MISSED=$((MISSED + 1))
+        }
+        ;;
+    esac
+done < <(grep -E '^CONFIG_[A-Z0-9_]+=(y|n)$' "$FRAGMENT")
+
+TOTAL=$(grep -cE '^CONFIG_[A-Z0-9_]+=(y|n)$' "$FRAGMENT")
+if [[ "$MISSED" == "0" ]]; then
+    echo "    전부 반영됨 (${TOTAL}개)"
+else
+    echo ""
+    echo "    ${TOTAL}개 중 ${MISSED}개가 반영되지 않았습니다."
+    echo "    대부분 다른 옵션이 select 로 강제하는 경우입니다."
+    echo "    선택자를 찾으려면:"
+    echo "      grep -rn --include='Kconfig*' 'select <심볼이름>\\b' ${LINUX_SRC}"
+fi
 
 # ── 3. 빌드 ──────────────────────────────────────────────────────
 step "빌드 시작 (-j${JOBS}) — 몇 분 걸립니다"
