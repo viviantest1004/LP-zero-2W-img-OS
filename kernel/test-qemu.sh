@@ -5,7 +5,16 @@
 # 우리 유저랜드가 커널에 내장되어 있으므로 Image 파일 하나만 주면
 # 부팅해서 셸까지 올라온다. SD 이미지도 initramfs 파일도 필요 없다.
 #
-# 머신은 raspi3ap (BCM2837, 512MB) - Zero 2 W 와 SoC 계열·메모리가 같다.
+# 머신은 virt 를 쓴다. raspi3ap 이 하드웨어에는 더 가깝지만, QEMU 의 raspi
+# 머신은 디바이스 트리를 만들어주지 않는다. 실기에서는 start.elf 가 DTB 를
+# 읽어 메모리 크기·시리얼·활성 노드를 패치해서 커널에 넘기는데, QEMU 에는
+# 그 과정이 없다. 라즈베리파이 공식 DTB 를 -dtb 로 줘도 패치되지 않은
+# 상태라 콘솔조차 올라오지 않는다.
+#
+# virt 는 QEMU 가 DTB 를 직접 생성해준다. CPU 를 cortex-a53, 메모리를
+# 512MB 로 맞추면 Zero 2 W 와 같은 조건이 된다. BCM 고유 주변장치는
+# 검증되지 않지만, 커널이 부팅하고 initramfs 를 풀고 우리 init 과 셸이
+# 도는지는 여기서 확인할 수 있다. BCM 부분은 실기에서 확인한다.
 
 set -euo pipefail
 
@@ -13,7 +22,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${REPO_ROOT}/kernel/out/Image"
 LOG_DIR="${REPO_ROOT}/kernel/out"
 LOG="${LOG_DIR}/boot.log"
-MACHINE=raspi3ap
+MACHINE=virt
+CPU=cortex-a53
+MEM=512
 TIMEOUT="${TIMEOUT:-90}"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -26,8 +37,9 @@ MODE="${1:-log}"
 case "$MODE" in
 interactive)
     echo "QEMU ${MACHINE}. 종료: Ctrl-A 다음 X"
-    exec qemu-system-aarch64 -M "$MACHINE" -kernel "$IMAGE" \
-        -append "console=ttyAMA0,115200 rootwait" \
+    exec qemu-system-aarch64 -M "$MACHINE" -cpu "$CPU" -m "$MEM" \
+        -kernel "$IMAGE" \
+        -append "console=ttyAMA0 rootwait" \
         -serial mon:stdio -display none
     ;;
 log)
@@ -35,12 +47,13 @@ log)
     echo "${TIMEOUT}초간 부팅하고 로그를 수집합니다..."
     # QEMU 의 stdio 채드브는 stdout 이 TTY 가 아니면 출력을 버린다.
     # 파일로 받아야 파이프/CI 에서도 확실하다.
-    timeout "$TIMEOUT" qemu-system-aarch64 -M "$MACHINE" -kernel "$IMAGE" \
-        -append "console=ttyAMA0,115200 rootwait" \
+    timeout "$TIMEOUT" qemu-system-aarch64 -M "$MACHINE" -cpu "$CPU" -m "$MEM" \
+        -kernel "$IMAGE" \
+        -append "earlycon console=ttyAMA0 rootwait" \
         -serial "file:${LOG}" -display none >/dev/null 2>&1 || true
 
     echo ""
-    cat "$LOG"
+    tail -20 "$LOG"
     echo ""
     echo "── 판정 ──"
     if grep -q "LP-zero OS" "$LOG" 2>/dev/null; then
@@ -48,13 +61,21 @@ log)
     else
         echo "  실패: init 배너가 없습니다"
     fi
-    if grep -qE '\$ $|\$ ' "$LOG" 2>/dev/null; then
+    if grep -q 'init (pid 1)' "$LOG" 2>/dev/null; then
+        echo "  OK: init 이 PID 1 로 실행되었습니다"
+    else
+        echo "  실패: init 이 PID 1 이 아닙니다"
+    fi
+    if grep -qE '/ \$' "$LOG" 2>/dev/null; then
         echo "  OK: 셸 프롬프트가 나왔습니다"
     else
         echo "  실패: 셸 프롬프트가 없습니다"
     fi
     grep -qi "kernel panic" "$LOG" 2>/dev/null && echo "  !! 커널 패닉 발생"
     echo ""
+    printf "  부팅 시간: "
+    grep -oE '^\[ *[0-9]+\.[0-9]+\] Run /init' "$LOG" 2>/dev/null \
+        | grep -oE '[0-9]+\.[0-9]+' || echo "?"
     echo "  전체 로그: ${LOG}"
     ;;
 *)
