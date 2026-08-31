@@ -25,10 +25,20 @@ MODE=firmware
 PART_IMG="${OUT_DIR}/.boot-part.img"
 
 # 이미지 레이아웃
-IMAGE_MB=128            # 전체 이미지 크기
-PART_START_SECTOR=8192  # 4MiB 지점 - 라즈베리파이 표준 정렬
+#
+#   섹터 0                 MBR
+#   섹터 8192   (4MiB)     파티션 1: FAT32 부트 (GPU 블롭, 커널, config.txt)
+#   섹터 139264 (68MiB)    파티션 2: ext4 데이터 (WiFi 설정, SSH 키, 파일)
+#
+# 루트는 커널에 내장된 initramfs(RAM)이고 데이터만 여기에 남는다.
+# 루트에 쓰기가 없으므로 전원을 갑자기 뽑아도 시스템이 깨지지 않는다.
+IMAGE_MB=256
 SECTOR_SIZE=512
+BOOT_START_SECTOR=8192          # 4MiB
+BOOT_SIZE_MB=64
+DATA_START_SECTOR=139264        # 4 + 64 = 68MiB
 VOLUME_LABEL="LPZERO"
+DATA_LABEL="LPZERODATA"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 log() { printf '  %s\n' "$*"; }
@@ -72,11 +82,11 @@ mkdir -p "$OUT_DIR"
 rm -f "$IMAGE" "$PART_IMG"
 
 # ── 1. FAT32 부트 파티션 만들기 ──────────────────────────────────
-PART_SECTORS=$(( IMAGE_MB * 1024 * 1024 / SECTOR_SIZE - PART_START_SECTOR ))
+PART_SECTORS=$(( BOOT_SIZE_MB * 1024 * 1024 / SECTOR_SIZE ))
 PART_BYTES=$(( PART_SECTORS * SECTOR_SIZE ))
 
 echo "SD카드 이미지 생성 중 (${IMAGE_MB}MiB, 모드: ${MODE})"
-log "부트 파티션: ${PART_SECTORS} 섹터 ($(( PART_BYTES / 1024 / 1024 ))MiB)"
+log "부트 파티션: ${PART_SECTORS} 섹터 ($(( PART_BYTES / 1024 / 1024 ))MiB, FAT32)"
 
 truncate -s "$PART_BYTES" "$PART_IMG"
 mkfs.vfat -F 32 -n "$VOLUME_LABEL" "$PART_IMG" >/dev/null
@@ -123,39 +133,34 @@ fi
 log "MBR 작성 + 파티션 결합"
 
 truncate -s "${IMAGE_MB}M" "$IMAGE"
-dd if="$PART_IMG" of="$IMAGE" bs="$SECTOR_SIZE" seek="$PART_START_SECTOR" \
+dd if="$PART_IMG" of="$IMAGE" bs="$SECTOR_SIZE" seek="$BOOT_START_SECTOR" \
    conv=notrunc status=none
 
-python3 - "$IMAGE" "$PART_START_SECTOR" "$PART_SECTORS" <<'PY'
-import sys, struct
+# ── 데이터 파티션 (ext4) ────────────────────────────────────────
+# root 권한이나 loop 마운트 없이 파일 안에 직접 만든다.
+TOTAL_SECTORS=$(( IMAGE_MB * 1024 * 1024 / SECTOR_SIZE ))
+DATA_SECTORS=$(( TOTAL_SECTORS - DATA_START_SECTOR ))
+DATA_IMG="${OUT_DIR}/.data-part.img"
 
-image, start, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+log "데이터 파티션: ${DATA_SECTORS} 섹터 ($(( DATA_SECTORS * SECTOR_SIZE / 1024 / 1024 ))MiB, ext4)"
+rm -f "$DATA_IMG"
+truncate -s "$(( DATA_SECTORS * SECTOR_SIZE ))" "$DATA_IMG"
+mkfs.ext4 -q -F -L "$DATA_LABEL" -m 0 "$DATA_IMG"
 
-def chs(lba, heads=255, spt=63):
-    """LBA -> CHS. 1023 실린더를 넘으면 관례대로 최대값으로 고정한다."""
-    c, rem = divmod(lba, heads * spt)
-    h, s = divmod(rem, spt)
-    s += 1
-    if c > 1023:
-        c, h, s = 1023, 254, 63
-    return bytes([h & 0xFF, ((c >> 2) & 0xC0) | (s & 0x3F), c & 0xFF])
+# 첫 부팅에 쓸 WiFi 설정을 미리 넣어둔다.
+# SD 를 다시 굽지 않고 여기만 고쳐서 공유기 설정을 바꿀 수 있다.
+WPA_SRC="${REPO_ROOT}/boot/rootfs-overlay/etc/wpa_supplicant.conf"
+if command -v debugfs >/dev/null 2>&1 && [[ -f "$WPA_SRC" ]]; then
+    debugfs -w -R "write ${WPA_SRC} wpa_supplicant.conf" "$DATA_IMG" \
+        >/dev/null 2>&1 && log "데이터 파티션에 wpa_supplicant.conf 배치"
+fi
 
-entry = (
-    b"\x00"                    # 부트 플래그 (Pi 는 보지 않음)
-    + chs(start)               # 시작 CHS
-    + b"\x0C"                  # 파티션 타입 0x0C = FAT32 (LBA)
-    + chs(start + count - 1)   # 끝 CHS
-    + struct.pack("<I", start) # 시작 LBA
-    + struct.pack("<I", count) # 섹터 수
-)
-assert len(entry) == 16
+dd if="$DATA_IMG" of="$IMAGE" bs="$SECTOR_SIZE" seek="$DATA_START_SECTOR" \
+   conv=notrunc status=none
+rm -f "$DATA_IMG"
 
-with open(image, "r+b") as f:
-    f.seek(446)
-    f.write(entry + b"\x00" * 48)   # 파티션 1 + 나머지 3개는 비움
-    f.seek(510)
-    f.write(b"\x55\xAA")            # MBR 시그니처
-PY
+python3 "${REPO_ROOT}/tools/write-mbr.py" "$IMAGE" \
+    "$BOOT_START_SECTOR" "$PART_SECTORS" "$DATA_START_SECTOR" "$DATA_SECTORS"
 
 rm -f "$PART_IMG"
 
@@ -164,7 +169,7 @@ echo ""
 echo "완성: ${IMAGE}  ($(du -h "$IMAGE" | cut -f1))"
 echo ""
 echo "부트 파티션 내용:"
-mdir -i "${IMAGE}@@$(( PART_START_SECTOR * SECTOR_SIZE ))" :: 2>/dev/null | sed 's/^/  /'
+mdir -i "${IMAGE}@@$(( BOOT_START_SECTOR * SECTOR_SIZE ))" :: 2>/dev/null | sed 's/^/  /'
 
 cat <<EOF
 

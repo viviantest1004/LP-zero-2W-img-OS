@@ -127,3 +127,7 @@ long lp_reboot(int cmd)
 
 long lp_sync(void)            { return sys_call0(SYS_sync); }
 long lp_uname(void *buf)      { return sys_call1(SYS_uname, (long)buf); }
+long lp_getrandom(void *buf, size_t n, unsigned flags)
+{
+    return sys_call3(SYS_getrandom, (long)buf, (long)n, (long)flags);
+}

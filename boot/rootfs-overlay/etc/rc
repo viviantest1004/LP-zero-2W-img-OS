@@ -1,0 +1,22 @@
+# /etc/rc - 부팅 스크립트. init 이 대화형 셸을 띄우기 전에 실행한다.
+#
+# 우리 셸이 실행한다. 변수 확장이나 조건문은 아직 없으므로 명령을
+# 한 줄씩 나열하는 형태다.
+
+echo "[rc] 데이터 파티션 마운트"
+mount /dev/mmcblk0p2 /data
+
+echo "[rc] 무선 인터페이스 시작"
+# 설정 파일은 데이터 파티션 것을 우선한다 (SD 를 다시 굽지 않고 고칠 수 있게)
+wpa_supplicant -B -i wlan0 -c /data/wpa_supplicant.conf
+
+echo "[rc] DHCP 로 주소 요청"
+dhcp wlan0
+
+echo "[rc] SSH 서버 시작"
+# -R  호스트 키가 없으면 만든다
+# -s  비밀번호 인증 금지 (공개키만) - 빌드에서도 막았지만 명시해둔다
+# -E  로그를 표준오류로 (콘솔에서 보이게)
+dropbear -R -s -E -p 22
+
+echo "[rc] 완료"

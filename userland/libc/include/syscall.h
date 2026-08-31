@@ -67,6 +67,19 @@
 #define SYS_getppid         173
 #define SYS_getuid          174
 #define SYS_sync            81
+/* 소켓 (asm-generic 번호) */
+#define SYS_socket          198
+#define SYS_bind            200
+#define SYS_listen          201
+#define SYS_connect         203
+#define SYS_getsockname     204
+#define SYS_sendto          206
+#define SYS_recvfrom        207
+#define SYS_setsockopt      208
+#define SYS_getsockopt      209
+#define SYS_shutdown        210
+#define SYS_accept4         242
+
 #define SYS_brk             214
 #define SYS_munmap          215
 #define SYS_clone           220

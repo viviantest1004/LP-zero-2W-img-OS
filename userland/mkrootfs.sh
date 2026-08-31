@@ -3,24 +3,32 @@
 # mkrootfs.sh - 루트 파일시스템을 조립하고 initramfs(cpio)를 만든다.
 #
 # 리눅스는 부팅 시 initramfs 를 램디스크로 풀고 그 안의 /init 을 PID 1 로
-# 실행한다. 형식은 newc cpio 아카이브다 (gzip 압축 가능).
+# 실행한다. 형식은 newc cpio 아카이브다.
 #
-# 우리 시스템은 전부 정적 링크라 라이브러리도 동적 링커도 넣을 필요가 없다.
-# 바이너리 네 개와 빈 디렉터리 몇 개가 전부다.
+# 우리 프로그램은 전부 정적 링크라 라이브러리도 동적 링커도 필요 없다.
+# 외부에서 가져오는 것은 셋뿐이다:
+#   dropbear         SSH 서버 (직접 만든 암호 구현은 위험하다)
+#   wpa_supplicant   WPA2 인증 (같은 이유)
+#   brcm 펌웨어      무선칩 내부로 올라가는 블롭
 #
 # 사용법:
-#   ./mkrootfs.sh              rootfs/ 디렉터리 조립
-#   ./mkrootfs.sh --cpio       initramfs.cpio.gz 까지 생성
-#   ./mkrootfs.sh --test       조립 후 chroot 로 실행해본다 (root 필요)
+#   ./mkrootfs.sh              rootfs/ 조립
+#   ./mkrootfs.sh --cpio       initramfs.cpio.gz 까지
+#   ./mkrootfs.sh --test       chroot 로 실행 (root 필요)
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${HERE}/.." && pwd)"
+
 BIN_DIR="${HERE}/bin"
 ROOT_DIR="${HERE}/rootfs"
 CPIO_OUT="${HERE}/initramfs.cpio.gz"
+OVERLAY="${REPO_ROOT}/boot/rootfs-overlay"
+FW_DIR="${REPO_ROOT}/blobs/brcm"
+THIRD="${THIRDPARTY_DIR:-/home/user/kernel-work/thirdparty}"
 
-PROGRAMS=(init sh cat ls)
+PROGRAMS=(init sh cat ls dhcp mount)
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 log() { printf '  %s\n' "$*"; }
@@ -29,69 +37,118 @@ for p in "${PROGRAMS[@]}"; do
     [[ -f "${BIN_DIR}/${p}" ]] || die "bin/${p} 가 없습니다. 'make' 를 먼저 실행하세요."
 done
 
-# ── 디렉터리 구조 ────────────────────────────────────────────────
 echo "rootfs 조립 중..."
 rm -rf "$ROOT_DIR"
-mkdir -p "$ROOT_DIR"/{bin,dev,proc,sys,tmp,etc,root}
+mkdir -p "$ROOT_DIR"/{bin,dev/pts,proc,sys,tmp,etc,root/.ssh,data,var/run,lib/firmware/brcm}
 
+# ── 우리 프로그램 ────────────────────────────────────────────────
 for p in "${PROGRAMS[@]}"; do
     cp "${BIN_DIR}/${p}" "${ROOT_DIR}/bin/${p}"
 done
-log "bin/: ${PROGRAMS[*]}"
+# mount 는 argv[0] 로 동작을 가른다. 같은 파일을 umount 이름으로도 둔다.
+ln -sf mount "${ROOT_DIR}/bin/umount"
+log "bin/: ${PROGRAMS[*]} umount"
 
-# 커널은 initramfs 의 /init 을 PID 1 로 실행한다.
-# /bin/init 을 가리키게 두면 한 벌만 유지하면 된다.
+# 커널은 initramfs 의 /init 을 PID 1 로 실행한다
 ln -sf bin/init "${ROOT_DIR}/init"
-log "/init -> bin/init"
 
-# /dev/console 장치 노드.
-# 커널은 init 실행 전에 이걸 열어 fd 0,1,2 로 준다. 없으면 init 이
-# 파일 디스크립터 하나 없이 시작해서 오류조차 출력하지 못한다.
-# (init 안에도 devtmpfs 마운트 후 다시 여는 안전장치가 있다)
-if [[ "$(id -u)" == "0" ]]; then
-    mknod -m 600 "${ROOT_DIR}/dev/console" c 5 1
-    mknod -m 666 "${ROOT_DIR}/dev/null"    c 1 3
-    log "dev/: console, null"
+# ── 외부 프로그램 ────────────────────────────────────────────────
+copy_third() {
+    local src="$1" name="$2"
+    if [[ -f "$src" ]]; then
+        cp "$src" "${ROOT_DIR}/bin/${name}"
+        printf "  %-16s %8s bytes\n" "$name" "$(stat -c%s "$src")"
+        return 0
+    fi
+    printf "  경고: %s 가 없습니다 (%s)\n" "$name" "$src"
+    return 1
+}
+
+echo ""
+echo "외부 프로그램:"
+copy_third "${THIRD}/dropbear-2024.86/dropbear"    dropbear    || true
+copy_third "${THIRD}/dropbear-2024.86/dropbearkey" dropbearkey || true
+copy_third "${THIRD}/wpa_supplicant-2.11/wpa_supplicant/wpa_supplicant" wpa_supplicant || true
+copy_third "${THIRD}/wpa_supplicant-2.11/wpa_supplicant/wpa_cli"        wpa_cli        || true
+
+# ── 무선칩 펌웨어 ────────────────────────────────────────────────
+# brcmfmac 드라이버가 /lib/firmware/brcm/ 에서 찾는다.
+if [[ -d "$FW_DIR" ]] && compgen -G "${FW_DIR}/*" >/dev/null; then
+    cp "${FW_DIR}"/* "${ROOT_DIR}/lib/firmware/brcm/"
+    echo ""
+    log "lib/firmware/brcm/: $(ls -1 "$FW_DIR" | wc -l)개 파일, $(du -sh "$FW_DIR" | cut -f1)"
 else
-    log "경고: root 가 아니라 /dev/console 을 만들지 못했습니다"
+    echo ""
+    log "경고: blobs/brcm 이 비어 있습니다. './tools/fetch-wifi-fw.sh' 를 실행하세요."
+    log "      (없으면 wlan0 인터페이스가 생기지 않습니다)"
 fi
+
+# ── 설정 파일 ────────────────────────────────────────────────────
+if [[ -d "$OVERLAY" ]]; then
+    cp -r "${OVERLAY}/." "${ROOT_DIR}/"
+fi
+
+# dropbear 는 사용자의 홈 디렉터리를 /etc/passwd 에서 찾는다.
+# 이 파일이 없으면 로그인이 되지 않는다.
+cat > "${ROOT_DIR}/etc/passwd" <<'PASSWD'
+root:x:0:0:root:/root:/bin/sh
+PASSWD
+cat > "${ROOT_DIR}/etc/group" <<'GROUP'
+root:x:0:
+GROUP
+printf 'lp-zero\n' > "${ROOT_DIR}/etc/hostname"
+
+# 공개키는 ~/.ssh/authorized_keys 에 있어야 dropbear 가 읽는다.
+if [[ -f "${ROOT_DIR}/etc/authorized_keys" ]]; then
+    cp "${ROOT_DIR}/etc/authorized_keys" "${ROOT_DIR}/root/.ssh/authorized_keys"
+    chmod 600 "${ROOT_DIR}/root/.ssh/authorized_keys"
+fi
+chmod 700 "${ROOT_DIR}/root/.ssh" "${ROOT_DIR}/root"
 
 cat > "${ROOT_DIR}/etc/motd" <<'MOTD'
 LP-zero OS
 
-전부 직접 만든 시스템입니다:
-  펌웨어(베어메탈) -> 리눅스 커널 -> 자체 libc -> 자체 init -> 자체 셸
-
-'help' 를 입력하면 명령 목록이 나옵니다.
+펌웨어(베어메탈) -> 리눅스 커널 -> 자체 libc -> 자체 init -> 자체 셸
+'help' 로 명령 목록.
 MOTD
 
-printf 'lp-zero\n' > "${ROOT_DIR}/etc/hostname"
+echo ""
+log "etc/: rc, wpa_supplicant.conf, authorized_keys, passwd, group, motd"
+
+# ── 장치 노드 ────────────────────────────────────────────────────
+# 커널은 init 실행 전 /dev/console 을 열어 fd 0,1,2 로 준다.
+# 없으면 init 이 파일 디스크립터 하나 없이 시작해 오류조차 못 낸다.
+if [[ "$(id -u)" == "0" ]]; then
+    mknod -m 600 "${ROOT_DIR}/dev/console" c 5 1
+    mknod -m 666 "${ROOT_DIR}/dev/null"    c 1 3
+    mknod -m 666 "${ROOT_DIR}/dev/zero"    c 1 5
+    mknod -m 444 "${ROOT_DIR}/dev/urandom" c 1 9
+    log "dev/: console, null, zero, urandom"
+else
+    log "경고: root 가 아니라 장치 노드를 만들지 못했습니다"
+fi
 
 TOTAL=$(du -sb "$ROOT_DIR" | cut -f1)
 echo ""
-echo "rootfs: ${ROOT_DIR}  (${TOTAL} bytes)"
+printf "rootfs: %s  (%.2f MB)\n" "$ROOT_DIR" "$(echo "scale=2; $TOTAL/1048576" | bc)"
 
 # ── initramfs cpio ──────────────────────────────────────────────
 if [[ "${1:-}" == "--cpio" ]]; then
     command -v cpio >/dev/null 2>&1 || die "cpio 가 필요합니다 (apt install cpio)"
 
-    # newc 형식이 리눅스 initramfs 의 표준이다.
+    # newc 가 리눅스 initramfs 의 표준 형식이다.
     # --reproducible 로 타임스탬프/inode 를 고정해 빌드를 재현 가능하게 한다.
     ( cd "$ROOT_DIR" && find . -print0 \
         | LC_ALL=C sort -z \
         | cpio --null --create --format=newc --reproducible --quiet ) \
         | gzip -9 -n > "$CPIO_OUT"
 
-    echo "initramfs: ${CPIO_OUT}  ($(stat -c%s "$CPIO_OUT") bytes)"
+    printf "initramfs: %s  (%.2f MB)\n" "$CPIO_OUT" \
+        "$(echo "scale=2; $(stat -c%s "$CPIO_OUT")/1048576" | bc)"
 fi
 
-# ── chroot 실행 테스트 ──────────────────────────────────────────
 if [[ "${1:-}" == "--test" ]]; then
     [[ "$(id -u)" == "0" ]] || die "chroot 테스트는 root 권한이 필요합니다"
     echo ""
-    echo "chroot 로 실행합니다. 'exit' 로 빠져나옵니다."
-    echo ""
-    # binfmt_misc 에 F 플래그로 등록되어 있으면 chroot 안에서도
-    # 인터프리터를 찾을 수 있다 (등록 시점에 열어두기 때문).
     chroot "$ROOT_DIR" /bin/init
 fi

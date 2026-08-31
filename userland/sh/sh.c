@@ -461,20 +461,41 @@ static void print_prompt(void)
 
 int main(int argc, char **argv)
 {
-    (void)argc; (void)argv;
-
     char line[MAX_LINE];
     cmd_t cmds[MAX_CMDS];
 
-    while (shell_running) {
-        print_prompt();
+    /* 인자로 파일이 주어지면 그 안의 명령을 순서대로 실행한다.
+     * /etc/rc 같은 부팅 스크립트를 위한 것이다. 이때는 프롬프트를
+     * 찍지 않는다. */
+    int  input_fd  = STDIN_FILENO;
+    bool interactive = true;
 
-        long len = readline(STDIN_FILENO, line, sizeof(line));
-        if (len < 0) {              /* EOF (Ctrl-D) */
-            printf("\n");
+    if (argc > 1) {
+        long fd = lp_open(argv[1], O_RDONLY, 0);
+        if (fd < 0) {
+            dprintf(STDERR_FILENO, "sh: %s: 열 수 없습니다 (%ld)\n",
+                    argv[1], -fd);
+            return 127;
+        }
+        input_fd    = (int)fd;
+        interactive = false;
+    }
+
+    while (shell_running) {
+        if (interactive)
+            print_prompt();
+
+        long len = readline(input_fd, line, sizeof(line));
+        if (len < 0) {              /* EOF (Ctrl-D 또는 파일 끝) */
+            if (interactive)
+                printf("\n");
             break;
         }
         if (len == 0)
+            continue;
+
+        /* 스크립트에서는 주석을 건너뛴다 */
+        if (line[0] == '#')
             continue;
 
         int n = parse_line(line, cmds, MAX_CMDS);
@@ -491,6 +512,9 @@ int main(int argc, char **argv)
 
         run_pipeline(cmds, n);
     }
+
+    if (input_fd != STDIN_FILENO)
+        lp_close(input_fd);
 
     return last_status;
 }

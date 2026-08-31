@@ -86,7 +86,8 @@ long  lp_mount(const char *src, const char *tgt, const char *fstype,
                unsigned long flags, const void *data);
 long  lp_reboot(int cmd);
 long  lp_sync(void);
-long  lp_uname(void *buf);           /* struct utsname 크기 390바이트 */
+long  lp_uname(void *buf);
+long  lp_getrandom(void *buf, size_t n, unsigned flags);           /* struct utsname 크기 390바이트 */
 
 /* wait 상태 해석 */
 #define LP_WIFEXITED(s)    (((s) & 0x7F) == 0)

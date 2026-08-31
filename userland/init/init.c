@@ -16,6 +16,7 @@
 #include "unistd.h"
 
 #define SHELL_PATH   "/bin/sh"
+#define RC_SCRIPT    "/etc/rc"
 #define RESPAWN_MS   1000   /* 셸이 즉시 죽을 때 폭주 방지 대기 */
 
 /* 마운트할 가상 파일시스템 목록.
@@ -31,6 +32,9 @@ static const struct {
     /* devtmpfs 는 커널이 장치 노드를 자동으로 만들어준다.
      * CONFIG_DEVTMPFS 가 켜져 있어야 한다. */
     { "devtmpfs", "/dev",  "devtmpfs", MS_NOSUID },
+    /* SSH 로 들어온 세션은 의사 터미널(PTY)을 쓴다. devpts 가 없으면
+     * dropbear 가 셸을 띄우지 못한다. /dev 마운트 뒤에 와야 한다. */
+    { "devpts",   "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC },
 };
 
 static void mount_filesystems(void)
@@ -76,6 +80,48 @@ static void banner(void)
     printf("  LP-zero OS\n");
     printf("  init (pid %d)\n", lp_getpid());
     printf("\n");
+}
+
+/* 부팅 스크립트를 실행하고 끝날 때까지 기다린다.
+ *
+ * init 이 직접 하지 않고 스크립트로 뺀 이유: 무선 연결이나 SSH 시작 같은
+ * 것은 설정에 따라 자주 바뀐다. 그때마다 init 을 다시 빌드하는 것보다
+ * /etc/rc 를 고치는 편이 낫다. */
+static void run_rc(void)
+{
+    if (!lp_exists(RC_SCRIPT))
+        return;
+
+    pid_t pid = lp_fork();
+    if (pid < 0) {
+        dprintf(STDERR_FILENO, "init: rc 를 위한 fork 실패\n");
+        return;
+    }
+
+    if (pid == 0) {
+        char *argv[] = { (char *)SHELL_PATH, (char *)RC_SCRIPT, NULL };
+        char *envp[] = {
+            (char *)"PATH=/bin:/sbin:/usr/bin:/usr/sbin",
+            (char *)"HOME=/",
+            NULL
+        };
+        lp_execve(SHELL_PATH, argv, envp);
+        lp_exit(127);
+    }
+
+    /* rc 가 끝날 때까지 기다린다. 그 사이 다른 자식이 죽으면 함께 거둔다. */
+    for (;;) {
+        int status = 0;
+        pid_t done = lp_wait(&status);
+        if (done < 0)
+            break;
+        if (done == pid) {
+            if (!LP_WIFEXITED(status) || LP_WEXITSTATUS(status) != 0)
+                dprintf(STDERR_FILENO, "init: %s 가 오류로 끝났습니다\n",
+                        RC_SCRIPT);
+            break;
+        }
+    }
 }
 
 /* 셸을 하나 띄운다. 자식 pid 를 돌려준다. */
@@ -124,6 +170,9 @@ int main(int argc, char **argv)
         printf("init: pid 1 이 아니므로 마운트를 건너뜁니다 (테스트 모드)\n");
 
     banner();
+
+    if (is_pid1)
+        run_rc();
 
     pid_t shell_pid = spawn_shell();
 
