@@ -12,6 +12,7 @@
 #define MAX_LINE   1024
 #define MAX_ARGS   64
 #define MAX_CMDS   8        /* 파이프라인 최대 단계 */
+#define MAX_PIPES  8        /* && || ; 로 이어붙일 수 있는 파이프라인 수 */
 
 typedef struct {
     char *argv[MAX_ARGS + 1];   /* execve 를 위해 NULL 로 끝난다 */
@@ -20,6 +21,15 @@ typedef struct {
     char *redir_out;
     bool  out_append;
 } cmd_t;
+
+/* 앞선 파이프라인과 어떻게 이어지는가 */
+typedef enum { LINK_NONE, LINK_AND, LINK_OR, LINK_SEQ } link_t;
+
+typedef struct {
+    cmd_t  cmds[MAX_CMDS];
+    int    ncmds;
+    link_t link;        /* 이 파이프라인 "앞"의 연결자 */
+} pipeline_t;
 
 static const char *DEFAULT_PATH = "/bin:/sbin:/usr/bin:/usr/sbin";
 static bool shell_running = true;
@@ -39,6 +49,9 @@ typedef enum {
     TOK_END,
     TOK_WORD,
     TOK_PIPE,
+    TOK_AND,            /* && */
+    TOK_OR,             /* || */
+    TOK_SEMI,           /* ;  */
     TOK_REDIR_IN,
     TOK_REDIR_OUT,
     TOK_REDIR_APPEND,
@@ -70,8 +83,12 @@ static tok_type_t next_token(char **p, char **word_out)
     while (is_space(*s)) s++;
     if (*s == '\0') { *p = s; return TOK_END; }
 
-    /* 연산자는 그 자체로 토큰이다 */
-    if (*s == '|') { *p = s + 1; return TOK_PIPE; }
+    /* 연산자는 그 자체로 토큰이다.
+     * 두 글자짜리(&& ||)를 한 글자짜리(|)보다 먼저 본다. */
+    if (*s == '&' && s[1] == '&') { *p = s + 2; return TOK_AND;  }
+    if (*s == '|' && s[1] == '|') { *p = s + 2; return TOK_OR;   }
+    if (*s == '|')                { *p = s + 1; return TOK_PIPE; }
+    if (*s == ';')                { *p = s + 1; return TOK_SEMI; }
     if (*s == '<') { *p = s + 1; return TOK_REDIR_IN; }
     if (*s == '>') {
         if (s[1] == '>') { *p = s + 2; return TOK_REDIR_APPEND; }
@@ -83,7 +100,8 @@ static tok_type_t next_token(char **p, char **word_out)
     char   buf[MAX_LINE];
     size_t n = 0;
 
-    while (*s && !is_space(*s) && *s != '|' && *s != '<' && *s != '>') {
+    while (*s && !is_space(*s) &&
+           *s != '|' && *s != '<' && *s != '>' && *s != ';' && *s != '&') {
         if (*s == '"' || *s == '\'') {
             char quote = *s++;
             while (*s && *s != quote) {
@@ -106,14 +124,23 @@ static tok_type_t next_token(char **p, char **word_out)
     return TOK_WORD;
 }
 
-/* 한 줄을 파이프라인으로 파싱한다.
- * 반환: 단계 수, 빈 줄이면 0, 오류면 -1. */
-static int parse_line(char *line, cmd_t *cmds, int max_cmds)
+/* 한 줄을 파이프라인 목록으로 파싱한다.
+ *
+ *   cmd1 | cmd2 && cmd3 || cmd4 ; cmd5
+ *
+ * | 는 한 파이프라인 안의 단계를 잇고, && || ; 는 파이프라인 사이를 잇는다.
+ * 반환: 파이프라인 개수, 빈 줄이면 0, 오류면 -1. */
+static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
 {
     arena_used = 0;
 
-    int    n = 1;
-    cmd_t *c = &cmds[0];
+    int np = 1;
+    pipeline_t *pl = &pipes[0];
+    memset(pl, 0, sizeof(*pl));
+    pl->ncmds = 1;
+    pl->link  = LINK_NONE;
+
+    cmd_t *c = &pl->cmds[0];
     memset(c, 0, sizeof(*c));
 
     char *p = line;
@@ -138,12 +165,33 @@ static int parse_line(char *line, cmd_t *cmds, int max_cmds)
                 dprintf(STDERR_FILENO, "sh: | 앞에 명령이 없습니다\n");
                 return -1;
             }
-            if (n >= max_cmds) {
+            if (pl->ncmds >= MAX_CMDS) {
                 dprintf(STDERR_FILENO, "sh: 파이프가 너무 깁니다 (최대 %d)\n",
-                        max_cmds);
+                        MAX_CMDS);
                 return -1;
             }
-            c = &cmds[n++];
+            c = &pl->cmds[pl->ncmds++];
+            memset(c, 0, sizeof(*c));
+            continue;
+        }
+
+        if (t == TOK_AND || t == TOK_OR || t == TOK_SEMI) {
+            if (c->argc == 0) {
+                dprintf(STDERR_FILENO, "sh: 연결자 앞에 명령이 없습니다\n");
+                return -1;
+            }
+            if (np >= max_pipes) {
+                dprintf(STDERR_FILENO,
+                        "sh: 이어붙인 명령이 너무 많습니다 (최대 %d)\n",
+                        max_pipes);
+                return -1;
+            }
+            pl = &pipes[np++];
+            memset(pl, 0, sizeof(*pl));
+            pl->ncmds = 1;
+            pl->link  = (t == TOK_AND) ? LINK_AND
+                      : (t == TOK_OR)  ? LINK_OR : LINK_SEQ;
+            c = &pl->cmds[0];
             memset(c, 0, sizeof(*c));
             continue;
         }
@@ -162,13 +210,16 @@ static int parse_line(char *line, cmd_t *cmds, int max_cmds)
         }
     }
 
-    for (int i = 0; i < n; i++)
-        cmds[i].argv[cmds[i].argc] = NULL;
+    /* argv 를 NULL 로 마감 */
+    for (int i = 0; i < np; i++)
+        for (int j = 0; j < pipes[i].ncmds; j++)
+            pipes[i].cmds[j].argv[pipes[i].cmds[j].argc] = NULL;
 
-    if (n == 1 && cmds[0].argc == 0)
-        return 0;               /* 빈 줄 */
+    /* 마지막 파이프라인이 비어 있으면(줄이 연결자로 끝남) 버린다 */
+    while (np > 0 && pipes[np - 1].cmds[0].argc == 0)
+        np--;
 
-    return n;
+    return np;
 }
 
 /* ── 내장 명령 ──────────────────────────────────────────────────── */
@@ -184,7 +235,7 @@ static void builtin_help(void)
     printf("  reboot        재부팅\n");
     printf("  poweroff      전원 끄기\n");
     printf("  help          이 도움말\n\n");
-    printf("리다이렉션 < > >> 과 파이프 | 를 쓸 수 있습니다.\n");
+    printf("리다이렉션 < > >> , 파이프 | , 연결자 && || ; 를 쓸 수 있습니다.\n");
 }
 
 static const char *BUILTINS[] = {
@@ -461,8 +512,8 @@ static void print_prompt(void)
 
 int main(int argc, char **argv)
 {
-    char line[MAX_LINE];
-    cmd_t cmds[MAX_CMDS];
+    char       line[MAX_LINE];
+    pipeline_t pipes[MAX_PIPES];
 
     /* 인자로 파일이 주어지면 그 안의 명령을 순서대로 실행한다.
      * /etc/rc 같은 부팅 스크립트를 위한 것이다. 이때는 프롬프트를
@@ -498,19 +549,26 @@ int main(int argc, char **argv)
         if (line[0] == '#')
             continue;
 
-        int n = parse_line(line, cmds, MAX_CMDS);
-        if (n <= 0)
+        int np = parse_line(line, pipes, MAX_PIPES);
+        if (np <= 0)
             continue;
 
-        /* 내장 명령은 파이프라인이 한 단계일 때만 셸 안에서 실행한다.
-         * 파이프의 일부일 때는 자식에서 도는 외부 명령으로 취급한다
-         * (그래야 stdin/stdout 연결이 자연스럽다). */
-        if (n == 1 && cmds[0].argc > 0 && is_builtin(cmds[0].argv[0])) {
-            run_builtin_redirected(&cmds[0]);
-            continue;
+        for (int i = 0; i < np && shell_running; i++) {
+            /* 단락 평가: && 는 앞이 성공했을 때만, || 는 실패했을 때만 */
+            if (pipes[i].link == LINK_AND && last_status != 0) continue;
+            if (pipes[i].link == LINK_OR  && last_status == 0) continue;
+
+            cmd_t *cmds = pipes[i].cmds;
+            int    n    = pipes[i].ncmds;
+
+            /* 내장 명령은 파이프라인이 한 단계일 때만 셸 안에서 실행한다.
+             * 파이프의 일부일 때는 자식에서 도는 외부 명령으로 취급한다
+             * (그래야 stdin/stdout 연결이 자연스럽다). */
+            if (n == 1 && cmds[0].argc > 0 && is_builtin(cmds[0].argv[0]))
+                run_builtin_redirected(&cmds[0]);
+            else
+                run_pipeline(cmds, n);
         }
-
-        run_pipeline(cmds, n);
     }
 
     if (input_fd != STDIN_FILENO)

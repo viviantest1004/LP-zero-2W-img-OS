@@ -64,6 +64,82 @@ qemu-system-aarch64 -M raspi3ap -kernel firmware/kernel8.img \
 ```
 `make qemu-log` 가 이 방식을 쓴다.
 
+## 윈도우
+
+**된다.** QEMU 는 공식 윈도우 빌드가 있고 `virt` 머신을 그대로 지원한다.
+아이폰 UTM 이 막힌 이유(raspi 머신 미지원)가 여기서는 해당 없다.
+
+### 방법 1 — QEMU 만 설치
+
+1. https://qemu.weilnetz.de/w64/ 에서 설치
+2. 설치 폴더(보통 `C:\Program Files\qemu`)를 PATH 에 추가
+3. PowerShell 에서:
+
+```powershell
+qemu-system-aarch64.exe -M virt -cpu cortex-a53 -m 512 `
+  -kernel Image `
+  -append "console=ttyAMA0 rootwait" `
+  -serial mon:stdio -display none
+```
+
+종료는 `Ctrl-A` 다음 `X`.
+
+### VirtualBox 만으로는 안 된다
+
+**VirtualBox 는 에뮬레이터가 아니라 가상화기다.** 호스트 CPU 를 게스트에
+그대로 빌려주는 방식이라 **호스트와 같은 아키텍처만** 돌릴 수 있다.
+x86 PC 에서는 x86 게스트만 뜬다. 우리 커널은 aarch64 라 불가능하다.
+
+QEMU 는 ARM 명령어를 x86 으로 번역해서 실행한다. 느린 이유이자 되는 이유다.
+
+| | 하는 일 | ARM 코드 |
+|---|---|---|
+| VirtualBox | CPU 를 그대로 빌려줌 | ❌ |
+| QEMU | 명령어를 번역 | ✅ |
+
+**다만 VirtualBox 안에 리눅스를 깔고 그 안에서 QEMU 를 돌리면 된다.**
+그러면 실행뿐 아니라 빌드까지 전부 가능하다.
+
+```
+Windows
+  └─ VirtualBox
+       └─ Ubuntu 게스트          <- 여기서 빌드
+            └─ QEMU (aarch64 에뮬레이션)
+                 └─ 우리 커널
+```
+
+VM 권장값: CPU 4코어 이상, RAM 8GB, 디스크 40GB
+(커널 소스 2GB + 빌드 산출물).
+
+### 방법 2 — WSL2 (권장)
+
+```bash
+wsl --install          # PowerShell 관리자 권한으로
+
+# WSL 안에서
+sudo apt install qemu-system-arm clang lld llvm \
+                 gcc-aarch64-linux-gnu mtools dosfstools cpio bc flex bison
+git clone <저장소>
+make kernel-test
+```
+
+WSL2 를 권하는 이유는 실행만이 아니라 **프로젝트 전체를 직접 빌드**할 수
+있기 때문이다. 커널 설정 수정, 셸에 명령 추가, SD 이미지 생성까지 전부
+가능하다.
+
+| | 아이폰 UTM | VirtualBox 단독 | 윈도우 QEMU | VBox+Ubuntu | WSL2 |
+|---|---|---|---|---|---|
+| 커널 부팅 테스트 | ❌ | ❌ | ✅ | ✅ | ✅ |
+| 직접 빌드 | ❌ | ❌ | ❌ | ✅ | ✅ |
+| SD 이미지 생성 | ❌ | ❌ | ❌ | ✅ | ✅ |
+| 설치 부담 | — | — | 작음 | 큼 | 작음 |
+
+이미 VirtualBox 에 리눅스가 있으면 그대로 쓰면 된다. 새로 준비한다면
+WSL2 가 설치도 빠르고 디스크도 덜 먹는다.
+
+`Image` 는 빌드 산출물이라 저장소에 없다. WSL2 로 직접 빌드하거나
+릴리스에서 받아야 한다.
+
 ## UTM SE (아이폰/아이패드) — 사실상 안 된다
 
 UTM SE 는 QEMU 를 iOS 로 포팅한 것이라 원리상 될 것 같지만,
