@@ -1,24 +1,29 @@
 # /etc/rc - 부팅 스크립트. init 이 대화형 셸을 띄우기 전에 실행한다.
 #
-# 우리 셸이 실행한다. 변수 확장이나 if 는 없지만 && || ; 는 되므로
+# 우리 셸이 실행한다. 변수 확장이나 if 는 없지만 && || ; 가 되므로
 # 실패해도 부팅이 멈추지 않도록 폴백을 붙여 쓴다.
 
 echo "[rc] 메모리 안전장치"
 # RAM 안에 압축 스왑을 만든다. SD 에는 쓰지 않는다.
-# 256MB 를 잡지만 실제로 쓰는 만큼만 RAM 을 차지한다.
 zram on 256 || echo "[rc]   zram 없이 계속합니다"
 # 여유가 32MB 아래로 떨어지면 가장 큰 프로세스를 정리한다.
 # init/셸/SSH/무선은 보호 대상이라 죽이지 않는다.
 memwatch -d -r 32 -w 64 || echo "[rc]   memwatch 시작 실패"
 
-echo "[rc] 데이터 파티션 확장 확인"
+echo "[rc] 저장장치 준비"
 # 이미지가 256MB 라 큰 카드에 구우면 나머지가 미할당으로 남는다.
 # 첫 부팅에 파티션과 파일시스템을 카드 끝까지 늘린다.
-# 이미 최대면 아무것도 하지 않고 넘어간다.
+# 두 번째 부팅부터는 "이미 최대"로 바로 넘어간다.
 expandfs || echo "[rc]   확장 없음"
+mount /dev/mmcblk0p2 /data || echo "[rc]   데이터 파티션 없음 - RAM 으로 계속합니다"
 
-echo "[rc] 데이터 파티션 마운트"
-mount /dev/mmcblk0p2 /data || echo "[rc]   없음 - 내장 설정으로 진행합니다"
+echo "[rc] 홈 디렉터리를 저장장치로"
+# /root 는 원래 RAM 이라 재부팅하면 사라진다. 데이터 파티션의
+# 디렉터리를 그 자리에 겹쳐 붙여(bind) 홈에 저장한 것이 남게 한다.
+# 마운트가 실패하면 RAM 홈이 그대로 쓰인다.
+mkdir -p /data/root/.ssh && mount -o bind /data/root /root || echo "[rc]   홈은 RAM 입니다 (재부팅 시 사라짐)"
+# 공개키가 이미지에만 있으면 데이터 파티션 쪽으로 복사해 둔다.
+cat /etc/authorized_keys > /root/.ssh/authorized_keys || echo "[rc]   authorized_keys 준비 실패"
 
 echo "[rc] 무선 설정 준비"
 # 데이터 파티션의 설정을 우선한다. SD 를 다시 굽지 않고 공유기 정보를
@@ -26,10 +31,14 @@ echo "[rc] 무선 설정 준비"
 cat /data/wpa_supplicant.conf > /etc/wpa.conf || cat /etc/wpa_supplicant.conf > /etc/wpa.conf
 
 echo "[rc] 무선 인터페이스 시작"
-wpa_supplicant -B -i wlan0 -c /etc/wpa.conf || echo "[rc]   실패 - 무선 없이 계속합니다"
+wpa_supplicant -B -i wlan0 -c /etc/wpa.conf || echo "[rc]   무선 없이 계속합니다"
 
-echo "[rc] DHCP 로 주소 요청"
-dhcp wlan0 || echo "[rc]   주소를 받지 못했습니다"
+echo "[rc] 주소 요청"
+# 순서대로 시도한다. 하나라도 성공하면 나머지는 건너뛴다.
+#   wlan0  무선
+#   eth0   USB 이더넷 어댑터 (호스트 모드)
+#   usb0   USB 가젯 - PC 에 연결했을 때
+dhcp wlan0 || dhcp eth0 || dhcp usb0 || echo "[rc]   주소를 받지 못했습니다"
 
 echo "[rc] SSH 서버 시작"
 # 호스트 키를 데이터 파티션에 두어야 재부팅해도 유지된다.

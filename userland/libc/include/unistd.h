@@ -41,6 +41,9 @@
 #define MS_NODEV    4
 #define MS_NOEXEC   8
 #define MS_RDONLY   1
+/* bind: 이미 있는 디렉터리를 다른 위치에도 보이게 한다.
+ * 파일시스템 타입을 주지 않고 원본의 것을 그대로 쓴다. */
+#define MS_BIND     4096
 
 /* reboot 매직 */
 #define LINUX_REBOOT_MAGIC1     0xfee1dead

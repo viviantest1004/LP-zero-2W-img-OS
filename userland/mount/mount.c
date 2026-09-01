@@ -73,6 +73,7 @@ int main(int argc, char **argv)
             type = argv[++i];
         } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             i++;
+            if (strstr(argv[i], "bind"))   flags |= MS_BIND;
             if (strstr(argv[i], "ro"))     flags |= MS_RDONLY;
             if (strstr(argv[i], "noexec")) flags |= MS_NOEXEC;
             if (strstr(argv[i], "nosuid")) flags |= MS_NOSUID;
@@ -83,11 +84,23 @@ int main(int argc, char **argv)
 
     if (nargs < 2) {
         dprintf(STDERR_FILENO,
-                "사용법: mount [-t 타입] [-o ro] <장치> <위치>\n");
+                "사용법: mount [-t 타입] [-o ro|bind] <원본> <위치>\n");
         return 2;
     }
 
     const char *src = args[0], *dst = args[1];
+
+    /* bind 마운트는 파일시스템 타입이 없다. 디렉터리를 다른 위치에도
+     * 보이게 하는 것이라 원본의 타입을 그대로 쓴다. */
+    if (flags & MS_BIND) {
+        long rc = lp_mount(src, dst, NULL, flags, NULL);
+        if (rc < 0) {
+            dprintf(STDERR_FILENO, "mount: bind %s -> %s: 실패 (%ld)\n",
+                    src, dst, -rc);
+            return 1;
+        }
+        return 0;
+    }
 
     if (type) {
         long rc = lp_mount(src, dst, type, flags, NULL);

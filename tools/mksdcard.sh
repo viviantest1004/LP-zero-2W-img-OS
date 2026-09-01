@@ -115,11 +115,13 @@ if [[ "$MODE" == "linux" ]]; then
 
     # disable-bt 오버레이가 있어야 PL011 이 헤더 핀으로 나온다.
     # 없으면 부팅은 되는데 시리얼에 아무것도 안 보인다.
-    OVL_SRC="${REPO_ROOT}/kernel/out/overlays/disable-bt.dtbo"
-    if [[ -f "$OVL_SRC" ]]; then
+    OVL_DIR="${REPO_ROOT}/kernel/out/overlays"
+    if [[ -d "$OVL_DIR" ]] && compgen -G "${OVL_DIR}/*.dtbo" >/dev/null; then
         mmd -i "$PART_IMG" ::overlays 2>/dev/null || true
-        mcopy -i "$PART_IMG" "$OVL_SRC" ::overlays/
-        log "복사: overlays/disable-bt.dtbo            (PL011 을 헤더 핀으로)"
+        for o in "${OVL_DIR}"/*.dtbo; do
+            mcopy -i "$PART_IMG" "$o" ::overlays/
+            log "복사: overlays/$(basename "$o")"
+        done
     else
         echo ""
         echo "  경고: disable-bt.dtbo 가 없습니다."

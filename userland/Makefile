@@ -41,7 +41,7 @@ LIBC_ASM  := $(wildcard $(LIBC_DIR)/src/*.S)
 LIBC_OBJS := $(patsubst $(LIBC_DIR)/src/%.c,$(OBJDIR)/libc/%.o,$(LIBC_SRCS)) \
              $(patsubst $(LIBC_DIR)/src/%.S,$(OBJDIR)/libc/%.o,$(LIBC_ASM))
 
-PROGS := init sh cat ls dhcp mount zram memwatch expandfs
+PROGS := init sh cat ls dhcp mount zram memwatch expandfs mkdir
 BINS  := $(addprefix $(BINDIR)/,$(PROGS))
 
 .PHONY: all clean size test

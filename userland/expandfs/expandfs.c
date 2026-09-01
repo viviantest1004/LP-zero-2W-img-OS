@@ -21,8 +21,12 @@
 #include "unistd.h"
 #include "syscall.h"
 
-#define DEV_DISK      "/dev/mmcblk0"
-#define DEV_PART      "/dev/mmcblk0p2"
+/* 기본은 SD 카드. QEMU 등에서 다른 장치를 쓰려면 인자로 준다.
+ *   expandfs /dev/vda /dev/vda2 */
+static const char *dev_disk = "/dev/mmcblk0";
+static const char *dev_part = "/dev/mmcblk0p2";
+#define DEV_DISK      dev_disk
+#define DEV_PART      dev_part
 #define MOUNT_POINT   "/data"
 #define PART_INDEX    2            /* 1-기반 */
 #define SECTOR_SIZE   512
@@ -218,7 +222,15 @@ static bool grow_filesystem(u64 part_bytes)
 
 int main(int argc, char **argv)
 {
-    (void)argc; (void)argv;
+    if (argc >= 3) {
+        dev_disk = argv[1];
+        dev_part = argv[2];
+    } else if (argc == 2) {
+        dprintf(STDERR_FILENO,
+                "사용법: expandfs [디스크 파티션]\n"
+                "  예:   expandfs /dev/mmcblk0 /dev/mmcblk0p2\n");
+        return 2;
+    }
 
     u64 part_bytes = 0;
     bool grew = grow_partition(&part_bytes);

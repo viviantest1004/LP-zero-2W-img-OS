@@ -24,6 +24,17 @@ enable_uart=1
 # 이게 없으면 부팅은 되는데 시리얼에 아무것도 안 보인다.
 dtoverlay=disable-bt
 
+# ── USB (유선 네트워크) ─────────────────────────────────────────
+# Zero 2 W 에는 이더넷 포트가 없다. micro USB 로 대신한다.
+#
+# dr_mode=otg 이면 케이블에 따라 자동으로 정해진다:
+#   OTG 젠더 + USB 이더넷 어댑터  -> 호스트 모드 (진짜 랜선)
+#   PC 에 그냥 연결               -> 가젯 모드 (PC 와 USB 네트워크)
+#
+# 자동 판별이 안 되면 dr_mode 를 host 나 peripheral 로 고정한다.
+# ★ 반드시 "USB" 라고 인쇄된 포트에 꽂아야 한다. PWR IN 은 전원 전용이다.
+dtoverlay=dwc2,dr_mode=otg
+
 # ── 부팅 시간 ───────────────────────────────────────────────────
 disable_splash=1
 boot_delay=0

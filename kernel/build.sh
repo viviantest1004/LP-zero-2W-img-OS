@@ -147,13 +147,15 @@ fi
 # disable-bt 오버레이. Zero 2 W 에서 PL011 을 40핀 헤더로 돌리는 데
 # 필요하다. 없으면 시리얼 콘솔이 나오지 않는다.
 OVL_DIR="${BUILD_DIR}/arch/arm64/boot/dts/overlays"
-if [[ -f "${OVL_DIR}/disable-bt.dtbo" ]]; then
-    mkdir -p "${OUT_DIR}/overlays"
-    cp "${OVL_DIR}/disable-bt.dtbo" "${OUT_DIR}/overlays/"
-    echo "  오버레이 disable-bt.dtbo"
-else
-    echo "  경고: disable-bt.dtbo 를 찾지 못했습니다 (시리얼 콘솔이 안 나올 수 있습니다)"
-fi
+mkdir -p "${OUT_DIR}/overlays"
+for ovl in disable-bt dwc2; do
+    if [[ -f "${OVL_DIR}/${ovl}.dtbo" ]]; then
+        cp "${OVL_DIR}/${ovl}.dtbo" "${OUT_DIR}/overlays/"
+        echo "  오버레이 ${ovl}.dtbo"
+    else
+        echo "  경고: ${ovl}.dtbo 를 찾지 못했습니다"
+    fi
+done
 
 IMG_SIZE=$(stat -c%s "${OUT_DIR}/Image")
 printf "  Image %s bytes (%.1f MB)\n" "$IMG_SIZE" "$(echo "scale=2; $IMG_SIZE/1048576" | bc)"
