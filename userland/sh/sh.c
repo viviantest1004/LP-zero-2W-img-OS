@@ -237,7 +237,10 @@ static void builtin_help(void)
     printf("  reboot        재부팅\n");
     printf("  poweroff      전원 끄기\n");
     printf("  help          이 도움말\n\n");
-    printf("리다이렉션 < > >> , 파이프 | , 연결자 && || ; 를 쓸 수 있습니다.\n");
+    printf("리다이렉션 < > >> , 파이프 | , 연결자 && || ; 를 쓸 수 있습니다.\n\n");
+    printf("파일:   ls  cat  cp  mv  rm  mkdir\n");
+    printf("시스템: sysinfo  zram  memwatch  mount  expandfs  dhcp  ntp\n");
+    printf("계산:   calc \"2+3*4\"      파이썬: python (/data 에 있습니다)\n");
 }
 
 static const char *BUILTINS[] = {

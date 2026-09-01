@@ -99,6 +99,25 @@ size_t strlcpy(char *d, const char *s, size_t size)
     return slen;    /* >= size 면 잘렸다는 뜻 */
 }
 
+size_t strlcat(char *d, const char *s, size_t size)
+{
+    /* d 안에서 NUL 을 찾는다. size 안에 NUL 이 없으면 d 는 문자열이
+     * 아니므로 아무것도 하지 않고 붙이려던 길이만 돌려준다. */
+    size_t dlen = 0;
+    while (dlen < size && d[dlen] != '\0')
+        dlen++;
+
+    size_t slen = strlen(s);
+    if (dlen == size)
+        return size + slen;
+
+    size_t room = size - dlen;      /* NUL 자리 포함 */
+    size_t copy = (slen >= room) ? room - 1 : slen;
+    memcpy(d + dlen, s, copy);
+    d[dlen + copy] = '\0';
+    return dlen + slen;             /* >= size 면 잘렸다 */
+}
+
 char *strchr(const char *s, int c)
 {
     for (; *s; s++)

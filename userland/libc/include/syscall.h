@@ -53,6 +53,7 @@
 #define SYS_exit_group      94
 #define SYS_set_tid_address 96
 #define SYS_nanosleep       101
+#define SYS_clock_settime   112
 #define SYS_clock_gettime   113
 #define SYS_sched_yield     124
 #define SYS_kill            129

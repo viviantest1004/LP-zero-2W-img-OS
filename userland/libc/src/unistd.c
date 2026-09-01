@@ -68,6 +68,45 @@ bool lp_is_dir(const char *path)
     return (mode & S_IFMT) == S_IFDIR;
 }
 
+/* struct stat 에서 우리가 쓰는 두 필드의 오프셋:
+ *   16  st_mode (u32)
+ *   48  st_size (s64)
+ * 나머지는 건너뛴다. */
+#define STAT_SIZE_OFF       48
+#define AT_SYMLINK_NOFOLLOW 0x100
+
+long lp_stat(const char *path, lp_stat_t *out, bool follow_symlink)
+{
+    u8 buf[STAT_BUF_SIZE];
+    long r = sys_call4(SYS_newfstatat, AT_FDCWD, (long)path, (long)buf,
+                       follow_symlink ? 0 : AT_SYMLINK_NOFOLLOW);
+    if (r < 0)
+        return r;
+    out->mode = *(u32 *)(buf + STAT_MODE_OFF);
+    out->size = *(u64 *)(buf + STAT_SIZE_OFF);
+    return 0;
+}
+
+long lp_rename(const char *from, const char *to)
+{
+    return sys_call4(SYS_renameat, AT_FDCWD, (long)from, AT_FDCWD, (long)to);
+}
+
+long lp_chmod(const char *path, mode_t mode)
+{
+    return sys_call4(SYS_fchmodat, AT_FDCWD, (long)path, (long)mode, 0);
+}
+
+long lp_symlink(const char *target, const char *linkpath)
+{
+    return sys_call3(SYS_symlinkat, (long)target, AT_FDCWD, (long)linkpath);
+}
+
+long lp_readlink(const char *path, char *buf, size_t n)
+{
+    return sys_call4(SYS_readlinkat, AT_FDCWD, (long)path, (long)buf, (long)n);
+}
+
 /* ── 프로세스 ─────────────────────────────────────────────────── */
 
 pid_t lp_fork(void)
@@ -124,6 +163,26 @@ long lp_reboot(int cmd)
 {
     return sys_call4(SYS_reboot, (long)LINUX_REBOOT_MAGIC1,
                      (long)LINUX_REBOOT_MAGIC2, cmd, 0);
+}
+
+/* ── 시각 ─────────────────────────────────────────────────────── */
+
+/* struct timespec 은 arm64 에서 { s64 tv_sec; s64 tv_nsec; } 16바이트다.
+ * 구조체를 정의하는 대신 배열로 다룬다. */
+#define CLOCK_REALTIME 0
+
+s64 lp_time(void)
+{
+    s64 ts[2] = { 0, 0 };
+    if (sys_call2(SYS_clock_gettime, CLOCK_REALTIME, (long)ts) < 0)
+        return 0;
+    return ts[0];
+}
+
+long lp_settime(s64 unix_seconds)
+{
+    s64 ts[2] = { unix_seconds, 0 };
+    return sys_call2(SYS_clock_settime, CLOCK_REALTIME, (long)ts);
 }
 
 long lp_sync(void)            { return sys_call0(SYS_sync); }

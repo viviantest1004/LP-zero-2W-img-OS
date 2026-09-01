@@ -72,6 +72,25 @@ long  lp_access(const char *path, int mode);
 long  sys_getdents(int fd, void *buf, size_t size);
 bool  lp_exists(const char *path);
 bool  lp_is_dir(const char *path);
+long  lp_rename(const char *from, const char *to);
+long  lp_chmod(const char *path, mode_t mode);
+long  lp_symlink(const char *target, const char *linkpath);
+long  lp_readlink(const char *path, char *buf, size_t n);
+
+/* 커널의 struct stat 은 arm64 에서 128바이트이고 대부분 우리가 쓰지
+ * 않는 필드다. 필요한 것만 담아 돌려준다. */
+typedef struct {
+    u32 mode;        /* 종류(S_IF*) + 권한 */
+    u64 size;
+} lp_stat_t;
+
+#define LP_S_IFMT   0170000
+#define LP_S_IFDIR  0040000
+#define LP_S_IFREG  0100000
+#define LP_S_IFLNK  0120000
+
+/* follow_symlink=false 면 링크 자체를 본다 (lstat). */
+long  lp_stat(const char *path, lp_stat_t *out, bool follow_symlink);
 
 /* ── 프로세스 ── */
 pid_t lp_fork(void);                 /* clone(SIGCHLD) 로 구현 */
@@ -83,6 +102,12 @@ long  lp_setsid(void);
 long  lp_kill(pid_t pid, int sig);
 void  lp_exit(int code) __attribute__((noreturn));
 long  lp_sleep_ms(long ms);
+
+/* ── 시각 ── */
+/* 1970-01-01 부터의 초. 실패하면 0. */
+s64   lp_time(void);
+/* 시스템 시각을 맞춘다. root 만 된다. */
+long  lp_settime(s64 unix_seconds);
 
 /* ── 시스템 ── */
 long  lp_mount(const char *src, const char *tgt, const char *fstype,

@@ -127,6 +127,8 @@ LP-zero OS
 계산      calc 2+3*4    사칙연산·16진수·2진수 (즉시 실행)
 파이썬    python        /data 에 있습니다
 상태      sysinfo / zram status / ls /data
+시각      ntp           이 보드에는 시계 배터리가 없습니다.
+                        시각이 틀리면 HTTPS 인증서 검증이 실패합니다.
 자동실행  /data/rc.local 에 적어두면 부팅할 때 실행됩니다
 MOTD
 

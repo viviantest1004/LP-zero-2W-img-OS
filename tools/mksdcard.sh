@@ -131,6 +131,75 @@ if [[ "$MODE" == "linux" ]]; then
     fi
 fi
 
+if [[ "$MODE" == "linux" ]]; then
+    # 부트 파티션은 FAT32 라 윈도우·맥에서도 그냥 보인다. 기기에 리눅스
+    # 없이 접근할 수 있는 유일한 통로이므로, 첫 설정에 필요한 파일을
+    # 여기에 둔다. /etc/rc 가 부팅할 때 읽어간다.
+    log "복사: authorized_keys                     (SSH 공개키 - 여기에 붙이세요)"
+    mcopy -i "$PART_IMG" "${REPO_ROOT}/boot/rootfs-overlay/etc/authorized_keys" ::
+
+    log "복사: wpa_supplicant.conf                 (무선 설정)"
+    mcopy -i "$PART_IMG" "${REPO_ROOT}/boot/rootfs-overlay/etc/wpa_supplicant.conf" ::
+
+    README="${OUT_DIR}/.README.txt"
+    cat > "$README" <<'READMEEOF'
+LP-zero OS
+
+이 파티션은 FAT32 라 윈도우와 맥에서도 보입니다.
+아래 두 파일을 고치면 다음 부팅에 자동으로 적용됩니다.
+(SD 카드를 다시 구울 필요가 없습니다)
+
+  authorized_keys       SSH 로 접속할 공개키.
+                        ★ 여기에 공개키를 넣어야 원격 접속이 됩니다 ★
+                        접속할 PC 에서:
+                            ssh-keygen -t ed25519 -f ~/.ssh/lpzero
+                            type %USERPROFILE%\.ssh\lpzero.pub    (윈도우)
+                            cat ~/.ssh/lpzero.pub                 (맥/리눅스)
+                        나온 한 줄을 이 파일 맨 아래에 붙이세요.
+
+                        이 파일이 SSH 키의 원본입니다. 매 부팅마다
+                        기기로 복사됩니다. 기기 안에서 직접 관리하고
+                        싶으면 이 파일을 지우세요.
+
+  wpa_supplicant.conf   무선 공유기 이름과 비밀번호.
+
+  config.txt            GPU 부팅 설정. 화면 해상도 등.
+  cmdline.txt           커널 커맨드라인.
+
+접속 방법
+  1. 위 두 파일을 채운다
+  2. SD 를 꽂고 전원을 넣는다
+  3. 공유기 관리 페이지에서 받은 IP 를 확인한다
+     (또는 시리얼 콘솔에 IP 가 찍힙니다)
+  4. ssh -i ~/.ssh/lpzero root@<그 IP>
+
+비밀번호 인증은 빌드 단계에서 아예 빼놓았습니다. 네트워크에 열린
+기기에서 비밀번호는 무차별 대입의 표적이 되기 때문입니다.
+공개키가 없으면 아무도 들어올 수 없습니다 - 본인 포함입니다.
+
+저장 위치
+  기기에서 파일을 남기려면 /data 나 홈(/root) 안에 두세요.
+  그 밖은 RAM 이라 재부팅하면 사라집니다.
+
+파이썬
+  /data/bin/micropython      가볍고 빠릅니다
+  /data/python/bin/python3.12  표준 CPython (있는 이미지에 한함)
+  둘 중 하나가 'python' 입니다.
+
+시계
+  이 보드에는 배터리로 도는 시계(RTC)가 없습니다. 전원을 넣으면
+  1970년에서 시작합니다. 부팅할 때 자동으로 인터넷에서 시각을
+  받아오지만(ntp), 공유기나 회사망이 UDP 123 을 막으면 실패합니다.
+  시각이 틀리면 HTTPS 인증서 검증이 전부 실패하므로,
+  파이썬에서 인증서 오류가 나면 먼저 시각을 확인하세요.
+
+부팅할 때 실행할 명령은 기기의 /data/rc.local 에 적어두면 됩니다.
+READMEEOF
+    log "복사: README.txt                          (설정 안내)"
+    mcopy -i "$PART_IMG" "$README" ::README.txt
+    rm -f "$README"
+fi
+
 # ── 3. MBR 을 붙여 완성 ─────────────────────────────────────────
 log "MBR 작성 + 파티션 결합"
 
@@ -180,7 +249,7 @@ if command -v debugfs >/dev/null 2>&1; then
     # 파이썬을 시스템(initramfs)이 아니라 여기에 두는 이유는 크기다.
     # initramfs 는 커널에 박혀 있어서 늘리면 부팅 이미지가 그대로 커지지만,
     # /data 는 첫 부팅에 카드 전체로 늘어나므로 크기가 문제되지 않는다.
-    MPY="${MICROPYTHON_BIN:-/home/user/kernel-work/thirdparty/micropython/ports/unix/build-standard/micropython}"
+    MPY="${MICROPYTHON_BIN:-/home/user/kernel-work/thirdparty/micropython/ports/unix/build-lpzero/micropython}"
     HAVE_MPY=0
     if [[ -f "$MPY" ]]; then
         d_put "$MPY" bin/micropython 0100755
@@ -203,6 +272,38 @@ if command -v debugfs >/dev/null 2>&1; then
           find python -type l  -printf 'symlink /%p %l\n' ) >> "$DBG"
         log "데이터: python/  ($(du -sh "$PYSTAGE" | cut -f1))"
     fi
+
+    # 루트 인증서. OpenSSL 을 --openssldir=/data/ssl 로 지었으므로
+    # 파이썬과 다른 프로그램이 여기를 본다. 없으면 HTTPS 접속이
+    # CERTIFICATE_VERIFY_FAILED 로 죽는다.
+    CA_SRC="${CA_BUNDLE:-/home/user/kernel-work/thirdparty/ca/cert.pem}"
+    if [[ -f "$CA_SRC" ]]; then
+        d_mkdir /ssl
+        d_put "$CA_SRC" ssl/cert.pem
+        log "데이터: ssl/cert.pem  (루트 인증서 $(grep -c 'BEGIN CERTIFICATE' "$CA_SRC")개)"
+    fi
+
+    # terminfo. readline 이 터미널의 능력(화면 크기, 키 코드)을 여기서
+    # 읽는다. 없어도 방향키는 되지만 화면 폭 계산이 틀어진다.
+    # 바이너리 형식이 아키텍처와 무관해서 호스트 것을 그대로 쓴다.
+    #
+    # find 에 없는 디렉터리를 넘기면 find 가 1 로 끝나고, pipefail 때문에
+    # 대입이 실패하면서 set -e 가 스크립트를 끊는다. 있는 것만 넘긴다.
+    TI_DIRS=()
+    for d in /usr/share/terminfo /lib/terminfo /etc/terminfo; do
+        [[ -d "$d" ]] && TI_DIRS+=("$d")
+    done
+    TI_N=0
+    for t in xterm xterm-256color linux vt100 vt102 vt220 screen screen-256color ansi dumb; do
+        [[ ${#TI_DIRS[@]} -gt 0 ]] || break
+        ti_src=$(find "${TI_DIRS[@]}" -name "$t" -type f 2>/dev/null | head -1 || true)
+        [[ -n "$ti_src" ]] || continue
+        [[ "$TI_N" == "0" ]] && d_mkdir /terminfo
+        d_mkdir "/terminfo/${t:0:1}"
+        d_put "$ti_src" "terminfo/${t:0:1}/${t}"
+        TI_N=$((TI_N + 1))
+    done
+    [[ "$TI_N" -gt 0 ]] && log "데이터: terminfo/  (${TI_N}개 터미널)"
 
     # 사용자가 python 이라고 쳤을 때 쓸 것을 정한다.
     # CPython 이 있으면 그것이, 없으면 MicroPython 이 python 이다.

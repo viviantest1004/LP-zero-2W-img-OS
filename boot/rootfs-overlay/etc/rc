@@ -28,11 +28,34 @@ echo "[rc] 저장장치 준비"
 expandfs || expandfs /dev/vda /dev/vda2 || echo "[rc]   확장 없음"
 mount /dev/mmcblk0p2 /data || mount /dev/vda2 /data || echo "[rc]   데이터 파티션 없음 - RAM 으로 계속합니다"
 
+echo "[rc] 시계 복원"
+# Pi Zero 2 W 에는 배터리로 도는 시계(RTC)가 없다. 전원을 넣으면 커널
+# 시계가 1970년에서 시작한다. 그 상태로 두면 파일 시각이 엉망이 되고,
+# HTTPS 는 서버 인증서가 "미래에 발급된 것"으로 보여 전부 실패한다.
+# 우선 지난번에 저장해둔 시각으로 올려둔다. 정확하진 않아도 1970년보다
+# 훨씬 낫다. 진짜 시각은 네트워크가 올라온 뒤에 맞춘다.
+ntp -r || echo "[rc]   저장된 시각이 없습니다 (첫 부팅)"
+
 echo "[rc] 홈 디렉터리를 저장장치로"
 # /root 는 원래 RAM 이라 재부팅하면 사라진다. 데이터 파티션의
 # 디렉터리를 그 자리에 겹쳐 붙여(bind) 홈에 저장한 것이 남게 한다.
 mkdir -p /data/root/.ssh && mount -o bind /data/root /root || echo "[rc]   홈은 RAM 입니다 (재부팅 시 사라짐)"
-cat /etc/authorized_keys > /root/.ssh/authorized_keys || echo "[rc]   authorized_keys 준비 실패"
+# -n: 이미 있으면 덮지 않는다. 사용자가 넣어둔 키를 매 부팅마다
+# 빈 기본값으로 지워버리면 안 된다.
+cp -n /etc/authorized_keys /root/.ssh/authorized_keys
+
+echo "[rc] 부트 파티션에서 설정 읽기"
+# 부트 파티션은 FAT32 다. 윈도우·맥에서도 그냥 보인다.
+# SD 를 PC 에 꽂아 여기에 파일을 넣어두면 다음 부팅에 적용된다.
+# 리눅스 없이 기기를 설정할 수 있는 유일한 통로라 중요하다.
+#
+#   authorized_keys       SSH 공개키 (이게 있어야 원격 접속이 된다)
+#   wpa_supplicant.conf   무선 공유기 정보
+#
+# -q: 파일이 없는 것은 정상이므로 오류를 찍지 않는다.
+mkdir -p /boot && mount /dev/mmcblk0p1 /boot || mount /dev/vda1 /boot || echo "[rc]   부트 파티션을 읽지 못했습니다"
+cp -q /boot/authorized_keys /root/.ssh/authorized_keys && echo "[rc]   SSH 공개키를 가져왔습니다"
+cp -q /boot/wpa_supplicant.conf /data/wpa_supplicant.conf && echo "[rc]   무선 설정을 가져왔습니다"
 
 echo "[rc] 무선 설정 준비"
 # 데이터 파티션의 설정을 우선한다. SD 를 다시 굽지 않고 공유기 정보를
@@ -47,6 +70,11 @@ echo "[rc] 주소 요청"
 #   eth0   USB 이더넷 어댑터 (호스트 모드)
 #   usb0   USB 가젯 - PC 에 연결했을 때
 dhcp wlan0 || dhcp eth0 || dhcp usb0 || echo "[rc]   주소를 받지 못했습니다"
+
+echo "[rc] 시각 동기화"
+# 이게 되어야 HTTPS 가 된다. 실패해도 부팅은 계속하지만,
+# 그때는 파이썬의 인증서 검증이 실패할 수 있다.
+ntp || echo "[rc]   시각을 못 받았습니다 - HTTPS 인증서 검증이 실패할 수 있습니다"
 
 # 사용자 시작 스크립트. 데이터 파티션에 있으면 실행한다.
 # 이미지를 다시 굽지 않고 부팅할 때 할 일을 추가할 수 있는 자리다.
