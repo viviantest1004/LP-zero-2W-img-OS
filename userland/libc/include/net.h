@@ -27,6 +27,7 @@
 /* 인터페이스 ioctl */
 #define SIOCGIFFLAGS    0x8913
 #define SIOCSIFFLAGS    0x8914
+#define SIOCGIFADDR     0x8915
 #define SIOCSIFADDR     0x8916
 #define SIOCSIFNETMASK  0x891C
 #define SIOCGIFHWADDR   0x8927
@@ -72,6 +73,8 @@ long net_if_down(const char *ifname);
 bool net_if_is_up(const char *ifname);
 long net_if_index(const char *ifname, int *index_out);
 long net_if_hwaddr(const char *ifname, u8 mac[6]);
+/* 현재 IPv4 주소를 읽는다. 주소가 없으면 음수. */
+long net_get_addr(const char *ifname, u32 *addr_be);
 long net_set_addr(const char *ifname, u32 addr_be);      /* 네트워크 순서 */
 long net_set_netmask(const char *ifname, u32 mask_be);
 long net_add_default_route(const char *ifname, u32 gw_be);

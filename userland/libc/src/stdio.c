@@ -42,8 +42,9 @@ static void sink_put(sink_t *s, char c)
         s->buf[s->len - 1] = c;
 }
 
-static void emit_uint(sink_t *s, u64 v, unsigned base, bool upper,
-                      unsigned width, bool zero_pad)
+/* 숫자를 buf 에 문자열로 만들고 길이를 돌려준다.
+ * 패딩은 하지 않는다 - 정렬은 emit_padded 가 맡는다. */
+static unsigned fmt_uint(char *buf, unsigned cap, u64 v, unsigned base, bool upper)
 {
     static const char lo[] = "0123456789abcdef";
     static const char up[] = "0123456789ABCDEF";
@@ -60,23 +61,63 @@ static void emit_uint(sink_t *s, u64 v, unsigned base, bool upper,
             v /= base;
         }
     }
-    while (n < width && n < sizeof(tmp))
-        tmp[n++] = zero_pad ? '0' : ' ';
 
-    while (n--)
-        sink_put(s, tmp[n]);
+    unsigned len = 0;
+    while (n && len < cap)
+        buf[len++] = tmp[--n];
+    return len;
 }
 
-static void emit_int(sink_t *s, s64 v, unsigned width, bool zero_pad)
+/* 폭을 맞춰 출력한다.
+ *   left  = true 면 오른쪽에 채운다 ("%-10s")
+ *   pad   = 채울 문자 ('0' 또는 ' ')
+ * 부호가 있는 값을 '0' 으로 채울 때는 부호가 먼저 나와야 하므로
+ * 호출자가 sign 을 따로 넘긴다. */
+static void emit_padded(sink_t *s, const char *sign, const char *str,
+                        unsigned len, unsigned width, bool left, char pad)
 {
-    if (v < 0) {
-        sink_put(s, '-');
-        /* -(-2^63) 은 넘친다. 부호를 먼저 떼어내 피한다. */
-        u64 mag = (u64)(-(v + 1)) + 1;
-        emit_uint(s, mag, 10, false, width ? width - 1 : 0, zero_pad);
-    } else {
-        emit_uint(s, (u64)v, 10, false, width, zero_pad);
+    unsigned slen = sign ? 1 : 0;
+    unsigned total = len + slen;
+    unsigned fill  = (width > total) ? width - total : 0;
+
+    if (left) {
+        if (sign) sink_put(s, *sign);
+        for (unsigned i = 0; i < len; i++) sink_put(s, str[i]);
+        while (fill--) sink_put(s, ' ');     /* 왼쪽 정렬은 항상 공백 */
+        return;
     }
+
+    /* 오른쪽 정렬. '0' 으로 채울 때는 부호가 채움 앞에 와야 한다. */
+    if (pad == '0' && sign) sink_put(s, *sign);
+    while (fill--) sink_put(s, pad);
+    if (pad != '0' && sign) sink_put(s, *sign);
+    for (unsigned i = 0; i < len; i++) sink_put(s, str[i]);
+}
+
+static void emit_uint(sink_t *s, u64 v, unsigned base, bool upper,
+                      unsigned width, bool left, bool zero_pad)
+{
+    char buf[24];
+    unsigned len = fmt_uint(buf, sizeof(buf), v, base, upper);
+    emit_padded(s, NULL, buf, len, width, left, zero_pad ? '0' : ' ');
+}
+
+static void emit_int(sink_t *s, s64 v, unsigned width, bool left, bool zero_pad)
+{
+    char buf[24];
+    const char *sign = NULL;
+    u64 mag;
+
+    if (v < 0) {
+        sign = "-";
+        /* -(-2^63) 은 넘친다. 부호를 먼저 떼어내 피한다. */
+        mag = (u64)(-(v + 1)) + 1;
+    } else {
+        mag = (u64)v;
+    }
+
+    unsigned len = fmt_uint(buf, sizeof(buf), mag, 10, false);
+    emit_padded(s, sign, buf, len, width, left, zero_pad ? '0' : ' ');
 }
 
 static void format(sink_t *s, const char *fmt, va_list ap)
@@ -85,8 +126,13 @@ static void format(sink_t *s, const char *fmt, va_list ap)
         if (*fmt != '%') { sink_put(s, *fmt++); continue; }
         fmt++;
 
-        bool zero_pad = false;
-        if (*fmt == '0') { zero_pad = true; fmt++; }
+        /* 플래그는 순서에 상관없이 올 수 있다 ("%-05d" 도 유효) */
+        bool left_align = false, zero_pad = false;
+        for (;;) {
+            if (*fmt == '-') { left_align = true; fmt++; continue; }
+            if (*fmt == '0') { zero_pad   = true; fmt++; continue; }
+            break;
+        }
 
         unsigned width = 0;
         while (*fmt >= '0' && *fmt <= '9')
@@ -102,30 +148,30 @@ static void format(sink_t *s, const char *fmt, va_list ap)
         case 's': {
             const char *p = va_arg(ap, const char *);
             if (!p) p = "(null)";
-            size_t plen = strlen(p);
-            while (plen < width) { sink_put(s, ' '); width--; }
-            while (*p) sink_put(s, *p++);
+            emit_padded(s, NULL, p, (unsigned)strlen(p), width,
+                        left_align, ' ');
             break;
         }
         case 'd': case 'i':
             emit_int(s, longness ? va_arg(ap, s64) : (s64)va_arg(ap, s32),
-                     width, zero_pad);
+                     width, left_align, zero_pad);
             break;
         case 'u':
             emit_uint(s, longness ? va_arg(ap, u64) : (u64)va_arg(ap, u32),
-                      10, false, width, zero_pad);
+                      10, false, width, left_align, zero_pad);
             break;
         case 'x':
             emit_uint(s, longness ? va_arg(ap, u64) : (u64)va_arg(ap, u32),
-                      16, false, width, zero_pad);
+                      16, false, width, left_align, zero_pad);
             break;
         case 'X':
             emit_uint(s, longness ? va_arg(ap, u64) : (u64)va_arg(ap, u32),
-                      16, true, width, zero_pad);
+                      16, true, width, left_align, zero_pad);
             break;
         case 'p':
             sink_put(s, '0'); sink_put(s, 'x');
-            emit_uint(s, (u64)(uintptr_t)va_arg(ap, void *), 16, false, 16, true);
+            emit_uint(s, (u64)(uintptr_t)va_arg(ap, void *), 16, false,
+                      16, false, true);
             break;
         case '%':
             sink_put(s, '%');

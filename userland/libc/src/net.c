@@ -151,6 +151,20 @@ static long if_set_inaddr(const char *ifname, unsigned long req, u32 addr_be)
     return if_ioctl(req, r);
 }
 
+long net_get_addr(const char *ifname, u32 *addr_be)
+{
+    ifreq_t r;
+    ifreq_init(r, ifname);
+
+    long rc = if_ioctl(SIOCGIFADDR, r);
+    if (rc < 0)
+        return rc;
+
+    sockaddr_in_t *sa = (sockaddr_in_t *)(r + IFR_UNION);
+    if (addr_be) *addr_be = sa->sin_addr;
+    return 0;
+}
+
 long net_set_addr(const char *ifname, u32 addr_be)
 {
     return if_set_inaddr(ifname, SIOCSIFADDR, addr_be);
