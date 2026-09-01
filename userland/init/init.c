@@ -263,7 +263,7 @@ static void run_rc(void)
 }
 
 /* Start one shell. Returns the child's pid. */
-static pid_t spawn_shell(void)
+static pid_t spawn_shell_on(const char *tty)
 {
     pid_t pid = lp_fork();
     if (pid < 0) {
@@ -275,6 +275,21 @@ static pid_t spawn_shell(void)
         /* Become the leader of a new session so we get a controlling
          * terminal. Without this, Ctrl-C and friends do nothing. */
         lp_setsid();
+
+        /* A NULL tty means "inherit whatever init has", which is the
+         * console the kernel picked. Otherwise open the named device and
+         * make it this shell's stdin, stdout and stderr. */
+        if (tty) {
+            long fd = lp_open(tty, O_RDWR, 0);
+            if (fd < 0)
+                lp_exit(127);
+            lp_dup2((int)fd, STDIN_FILENO);
+            lp_dup2((int)fd, STDOUT_FILENO);
+            lp_dup2((int)fd, STDERR_FILENO);
+            if (fd > STDERR_FILENO)
+                lp_close((int)fd);
+            lp_term_set_utf8(STDIN_FILENO);
+        }
 
         char *argv[] = { (char *)SHELL_PATH, NULL };
         char *envp[] = {
@@ -291,6 +306,53 @@ static pid_t spawn_shell(void)
     }
 
     return pid;
+}
+
+static pid_t spawn_shell(void) { return spawn_shell_on(NULL); }
+
+/* Is the screen a separate place from the console we already talk to?
+ *
+ * The kernel picks one device as /dev/console - the last console= on the
+ * command line. Ours puts the serial port last, because that is what a
+ * headless board and an SSH session need.
+ *
+ * But in a VM with a window (UTM, or QEMU with a display), the screen is
+ * tty1 and it would then show the boot messages and nothing else: the
+ * shell would be off on the serial port, and the window would look dead.
+ *
+ * /sys/class/tty/console/active lists the active consoles, and the LAST
+ * one is where /dev/console actually points. Being in the list is not
+ * enough: with "console=tty1 console=ttyAMA0" both are listed, yet the
+ * shell only lands on ttyAMA0. So we compare against the last entry, and
+ * put a second shell on tty1 when that is not it. Costs one idle
+ * process, and it means an HDMI screen plugged in later already has a
+ * shell waiting on it. */
+static bool screen_needs_its_own_shell(void)
+{
+    if (!lp_exists("/dev/tty1"))
+        return false;
+
+    char buf[128];
+    long fd = lp_open("/sys/class/tty/console/active", O_RDONLY, 0);
+    if (fd < 0)
+        return false;
+    long n = lp_read((int)fd, buf, sizeof(buf) - 1);
+    lp_close((int)fd);
+    if (n <= 0)
+        return false;
+    buf[n] = '\0';
+
+    /* Find the last whitespace-separated name. */
+    const char *last = buf;
+    for (char *p = buf; *p; p++) {
+        if (*p == ' ' || *p == '\n' || *p == '\t') {
+            *p = '\0';
+            if (p[1] && p[1] != ' ' && p[1] != '\n' && p[1] != '\t')
+                last = p + 1;
+        }
+    }
+
+    return strcmp(last, "tty1") != 0;
 }
 
 int main(int argc, char **argv)
@@ -316,6 +378,15 @@ int main(int argc, char **argv)
 
     pid_t shell_pid = spawn_shell();
 
+    /* A VM window, or an HDMI screen, is a console nobody is reading
+     * unless we put a shell there too. */
+    pid_t screen_pid = -1;
+    if (is_pid1 && screen_needs_its_own_shell()) {
+        screen_pid = spawn_shell_on("/dev/tty1");
+        if (screen_pid > 0)
+            printf("init: a second shell is on the screen (tty1)\n");
+    }
+
     /* Main loop: reap dead children, and restart the shell when it exits. */
     for (;;) {
         int status = 0;
@@ -332,6 +403,12 @@ int main(int argc, char **argv)
 
         if (respawn_service(pid, status))
             continue;           /* it was a supervised service */
+
+        if (pid == screen_pid) {
+            lp_sleep_ms(RESPAWN_MS);
+            screen_pid = spawn_shell_on("/dev/tty1");
+            continue;
+        }
 
         if (pid != shell_pid)
             continue;           /* just an orphan we reaped */
