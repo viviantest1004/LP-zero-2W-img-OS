@@ -177,6 +177,58 @@ minicom -D /dev/ttyUSB0 -b 115200
 
 설정은 **115200 8N1, 흐름제어 없음**.
 
+## microSD 카드 고르기
+
+비싼 카드를 사도 이득이 없다. 이유가 분명하다.
+
+### Zero 2 W 는 25MB/s 가 천장이다
+
+Pi 의 SD 컨트롤러는 **SDR25** 까지만 지원한다. UHS-I 의 고속 모드
+(SDR50/SDR104)를 쓰지 못한다. 200MB/s 짜리 카드를 꽂아도 25MB/s 로 돈다.
+
+| 항목 | 권장 | 이유 |
+|---|---|---|
+| 형태 | **microSD** | full-size 는 안 들어간다 |
+| 용량 | **16~32GB** | 우리 이미지가 256MB 라 8GB 도 남는다 |
+| 타입 | **SDHC** (32GB 이하) | SDXC 도 되지만 이점이 없다 |
+| 속도 | **Class 10 / U1** | 이 이상은 낭비 (25MB/s 천장) |
+| 앱 등급 | **A1** | 아래 참조 |
+| 브랜드 | SanDisk, Samsung | 가짜가 많다 |
+
+구체적으로는 SanDisk Ultra microSDHC 32GB A1 이나 Samsung EVO Plus 32GB.
+
+### A2 를 사지 않는 이유
+
+A2 는 **CQHCI**(커맨드 큐잉) 하드웨어가 있어야 제 성능이 난다.
+Pi 중에서는 BCM2712(Pi 5)만 그 엔진을 갖고 있고, 그마저도 커널 지원이
+없다. Zero 2 W 는 해당 사항이 아예 없다.
+
+A2 카드는 CQ 명령을 받지 못하면 A1 속도를 보장할 의무가 없어서, 오히려
+A1 보다 느린 경우도 보고된다. **A1 이 싸고 확실하다.**
+
+### 우리 설계에서는 카드 수명 걱정이 거의 없다
+
+루트가 커널에 내장된 initramfs(RAM)라 SD 에 쓰기가 거의 없다.
+`/data` 파티션에만 가끔 쓴다. 그래서 "High Endurance" 같은 비싼 카드도
+필요 없고, 전원을 갑자기 뽑아도 루트가 깨지지 않는다.
+
+### 굽기
+
+```bash
+sudo dd if=sdcard/lp-zero.img of=/dev/sdX bs=4M conv=fsync status=progress
+```
+
+카드에 원래 어떤 파일시스템이 있었는지는 상관없다. 이미지가 자기
+MBR 과 파티션을 통째로 덮어쓴다.
+
+굽고 나면 이렇게 된다:
+
+```
+p1  FAT32   64MiB   부트 (GPU 블롭, 커널, DTB, config.txt)
+p2  ext4   188MiB   데이터 (wpa_supplicant.conf, SSH 호스트키, 파일)
+나머지                미할당 - 필요하면 나중에 p2 를 늘린다
+```
+
 ## 화면 (미니 HDMI)
 
 Zero 2 W 는 **미니 HDMI** 단자다. 일반 HDMI 케이블이 안 들어가므로
