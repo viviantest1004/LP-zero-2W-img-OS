@@ -28,7 +28,12 @@ OVERLAY="${REPO_ROOT}/boot/rootfs-overlay"
 FW_DIR="${REPO_ROOT}/blobs/brcm"
 THIRD="${THIRDPARTY_DIR:-/home/user/kernel-work/thirdparty}"
 
-PROGRAMS=(init sh cat ls dhcp mount)
+# 프로그램 목록은 Makefile 의 PROGS 에서 읽는다.
+# 두 곳에 나눠 적으면 새 도구를 추가할 때 한쪽을 빠뜨린다
+# (실제로 zram/memwatch/expandfs/mkdir 를 빌드해놓고 rootfs 에 넣지 않아
+#  부팅 후 "명령을 찾을 수 없습니다" 가 났었다).
+read -r -a PROGRAMS <<< "$(sed -n 's/^PROGS[[:space:]]*:*=[[:space:]]*//p' "${HERE}/Makefile" | tail -1)"
+[[ ${#PROGRAMS[@]} -gt 0 ]] || die "Makefile 에서 PROGS 를 읽지 못했습니다"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 log() { printf '  %s\n' "$*"; }

@@ -24,8 +24,9 @@ memwatch -d -r 32 -w 64 || echo "[rc]   memwatch 시작 실패"
 echo "[rc] 저장장치 준비"
 # 이미지가 256MB 라 큰 카드에 구우면 나머지가 미할당으로 남는다.
 # 첫 부팅에 파티션과 파일시스템을 카드 끝까지 늘린다.
-expandfs || echo "[rc]   확장 없음"
-mount /dev/mmcblk0p2 /data || echo "[rc]   데이터 파티션 없음 - RAM 으로 계속합니다"
+# 실기는 /dev/mmcblk0(SD), QEMU 는 /dev/vda(virtio) 다. 둘 다 시도한다.
+expandfs || expandfs /dev/vda /dev/vda2 || echo "[rc]   확장 없음"
+mount /dev/mmcblk0p2 /data || mount /dev/vda2 /data || echo "[rc]   데이터 파티션 없음 - RAM 으로 계속합니다"
 
 echo "[rc] 홈 디렉터리를 저장장치로"
 # /root 는 원래 RAM 이라 재부팅하면 사라진다. 데이터 파티션의
