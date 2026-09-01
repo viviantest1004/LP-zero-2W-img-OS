@@ -1,7 +1,15 @@
 # /etc/rc - 부팅 스크립트. init 이 대화형 셸을 띄우기 전에 실행한다.
 #
-# 우리 셸이 실행한다. 변수 확장이나 조건문(if)은 없지만 && || ; 는 되므로
+# 우리 셸이 실행한다. 변수 확장이나 if 는 없지만 && || ; 는 되므로
 # 실패해도 부팅이 멈추지 않도록 폴백을 붙여 쓴다.
+
+echo "[rc] 메모리 안전장치"
+# RAM 안에 압축 스왑을 만든다. SD 에는 쓰지 않는다.
+# 256MB 를 잡지만 실제로 쓰는 만큼만 RAM 을 차지한다.
+zram on 256 || echo "[rc]   zram 없이 계속합니다"
+# 여유가 32MB 아래로 떨어지면 가장 큰 프로세스를 정리한다.
+# init/셸/SSH/무선은 보호 대상이라 죽이지 않는다.
+memwatch -d -r 32 -w 64 || echo "[rc]   memwatch 시작 실패"
 
 echo "[rc] 데이터 파티션 마운트"
 mount /dev/mmcblk0p2 /data || echo "[rc]   없음 - 내장 설정으로 진행합니다"
@@ -19,8 +27,7 @@ dhcp wlan0 || echo "[rc]   주소를 받지 못했습니다"
 
 echo "[rc] SSH 서버 시작"
 # 호스트 키를 데이터 파티션에 두어야 재부팅해도 유지된다.
-# RAM(initramfs)에 두면 매번 새로 생겨서 접속할 때마다 경고가 뜬다.
-# -R  키가 없으면 만든다   -E  로그를 콘솔로
+# RAM 에 두면 매번 새로 생겨서 접속할 때마다 클라이언트가 경고한다.
 dropbear -R -E -p 22 -r /data/dropbear_ed25519_host_key || dropbear -R -E -p 22 || echo "[rc]   SSH 시작 실패"
 
 echo "[rc] 완료"

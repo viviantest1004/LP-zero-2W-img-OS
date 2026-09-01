@@ -1,6 +1,7 @@
 /* unistd.c - 시스템콜 위에 얹은 얇은 래퍼. */
 #include "unistd.h"
 #include "syscall.h"
+#include "string.h"
 
 char **environ = NULL;
 
@@ -126,6 +127,63 @@ long lp_reboot(int cmd)
 }
 
 long lp_sync(void)            { return sys_call0(SYS_sync); }
+
+long lp_swapon(const char *path, int flags)
+{
+    return sys_call2(SYS_swapon, (long)path, flags);
+}
+
+long lp_swapoff(const char *path)
+{
+    return sys_call1(SYS_swapoff, (long)path);
+}
+
+/* /proc 파일은 크기가 0 으로 보고되므로 stat 으로 미리 알 수 없다.
+ * 그냥 버퍼가 찰 때까지 읽는다. */
+long proc_read(const char *path, char *buf, size_t size)
+{
+    long fd = lp_open(path, O_RDONLY, 0);
+    if (fd < 0)
+        return fd;
+
+    size_t total = 0;
+    while (total < size - 1) {
+        long n = lp_read((int)fd, buf + total, size - 1 - total);
+        if (n <= 0)
+            break;
+        total += (size_t)n;
+    }
+    lp_close((int)fd);
+
+    buf[total] = '\0';
+    return (long)total;
+}
+
+/* "MemAvailable:  483252 kB" 같은 줄에서 숫자를 뽑는다. */
+long proc_find_kv(const char *text, const char *key)
+{
+    size_t klen = strlen(key);
+
+    for (const char *p = text; *p; ) {
+        /* 줄 시작에서만 비교한다. 부분 문자열 오탐을 막기 위해서다
+         * (예: "SwapFree" 를 찾는데 "MemFree" 에 걸리지 않도록) */
+        if (strncmp(p, key, klen) == 0 && p[klen] == ':') {
+            p += klen + 1;
+            while (*p == ' ' || *p == '\t') p++;
+
+            long v = 0;
+            if (*p < '0' || *p > '9')
+                return -1;
+            while (*p >= '0' && *p <= '9')
+                v = v * 10 + (*p++ - '0');
+            return v;
+        }
+        /* 다음 줄로 */
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+    }
+    return -1;
+}
 long lp_uname(void *buf)      { return sys_call1(SYS_uname, (long)buf); }
 long lp_getrandom(void *buf, size_t n, unsigned flags)
 {

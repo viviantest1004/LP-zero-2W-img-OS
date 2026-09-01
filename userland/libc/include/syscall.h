@@ -80,6 +80,9 @@
 #define SYS_shutdown        210
 #define SYS_accept4         242
 
+#define SYS_swapon          224
+#define SYS_swapoff         225
+
 #define SYS_brk             214
 #define SYS_munmap          215
 #define SYS_clone           220

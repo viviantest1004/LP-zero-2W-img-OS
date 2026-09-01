@@ -85,6 +85,14 @@ long  lp_sleep_ms(long ms);
 long  lp_mount(const char *src, const char *tgt, const char *fstype,
                unsigned long flags, const void *data);
 long  lp_reboot(int cmd);
+long  lp_swapon(const char *path, int flags);
+long  lp_swapoff(const char *path);
+
+/* /proc 의 한 줄짜리 값을 읽는다. 성공 시 읽은 바이트 수. */
+long  proc_read(const char *path, char *buf, size_t size);
+/* /proc/meminfo 처럼 "이름:   숫자 kB" 형식에서 값을 찾는다.
+ * 못 찾으면 -1. */
+long  proc_find_kv(const char *text, const char *key);
 long  lp_sync(void);
 long  lp_uname(void *buf);
 long  lp_getrandom(void *buf, size_t n, unsigned flags);           /* struct utsname 크기 390바이트 */
