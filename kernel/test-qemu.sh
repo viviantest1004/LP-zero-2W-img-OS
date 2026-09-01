@@ -78,7 +78,51 @@ log)
         | grep -oE '[0-9]+\.[0-9]+' || echo "?"
     echo "  전체 로그: ${LOG}"
     ;;
+disk)
+    # SD 이미지를 디스크로 붙여서 부팅한다. 이래야 /data 파티션 마운트,
+    # expandfs, /data/bin 의 프로그램까지 확인할 수 있다.
+    #
+    # 주의: 우리 커널에는 VIRTIO_MMIO 만 있고 VIRTIO_PCI 는 없다.
+    # QEMU 의 '-drive if=virtio' 는 virt 머신에서 virtio-blk-PCI 를 만들기
+    # 때문에 커널이 디스크를 못 본다. -device virtio-blk-device 로
+    # MMIO 트랜스포트를 명시해야 한다.
+    SRC="${2:-${REPO_ROOT}/sdcard/lp-zero.img}"
+    [[ -f "$SRC" ]] || die "SD 이미지가 없습니다: $SRC  ('make sdcard-linux')"
+
+    # 원본을 건드리지 않도록 복사한다. 겸사겸사 크게 만들어
+    # 첫 부팅 확장(expandfs)이 실제로 도는지도 본다.
+    WORK="${LOG_DIR}/.qemu-disk.img"
+    DISK_MB="${DISK_MB:-1024}"
+    cp "$SRC" "$WORK"
+    truncate -s "${DISK_MB}M" "$WORK"
+
+    rm -f "$LOG"
+    echo "${TIMEOUT}초간 부팅합니다 (디스크 ${DISK_MB}MB)..."
+    timeout "$TIMEOUT" qemu-system-aarch64 -M "$MACHINE" -cpu "$CPU" -m "$MEM" \
+        -kernel "$IMAGE" \
+        -append "earlycon console=ttyAMA0" \
+        -drive "file=${WORK},format=raw,if=none,id=hd0" \
+        -device virtio-blk-device,drive=hd0 \
+        -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+        -serial "file:${LOG}" -display none >/dev/null 2>&1 || true
+
+    echo ""
+    echo "── 판정 ──"
+    check() {   # check <설명> <정규식>
+        if grep -qE "$2" "$LOG" 2>/dev/null; then echo "  OK: $1"
+        else echo "  실패: $1"; fi
+    }
+    check "init 이 PID 1 로 실행"        'init \(pid 1\)'
+    check "zram 압축 스왑 생성"          'zram: [0-9]+MB'
+    check "데이터 파티션을 카드 끝까지 확장" 'expandfs: 완료'
+    check "/data 마운트"                 'mount: /dev/[a-z0-9]+2 -> /data'
+    check "DHCP 주소 획득"               'dhcp: [a-z0-9]+ +주소 [0-9]'
+    check "셸 프롬프트"                  '/ \$'
+    grep -qi "kernel panic" "$LOG" 2>/dev/null && echo "  !! 커널 패닉"
+    echo ""
+    echo "  전체 로그: ${LOG}"
+    ;;
 *)
-    die "알 수 없는 모드 '$MODE' (interactive | log)"
+    die "알 수 없는 모드 '$MODE' (interactive | log | disk)"
     ;;
 esac

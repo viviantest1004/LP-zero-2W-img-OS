@@ -136,7 +136,7 @@ static void start_service(service_t *svc)
 
     if (pid == 0) {
         char *envp[] = {
-            (char *)"PATH=/bin:/sbin:/usr/bin:/usr/sbin",
+            (char *)"PATH=/bin:/data/bin:/sbin:/usr/bin:/usr/sbin",
             (char *)"HOME=/root",
             NULL
         };
@@ -231,7 +231,7 @@ static void run_rc(void)
     if (pid == 0) {
         char *argv[] = { (char *)SHELL_PATH, (char *)RC_SCRIPT, NULL };
         char *envp[] = {
-            (char *)"PATH=/bin:/sbin:/usr/bin:/usr/sbin",
+            (char *)"PATH=/bin:/data/bin:/sbin:/usr/bin:/usr/sbin",
             (char *)"HOME=/",
             NULL
         };
@@ -270,7 +270,7 @@ static pid_t spawn_shell(void)
 
         char *argv[] = { (char *)SHELL_PATH, NULL };
         char *envp[] = {
-            (char *)"PATH=/bin:/sbin:/usr/bin:/usr/sbin",
+            (char *)"PATH=/bin:/data/bin:/sbin:/usr/bin:/usr/sbin",
             (char *)"HOME=/",
             (char *)"TERM=linux",
             NULL

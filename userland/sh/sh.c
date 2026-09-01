@@ -31,7 +31,9 @@ typedef struct {
     link_t link;        /* 이 파이프라인 "앞"의 연결자 */
 } pipeline_t;
 
-static const char *DEFAULT_PATH = "/bin:/sbin:/usr/bin:/usr/sbin";
+/* /data/bin 은 데이터 파티션이다. 파이썬처럼 큰 프로그램은 시스템
+ * (커널 내장 initramfs)이 아니라 여기에 둔다. */
+static const char *DEFAULT_PATH = "/bin:/data/bin:/sbin:/usr/bin:/usr/sbin";
 static bool shell_running = true;
 static int  last_status   = 0;
 
@@ -521,11 +523,20 @@ int main(int argc, char **argv)
     int  input_fd  = STDIN_FILENO;
     bool interactive = true;
 
-    if (argc > 1) {
-        long fd = lp_open(argv[1], O_RDONLY, 0);
+    /* -q 는 "없으면 조용히 넘어가라"는 뜻이다. /data/rc.local 처럼
+     * 있을 수도 없을 수도 있는 스크립트를 부를 때 쓴다. 우리 셸에는
+     * test 나 if 가 없어서 존재 여부를 따로 확인할 방법이 없다. */
+    int  first = 1;
+    bool quiet = false;
+    if (argc > 1 && strcmp(argv[1], "-q") == 0) { quiet = true; first = 2; }
+
+    if (argc > first) {
+        long fd = lp_open(argv[first], O_RDONLY, 0);
         if (fd < 0) {
+            if (quiet)
+                return 0;
             dprintf(STDERR_FILENO, "sh: %s: 열 수 없습니다 (%ld)\n",
-                    argv[1], -fd);
+                    argv[first], -fd);
             return 127;
         }
         input_fd    = (int)fd;

@@ -149,12 +149,79 @@ rm -f "$DATA_IMG"
 truncate -s "$(( DATA_SECTORS * SECTOR_SIZE ))" "$DATA_IMG"
 mkfs.ext4 -q -F -L "$DATA_LABEL" -m 0 "$DATA_IMG"
 
-# 첫 부팅에 쓸 WiFi 설정을 미리 넣어둔다.
-# SD 를 다시 굽지 않고 여기만 고쳐서 공유기 설정을 바꿀 수 있다.
-WPA_SRC="${REPO_ROOT}/boot/rootfs-overlay/etc/wpa_supplicant.conf"
-if command -v debugfs >/dev/null 2>&1 && [[ -f "$WPA_SRC" ]]; then
-    debugfs -w -R "write ${WPA_SRC} wpa_supplicant.conf" "$DATA_IMG" \
-        >/dev/null 2>&1 && log "데이터 파티션에 wpa_supplicant.conf 배치"
+# ── 데이터 파티션 채우기 ────────────────────────────────────────
+# debugfs 로 마운트 없이 ext4 안에 직접 써 넣는다. root 도 loop 장치도
+# 필요 없어서 컨테이너/CI 안에서 그대로 돈다.
+#
+# 파일 하나마다 debugfs 를 새로 띄우면 CPython 처럼 수천 개짜리 트리에서
+# 몇 분이 걸린다. 명령을 파일 하나에 모아 한 번에 실행한다.
+if command -v debugfs >/dev/null 2>&1; then
+    DBG="${OUT_DIR}/.debugfs-cmds"
+    : > "$DBG"
+    d_mkdir() { printf 'mkdir %s\n' "$1" >> "$DBG"; }
+    d_link()  { printf 'symlink %s %s\n' "$1" "$2" >> "$DBG"; }
+    # debugfs 의 write 는 항상 0100644 로 만든다. 실행 파일은 모드를 따로 세운다.
+    d_put() {   # d_put <원본> <파티션안경로> [8진수모드]
+        printf 'write %s %s\n' "$1" "$2" >> "$DBG"
+        [[ -n "${3:-}" ]] && printf 'sif %s mode %s\n' "$2" "$3" >> "$DBG"
+        return 0
+    }
+
+    d_mkdir /bin
+    d_mkdir /root
+    d_mkdir /root/.ssh
+
+    # 첫 부팅에 쓸 WiFi 설정. SD 를 다시 굽지 않고 여기만 고쳐서
+    # 공유기 설정을 바꿀 수 있다.
+    WPA_SRC="${REPO_ROOT}/boot/rootfs-overlay/etc/wpa_supplicant.conf"
+    [[ -f "$WPA_SRC" ]] && d_put "$WPA_SRC" wpa_supplicant.conf \
+        && log "데이터: wpa_supplicant.conf"
+
+    # 파이썬을 시스템(initramfs)이 아니라 여기에 두는 이유는 크기다.
+    # initramfs 는 커널에 박혀 있어서 늘리면 부팅 이미지가 그대로 커지지만,
+    # /data 는 첫 부팅에 카드 전체로 늘어나므로 크기가 문제되지 않는다.
+    MPY="${MICROPYTHON_BIN:-/home/user/kernel-work/thirdparty/micropython/ports/unix/build-standard/micropython}"
+    HAVE_MPY=0
+    if [[ -f "$MPY" ]]; then
+        d_put "$MPY" bin/micropython 0100755
+        HAVE_MPY=1
+        log "데이터: bin/micropython  ($(stat -c%s "$MPY") bytes)"
+    fi
+
+    # CPython 을 빌드해두었으면 트리째 넣는다 (tools/build-python.sh).
+    PYSTAGE="${PYSTAGE:-/home/user/kernel-work/python-stage/data/python}"
+    if [[ -d "$PYSTAGE" ]]; then
+        log "데이터: CPython 트리 준비 중..."
+        # 디렉터리가 먼저, 그 다음 파일. find 는 부모를 먼저 내므로 순서가 맞다.
+        # 원본 경로는 절대경로여야 한다. debugfs 는 여기서 cd 한 곳이 아니라
+        # 스크립트를 부른 디렉터리에서 돌기 때문이다.
+        PYPARENT="$(cd "$(dirname "$PYSTAGE")" && pwd)"
+        ( cd "$PYPARENT"
+          find python -type d  -printf 'mkdir /%p\n'
+          find python -type f  -printf "write ${PYPARENT}/%p %p\n"
+          find python -type f -perm -u+x -printf 'sif %p mode 0100755\n'
+          find python -type l  -printf 'symlink /%p %l\n' ) >> "$DBG"
+        log "데이터: python/  ($(du -sh "$PYSTAGE" | cut -f1))"
+    fi
+
+    # 사용자가 python 이라고 쳤을 때 쓸 것을 정한다.
+    # CPython 이 있으면 그것이, 없으면 MicroPython 이 python 이다.
+    if [[ -d "$PYSTAGE" ]]; then
+        d_link /bin/python3 /data/python/bin/python3.12
+        d_link /bin/python  /data/python/bin/python3.12
+    elif [[ "$HAVE_MPY" == "1" ]]; then
+        d_link /bin/python3 /data/bin/micropython
+        d_link /bin/python  /data/bin/micropython
+    fi
+
+    debugfs -w -f "$DBG" "$DATA_IMG" > "${OUT_DIR}/.debugfs.log" 2>&1 || true
+    # debugfs 는 실패해도 종료코드가 0 이다. 결과를 직접 확인한다.
+    if ! debugfs -R "stat bin/micropython" "$DATA_IMG" 2>/dev/null | grep -q 'Mode:  0755'; then
+        [[ "$HAVE_MPY" == "1" ]] && die "데이터 파티션에 micropython 을 넣지 못했습니다 (${OUT_DIR}/.debugfs.log 확인)"
+    fi
+    rm -f "$DBG"
+else
+    log "debugfs 없음 - 데이터 파티션을 비워 둡니다 (apt install e2fsprogs)"
 fi
 
 dd if="$DATA_IMG" of="$IMAGE" bs="$SECTOR_SIZE" seek="$DATA_START_SECTOR" \

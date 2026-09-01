@@ -22,3 +22,4 @@ qemu-out/
 userland/rootfs/
 userland/initramfs.cpio.gz
 kernel/out/
+dist/

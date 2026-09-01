@@ -52,7 +52,7 @@ step "설정 (소스 ${SRC_VER}, 호스트 파이썬 ${HOST_VER})"
 cd "$PY_SRC"
 
 # 설정을 바꿔 다시 빌드할 때는 이전 Makefile 을 지워야 한다
-[[ -f Makefile && "${RECONFIGURE:-0}" == "1" ]] && make distclean >/dev/null 2>&1
+[[ -f Makefile && "${RECONFIGURE:-0}" == "1" ]] && make distclean >/dev/null 2>&1 || true
 
 if [[ ! -f Makefile ]]; then
     # 외부 라이브러리가 필요한 모듈은 끈다. 우리 시스템에는 그 라이브러리가
@@ -97,8 +97,46 @@ if [[ ! -f Makefile ]]; then
         > /tmp/py-conf.log 2>&1 || { tail -25 /tmp/py-conf.log; die "configure 실패"; }
     echo "  완료"
 else
-    echo "  이미 설정됨 (다시 하려면 make distclean)"
+    echo "  이미 설정됨 (다시 하려면 RECONFIGURE=1)"
 fi
+
+# ── 확장 모듈을 전부 바이너리 안에 넣는다 ────────────────────────
+#
+# CPython 은 --disable-shared 로 지어도 표준 확장 모듈(array, math,
+# socket, _ctypes ...)은 여전히 .so 로 만들려고 한다. LDFLAGS 에 -static
+# 이 있으면 그 링크가 이렇게 깨진다:
+#
+#   undefined reference to `_start'
+#   hidden symbol `__fini_array_end' isn't defined
+#
+# 정적 libc 를 공유 오브젝트로 링크하려 해서 나는 오류다. 게다가 정적
+# 바이너리는 dlopen 을 못 하므로 .so 를 만들어봐야 부를 수도 없다.
+#
+# 해결: 모듈 정의를 Modules/Setup.local 로 복사하면서 맨 위의 *shared*
+# 를 *static* 으로 바꾼다. makesetup 은 파일을 준 순서대로 읽고 먼저
+# 나온 정의를 쓰므로, Setup.local 의 정적 정의가 Setup.stdlib 의 공유
+# 정의를 덮는다.
+#
+# Setup.stdlib 뒷부분의 xxlimited 는 '반드시 공유'여야 하는 테스트용
+# 모듈이라 아예 주석 처리한다. 우리에게 필요 없다.
+step "확장 모듈을 정적으로 (Setup.local 생성)"
+SECOND_SHARED=$(grep -n '^\*shared\*' Modules/Setup.stdlib | sed -n '2p' | cut -d: -f1)
+[[ -n "$SECOND_SHARED" ]] || die "Modules/Setup.stdlib 의 형식이 예상과 다릅니다"
+{
+    echo "# tools/build-python.sh 가 자동 생성. 직접 고치지 마세요."
+    echo "# 정적 링크 바이너리는 .so 를 못 부른다. 모든 모듈을 안에 넣는다."
+    sed -n "1,$((SECOND_SHARED - 1))p" Modules/Setup.stdlib \
+        | sed 's/^\*shared\*$/*static*/'
+} > Modules/Setup.local
+sed -i 's/^\(xxlimited.*\)$/#\1/' Modules/Setup.stdlib
+rm -f Modules/*.so
+make Makefile > /tmp/py-makefile.log 2>&1 || { tail -20 /tmp/py-makefile.log; die "Makefile 재생성 실패"; }
+# 남은 공유 모듈이 있으면 링크에서 또 깨진다. 여기서 잡는다.
+if grep -qE '^\s*Modules/[A-Za-z_]+\.cpython.*\.so:' Makefile; then
+    grep -oE 'Modules/[A-Za-z_]+\.cpython[^:]*\.so' Makefile | sort -u
+    die "아직 공유로 빌드되는 모듈이 있습니다"
+fi
+echo "  $(grep -c '^[a-z_]' Modules/Setup.local)개 모듈을 정적으로"
 
 step "빌드 (-j${JOBS}) — 오래 걸립니다"
 make -j"$JOBS" > /tmp/py-make.log 2>&1 \

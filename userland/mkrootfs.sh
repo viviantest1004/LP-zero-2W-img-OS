@@ -118,12 +118,16 @@ LP-zero OS
 ★ 저장 위치에 주의하세요
 
   /data     SD 카드. 재부팅해도 남습니다.
-  그 밖     RAM. 재부팅하면 사라집니다 (/root, /tmp 포함).
+  /root     홈. /data 에 붙어 있어 남습니다.
+  그 밖     RAM. 재부팅하면 사라집니다 (/tmp, /etc 포함).
 
-  파일을 남기려면 /data 안에 두세요.
+  파일을 남기려면 /data 나 홈(/root) 안에 두세요.
 
-명령: help
-상태: zram status / memwatch / ls /data
+명령      help          내장 명령 목록
+계산      calc 2+3*4    사칙연산·16진수·2진수 (즉시 실행)
+파이썬    python        /data 에 있습니다
+상태      sysinfo / zram status / ls /data
+자동실행  /data/rc.local 에 적어두면 부팅할 때 실행됩니다
 MOTD
 
 echo ""
