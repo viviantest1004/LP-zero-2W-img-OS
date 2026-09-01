@@ -1,27 +1,27 @@
-/* memwatch - 메모리 안전장치.
+/* memwatch - the memory safety net.
  *
- * 리눅스에는 이미 OOM Killer 가 있다. 그런데 그것만 믿기 어려운 이유가 둘 있다:
- *   1) 너무 늦게 동작한다. 커널이 정말 할당에 실패하는 지점까지 가면
- *      그 전에 이미 시스템이 한참 버벅인다.
- *   2) 무엇을 죽일지 우리가 정하지 못한다. 셸이나 SSH 서버가 먼저
- *      죽으면 원격에서 손을 쓸 수가 없다.
+ * Linux already has an OOM killer. Two things make it hard to rely on:
+ *   1) It acts too late. By the time an allocation actually fails the
+ *      machine has already been crawling for a while.
+ *   2) We do not choose what it kills. If the shell or the SSH server
+ *      goes first, there is no way left to reach the machine.
  *
- * 그래서 그보다 먼저, 우리가 정한 기준으로 개입한다:
- *   여유 < WARN_MB   -> 콘솔에 경고
- *   여유 < RESERVE_MB -> 보호 대상이 아닌 프로세스 중 가장 큰 것을 종료
+ * So we step in earlier, on our own thresholds:
+ *   free < WARN_MB     -> warn on the console
+ *   free < RESERVE_MB  -> kill the largest unprotected process
  *
- * 보호 대상(기본): init, memwatch, sh, dropbear, wpa_supplicant
- * 이들이 살아 있어야 상황을 보고 손을 쓸 수 있다.
+ * Protected by default: init, memwatch, sh, dropbear, wpa_supplicant.
+ * These have to survive for anyone to see the state and act on it.
  *
- * 두 겹으로 막는다:
- *   1) 우리가 먼저 개입한다 (여유 32MB 지점)
- *   2) 그래도 커널 OOM Killer 까지 가면 - 커널은 우리 보호 목록을
- *      모른다. 그래서 각 프로세스의 /proc/<pid>/oom_score_adj 를
- *      직접 조정해 커널에게 알려준다:
- *        -1000  절대 죽이지 않는다 (보호 대상)
- *          500  먼저 죽는다 (그 외)
- *      이 값은 fork 로 상속되므로, dropbear 가 접속마다 만드는 자식
- *      프로세스도 자동으로 보호된다.
+ * Two layers:
+ *   1) We step in first, at 32MB free.
+ *   2) If it still reaches the kernel's OOM killer, the kernel knows
+ *      nothing of our list - so we write each process's
+ *      /proc/<pid>/oom_score_adj to tell it:
+ *        -1000  never kill this (protected)
+ *          500  kill this first (everything else)
+ *      The value is inherited across fork, so the children dropbear
+ *      spawns per connection are protected automatically.
  */
 #include "types.h"
 #include "string.h"
@@ -30,15 +30,15 @@
 #include "unistd.h"
 #include "syscall.h"
 
-#define RESERVE_MB    32      /* 시스템 필수 여유. 이 아래로 가면 정리한다 */
-#define WARN_MB       64      /* 경고를 시작하는 지점 */
-#define POLL_MS      1000     /* 평상시 확인 주기 */
-#define POLL_BUSY_MS  200     /* 압박 상황에서의 주기 */
+#define RESERVE_MB    32      /* the reserve. Below this we start killing */
+#define WARN_MB       64      /* start warning here */
+#define POLL_MS      1000     /* how often we look, normally */
+#define POLL_BUSY_MS  200     /* how often we look under pressure */
 #define MAX_PROCS     256
-#define TERM_GRACE_MS 500     /* SIGTERM 후 SIGKILL 까지 기다리는 시간 */
+#define TERM_GRACE_MS 500     /* grace between SIGTERM and SIGKILL */
 
-/* /proc/<pid>/oom_score_adj 값.
- * -1000 이면 커널 OOM Killer 가 그 프로세스를 후보에서 아예 제외한다. */
+/* /proc/<pid>/oom_score_adj values.
+ * At -1000 the kernel's OOM killer drops the process from its candidates. */
 #define OOM_PROTECT   (-1000)
 #define OOM_SACRIFICE    500
 
@@ -48,7 +48,7 @@ typedef struct {
     char  name[32];
 } proc_t;
 
-/* 이들은 죽이지 않는다. 죽으면 상황 파악도 복구도 못 한다. */
+/* Never killed. Without these you can neither see nor fix anything. */
 static const char *PROTECTED[] = {
     "init", "memwatch", "sh", "dropbear", "wpa_supplicant", NULL
 };
@@ -63,8 +63,9 @@ static bool is_protected(const char *name, pid_t pid, pid_t self)
     return false;
 }
 
-/* 커널에게 이 프로세스의 우선순위를 알린다.
- * 이미 원하는 값이면 쓰지 않는다 - 매 초 불필요하게 쓰지 않기 위해서다. */
+/* Tell the kernel how this process should be ranked.
+ * Skip the write when it already holds the value we want, so we are not
+ * writing every second for nothing. */
 static void set_oom_score(pid_t pid, int score)
 {
     char path[64];
@@ -74,12 +75,12 @@ static void set_oom_score(pid_t pid, int score)
     if (proc_read(path, cur, sizeof(cur)) > 0) {
         long v = strtol(cur, NULL, 10);
         if (v == score)
-            return;                 /* 이미 맞다 */
+            return;                 /* already right */
     }
 
     long fd = lp_open(path, O_WRONLY, 0);
     if (fd < 0)
-        return;                     /* 그 사이 종료된 프로세스 */
+        return;                     /* the process exited meanwhile */
 
     char buf[16];
     int n = snprintf(buf, sizeof(buf), "%d\n", score);
@@ -87,7 +88,7 @@ static void set_oom_score(pid_t pid, int score)
     lp_close((int)fd);
 }
 
-/* /proc/<pid>/comm 에서 프로세스 이름을 읽는다 (개행 제거) */
+/* Read the process name from /proc/<pid>/comm, without the newline. */
 static bool read_comm(pid_t pid, char *out, size_t size)
 {
     char path[64];
@@ -103,8 +104,8 @@ static bool read_comm(pid_t pid, char *out, size_t size)
     return true;
 }
 
-/* /proc/<pid>/statm 의 두 번째 값이 상주 페이지 수다.
- *   size resident shared text lib data dt   (모두 페이지 단위) */
+/* The second field of /proc/<pid>/statm is the resident page count.
+ *   size resident shared text lib data dt   (all in pages) */
 static long read_rss_kb(pid_t pid)
 {
     char path[64];
@@ -115,17 +116,17 @@ static long read_rss_kb(pid_t pid)
         return -1;
 
     char *p = buf;
-    while (*p && *p != ' ') p++;      /* 첫 번째 값 건너뛰기 */
+    while (*p && *p != ' ') p++;      /* skip the first field */
     while (*p == ' ') p++;
 
     long pages = strtol(p, NULL, 10);
     if (pages <= 0)
         return -1;
 
-    return pages * 4;                  /* 4KB 페이지 -> KB */
+    return pages * 4;                  /* 4KB pages -> KB */
 }
 
-/* /proc 를 훑어 프로세스 목록을 만든다. 반환: 개수 */
+/* Walk /proc and build the process list. Returns the count. */
 static int scan_processes(proc_t *list, int max, pid_t self)
 {
     long fd = lp_open("/proc", O_RDONLY | O_DIRECTORY, 0);
@@ -147,7 +148,7 @@ static int scan_processes(proc_t *list, int max, pid_t self)
             if (len == 0) break;
             off += len;
 
-            /* 숫자로만 된 이름이 프로세스 디렉터리다 */
+            /* An all-digit name is a process directory. */
             if (name[0] < '1' || name[0] > '9')
                 continue;
             bool numeric = true;
@@ -159,7 +160,7 @@ static int scan_processes(proc_t *list, int max, pid_t self)
             pid_t pid = (pid_t)strtol(name, NULL, 10);
             long rss = read_rss_kb(pid);
             if (rss < 0)
-                continue;               /* 그 사이 종료된 프로세스 */
+                continue;               /* the process exited meanwhile */
 
             list[n].pid    = pid;
             list[n].rss_kb = rss;
@@ -174,10 +175,10 @@ static int scan_processes(proc_t *list, int max, pid_t self)
     return n;
 }
 
-/* 스캔한 프로세스들에 커널 우선순위를 적용한다.
+/* Apply the kernel priorities to the processes we scanned.
  *
- * 새 프로세스가 계속 생기므로(특히 dropbear 는 접속마다 자식을 만든다)
- * 한 번만 설정하는 것으로는 부족하다. 주기적으로 다시 확인한다. */
+ * New processes keep appearing - dropbear forks per connection - so
+ * setting this once is not enough. We revisit it periodically. */
 static void apply_oom_policy(const proc_t *list, int n, pid_t self)
 {
     for (int i = 0; i < n; i++) {
@@ -186,8 +187,8 @@ static void apply_oom_policy(const proc_t *list, int n, pid_t self)
     }
 }
 
-/* 보호 대상이 아닌 것 중 가장 큰 프로세스를 종료한다.
- * 반환: 종료했으면 true */
+/* Kill the largest unprotected process.
+ * Returns true if we killed something. */
 static bool kill_largest(pid_t self, long need_kb)
 {
     static proc_t list[MAX_PROCS];
@@ -207,23 +208,23 @@ static bool kill_largest(pid_t self, long need_kb)
 
     if (best < 0) {
         dprintf(STDERR_FILENO,
-                "memwatch: 정리할 수 있는 프로세스가 없습니다."
-                " 보호 대상만 남았습니다 (%ldKB 부족)\n", need_kb);
+                "memwatch: nothing left to reclaim."
+                " Only protected processes remain (%ldKB short)\n", need_kb);
         return false;
     }
 
     dprintf(STDERR_FILENO,
-            "memwatch: 메모리 부족 - %s (pid %d, %ldKB) 를 종료합니다\n",
+            "memwatch: out of memory - killing %s (pid %d, %ldKB)\n",
             list[best].name, (int)list[best].pid, list[best].rss_kb);
 
-    /* 먼저 정리할 기회를 준다 */
+    /* Give it a chance to clean up first. */
     lp_kill(list[best].pid, SIGTERM);
     lp_sleep_ms(TERM_GRACE_MS);
 
-    /* 아직 살아 있으면 강제 종료. kill(pid, 0) 은 존재 확인용이다. */
+    /* Still there? Force it. kill(pid, 0) only tests for existence. */
     if (lp_kill(list[best].pid, 0) == 0) {
         lp_kill(list[best].pid, SIGKILL);
-        dprintf(STDERR_FILENO, "memwatch:   응답이 없어 강제 종료했습니다\n");
+        dprintf(STDERR_FILENO, "memwatch:   no response, killed it\n");
     }
     return true;
 }
@@ -242,10 +243,10 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
             warn_kb = strtol(argv[++i], NULL, 10) * 1024;
         } else {
-            printf("사용법: memwatch [-d] [-r 예약MB] [-w 경고MB]\n");
-            printf("  -d  백그라운드로\n");
-            printf("  -r  시스템 필수 여유 (기본 %d MB)\n", RESERVE_MB);
-            printf("  -w  경고 시작 지점 (기본 %d MB)\n", WARN_MB);
+            printf("usage: memwatch [-d] [-r reserveMB] [-w warnMB]\n");
+            printf("  -d  run in the background\n");
+            printf("  -r  the reserve to keep free (default %d MB)\n", RESERVE_MB);
+            printf("  -w  where warnings start (default %d MB)\n", WARN_MB);
             return 2;
         }
     }
@@ -256,11 +257,11 @@ int main(int argc, char **argv)
     if (daemonize) {
         pid_t pid = lp_fork();
         if (pid < 0) {
-            dprintf(STDERR_FILENO, "memwatch: fork 실패\n");
+            dprintf(STDERR_FILENO, "memwatch: fork failed\n");
             return 1;
         }
         if (pid > 0)
-            return 0;               /* 부모는 즉시 빠진다 */
+            return 0;               /* the parent leaves at once */
         lp_setsid();
     }
 
@@ -271,26 +272,26 @@ int main(int argc, char **argv)
 
     if (total < 0) {
         dprintf(STDERR_FILENO,
-                "memwatch: /proc/meminfo 를 읽을 수 없습니다"
-                " (/proc 가 마운트되어 있습니까?)\n");
+                "memwatch: cannot read /proc/meminfo"
+                " (is /proc mounted?)\n");
         return 1;
     }
 
-    printf("memwatch: 전체 %ldMB, 예약 %ldMB, 경고 %ldMB 에서 시작\n",
+    printf("memwatch: %ldMB total, reserve %ldMB, warning at %ldMB\n",
            total / 1024, reserve_kb / 1024, warn_kb / 1024);
 
     pid_t self = lp_getpid();
     bool  warned = false;
     int   tick = 0;
 
-    /* 시작하자마자 한 번 적용한다. 이게 있어야 memwatch 가 개입하기 전에
-     * 커널 OOM Killer 가 먼저 돌더라도 SSH 와 셸이 살아남는다. */
+    /* Apply once immediately. This is what keeps SSH and the shell alive
+     * if the kernel's OOM killer runs before memwatch gets a chance. */
     {
         static proc_t boot_list[MAX_PROCS];
         int n = scan_processes(boot_list, MAX_PROCS, self);
         apply_oom_policy(boot_list, n, self);
-        printf("memwatch: 커널 우선순위 적용 (%d개 프로세스)\n", n);
-        printf("memwatch:   보호 = init, memwatch, sh, dropbear, wpa_supplicant\n");
+        printf("memwatch: kernel priorities applied to %d processes\n", n);
+        printf("memwatch:   protected = init, memwatch, sh, dropbear, wpa_supplicant\n");
     }
 
     for (;;) {
@@ -307,8 +308,8 @@ int main(int argc, char **argv)
             continue;
         }
 
-        /* 5초마다 새로 생긴 프로세스에도 우선순위를 적용한다.
-         * dropbear 는 접속마다 자식을 만들고, 셸은 명령마다 만든다. */
+        /* Every 5s, apply the priorities to newly created processes too:
+         * dropbear forks per connection, the shell forks per command. */
         if (++tick >= 5) {
             tick = 0;
             static proc_t all[MAX_PROCS];
@@ -320,12 +321,12 @@ int main(int argc, char **argv)
             long swap_used = (swap_total > 0 && swap_free >= 0)
                              ? swap_total - swap_free : 0;
             dprintf(STDERR_FILENO,
-                    "\nmemwatch: ★ 메모리 한계 - 여유 %ldMB (예약 %ldMB)"
+                    "\nmemwatch: ** memory limit - %ldMB free (reserve %ldMB)"
                     "%s\n", avail / 1024, reserve_kb / 1024,
-                    swap_used > 0 ? ", 스왑 사용 중" : "");
+                    swap_used > 0 ? ", swap in use" : "");
 
-            /* 한 번에 하나씩 정리하고 다시 확인한다.
-             * 한꺼번에 여러 개를 죽이면 필요 이상으로 정리된다. */
+            /* Reclaim one at a time and look again. Killing several at once
+             * would take more than necessary. */
             kill_largest(self, reserve_kb - avail);
             warned = true;
             lp_sleep_ms(POLL_BUSY_MS);
@@ -335,17 +336,17 @@ int main(int argc, char **argv)
         if (avail < warn_kb) {
             if (!warned) {
                 dprintf(STDERR_FILENO,
-                        "memwatch: 경고 - 여유 메모리 %ldMB\n", avail / 1024);
+                        "memwatch: warning - %ldMB free\n", avail / 1024);
                 warned = true;
             }
             lp_sleep_ms(POLL_BUSY_MS);
             continue;
         }
 
-        /* 여유를 회복하면 다음 경고를 다시 낼 수 있게 초기화한다 */
+        /* Once it recovers, re-arm the warning. */
         if (warned) {
             dprintf(STDERR_FILENO,
-                    "memwatch: 회복 - 여유 메모리 %ldMB\n", avail / 1024);
+                    "memwatch: recovered - %ldMB free\n", avail / 1024);
             warned = false;
         }
         lp_sleep_ms(POLL_MS);

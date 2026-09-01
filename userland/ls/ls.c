@@ -1,14 +1,15 @@
-/* ls - 디렉터리 목록.
+/* ls - list a directory.
  *
- * getdents64 는 가변 길이 레코드를 버퍼에 연속으로 채워준다:
+ * getdents64 fills the buffer with variable-length records, back to back:
  *   struct linux_dirent64 {
  *       u64  d_ino;      offset 0
  *       s64  d_off;      offset 8
- *       u16  d_reclen;   offset 16   <- 다음 레코드까지의 바이트
+ *       u16  d_reclen;   offset 16   <- bytes to the next record
  *       u8   d_type;     offset 18
- *       char d_name[];   offset 19   NUL 로 끝남
+ *       char d_name[];   offset 19   NUL terminated
  *   };
- * 구조체를 정의하는 대신 오프셋으로 읽는다 - 패딩 규칙에 의존하지 않는다. */
+ * We read by offset rather than declaring a struct, so nothing depends on
+ * the compiler's padding rules. */
 #include "types.h"
 #include "string.h"
 #include "stdio.h"
@@ -20,7 +21,7 @@
 #define DIRENT_TYPE    18
 #define DIRENT_NAME    19
 
-/* d_type 값 */
+/* d_type values */
 #define DT_UNKNOWN  0
 #define DT_FIFO     1
 #define DT_CHR      2
@@ -45,7 +46,7 @@ static int list_dir(const char *path, bool show_header, bool show_all)
 {
     long fd = lp_open(path, O_RDONLY | O_DIRECTORY, 0);
     if (fd < 0) {
-        dprintf(STDERR_FILENO, "ls: %s: 열 수 없습니다 (%ld)\n", path, -fd);
+        dprintf(STDERR_FILENO, "ls: %s: cannot open (%ld)\n", path, -fd);
         return 1;
     }
 
@@ -58,7 +59,7 @@ static int list_dir(const char *path, bool show_header, bool show_all)
         if (n == 0)
             break;
         if (n < 0) {
-            dprintf(STDERR_FILENO, "ls: %s: 읽기 실패 (%ld)\n", path, -n);
+            dprintf(STDERR_FILENO, "ls: %s: read failed (%ld)\n", path, -n);
             lp_close((int)fd);
             return 1;
         }
@@ -69,7 +70,7 @@ static int list_dir(const char *path, bool show_header, bool show_all)
             u8    type = *(u8 *)(rec + DIRENT_TYPE);
             char *name = rec + DIRENT_NAME;
 
-            if (len == 0)       /* 방어: 무한 루프 방지 */
+            if (len == 0)       /* guard against a zero-length record looping forever */
                 break;
 
             bool hidden = (name[0] == '.');
@@ -92,13 +93,13 @@ int main(int argc, char **argv)
     int  first_path = argc;
     int  npaths = 0;
 
-    /* 옵션과 경로를 가른다 */
+    /* Split options from paths. */
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] == '-' && argv[i][1]) {
             for (char *o = argv[i] + 1; *o; o++) {
                 if (*o == 'a') show_all = true;
                 else {
-                    dprintf(STDERR_FILENO, "ls: 알 수 없는 옵션 -%c\n", *o);
+                    dprintf(STDERR_FILENO, "ls: unknown option -%c\n", *o);
                     return 2;
                 }
             }

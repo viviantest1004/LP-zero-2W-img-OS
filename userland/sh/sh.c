@@ -1,8 +1,8 @@
-/* sh.c - LP-zero 셸.
+/* sh.c - the LP-zero shell.
  *
- * 지원: 내장 명령, PATH 탐색, 리다이렉션(< > >>), 파이프(|).
- * 미지원: 잡 컨트롤, 변수 확장, 와일드카드, 서브셸.
- *   이것들은 셸 자체보다 큰 기능이라 필요해지면 그때 붙인다. */
+ * Supported: builtins, PATH search, redirection (< > >>), pipes (|).
+ * Not supported: job control, variable expansion, globbing, subshells.
+ *   Each is bigger than the shell itself; they go in when needed. */
 #include "types.h"
 #include "string.h"
 #include "stdio.h"
@@ -11,41 +11,42 @@
 
 #define MAX_LINE   1024
 #define MAX_ARGS   64
-#define MAX_CMDS   8        /* 파이프라인 최대 단계 */
-#define MAX_PIPES  8        /* && || ; 로 이어붙일 수 있는 파이프라인 수 */
+#define MAX_CMDS   8        /* stages in one pipeline */
+#define MAX_PIPES  8        /* pipelines joined by && || ; */
 
 typedef struct {
-    char *argv[MAX_ARGS + 1];   /* execve 를 위해 NULL 로 끝난다 */
+    char *argv[MAX_ARGS + 1];   /* NULL terminated, for execve */
     int   argc;
     char *redir_in;
     char *redir_out;
     bool  out_append;
 } cmd_t;
 
-/* 앞선 파이프라인과 어떻게 이어지는가 */
+/* How this pipeline joins onto the one before it */
 typedef enum { LINK_NONE, LINK_AND, LINK_OR, LINK_SEQ } link_t;
 
 typedef struct {
     cmd_t  cmds[MAX_CMDS];
     int    ncmds;
-    link_t link;        /* 이 파이프라인 "앞"의 연결자 */
+    link_t link;        /* the operator in front of this pipeline */
 } pipeline_t;
 
-/* /data/bin 은 데이터 파티션이다. 파이썬처럼 큰 프로그램은 시스템
- * (커널 내장 initramfs)이 아니라 여기에 둔다. */
+/* /data/bin is on the data partition. Large programs such as Python live
+ * there rather than in the system image (the initramfs inside the kernel). */
 static const char *DEFAULT_PATH = "/bin:/data/bin:/sbin:/usr/bin:/usr/sbin";
 static bool shell_running = true;
 static int  last_status   = 0;
 
-/* ── 토크나이저 ───────────────────────────────────────────────────
+/* ── Tokenizer ────────────────────────────────────────────────────
  *
- * 토큰을 입력 버퍼에서 제자리로 자르지 않고 아레나에 복사한다.
- * 제자리 방식은 두 곳에서 깨진다:
- *   1) 구분자 자리에 종료 NUL 을 쓰면 다음 토큰의 시작을 잃는다
- *   2) "echo hi|cat" 처럼 단어 뒤에 바로 연산자가 오면 NUL 을 쓸 자리가
- *      연산자 자리뿐이라 연산자를 덮어쓴다
- * 아레나는 줄마다 초기화되고, 토큰은 execve 까지 살아 있어야 하므로
- * 정적으로 둔다. */
+ * Tokens are copied into an arena rather than cut in place in the input
+ * buffer. Cutting in place breaks in two ways:
+ *   1) writing the terminating NUL over a separator loses where the next
+ *      token starts;
+ *   2) in "echo hi|cat" the only place to put the NUL is the operator
+ *      itself, so the operator is destroyed.
+ * The arena is reset per line, and tokens must live until execve, so it
+ * is static. */
 
 typedef enum {
     TOK_END,
@@ -64,7 +65,7 @@ static bool is_space(char c) { return c == ' ' || c == '\t' || c == '\r'; }
 static char   arena[MAX_LINE * 2];
 static size_t arena_used;
 
-/* 토큰 문자열을 아레나에 복사하고 그 포인터를 돌려준다. 부족하면 NULL. */
+/* Copy a token into the arena and return the pointer. NULL if it is full. */
 static char *arena_push(const char *src, size_t len)
 {
     if (arena_used + len + 1 > sizeof(arena))
@@ -77,7 +78,7 @@ static char *arena_push(const char *src, size_t len)
     return dst;
 }
 
-/* 다음 토큰 하나를 읽는다. TOK_WORD 면 *word_out 에 아레나 포인터가 들어간다. */
+/* Read one token. For TOK_WORD, *word_out gets the arena pointer. */
 static tok_type_t next_token(char **p, char **word_out)
 {
     char *s = *p;
@@ -85,8 +86,8 @@ static tok_type_t next_token(char **p, char **word_out)
     while (is_space(*s)) s++;
     if (*s == '\0') { *p = s; return TOK_END; }
 
-    /* 연산자는 그 자체로 토큰이다.
-     * 두 글자짜리(&& ||)를 한 글자짜리(|)보다 먼저 본다. */
+    /* An operator is a token in itself. Two-character ones (&& ||) must
+     * be checked before the single-character ones (|). */
     if (*s == '&' && s[1] == '&') { *p = s + 2; return TOK_AND;  }
     if (*s == '|' && s[1] == '|') { *p = s + 2; return TOK_OR;   }
     if (*s == '|')                { *p = s + 1; return TOK_PIPE; }
@@ -98,7 +99,7 @@ static tok_type_t next_token(char **p, char **word_out)
         return TOK_REDIR_OUT;
     }
 
-    /* 단어: 따옴표를 벗기면서 모은다 */
+    /* A word: gather it, stripping quotes. */
     char   buf[MAX_LINE];
     size_t n = 0;
 
@@ -110,7 +111,7 @@ static tok_type_t next_token(char **p, char **word_out)
                 if (n < sizeof(buf)) buf[n++] = *s;
                 s++;
             }
-            if (*s == quote) s++;       /* 닫는 따옴표. 없으면 줄 끝까지 */
+            if (*s == quote) s++;       /* closing quote; without one, to end of line */
         } else {
             if (n < sizeof(buf)) buf[n++] = *s;
             s++;
@@ -120,18 +121,18 @@ static tok_type_t next_token(char **p, char **word_out)
     *p = s;
     *word_out = arena_push(buf, n);
     if (!*word_out) {
-        dprintf(STDERR_FILENO, "sh: 줄이 너무 깁니다\n");
+        dprintf(STDERR_FILENO, "sh: line too long\n");
         return TOK_END;
     }
     return TOK_WORD;
 }
 
-/* 한 줄을 파이프라인 목록으로 파싱한다.
+/* Parse one line into a list of pipelines.
  *
  *   cmd1 | cmd2 && cmd3 || cmd4 ; cmd5
  *
- * | 는 한 파이프라인 안의 단계를 잇고, && || ; 는 파이프라인 사이를 잇는다.
- * 반환: 파이프라인 개수, 빈 줄이면 0, 오류면 -1. */
+ * | joins stages within a pipeline; && || ; join pipelines together.
+ * Returns the pipeline count, 0 for a blank line, -1 on error. */
 static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
 {
     arena_used = 0;
@@ -155,7 +156,7 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
 
         if (t == TOK_WORD) {
             if (c->argc >= MAX_ARGS) {
-                dprintf(STDERR_FILENO, "sh: 인자가 너무 많습니다\n");
+                dprintf(STDERR_FILENO, "sh: too many arguments\n");
                 return -1;
             }
             c->argv[c->argc++] = word;
@@ -164,11 +165,11 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
 
         if (t == TOK_PIPE) {
             if (c->argc == 0) {
-                dprintf(STDERR_FILENO, "sh: | 앞에 명령이 없습니다\n");
+                dprintf(STDERR_FILENO, "sh: no command before |\n");
                 return -1;
             }
             if (pl->ncmds >= MAX_CMDS) {
-                dprintf(STDERR_FILENO, "sh: 파이프가 너무 깁니다 (최대 %d)\n",
+                dprintf(STDERR_FILENO, "sh: pipeline too long (max %d)\n",
                         MAX_CMDS);
                 return -1;
             }
@@ -179,12 +180,12 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
 
         if (t == TOK_AND || t == TOK_OR || t == TOK_SEMI) {
             if (c->argc == 0) {
-                dprintf(STDERR_FILENO, "sh: 연결자 앞에 명령이 없습니다\n");
+                dprintf(STDERR_FILENO, "sh: no command before the operator\n");
                 return -1;
             }
             if (np >= max_pipes) {
                 dprintf(STDERR_FILENO,
-                        "sh: 이어붙인 명령이 너무 많습니다 (최대 %d)\n",
+                        "sh: too many commands joined together (max %d)\n",
                         max_pipes);
                 return -1;
             }
@@ -198,10 +199,10 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
             continue;
         }
 
-        /* 리다이렉션: 바로 뒤에 파일 이름이 와야 한다 */
+        /* Redirection: a file name has to follow immediately. */
         char *file = NULL;
         if (next_token(&p, &file) != TOK_WORD) {
-            dprintf(STDERR_FILENO, "sh: 리다이렉션 뒤에 파일이 없습니다\n");
+            dprintf(STDERR_FILENO, "sh: no file after the redirection\n");
             return -1;
         }
         if (t == TOK_REDIR_IN) {
@@ -212,35 +213,36 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
         }
     }
 
-    /* argv 를 NULL 로 마감 */
+    /* Terminate each argv with NULL. */
     for (int i = 0; i < np; i++)
         for (int j = 0; j < pipes[i].ncmds; j++)
             pipes[i].cmds[j].argv[pipes[i].cmds[j].argc] = NULL;
 
-    /* 마지막 파이프라인이 비어 있으면(줄이 연결자로 끝남) 버린다 */
+    /* Drop a trailing empty pipeline (the line ended on an operator). */
     while (np > 0 && pipes[np - 1].cmds[0].argc == 0)
         np--;
 
     return np;
 }
 
-/* ── 내장 명령 ──────────────────────────────────────────────────── */
+/* ── Builtins ───────────────────────────────────────────────────── */
 
 static void builtin_help(void)
 {
     printf("LP-zero shell\n\n");
-    printf("  cd [dir]      디렉터리 이동 (인자 없으면 /)\n");
-    printf("  pwd           현재 디렉터리\n");
-    printf("  echo ...      인자 출력\n");
-    printf("  env           환경변수 목록\n");
-    printf("  exit [n]      셸 종료\n");
-    printf("  reboot        재부팅\n");
-    printf("  poweroff      전원 끄기\n");
-    printf("  help          이 도움말\n\n");
-    printf("리다이렉션 < > >> , 파이프 | , 연결자 && || ; 를 쓸 수 있습니다.\n\n");
-    printf("파일:   ls  cat  cp  mv  rm  mkdir\n");
-    printf("시스템: sysinfo  zram  memwatch  mount  expandfs  dhcp  ntp\n");
-    printf("계산:   calc \"2+3*4\"      파이썬: python (/data 에 있습니다)\n");
+    printf("  cd [dir]      change directory (to / with no argument)\n");
+    printf("  pwd           where you are\n");
+    printf("  echo ...      print the arguments\n");
+    printf("  env           list the environment\n");
+    printf("  exit [n]      leave the shell\n");
+    printf("  reboot        restart the machine\n");
+    printf("  poweroff      shut down\n");
+    printf("  help          this help\n\n");
+    printf("Redirection < > >> , pipes | , and && || ; all work.\n\n");
+    printf("files:  ls  cat  cp  mv  rm  mkdir  touch  edit\n");
+    printf("time:   date   date -z list   date -s \"2026-09-01 12:00:00\"   ntp\n");
+    printf("system: sysinfo  zram  memwatch  mount  expandfs  dhcp\n");
+    printf("other:  calc \"2+3*4\"      python (on /data)\n");
 }
 
 static const char *BUILTINS[] = {
@@ -255,7 +257,7 @@ static bool is_builtin(const char *name)
     return false;
 }
 
-/* 내장이면 처리하고 true. 종료 코드는 last_status 에 남긴다. */
+/* Handle a builtin and return true. The exit code goes in last_status. */
 static bool run_builtin(cmd_t *c)
 {
     const char *cmd = c->argv[0];
@@ -270,7 +272,7 @@ static bool run_builtin(cmd_t *c)
         const char *dir = (c->argc > 1) ? c->argv[1] : "/";
         long r = lp_chdir(dir);
         if (r < 0) {
-            dprintf(STDERR_FILENO, "cd: %s: 이동할 수 없습니다 (%ld)\n", dir, -r);
+            dprintf(STDERR_FILENO, "cd: %s: cannot change to it (%ld)\n", dir, -r);
             last_status = 1;
         } else {
             last_status = 0;
@@ -281,7 +283,7 @@ static bool run_builtin(cmd_t *c)
     if (strcmp(cmd, "pwd") == 0) {
         char buf[512];
         long r = lp_getcwd(buf, sizeof(buf));
-        if (r < 0) { dprintf(STDERR_FILENO, "pwd: 실패 (%ld)\n", -r); last_status = 1; }
+        if (r < 0) { dprintf(STDERR_FILENO, "pwd: failed (%ld)\n", -r); last_status = 1; }
         else       { printf("%s\n", buf); last_status = 0; }
         return true;
     }
@@ -310,11 +312,28 @@ static bool run_builtin(cmd_t *c)
 
     if (strcmp(cmd, "reboot") == 0 || strcmp(cmd, "poweroff") == 0) {
         printf("%s...\n", cmd);
+
+        /* Write the time down just before we go. This board has no
+         * battery-backed clock, so without this the next boot starts at 1970.
+         * The ntp daemon saves every 30s; this fills in that last window.
+         * Anything before 2020 means the clock was never set, and saving it
+         * would be worse than saving nothing. */
+        s64 now = lp_time();
+        if (now >= 1577836800LL) {
+            char buf[32];
+            int  n = snprintf(buf, sizeof(buf), "%lld\n", (long long)now);
+            long fd = lp_open("/data/.clock", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                lp_write((int)fd, buf, (size_t)n);
+                lp_close((int)fd);
+            }
+        }
+
         lp_sync();
         int op = (strcmp(cmd, "reboot") == 0)
                  ? LINUX_REBOOT_CMD_RESTART : LINUX_REBOOT_CMD_POWER_OFF;
         long r = lp_reboot(op);
-        dprintf(STDERR_FILENO, "%s: 실패 (%ld) - 권한이 있습니까?\n", cmd, -r);
+        dprintf(STDERR_FILENO, "%s: failed (%ld) - do you have permission?\n", cmd, -r);
         last_status = 1;
         return true;
     }
@@ -322,12 +341,12 @@ static bool run_builtin(cmd_t *c)
     return false;
 }
 
-/* ── 외부 명령 ──────────────────────────────────────────────────── */
+/* ── External commands ──────────────────────────────────────────── */
 
-/* PATH 를 뒤져 실행 파일 경로를 buf 에 채운다. 찾으면 true. */
+/* Search PATH and fill buf with the executable's path. true if found. */
 static bool resolve_path(const char *cmd, char *buf, size_t size)
 {
-    if (strchr(cmd, '/')) {                 /* 경로가 주어졌으면 그대로 */
+    if (strchr(cmd, '/')) {                 /* a path was given: use it */
         strlcpy(buf, cmd, size);
         return lp_exists(buf);
     }
@@ -354,13 +373,13 @@ static bool resolve_path(const char *cmd, char *buf, size_t size)
     return false;
 }
 
-/* 자식 안에서 리다이렉션을 적용한다. 실패하면 종료. */
+/* Apply redirections inside the child. Exit if one fails. */
 static void apply_redirects(cmd_t *c)
 {
     if (c->redir_in) {
         long fd = lp_open(c->redir_in, O_RDONLY, 0);
         if (fd < 0) {
-            dprintf(STDERR_FILENO, "sh: %s: 열 수 없습니다\n", c->redir_in);
+            dprintf(STDERR_FILENO, "sh: %s: cannot open\n", c->redir_in);
             lp_exit(1);
         }
         lp_dup2((int)fd, STDIN_FILENO);
@@ -371,7 +390,7 @@ static void apply_redirects(cmd_t *c)
         int flags = O_WRONLY | O_CREAT | (c->out_append ? O_APPEND : O_TRUNC);
         long fd = lp_open(c->redir_out, flags, 0644);
         if (fd < 0) {
-            dprintf(STDERR_FILENO, "sh: %s: 만들 수 없습니다\n", c->redir_out);
+            dprintf(STDERR_FILENO, "sh: %s: cannot create\n", c->redir_out);
             lp_exit(1);
         }
         lp_dup2((int)fd, STDOUT_FILENO);
@@ -379,10 +398,10 @@ static void apply_redirects(cmd_t *c)
     }
 }
 
-/* 파이프라인 실행. 각 단계를 fork 하고 파이프로 잇는다. */
+/* Run a pipeline: fork each stage and join them with pipes. */
 static void run_pipeline(cmd_t *cmds, int n)
 {
-    int  prev_read = -1;      /* 이전 단계에서 넘겨받는 읽기 끝 */
+    int  prev_read = -1;      /* read end handed over by the previous stage */
     pid_t pids[MAX_CMDS];
     int  npids = 0;
 
@@ -391,51 +410,51 @@ static void run_pipeline(cmd_t *cmds, int n)
         bool last = (i == n - 1);
 
         if (!last && lp_pipe(pipefd) < 0) {
-            dprintf(STDERR_FILENO, "sh: 파이프 생성 실패\n");
+            dprintf(STDERR_FILENO, "sh: cannot create a pipe\n");
             break;
         }
 
         pid_t pid = lp_fork();
         if (pid < 0) {
-            dprintf(STDERR_FILENO, "sh: fork 실패\n");
+            dprintf(STDERR_FILENO, "sh: fork failed\n");
             if (pipefd[0] >= 0) { lp_close(pipefd[0]); lp_close(pipefd[1]); }
             break;
         }
 
         if (pid == 0) {
-            /* ── 자식 ── */
+            /* ── child ── */
             if (prev_read >= 0) {
                 lp_dup2(prev_read, STDIN_FILENO);
                 lp_close(prev_read);
             }
             if (!last) {
-                lp_close(pipefd[0]);             /* 쓰기만 한다 */
+                lp_close(pipefd[0]);             /* we only write */
                 lp_dup2(pipefd[1], STDOUT_FILENO);
                 lp_close(pipefd[1]);
             }
 
-            apply_redirects(&cmds[i]);           /* 리다이렉션이 파이프보다 우선 */
+            apply_redirects(&cmds[i]);           /* redirection beats the pipe */
 
             char path[512];
             if (!resolve_path(cmds[i].argv[0], path, sizeof(path))) {
-                dprintf(STDERR_FILENO, "sh: %s: 명령을 찾을 수 없습니다\n",
+                dprintf(STDERR_FILENO, "sh: %s: command not found\n",
                         cmds[i].argv[0]);
                 lp_exit(127);
             }
 
             long e = lp_execve(path, cmds[i].argv, environ);
-            dprintf(STDERR_FILENO, "sh: %s: 실행할 수 없습니다 (%ld)\n",
+            dprintf(STDERR_FILENO, "sh: %s: cannot run it (%ld)\n",
                     path, -e);
             lp_exit(126);
         }
 
-        /* ── 부모 ── */
+        /* ── parent ── */
         pids[npids++] = pid;
 
         if (prev_read >= 0)
             lp_close(prev_read);
         if (!last) {
-            lp_close(pipefd[1]);                 /* 부모는 쓰지 않는다 */
+            lp_close(pipefd[1]);                 /* the parent does not write */
             prev_read = pipefd[0];
         }
     }
@@ -443,7 +462,7 @@ static void run_pipeline(cmd_t *cmds, int n)
     if (prev_read >= 0)
         lp_close(prev_read);
 
-    /* 모든 단계를 기다린다. 마지막 단계의 상태가 파이프라인 상태. */
+    /* Wait for every stage. The last stage's status is the pipeline's. */
     for (int i = 0; i < npids; i++) {
         int status = 0;
         lp_waitpid(pids[i], &status, 0);
@@ -453,11 +472,11 @@ static void run_pipeline(cmd_t *cmds, int n)
     }
 }
 
-/* 내장 명령을 리다이렉션과 함께 실행한다.
+/* Run a builtin with redirection.
  *
- * 내장은 셸 프로세스 안에서 돌아야 한다 - cd 를 자식에서 하면 부모의
- * 디렉터리가 안 바뀌어 의미가 없다. 그래서 fork 대신 셸 자신의 fd 를
- * 잠깐 바꿔치기하고 끝나면 되돌린다. */
+ * A builtin has to run inside the shell process: cd in a child would
+ * leave the parent's directory unchanged and mean nothing. So instead of
+ * forking we swap the shell's own fds and put them back afterwards. */
 static void run_builtin_redirected(cmd_t *c)
 {
     int saved_in  = -1;
@@ -466,7 +485,7 @@ static void run_builtin_redirected(cmd_t *c)
     if (c->redir_in) {
         long fd = lp_open(c->redir_in, O_RDONLY, 0);
         if (fd < 0) {
-            dprintf(STDERR_FILENO, "sh: %s: 열 수 없습니다 (%ld)\n",
+            dprintf(STDERR_FILENO, "sh: %s: cannot open (%ld)\n",
                     c->redir_in, -fd);
             last_status = 1;
             return;
@@ -480,7 +499,7 @@ static void run_builtin_redirected(cmd_t *c)
         int flags = O_WRONLY | O_CREAT | (c->out_append ? O_APPEND : O_TRUNC);
         long fd = lp_open(c->redir_out, flags, 0644);
         if (fd < 0) {
-            dprintf(STDERR_FILENO, "sh: %s: 만들 수 없습니다 (%ld)\n",
+            dprintf(STDERR_FILENO, "sh: %s: cannot create (%ld)\n",
                     c->redir_out, -fd);
             if (saved_in >= 0) {
                 lp_dup2(saved_in, STDIN_FILENO);
@@ -500,7 +519,7 @@ static void run_builtin_redirected(cmd_t *c)
     if (saved_out >= 0) { lp_dup2(saved_out, STDOUT_FILENO); lp_close(saved_out); }
 }
 
-/* ── 메인 루프 ──────────────────────────────────────────────────── */
+/* ── Main loop ─────────────────────────────────────────────────── */
 
 static void print_prompt(void)
 {
@@ -508,7 +527,7 @@ static void print_prompt(void)
     if (lp_getcwd(cwd, sizeof(cwd)) < 0)
         strlcpy(cwd, "?", sizeof(cwd));
 
-    /* 종료 코드가 0 이 아니면 프롬프트에 표시한다 */
+    /* Show a non-zero exit code in the prompt. */
     if (last_status)
         printf("[%d] %s $ ", last_status, cwd);
     else
@@ -520,15 +539,15 @@ int main(int argc, char **argv)
     char       line[MAX_LINE];
     pipeline_t pipes[MAX_PIPES];
 
-    /* 인자로 파일이 주어지면 그 안의 명령을 순서대로 실행한다.
-     * /etc/rc 같은 부팅 스크립트를 위한 것이다. 이때는 프롬프트를
-     * 찍지 않는다. */
+    /* Given a file argument, run the commands in it in order. This is for
+     * boot scripts like /etc/rc, and there is no prompt in that mode. */
+     
     int  input_fd  = STDIN_FILENO;
     bool interactive = true;
 
-    /* -q 는 "없으면 조용히 넘어가라"는 뜻이다. /data/rc.local 처럼
-     * 있을 수도 없을 수도 있는 스크립트를 부를 때 쓴다. 우리 셸에는
-     * test 나 if 가 없어서 존재 여부를 따로 확인할 방법이 없다. */
+    /* -q means "if it is not there, say nothing". It is for scripts that
+     * may or may not exist, like /data/rc.local. Our shell has neither test
+     * nor if, so there is no other way to check first. */
     int  first = 1;
     bool quiet = false;
     if (argc > 1 && strcmp(argv[1], "-q") == 0) { quiet = true; first = 2; }
@@ -538,7 +557,7 @@ int main(int argc, char **argv)
         if (fd < 0) {
             if (quiet)
                 return 0;
-            dprintf(STDERR_FILENO, "sh: %s: 열 수 없습니다 (%ld)\n",
+            dprintf(STDERR_FILENO, "sh: %s: cannot open (%ld)\n",
                     argv[first], -fd);
             return 127;
         }
@@ -551,7 +570,7 @@ int main(int argc, char **argv)
             print_prompt();
 
         long len = readline(input_fd, line, sizeof(line));
-        if (len < 0) {              /* EOF (Ctrl-D 또는 파일 끝) */
+        if (len < 0) {              /* EOF: Ctrl-D, or the end of the file */
             if (interactive)
                 printf("\n");
             break;
@@ -559,7 +578,7 @@ int main(int argc, char **argv)
         if (len == 0)
             continue;
 
-        /* 스크립트에서는 주석을 건너뛴다 */
+        /* Skip comments when running a script. */
         if (line[0] == '#')
             continue;
 
@@ -568,16 +587,16 @@ int main(int argc, char **argv)
             continue;
 
         for (int i = 0; i < np && shell_running; i++) {
-            /* 단락 평가: && 는 앞이 성공했을 때만, || 는 실패했을 때만 */
+            /* Short circuit: && only after success, || only after failure. */
             if (pipes[i].link == LINK_AND && last_status != 0) continue;
             if (pipes[i].link == LINK_OR  && last_status == 0) continue;
 
             cmd_t *cmds = pipes[i].cmds;
             int    n    = pipes[i].ncmds;
 
-            /* 내장 명령은 파이프라인이 한 단계일 때만 셸 안에서 실행한다.
-             * 파이프의 일부일 때는 자식에서 도는 외부 명령으로 취급한다
-             * (그래야 stdin/stdout 연결이 자연스럽다). */
+            /* Builtins run inside the shell only when the pipeline has one
+             * stage. As part of a pipe they are treated like external commands
+             * in a child, so stdin/stdout hook up naturally. */
             if (n == 1 && cmds[0].argc > 0 && is_builtin(cmds[0].argv[0]))
                 run_builtin_redirected(&cmds[0]);
             else

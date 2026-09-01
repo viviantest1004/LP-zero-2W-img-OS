@@ -1,4 +1,4 @@
-/* stdlib.h - 메모리 할당과 환경변수. */
+/* stdlib.h - memory allocation and the environment. */
 #ifndef _LP_STDLIB_H
 #define _LP_STDLIB_H
 

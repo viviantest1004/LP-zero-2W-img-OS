@@ -1,14 +1,14 @@
-/* syscall.h - AArch64 리눅스 시스템콜.
+/* syscall.h - AArch64 Linux system calls.
  *
- * 호출 규약:
- *   x8       = 시스템콜 번호
- *   x0..x5   = 인자
+ * The calling convention:
+ *   x8       = the system call number
+ *   x0..x5   = arguments
  *   svc #0
- *   x0       = 반환값. 오류는 음수 -errno 로 돌아온다
- *              (glibc 처럼 -1 + errno 가 아니다)
+ *   x0       = the result. Errors come back as a negative -errno,
+ *              not as -1 plus a separate errno the way glibc does it.
  *
- * AArch64 는 asm-generic 시스템콜 표를 쓴다. 그래서 x86 에 있는
- * open / stat / fork / pipe / dup2 가 아예 없다. 대신:
+ * AArch64 uses the asm-generic syscall table, so the calls x86 has for
+ * open / stat / fork / pipe / dup2 do not exist at all. Instead:
  *   open  -> openat(AT_FDCWD, ...)
  *   stat  -> newfstatat
  *   fork  -> clone(SIGCHLD, ...)
@@ -20,7 +20,7 @@
 
 #include "types.h"
 
-/* ── 시스템콜 번호 (arch/arm64 = asm-generic/unistd.h) ── */
+/* ── System call numbers (arch/arm64 = asm-generic/unistd.h) ── */
 #define SYS_getcwd          17
 #define SYS_dup             23
 #define SYS_dup3            24
@@ -68,7 +68,7 @@
 #define SYS_getppid         173
 #define SYS_getuid          174
 #define SYS_sync            81
-/* 소켓 (asm-generic 번호) */
+/* Sockets (asm-generic numbers) */
 #define SYS_socket          198
 #define SYS_bind            200
 #define SYS_listen          201
@@ -92,9 +92,9 @@
 #define SYS_wait4           260
 #define SYS_getrandom       278
 
-/* ── raw 시스템콜 래퍼 ──
- * 레지스터를 명시적으로 지정해야 컴파일러가 임의 레지스터를 쓰지 않는다.
- * "memory" 클로버는 시스템콜이 메모리를 바꿀 수 있음을 알린다. */
+/* ── Raw system call wrappers ──
+ * The registers must be named explicitly, or the compiler picks its own.
+ * The "memory" clobber says the call may change memory. */
 
 static inline long sys_call0(long n)
 {

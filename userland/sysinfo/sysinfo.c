@@ -1,16 +1,17 @@
-/* sysinfo - 시스템 상태를 한눈에.
+/* sysinfo - the machine's state at a glance.
  *
- * 커널이 /proc 과 /sys 에 이미 다 내놓았다. 우리가 할 일은 흩어진 값을
- * 모아 읽기 좋게 내놓는 것뿐이다.
+ * The kernel already publishes all of this under /proc and /sys. All we do
+ * is gather the scattered numbers and lay them out readably.
  */
 #include "types.h"
 #include "string.h"
 #include "stdio.h"
+#include "stdlib.h"
 #include "unistd.h"
 #include "syscall.h"
 #include "net.h"
 
-/* struct utsname - 각 필드 65바이트, 총 390 */
+/* struct utsname - 65 bytes per field, 390 in total */
 #define UTS_LEN       65
 #define UTS_SYSNAME    0
 #define UTS_NODENAME  65
@@ -19,7 +20,7 @@
 #define UTS_MACHINE  260
 #define UTS_SIZE     390
 
-/* struct statfs (arm64) 오프셋 */
+/* struct statfs offsets (arm64) */
 #define STATFS_SIZE    120
 #define STATFS_BSIZE     8
 #define STATFS_BLOCKS   16
@@ -27,8 +28,8 @@
 
 static void hr(void) { printf("─────────────────────────────────────────────\n"); }
 
-/* /proc/cpuinfo 에서 첫 번째로 나오는 키의 값을 가져온다.
- * 형식이 "key : value" 라 meminfo 파서를 쓸 수 없다. */
+/* Value of the first occurrence of a key in /proc/cpuinfo. The format is
+ * "key : value", so the meminfo parser does not fit. */
 static bool cpuinfo_field(const char *text, const char *key, char *out, size_t n)
 {
     size_t klen = strlen(key);
@@ -68,24 +69,67 @@ static void show_system(void)
     u8 uts[UTS_SIZE];
     memset(uts, 0, sizeof(uts));
 
-    printf("\n[시스템]\n");
+    printf("\n[system]\n");
     if (lp_uname(uts) == 0) {
-        printf("  커널       %s %s\n", (char *)uts + UTS_SYSNAME,
+        printf("  kernel     %s %s\n", (char *)uts + UTS_SYSNAME,
                (char *)uts + UTS_RELEASE);
-        printf("  아키텍처   %s\n", (char *)uts + UTS_MACHINE);
-        printf("  호스트명   %s\n", (char *)uts + UTS_NODENAME);
+        printf("  arch       %s\n", (char *)uts + UTS_MACHINE);
+        printf("  hostname   %s\n", (char *)uts + UTS_NODENAME);
+    }
+
+    /* The time. This board has no battery-backed clock, so it is often
+     * wrong - and a wrong clock breaks HTTPS entirely, so it goes up front. */
+    {
+        s64  now   = lp_time();
+        int  tzmin = 0;
+        char label[32] = "UTC";
+
+        /* /data/timezone holds "<minutes> <label>", written by date(1).
+         * The label is only for display, so a file with just a number
+         * still works - we fall back to spelling the offset out. */
+        char tzbuf[64];
+        long fd = lp_open("/data/timezone", O_RDONLY, 0);
+        if (fd >= 0) {
+            long n = lp_read((int)fd, tzbuf, sizeof(tzbuf) - 1);
+            lp_close((int)fd);
+            if (n > 0) {
+                tzbuf[n] = '\0';
+                tzmin = atoi(tzbuf);
+
+                char *p = tzbuf;
+                while (*p && *p != ' ' && *p != '\t') p++;
+                while (*p == ' ' || *p == '\t')       p++;
+                char *e = p;
+                while (*e && *e != '\n' && *e != ' ') e++;
+                *e = '\0';
+                if (*p) strlcpy(label, p, sizeof(label));
+            }
+        }
+        if (strcmp(label, "UTC") == 0 && tzmin != 0) {
+            int a = tzmin < 0 ? -tzmin : tzmin;
+            snprintf(label, sizeof(label), "UTC%c%d:%02d",
+                     tzmin < 0 ? '-' : '+', a / 60, a % 60);
+        }
+
+        lp_tm_t tm;
+        lp_gmtime(now + (s64)tzmin * 60, &tm);
+        printf("  time       %d-%02d-%02d %02d:%02d:%02d %s",
+               tm.year, tm.mon, tm.day, tm.hour, tm.min, tm.sec, label);
+        if (tm.year < 2020)
+            printf("   <- clock is not set. Run 'ntp', or 'date -s'");
+        printf("\n");
     }
 
     char buf[256];
     if (proc_read("/proc/uptime", buf, sizeof(buf)) > 0) {
         long secs = strtol(buf, NULL, 10);
-        printf("  가동 시간  %ld일 %ld시간 %ld분 %ld초\n",
+        printf("  uptime     %ldd %ldh %ldm %lds\n",
                secs / 86400, (secs % 86400) / 3600,
                (secs % 3600) / 60, secs % 60);
     }
     if (proc_read("/proc/loadavg", buf, sizeof(buf)) > 0) {
         char *nl = strchr(buf, '\n'); if (nl) *nl = '\0';
-        printf("  부하       %s\n", buf);
+        printf("  load       %s\n", buf);
     }
 }
 
@@ -96,23 +140,23 @@ static void show_cpu(void)
         return;
 
     printf("\n[CPU]\n");
-    printf("  코어 수    %d\n", count_cpus(cpuinfo));
+    printf("  cores      %d\n", count_cpus(cpuinfo));
 
     char v[128];
     if (cpuinfo_field(cpuinfo, "CPU implementer", v, sizeof(v)))
-        printf("  제조사     %s%s\n", v,
+        printf("  vendor     %s%s\n", v,
                strcmp(v, "0x41") == 0 ? "  (ARM)" : "");
     if (cpuinfo_field(cpuinfo, "CPU part", v, sizeof(v)))
-        printf("  파트       %s%s\n", v,
+        printf("  part       %s%s\n", v,
                strcmp(v, "0xd03") == 0 ? "  (Cortex-A53)" : "");
     if (cpuinfo_field(cpuinfo, "Features", v, sizeof(v)))
-        printf("  기능       %s\n", v);
+        printf("  features   %s\n", v);
 
-    /* SoC 온도. 라즈베리파이는 thermal_zone0 에 밀리섭씨로 내놓는다. */
+    /* SoC temperature. The Pi reports millidegrees C in thermal_zone0. */
     char t[32];
     if (proc_read("/sys/class/thermal/thermal_zone0/temp", t, sizeof(t)) > 0) {
         long mc = strtol(t, NULL, 10);
-        printf("  온도       %ld.%ld C\n", mc / 1000, (mc % 1000) / 100);
+        printf("  temp       %ld.%ld C\n", mc / 1000, (mc % 1000) / 100);
     }
 }
 
@@ -127,27 +171,27 @@ static void show_memory(void)
     long swt   = proc_find_kv(mem, "SwapTotal");
     long swf   = proc_find_kv(mem, "SwapFree");
 
-    printf("\n[메모리]\n");
+    printf("\n[memory]\n");
     if (total > 0) {
         long used = total - (avail > 0 ? avail : 0);
-        printf("  전체       %4ld MB\n", total / 1024);
-        printf("  사용       %4ld MB  (%ld%%)\n", used / 1024, used * 100 / total);
-        printf("  여유       %4ld MB\n", avail / 1024);
+        printf("  total      %4ld MB\n", total / 1024);
+        printf("  used       %4ld MB  (%ld%%)\n", used / 1024, used * 100 / total);
+        printf("  free       %4ld MB\n", avail / 1024);
     }
     if (swt > 0) {
-        printf("  zram 스왑  %4ld MB 중 %ld MB 사용\n",
+        printf("  zram swap  %4ld MB total, %ld MB used\n",
                swt / 1024, (swt - swf) / 1024);
-        /* 압축 효과 */
+        /* How well it is compressing */
         char n1[32], n2[32];
         if (proc_read("/sys/block/zram0/orig_data_size", n1, sizeof(n1)) > 0 &&
             proc_read("/sys/block/zram0/compr_data_size", n2, sizeof(n2)) > 0) {
             long orig = strtol(n1, NULL, 10), compr = strtol(n2, NULL, 10);
             if (orig > 0 && compr > 0)
-                printf("  압축률     %ld%%  (%ld KB -> %ld KB)\n",
+                printf("  compressed %ld%%  (%ld KB -> %ld KB)\n",
                        compr * 100 / orig, orig / 1024, compr / 1024);
         }
     } else {
-        printf("  zram 스왑  없음\n");
+        printf("  zram swap  none\n");
     }
 }
 
@@ -168,7 +212,7 @@ static void show_one_fs(const char *path, const char *label)
     u64 avail_mb = avail  * bs / 1048576;
     u64 used_mb  = total_mb - avail_mb;
 
-    printf("  %-10s %5lu MB 중 %lu MB 사용 (%lu%%), 여유 %lu MB\n",
+    printf("  %-10s %5lu MB total, %lu MB used (%lu%%), %lu MB free\n",
            label, (unsigned long)total_mb, (unsigned long)used_mb,
            total_mb ? (unsigned long)(used_mb * 100 / total_mb) : 0UL,
            (unsigned long)avail_mb);
@@ -176,7 +220,7 @@ static void show_one_fs(const char *path, const char *label)
 
 static void show_storage(void)
 {
-    printf("\n[저장장치]\n");
+    printf("\n[storage]\n");
     show_one_fs("/",     "/ (RAM)");
     show_one_fs("/data", "/data");
 }
@@ -185,7 +229,7 @@ static void show_network(void)
 {
     static const char *IFACES[] = { "wlan0", "eth0", "usb0", "lo", NULL };
 
-    printf("\n[네트워크]\n");
+    printf("\n[network]\n");
     bool any = false;
 
     for (int i = 0; IFACES[i]; i++) {
@@ -209,7 +253,7 @@ static void show_network(void)
     }
 
     if (!any)
-        printf("  주소가 할당된 인터페이스가 없습니다\n");
+        printf("  no interface has an address\n");
 
     char dns[128];
     if (proc_read("/etc/resolv.conf", dns, sizeof(dns)) > 0) {
@@ -228,7 +272,7 @@ int main(int argc, char **argv)
 
     printf("\n");
     hr();
-    printf("  LP-zero OS  시스템 정보\n");
+    printf("  LP-zero OS  system information\n");
     hr();
 
     show_system();

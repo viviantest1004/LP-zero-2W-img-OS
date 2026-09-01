@@ -1,26 +1,26 @@
-/* malloc.c - brk 기반 최소 할당기.
+/* malloc.c - a minimal brk-based allocator.
  *
- * 우리 시스템에는 스레드가 없고(셸과 init 만 돈다) 할당 패턴도 단순해서
- * 프리 리스트 하나로 충분하다. 인접 블록 병합까지만 하고 그 이상은
- * 하지 않는다 - 복잡도 대비 이득이 없다. */
+ * There are no threads here - only the shell and init run - and the
+ * allocation pattern is simple, so one free list is enough. It coalesces
+ * adjacent blocks and stops there; more is not worth the complexity. */
 #include "stdlib.h"
 #include "string.h"
 #include "syscall.h"
 
 typedef struct block {
-    size_t        size;     /* 헤더를 제외한 사용 가능 바이트 */
-    struct block *next;     /* 주소 순으로 정렬된 전체 목록 */
+    size_t        size;     /* usable bytes, not counting the header */
+    struct block *next;     /* the whole list, in address order */
     int           free;
 } block_t;
 
 #define HDR_SIZE   ((size_t)sizeof(block_t))
-#define ALIGN_UP(n) (((n) + 15UL) & ~15UL)   /* 16바이트 정렬 */
-#define GROW_MIN    (64UL * 1024UL)          /* brk 를 늘릴 때 최소 단위 */
+#define ALIGN_UP(n) (((n) + 15UL) & ~15UL)   /* 16-byte alignment */
+#define GROW_MIN    (64UL * 1024UL)          /* smallest step when growing brk */
 
 static block_t *heap_head = NULL;
 static char    *brk_cur   = NULL;
 
-/* 현재 break 를 얻거나 늘린다. 실패하면 NULL. */
+/* Get or extend the current break. NULL on failure. */
 static void *heap_grow(size_t need)
 {
     if (brk_cur == NULL) {
@@ -35,7 +35,7 @@ static void *heap_grow(size_t need)
 
     long got = sys_call1(SYS_brk, (long)want);
     if ((char *)got < want)
-        return NULL;            /* 커널이 거부 */
+        return NULL;            /* the kernel refused */
 
     void *old = brk_cur;
     brk_cur = (char *)got;
@@ -48,13 +48,13 @@ void *malloc(size_t n)
         return NULL;
     n = ALIGN_UP(n);
 
-    /* 1) 프리 리스트에서 first-fit */
+    /* 1) first fit from the free list */
     block_t *prev = NULL;
     for (block_t *b = heap_head; b; prev = b, b = b->next) {
         if (!b->free || b->size < n)
             continue;
 
-        /* 남는 공간이 헤더 + 최소 블록보다 크면 쪼갠다 */
+        /* Split it if the leftover exceeds a header plus a minimum block. */
         if (b->size >= n + HDR_SIZE + 16) {
             block_t *split = (block_t *)((char *)b + HDR_SIZE + n);
             split->size = b->size - n - HDR_SIZE;
@@ -67,7 +67,7 @@ void *malloc(size_t n)
         return (char *)b + HDR_SIZE;
     }
 
-    /* 2) 힙을 늘린다 */
+    /* 2) grow the heap */
     void *mem = heap_grow(n + HDR_SIZE);
     if (!mem)
         return NULL;
@@ -80,7 +80,7 @@ void *malloc(size_t n)
     if (prev) prev->next = b;
     else      heap_head  = b;
 
-    /* heap_grow 가 요청보다 많이 받아왔으면 나머지를 free 블록으로 */
+    /* If heap_grow took more than we asked, the rest becomes a free block. */
     size_t used = HDR_SIZE + n;
     size_t have = (size_t)(brk_cur - (char *)mem);
     if (have >= used + HDR_SIZE + 16) {
@@ -101,8 +101,8 @@ void free(void *p)
     block_t *b = (block_t *)((char *)p - HDR_SIZE);
     b->free = 1;
 
-    /* 뒤쪽으로 이어진 free 블록들을 하나로 합친다.
-     * 목록이 주소 순이므로 next 만 봐도 된다. */
+    /* Merge the free blocks that follow into one. The list is in address
+     * order, so looking at next is enough. */
     while (b->next && b->next->free &&
            (char *)b->next == (char *)b + HDR_SIZE + b->size) {
         b->size += HDR_SIZE + b->next->size;
@@ -112,7 +112,8 @@ void free(void *p)
 
 void *calloc(size_t count, size_t size)
 {
-    /* 곱셈 넘침 검사 - 넘치면 작은 버퍼를 잡고 크게 쓰는 취약점이 된다 */
+    /* Check the multiplication for overflow. Without this, an overflow
+     * hands back a small buffer that the caller writes to as if it were big. */
     if (count && size > (size_t)-1 / count)
         return NULL;
 

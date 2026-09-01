@@ -1,13 +1,13 @@
-# authorized_keys - SSH 로 접속을 허용할 공개키 목록.
+# authorized_keys - the SSH public keys allowed to log in.
 #
-# ★ 여기에 자기 공개키를 한 줄로 붙여야 접속할 수 있다. ★
+# *** Paste your own public key here, on one line, or you cannot log in. ***
 #
-# 만드는 법 (접속할 PC 에서):
+# To make one, on the PC you will connect from:
 #     ssh-keygen -t ed25519 -f ~/.ssh/lpzero
-#     cat ~/.ssh/lpzero.pub        <- 이 한 줄을 여기 붙인다
+#     cat ~/.ssh/lpzero.pub        <- paste that single line below
 #
-# 접속:
-#     ssh -i ~/.ssh/lpzero root@<받은IP>
+# Then connect with:
+#     ssh -i ~/.ssh/lpzero root@<the address it got>
 #
-# 비밀번호 인증은 빌드 단계에서 제외했다. 네트워크에 노출되는 기기에서는
-# 무차별 대입의 표적이 되기 때문이다.
+# Password authentication was left out at build time. On a machine
+# exposed to a network, a password is just a target for brute force.

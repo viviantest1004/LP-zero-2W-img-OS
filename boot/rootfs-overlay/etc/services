@@ -1,22 +1,31 @@
-# /etc/services - init 이 감시하는 프로그램 목록.
+# /etc/services - the programs init supervises.
 #
-# 한 줄에 하나. init 이 부팅 시 띄우고, 죽으면 다시 띄운다.
-# 주석(#)과 빈 줄은 무시한다.
+# One per line. init starts each at boot and restarts it when it dies.
+# Comments (#) and blank lines are ignored.
 #
-# /etc/rc 와의 차이:
-#   rc        한 번 실행하고 끝. 죽어도 아무도 되살리지 않는다.
-#   services  init 이 계속 지켜본다. 죽으면 다시 띄운다.
+# How this differs from /etc/rc:
+#   rc        runs once and finishes. Nothing revives what it started.
+#   services  init keeps watching. If it dies, it comes back.
 #
-# SSH 서버를 여기 두는 이유가 명확하다. 메모리 부족이나 버그로 죽으면
-# 원격에서 손을 쓸 방법이 사라지기 때문이다.
+# The reason the SSH server belongs here is plain: if it died to a bug or
+# to memory pressure, there would be no way left to reach the machine.
 #
-# 즉시 죽는 것이 반복되면 재시작 간격을 늘리고, 20번 실패하면 포기한다
-# (폭주 방지).
+# Something that dies instantly gets a growing delay between restarts,
+# and after 20 failures init gives up on it. That stops a busy loop.
 
-# SSH 서버.
-#   -F  포그라운드 유지. init 이 감시하려면 자식이 살아 있어야 한다.
-#       (백그라운드로 가면 init 이 곧바로 "죽었다"고 판단한다)
-#   -R  호스트 키가 없으면 만든다
-#   -E  로그를 콘솔로
-#   -r  호스트 키 위치. 데이터 파티션에 두어야 재부팅해도 유지된다
+# The SSH server.
+#   -F  stay in the foreground. init can only supervise a child that
+#       stays alive; going to the background looks like an instant death.
+#   -R  generate a host key if there is none
+#   -E  log to the console
+#   -r  where the host key lives. On the data partition, so it survives
+#       a reboot and clients do not see the key change.
 dropbear -F -R -E -p 22 -r /data/dropbear_ed25519_host_key
+
+# The clock keeper.
+#   This board has no battery-backed clock. Pull the power and time
+#   stops; power it up again and it starts at 1970. That makes file
+#   timestamps nonsense and breaks every HTTPS certificate check.
+#   -d  writes the time to /data/.clock every 30s and resyncs from the
+#       network hourly. /etc/rc restores that value at boot.
+ntp -d

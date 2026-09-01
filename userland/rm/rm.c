@@ -1,19 +1,19 @@
-/* rm - 파일과 디렉터리를 지운다.
+/* rm - remove files and directories.
  *
- *   rm <경로>...
- *   rm -r <경로>...      디렉터리째
- *   rm -f <경로>...      없어도 오류로 치지 않음
+ *   rm <path>...
+ *   rm -r <path>...     including directories
+ *   rm -f <path>...     a missing file is not an error
  *
- * 되돌릴 수 없는 명령이라, 실수를 줄이는 두 가지 안전장치를 넣었다:
- *   · "/" 는 무조건 거절한다
- *   · -r 없이 디렉터리를 지우려 하면 거절한다
+ * This cannot be undone, so there are two guards against a slip:
+ *   - "/" is always refused
+ *   - removing a directory without -r is refused
  */
 #include "types.h"
 #include "string.h"
 #include "stdio.h"
 #include "unistd.h"
 
-/* linux_dirent64 오프셋 (ls.c 와 같다) */
+/* linux_dirent64 offsets (same as ls.c) */
 #define DIRENT_RECLEN 16
 #define DIRENT_NAME   19
 
@@ -48,17 +48,17 @@ static int remove_any(const char *path);
 static int remove_dir(const char *path)
 {
     long fd = lp_open(path, O_RDONLY | O_DIRECTORY, 0);
-    if (fd < 0) { oops("열 수 없습니다", path, fd); return 1; }
+    if (fd < 0) { oops("cannot open", path, fd); return 1; }
 
-    /* 스택에 둔다. static 이면 재귀가 부모의 목록을 덮어써서
-     * 항목이 남은 채로 rmdir 이 실패한다. */
+    /* Keep the buffer on the stack. As a static, recursion would overwrite
+     * the parent's listing and rmdir would fail on a non-empty directory. */
     char dbuf[8192];
     int  rc = 0;
 
     for (;;) {
         long n = sys_getdents((int)fd, dbuf, sizeof(dbuf));
         if (n == 0) break;
-        if (n < 0) { oops("읽기 실패", path, n); rc = 1; break; }
+        if (n < 0) { oops("read failed", path, n); rc = 1; break; }
 
         for (long off = 0; off < n; ) {
             char       *rec  = dbuf + off;
@@ -71,7 +71,7 @@ static int remove_dir(const char *path)
 
             char child[512];
             if (!join(child, sizeof(child), path, name)) {
-                dprintf(STDERR_FILENO, "rm: 경로가 너무 깁니다: %s\n", name);
+                dprintf(STDERR_FILENO, "rm: path too long: %s\n", name);
                 rc = 1;
                 continue;
             }
@@ -81,21 +81,22 @@ static int remove_dir(const char *path)
 
     lp_close((int)fd);
 
-    /* 안이 비어야 지워진다. 위에서 실패한 것이 있으면 여기서도 실패한다. */
+    /* rmdir only works on an empty directory, so anything that failed
+     * above makes this fail too. */
     long r = lp_rmdir(path);
-    if (r < 0) { oops("지울 수 없습니다", path, r); return 1; }
+    if (r < 0) { oops("cannot remove", path, r); return 1; }
     return rc;
 }
 
 static int remove_any(const char *path)
 {
     lp_stat_t st;
-    long r = lp_stat(path, &st, false);      /* 링크는 링크째로 지운다 */
-    if (r < 0) { oops("없습니다", path, r); return force ? 0 : 1; }
+    long r = lp_stat(path, &st, false);      /* remove the link, not its target */
+    if (r < 0) { oops("no such file", path, r); return force ? 0 : 1; }
 
     if ((st.mode & LP_S_IFMT) == LP_S_IFDIR) {
         if (!recursive) {
-            dprintf(STDERR_FILENO, "rm: %s 는 디렉터리입니다 (-r 을 쓰세요)\n", path);
+            dprintf(STDERR_FILENO, "rm: %s is a directory (use -r)\n", path);
             failures = 1;
             return 1;
         }
@@ -103,7 +104,7 @@ static int remove_any(const char *path)
     }
 
     r = lp_unlink(path);
-    if (r < 0) { oops("지울 수 없습니다", path, r); return force ? 0 : 1; }
+    if (r < 0) { oops("cannot remove", path, r); return force ? 0 : 1; }
     return 0;
 }
 
@@ -122,19 +123,19 @@ int main(int argc, char **argv)
     }
 
     if (first >= argc) {
-        dprintf(STDERR_FILENO, "사용법: rm [-r] [-f] <경로>...\n");
+        dprintf(STDERR_FILENO, "usage: rm [-r] [-f] <path>...\n");
         return force ? 0 : 2;
     }
 
     for (int i = first; i < argc; i++) {
-        /* 루트를 지우면 되돌릴 방법이 없다. 무조건 막는다.
-         * "/" 뿐 아니라 "//" 나 "/." 처럼 결국 루트인 것도 막는다. */
+        /* Removing the root leaves no way back, so it is always refused.
+         * Not just "/" but anything that resolves to it, like "//" or "/.". */
         const char *p = argv[i];
         bool only_root = true;
         for (const char *c = p; *c; c++)
             if (*c != '/' && *c != '.') { only_root = false; break; }
         if (only_root && p[0] == '/') {
-            dprintf(STDERR_FILENO, "rm: 루트(%s)는 지울 수 없습니다\n", p);
+            dprintf(STDERR_FILENO, "rm: refusing to remove the root (%s)\n", p);
             failures = 1;
             continue;
         }

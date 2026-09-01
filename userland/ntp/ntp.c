@@ -1,25 +1,26 @@
-/* ntp - 네트워크에서 시각을 받아 시스템 시계를 맞춘다.
+/* ntp - set the system clock from the network.
  *
- *   ntp                     기본 서버들에 물어보고 시계를 맞춘다
- *   ntp <서버|IP>...        지정한 서버에 물어본다
- *   ntp -r                  네트워크 없이, 저장해둔 마지막 시각으로 되돌린다
+ *   ntp                  ask the default servers and set the clock
+ *   ntp <server|IP>...   ask the servers you name
+ *   ntp -r               no network: restore the last saved time
+ *   ntp -d               daemon: save the time regularly and resync
  *
- * 왜 필요한가:
- *   Pi Zero 2 W 에는 배터리로 도는 시계(RTC)가 없다. 전원을 넣으면
- *   커널 시계가 1970년 1월 1일에서 시작한다. 그 상태에서 HTTPS 를 쓰면
- *   서버 인증서의 유효기간이 "아직 시작되지 않은 미래"로 보여서 검증이
- *   전부 실패한다. 시계가 맞아야 TLS 가 된다.
+ * Why this is needed:
+ *   The Pi Zero 2 W has no battery-backed clock. At power-on the kernel
+ *   clock starts at 1 January 1970. Try HTTPS in that state and every
+ *   server certificate looks like it starts in the future, so validation
+ *   fails across the board. TLS needs the clock to be right.
  *
- * 어떻게:
- *   SNTP(RFC 4330). NTP 패킷 48바이트를 UDP 123 으로 보내고 답에서
- *   transmit timestamp 를 읽는다. 정밀한 동기화(주파수 보정, 여러 서버
- *   비교)는 하지 않는다. 초 단위로 맞으면 인증서 검증에는 충분하다.
+ * How:
+ *   SNTP (RFC 4330). Send a 48-byte NTP packet to UDP 123 and read the
+ *   transmit timestamp out of the reply. No precise synchronisation - no
+ *   drift correction, no comparing servers. Seconds are enough for certs.
  *
- *   호스트 이름은 /etc/resolv.conf 의 네임서버에 A 레코드를 물어
- *   직접 해석한다. 우리 libc 에는 리졸버가 없다.
+ *   Host names are resolved here, by asking the nameserver in
+ *   /etc/resolv.conf for an A record. Our libc has no resolver.
  *
- * 맞춘 시각은 /data/.clock 에 남긴다. 다음 부팅에 네트워크가 없어도
- * -r 로 그 시각부터 시작할 수 있다. 1970년보다는 훨씬 낫다.
+ * The time we set is saved to /data/.clock, so the next boot can start
+ * from it with -r even with no network. Far better than 1970.
  */
 #include "types.h"
 #include "string.h"
@@ -28,15 +29,15 @@
 #include "unistd.h"
 #include "net.h"
 
-/* NTP 시각은 1900-01-01 기준, 유닉스 시각은 1970-01-01 기준.
- * 그 사이 70년(윤년 17번 포함)의 초. */
+/* NTP counts from 1900-01-01, unix time from 1970-01-01.
+ * This is the seconds between them: 70 years including 17 leap days. */
 #define NTP_UNIX_DELTA  2208988800LL
 
 #define NTP_PORT        123
 #define DNS_PORT        53
 #define CLOCK_FILE      "/data/.clock"
 
-/* 2020-01-01. 이보다 이른 답은 무언가 잘못된 것으로 본다. */
+/* 2020-01-01. An answer earlier than this means something is wrong. */
 #define SANITY_MIN      1577836800LL
 /* 2100-01-01 */
 #define SANITY_MAX      4102444800LL
@@ -48,8 +49,12 @@ static const char *DEFAULT_SERVERS[] = {
     NULL
 };
 
-/* ── 수신 제한시간 ──────────────────────────────────────────────
- * 응답이 없는 서버에 걸려 부팅이 멈추면 안 된다. */
+/* For the daemon: stay silent on failure. Spraying errors onto the
+ * console every hour would make the serial console unusable. */
+static bool quiet_mode = false;
+
+/* ── Receive timeout ──────────────────────────────────────────────
+ * Boot must not stall on a server that never answers. */
 static void set_timeout(int fd, long seconds)
 {
     /* struct __kernel_sock_timeval { s64 tv_sec; s64 tv_usec; } */
@@ -58,9 +63,9 @@ static void set_timeout(int fd, long seconds)
 }
 
 /* ── DNS ────────────────────────────────────────────────────────
- * A 레코드 하나만 필요하다. 최소한의 질의/응답 처리만 한다. */
+ * We only need one A record, so this is the bare minimum. */
 
-/* /etc/resolv.conf 에서 첫 네임서버를 읽는다. 못 읽으면 0. */
+/* First nameserver from /etc/resolv.conf. 0 if we cannot read one. */
 static u32 read_nameserver(void)
 {
     char buf[512];
@@ -73,7 +78,7 @@ static u32 read_nameserver(void)
         return 0;
     buf[n] = '\0';
 
-    /* "nameserver 1.2.3.4" 줄을 찾는다 */
+    /* Look for a "nameserver 1.2.3.4" line. */
     for (char *p = buf; *p; ) {
         char *line = p;
         while (*p && *p != '\n') p++;
@@ -87,13 +92,13 @@ static u32 read_nameserver(void)
 
         u32 addr = 0;
         if (ipv4_parse(ip, &addr))
-            return addr;        /* 네트워크 바이트 순서 */
+            return addr;        /* network byte order */
     }
     return 0;
 }
 
-/* 이름을 DNS 질의 형식으로 바꾼다: "a.b.com" -> 1'a' 1'b' 3'c''o''m' 0
- * 반환: 쓴 바이트 수, 넘치면 0. */
+/* Encode a name for a DNS query: "a.b.com" -> 1'a' 1'b' 3'c''o''m' 0
+ * Returns the bytes written, or 0 if it would not fit. */
 static size_t encode_name(u8 *out, size_t cap, const char *host)
 {
     size_t o = 0;
@@ -116,25 +121,25 @@ static size_t encode_name(u8 *out, size_t cap, const char *host)
     return o;
 }
 
-/* 이름 -> IPv4. 성공하면 네트워크 바이트 순서 주소, 실패하면 0. */
+/* Name to IPv4. The address in network order, or 0 on failure. */
 static u32 resolve(const char *host)
 {
-    /* 이미 숫자 주소면 그대로 쓴다 */
+    /* Already a numeric address? Use it as is. */
     u32 direct = 0;
     if (ipv4_parse(host, &direct))
         return direct;
 
     u32 ns = read_nameserver();
     if (ns == 0) {
-        dprintf(STDERR_FILENO, "ntp: 네임서버를 모릅니다 "
-                "(/etc/resolv.conf 가 비어 있습니다 - dhcp 를 먼저)\n");
+        dprintf(STDERR_FILENO, "ntp: no nameserver known "
+                "(/etc/resolv.conf is empty - run dhcp first)\n");
         return 0;
     }
 
     u8     query[512];
     size_t qlen = 0;
 
-    /* 헤더 12바이트: ID, 플래그(재귀 요청), 질문 1개 */
+    /* 12-byte header: ID, flags (recursion desired), one question. */
     u16 id = (u16)(lp_getpid() & 0xFFFF);
     query[qlen++] = (u8)(id >> 8);   query[qlen++] = (u8)id;
     query[qlen++] = 0x01;            query[qlen++] = 0x00;   /* RD */
@@ -165,13 +170,13 @@ static u32 resolve(const char *host)
         u8   resp[512];
         long n = lp_recvfrom((int)fd, resp, sizeof(resp), 0, NULL, NULL);
 
-        /* 헤더 + 질문부를 건너뛰고 답을 훑는다. 이름 압축 포인터(0xC0)를
-         * 만나면 2바이트, 아니면 라벨 길이만큼 건너뛴다. */
+        /* Skip the header and the question, then walk the answers. A name
+         * compression pointer (0xC0) is 2 bytes; otherwise skip the label. */
         if (n > 12 && resp[0] == (u8)(id >> 8) && resp[1] == (u8)id) {
             u16 ancount = (u16)((resp[6] << 8) | resp[7]);
             long off = 12;
 
-            /* 질문부의 이름 */
+            /* The name in the question section */
             while (off < n && resp[off] != 0) {
                 if ((resp[off] & 0xC0) == 0xC0) { off += 2; goto qtype; }
                 off += resp[off] + 1;
@@ -192,7 +197,7 @@ qtype:
                 u16 rdlen  = (u16)((resp[off + 8] << 8) | resp[off + 9]);
                 off += 10;
                 if (type == 1 && rdlen == 4 && off + 4 <= n) {
-                    memcpy(&result, resp + off, 4);   /* 이미 네트워크 순서 */
+                    memcpy(&result, resp + off, 4);   /* already network order */
                     break;
                 }
                 off += rdlen;
@@ -205,14 +210,15 @@ qtype:
 }
 
 /* ── SNTP ───────────────────────────────────────────────────────
- * 성공하면 유닉스 초, 실패하면 0. */
+ * Unix seconds on success, 0 on failure. */
 static s64 query_ntp(const char *server)
 {
     u32 addr = resolve(server);
     if (addr == 0) {
-        /* 이름을 못 찾은 것과 서버가 답을 안 하는 것은 원인이 전혀
-         * 다르다. 구분해서 알려야 사용자가 어디를 볼지 안다. */
-        dprintf(STDERR_FILENO, "ntp: %s: 이름을 찾을 수 없습니다\n", server);
+        /* A name that will not resolve and a server that will not answer
+         * have nothing in common. Say which, or nobody knows where to look. */
+        if (!quiet_mode)
+            dprintf(STDERR_FILENO, "ntp: %s: cannot resolve that name\n", server);
         return 0;
     }
 
@@ -226,8 +232,8 @@ static s64 query_ntp(const char *server)
     to.sin_port   = htons(NTP_PORT);
     to.sin_addr   = addr;
 
-    /* 48바이트. 첫 바이트만 채우면 된다:
-     *   LI=0(경고 없음) VN=4(NTPv4) Mode=3(클라이언트)
+    /* 48 bytes, and only the first one has to be filled in:
+     *   LI=0 (no warning) VN=4 (NTPv4) Mode=3 (client)
      *   0<<6 | 4<<3 | 3 = 0x23 */
     u8 pkt[48];
     memset(pkt, 0, sizeof(pkt));
@@ -237,13 +243,13 @@ static s64 query_ntp(const char *server)
     if (lp_sendto((int)fd, pkt, sizeof(pkt), 0, &to, sizeof(to)) > 0) {
         u8   resp[48];
         long n = lp_recvfrom((int)fd, resp, sizeof(resp), 0, NULL, NULL);
-        if (n < 0) {
+        if (n < 0 && !quiet_mode) {
             char ip[16];
             ipv4_format(addr, ip);
-            dprintf(STDERR_FILENO, "ntp: %s (%s): 응답 없음\n", server, ip);
+            dprintf(STDERR_FILENO, "ntp: %s (%s): no reply\n", server, ip);
         }
         if (n == (long)sizeof(resp)) {
-            /* transmit timestamp: 오프셋 40, 상위 4바이트가 초(빅엔디언) */
+            /* transmit timestamp at offset 40; the high 4 bytes are seconds */
             u32 secs = ((u32)resp[40] << 24) | ((u32)resp[41] << 16) |
                        ((u32)resp[42] << 8)  |  (u32)resp[43];
             if (secs != 0)
@@ -255,8 +261,18 @@ static s64 query_ntp(const char *server)
     return result;
 }
 
-/* ── 저장/복원 ──────────────────────────────────────────────────
- * RTC 가 없으니 우리가 대신한다. 완벽하지 않지만 1970년보다는 낫다. */
+static s64 query_ntp_quiet(const char *server)
+{
+    bool saved = quiet_mode;
+    quiet_mode = true;
+    s64 t = query_ntp(server);
+    quiet_mode = saved;
+    return t;
+}
+
+/* ── Save and restore ────────────────────────────────────────────
+ * There is no RTC, so we stand in for one. Imperfect, but far better
+ * than starting at 1970. */
 
 static void save_clock(s64 t)
 {
@@ -264,7 +280,7 @@ static void save_clock(s64 t)
     int  len = snprintf(buf, sizeof(buf), "%lld\n", (long long)t);
     long fd = lp_open(CLOCK_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
-        return;                      /* /data 가 없으면 그냥 넘어간다 */
+        return;                      /* no /data: nothing to do */
     lp_write((int)fd, buf, (size_t)len);
     lp_close((int)fd);
 }
@@ -281,8 +297,8 @@ static s64 load_clock(void)
         return 0;
     buf[n] = '\0';
 
-    /* 우리 libc 에는 atoll 이 없다. 유닉스 초는 이미 10자리라
-     * atoi(32비트)로는 부족하므로 여기서 직접 읽는다. */
+    /* Our libc has no atoll, and unix seconds are already 10 digits -
+     * too many for a 32-bit atoi - so parse it here. */
     s64 v = 0;
     for (const char *c = buf; *c >= '0' && *c <= '9'; c++)
         v = v * 10 + (*c - '0');
@@ -291,52 +307,88 @@ static s64 load_clock(void)
 
 static void report(s64 t)
 {
-    /* 우리 printf 에는 시각 서식이 없다. 날짜를 직접 계산한다. */
-    s64 days = t / 86400;
-    int hh = (int)((t % 86400) / 3600);
-    int mm = (int)((t % 3600) / 60);
-    int ss = (int)(t % 60);
-
-    /* 1970-01-01 부터 날짜 수를 년/월/일로. */
-    int y = 1970;
-    for (;;) {
-        bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
-        int  len  = leap ? 366 : 365;
-        if (days < len) break;
-        days -= len;
-        y++;
-    }
-    bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
-    int mdays[12] = { 31, leap ? 29 : 28, 31, 30, 31, 30,
-                      31, 31, 30, 31, 30, 31 };
-    int mo = 0;
-    while (mo < 12 && days >= mdays[mo]) { days -= mdays[mo]; mo++; }
-
+    lp_tm_t tm;
+    lp_gmtime(t, &tm);
     printf("ntp: %d-%02d-%02d %02d:%02d:%02d UTC\n",
-           y, mo + 1, (int)days + 1, hh, mm, ss);
+           tm.year, tm.mon, tm.day, tm.hour, tm.min, tm.sec);
+}
+
+/* ── The daemon ──────────────────────────────────────────────────
+ * This board has no battery-backed clock. Pull the power and time stops
+ * dead - that is hardware, and no software can fix it.
+ *
+ * What we can do is write the time down often. Then the next boot picks
+ * up from just before the power went. How often we save is the worst
+ * case error: at every 30s, a sudden power cut costs under 30 seconds.
+ *
+ * The card's endurance is not a worry: 32 bytes every 30s is 92KB a day,
+ * rewriting the same block, and wear levelling spreads that around.
+ *
+ * We also resync from the network hourly. Save-and-restore alone falls
+ * behind by however long the machine was off. */
+#define SAVE_EVERY_SEC   30
+#define RESYNC_EVERY_SEC 3600
+
+static int run_daemon(const char **servers)
+{
+    printf("ntp: daemon started (saving every %ds, resyncing every %dmin)\n",
+           SAVE_EVERY_SEC, RESYNC_EVERY_SEC / 60);
+
+    s64 last_sync = 0;
+
+    for (;;) {
+        s64 now = lp_time();
+
+        /* Only save a plausible time. Saving 1970 would send the next boot
+         * back to it, which is worse than nothing. */
+        if (now >= SANITY_MIN)
+            save_clock(now);
+
+        if (now - last_sync >= RESYNC_EVERY_SEC || last_sync == 0) {
+            for (int i = 0; servers[i]; i++) {
+                s64 t = query_ntp_quiet(servers[i]);
+                if (t >= SANITY_MIN && t <= SANITY_MAX) {
+                    if (lp_settime(t) == 0)
+                        save_clock(t);
+                    break;
+                }
+            }
+            last_sync = lp_time();
+        }
+
+        lp_sleep_ms(SAVE_EVERY_SEC * 1000);
+    }
+    return 0;   /* not reached */
 }
 
 int main(int argc, char **argv)
 {
-    /* -r: 네트워크 없이 저장해둔 시각으로. 부팅 초반에 쓴다. */
+    /* -r: restore the saved time without a network. Used early in boot. */
     if (argc > 1 && strcmp(argv[1], "-r") == 0) {
         s64 saved = load_clock();
         if (saved < SANITY_MIN) {
-            dprintf(STDERR_FILENO, "ntp: 저장된 시각이 없습니다\n");
+            dprintf(STDERR_FILENO, "ntp: no saved time\n");
             return 1;
         }
-        /* 이미 더 나중이면 되돌리지 않는다. 시계는 뒤로 가면 안 된다. */
+        /* Never move the clock backwards. */
         if (lp_time() >= saved) {
-            printf("ntp: 시계가 이미 더 앞서 있습니다\n");
+            printf("ntp: the clock is already ahead of that\n");
             return 0;
         }
         if (lp_settime(saved) < 0) {
-            dprintf(STDERR_FILENO, "ntp: 시계를 맞출 수 없습니다 (root 인가요?)\n");
+            dprintf(STDERR_FILENO, "ntp: cannot set the clock (are you root?)\n");
             return 1;
         }
-        printf("ntp: 저장된 시각으로 되돌림 (네트워크 아님)\n");
+        printf("ntp: restored the saved time (not from the network)\n");
         report(saved);
         return 0;
+    }
+
+    bool daemon = false;
+    if (argc > 1 && strcmp(argv[1], "-d") == 0) {
+        daemon = true;
+        argv++;
+        argc--;
     }
 
     const char **servers = DEFAULT_SERVERS;
@@ -349,27 +401,30 @@ int main(int argc, char **argv)
         servers = from_args;
     }
 
+    if (daemon)
+        return run_daemon(servers);
+
     for (int i = 0; servers[i]; i++) {
         s64 t = query_ntp(servers[i]);
         if (t < SANITY_MIN || t > SANITY_MAX) {
             if (t != 0)
-                dprintf(STDERR_FILENO, "ntp: %s 의 답이 이상합니다\n", servers[i]);
+                dprintf(STDERR_FILENO, "ntp: %s gave an implausible answer\n", servers[i]);
             continue;
         }
         if (lp_settime(t) < 0) {
-            dprintf(STDERR_FILENO, "ntp: 시계를 맞출 수 없습니다 (root 인가요?)\n");
+            dprintf(STDERR_FILENO, "ntp: cannot set the clock (are you root?)\n");
             return 1;
         }
-        printf("ntp: %s 에서 시각을 받았습니다\n", servers[i]);
+        printf("ntp: got the time from %s\n", servers[i]);
         report(t);
         save_clock(t);
         return 0;
     }
 
     dprintf(STDERR_FILENO,
-            "ntp: 시각을 받지 못했습니다.\n"
-            "     UDP 123 이 막혀 있거나(공용 와이파이·회사망에서 흔합니다)\n"
-            "     아직 주소를 못 받았을 수 있습니다. 다른 서버를 쓰려면:\n"
-            "       ntp <서버주소>\n");
+            "ntp: could not get the time.\n"
+            "     UDP 123 may be blocked (common on public and office networks),\n"
+            "     or there may be no address yet. To use another server:\n"
+            "       ntp <server>\n");
     return 1;
 }

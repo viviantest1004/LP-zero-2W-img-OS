@@ -1,13 +1,13 @@
-/* net.h - 소켓과 네트워크 인터페이스 설정.
+/* net.h - sockets and network interface configuration.
  *
- * IPv4 만 다룬다. 커널이 TCP/IP 를 처리하므로 우리가 만들 것은
- * 소켓 래퍼와 인터페이스 설정(ioctl) 뿐이다. */
+ * IPv4 only. The kernel does TCP/IP, so all we write are the socket
+ * wrappers and the interface ioctls. */
 #ifndef _LP_NET_H
 #define _LP_NET_H
 
 #include "types.h"
 
-/* 주소 패밀리 / 소켓 타입 */
+/* Address families and socket types */
 #define AF_INET         2
 #define AF_PACKET      17
 #define SOCK_STREAM     1
@@ -24,7 +24,7 @@
 #define SO_BINDTODEVICE 25
 #define SO_RCVTIMEO_NEW 66
 
-/* 인터페이스 ioctl */
+/* Interface ioctls */
 #define SIOCGIFFLAGS    0x8913
 #define SIOCSIFFLAGS    0x8914
 #define SIOCGIFADDR     0x8915
@@ -39,15 +39,15 @@
 
 #define IFNAMSIZ        16
 
-/* struct sockaddr_in - 커널이 기대하는 배치 그대로 */
+/* struct sockaddr_in - exactly the layout the kernel expects */
 typedef struct {
     u16 sin_family;
-    u16 sin_port;       /* 네트워크 바이트 순서 */
-    u32 sin_addr;       /* 네트워크 바이트 순서 */
+    u16 sin_port;       /* network byte order */
+    u32 sin_addr;       /* network byte order */
     u8  sin_zero[8];
 } sockaddr_in_t;
 
-/* 바이트 순서 변환. AArch64 는 리틀엔디언이므로 실제로 뒤집는다. */
+/* Byte order. AArch64 is little endian, so these really do swap. */
 static inline u16 htons(u16 v) { return (u16)((v << 8) | (v >> 8)); }
 static inline u16 ntohs(u16 v) { return htons(v); }
 static inline u32 htonl(u32 v)
@@ -57,7 +57,7 @@ static inline u32 htonl(u32 v)
 }
 static inline u32 ntohl(u32 v) { return htonl(v); }
 
-/* ── 소켓 ── */
+/* ── Sockets ── */
 long lp_socket(int family, int type, int proto);
 long lp_bind(int fd, const void *addr, u32 addrlen);
 long lp_connect(int fd, const void *addr, u32 addrlen);
@@ -67,21 +67,21 @@ long lp_recvfrom(int fd, void *buf, size_t n, int flags,
                  void *addr, u32 *addrlen);
 long lp_setsockopt(int fd, int level, int opt, const void *val, u32 len);
 
-/* ── 인터페이스 설정 ── */
+/* ── Interface configuration ── */
 long net_if_up(const char *ifname);
 long net_if_down(const char *ifname);
 bool net_if_is_up(const char *ifname);
 long net_if_index(const char *ifname, int *index_out);
 long net_if_hwaddr(const char *ifname, u8 mac[6]);
-/* 현재 IPv4 주소를 읽는다. 주소가 없으면 음수. */
+/* Read the current IPv4 address. Negative if it has none. */
 long net_get_addr(const char *ifname, u32 *addr_be);
-long net_set_addr(const char *ifname, u32 addr_be);      /* 네트워크 순서 */
+long net_set_addr(const char *ifname, u32 addr_be);      /* network order */
 long net_set_netmask(const char *ifname, u32 mask_be);
 long net_add_default_route(const char *ifname, u32 gw_be);
 
-/* "192.168.0.1" -> 네트워크 순서 u32. 실패 시 false. */
+/* "192.168.0.1" -> u32 in network order. false on failure. */
 bool ipv4_parse(const char *s, u32 *out_be);
-/* 네트워크 순서 u32 -> "192.168.0.1". buf 는 16바이트 이상. */
+/* u32 in network order -> "192.168.0.1". buf must hold 16 bytes. */
 void ipv4_format(u32 addr_be, char *buf);
 
 #endif /* _LP_NET_H */

@@ -1,16 +1,16 @@
-/* mv - 파일을 옮기거나 이름을 바꾼다.
+/* mv - move or rename files.
  *
- *   mv <원본> <대상>
- *   mv <원본>... <디렉터리>
+ *   mv <source> <dest>
+ *   mv <source>... <directory>
  *
- * 같은 파일시스템 안에서는 rename 하나로 끝난다 - 내용을 옮기지 않고
- * 디렉터리 항목만 바꾸므로 크기와 무관하게 즉시 끝나고, 중간에 전원이
- * 나가도 반쪽짜리 파일이 남지 않는다.
+ * Within one filesystem this is a single rename. No data moves - only the
+ * directory entry changes - so it is instant whatever the file size, and a
+ * power cut cannot leave a half-written file behind.
  *
- * 파일시스템이 다르면(EXDEV) rename 이 안 된다. 예를 들어 RAM 인 /tmp
- * 에서 SD 인 /data 로 옮길 때다. 그때는 복사한 뒤 원본을 지운다.
- * cp 를 부르지 않고 여기서 직접 하는 이유는, 복사가 실패했을 때
- * 원본을 지우면 안 되기 때문이다.
+ * Across filesystems rename fails with EXDEV - moving from /tmp (RAM) to
+ * /data (SD card), say. Then we copy and remove the original instead.
+ * We do that here rather than calling cp, because the original must not be
+ * removed when the copy fails.
  */
 #include "types.h"
 #include "string.h"
@@ -43,31 +43,31 @@ static bool join(char *out, size_t cap, const char *dir, const char *name)
     return strlcat(out, name, cap) < cap;
 }
 
-/* 파일시스템을 넘을 때: 복사 -> 확인 -> 원본 삭제. 순서가 중요하다. */
+/* Crossing filesystems: copy, check, then remove. The order matters. */
 static int move_across(const char *src, const char *dst)
 {
     lp_stat_t st;
     long r = lp_stat(src, &st, true);
     if (r < 0) {
-        dprintf(STDERR_FILENO, "mv: %s: 읽을 수 없습니다 (%ld)\n", src, -r);
+        dprintf(STDERR_FILENO, "mv: %s: cannot read (%ld)\n", src, -r);
         return 1;
     }
     if ((st.mode & LP_S_IFMT) == LP_S_IFDIR) {
         dprintf(STDERR_FILENO,
-                "mv: %s: 파일시스템을 넘는 디렉터리 이동은 지원하지 않습니다\n"
-                "    (cp -r 로 복사한 뒤 rm -r 로 지우세요)\n", src);
+                "mv: %s: moving a directory across filesystems is not supported\n"
+                "    (copy it with cp -r, then remove it with rm -r)\n", src);
         return 1;
     }
 
     long in = lp_open(src, O_RDONLY, 0);
     if (in < 0) {
-        dprintf(STDERR_FILENO, "mv: %s: 열 수 없습니다 (%ld)\n", src, -in);
+        dprintf(STDERR_FILENO, "mv: %s: cannot open (%ld)\n", src, -in);
         return 1;
     }
     long out = lp_open(dst, O_WRONLY | O_CREAT | O_TRUNC, st.mode & 07777);
     if (out < 0) {
         lp_close((int)in);
-        dprintf(STDERR_FILENO, "mv: %s: 만들 수 없습니다 (%ld)\n", dst, -out);
+        dprintf(STDERR_FILENO, "mv: %s: cannot create (%ld)\n", dst, -out);
         return 1;
     }
 
@@ -76,11 +76,11 @@ static int move_across(const char *src, const char *dst)
     for (;;) {
         long n = lp_read((int)in, buf, sizeof(buf));
         if (n == 0) break;
-        if (n < 0) { dprintf(STDERR_FILENO, "mv: 읽기 실패 (%ld)\n", -n); rc = 1; break; }
+        if (n < 0) { dprintf(STDERR_FILENO, "mv: read failed (%ld)\n", -n); rc = 1; break; }
         long off = 0;
         while (off < n) {
             long w = lp_write((int)out, buf + off, (size_t)(n - off));
-            if (w <= 0) { dprintf(STDERR_FILENO, "mv: 쓰기 실패 (%ld)\n", -w); rc = 1; break; }
+            if (w <= 0) { dprintf(STDERR_FILENO, "mv: write failed (%ld)\n", -w); rc = 1; break; }
             off += w;
         }
         if (rc) break;
@@ -89,7 +89,7 @@ static int move_across(const char *src, const char *dst)
     lp_close((int)out);
 
     if (rc != 0) {
-        /* 반쪽만 쓰인 대상을 남기면 안 된다. 원본은 그대로 둔다. */
+        /* Do not leave a half-written destination. The original stays. */
         lp_unlink(dst);
         return 1;
     }
@@ -99,7 +99,7 @@ static int move_across(const char *src, const char *dst)
     long u = lp_unlink(src);
     if (u < 0) {
         dprintf(STDERR_FILENO,
-                "mv: %s 는 복사했지만 원본을 지우지 못했습니다 (%ld)\n", dst, -u);
+                "mv: copied to %s but could not remove the original (%ld)\n", dst, -u);
         return 1;
     }
     return 0;
@@ -113,14 +113,14 @@ static int move_one(const char *src, const char *dst)
     if (r == -EXDEV)
         return move_across(src, dst);
 
-    dprintf(STDERR_FILENO, "mv: %s -> %s: 실패 (%ld)\n", src, dst, -r);
+    dprintf(STDERR_FILENO, "mv: %s -> %s: failed (%ld)\n", src, dst, -r);
     return 1;
 }
 
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        dprintf(STDERR_FILENO, "사용법: mv <원본>... <대상>\n");
+        dprintf(STDERR_FILENO, "usage: mv <source>... <dest>\n");
         return 2;
     }
 
@@ -128,7 +128,7 @@ int main(int argc, char **argv)
     bool dst_is_dir = lp_is_dir(dst);
 
     if (argc - 1 > 2 && !dst_is_dir) {
-        dprintf(STDERR_FILENO, "mv: 원본이 여러 개면 대상은 디렉터리여야 합니다\n");
+        dprintf(STDERR_FILENO, "mv: with several sources the destination must be a directory\n");
         return 2;
     }
 
@@ -136,7 +136,7 @@ int main(int argc, char **argv)
         if (dst_is_dir) {
             char full[512];
             if (!join(full, sizeof(full), dst, basename_of(argv[i]))) {
-                dprintf(STDERR_FILENO, "mv: 경로가 너무 깁니다\n");
+                dprintf(STDERR_FILENO, "mv: path too long\n");
                 failures = 1;
                 continue;
             }

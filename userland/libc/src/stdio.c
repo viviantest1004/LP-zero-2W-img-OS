@@ -1,20 +1,20 @@
-/* stdio.c - 최소 printf 계열.
- * 부동소수점은 지원하지 않는다. 셸과 init 에는 필요 없고, 넣으면
- * 코드가 몇 배로 커진다. */
+/* stdio.c - a minimal printf family.
+ * No floating point. The shell and init do not need it, and adding it
+ * would multiply the code size. */
 #include "stdio.h"
 #include "string.h"
 #include "unistd.h"
 
 #include <stdarg.h>
 
-/* 출력 대상을 추상화한다. 파일 디스크립터로 흘리거나(sink_fd)
- * 버퍼에 담거나(sink_buf) 같은 포맷 코드를 공유하기 위함. */
+/* An abstraction over where output goes, so the same formatting code
+ * serves both a file descriptor (sink_fd) and a buffer (sink_buf). */
 typedef struct {
-    int     fd;         /* fd >= 0 이면 파일로, 아니면 버퍼로 */
+    int     fd;         /* fd >= 0 goes to a file, otherwise to the buffer */
     char   *buf;
-    size_t  cap;        /* buf 크기 (NUL 자리 포함) */
-    size_t  len;        /* 지금까지 만들어진 길이 (잘려도 계속 센다) */
-    char    chunk[256]; /* fd 모드용 쓰기 버퍼 */
+    size_t  cap;        /* size of buf, including room for the NUL */
+    size_t  len;        /* length produced so far, counted past truncation */
+    char    chunk[256]; /* write buffer, for fd mode */
     size_t  chunk_len;
 } sink_t;
 
@@ -37,13 +37,13 @@ static void sink_put(sink_t *s, char c)
         return;
     }
 
-    /* 버퍼 모드: 넘치면 버리되 len 은 계속 센다 (snprintf 규약) */
+    /* Buffer mode: drop the overflow but keep counting, as snprintf does. */
     if (s->buf && s->len <= s->cap - 1)
         s->buf[s->len - 1] = c;
 }
 
-/* 숫자를 buf 에 문자열로 만들고 길이를 돌려준다.
- * 패딩은 하지 않는다 - 정렬은 emit_padded 가 맡는다. */
+/* Render a number into buf and return its length.
+ * No padding here - emit_padded handles alignment. */
 static unsigned fmt_uint(char *buf, unsigned cap, u64 v, unsigned base, bool upper)
 {
     static const char lo[] = "0123456789abcdef";
@@ -68,11 +68,11 @@ static unsigned fmt_uint(char *buf, unsigned cap, u64 v, unsigned base, bool upp
     return len;
 }
 
-/* 폭을 맞춰 출력한다.
- *   left  = true 면 오른쪽에 채운다 ("%-10s")
- *   pad   = 채울 문자 ('0' 또는 ' ')
- * 부호가 있는 값을 '0' 으로 채울 때는 부호가 먼저 나와야 하므로
- * 호출자가 sign 을 따로 넘긴다. */
+/* Emit a field padded to a width.
+ *   left  true pads on the right ("%-10s")
+ *   pad   the fill character, '0' or ' '
+ * Zero padding a signed value has to put the sign first, so the caller
+ * passes the sign separately. */
 static void emit_padded(sink_t *s, const char *sign, const char *str,
                         unsigned len, unsigned width, bool left, char pad)
 {
@@ -83,11 +83,11 @@ static void emit_padded(sink_t *s, const char *sign, const char *str,
     if (left) {
         if (sign) sink_put(s, *sign);
         for (unsigned i = 0; i < len; i++) sink_put(s, str[i]);
-        while (fill--) sink_put(s, ' ');     /* 왼쪽 정렬은 항상 공백 */
+        while (fill--) sink_put(s, ' ');     /* left aligned always pads with spaces */
         return;
     }
 
-    /* 오른쪽 정렬. '0' 으로 채울 때는 부호가 채움 앞에 와야 한다. */
+    /* Right aligned. With '0' padding the sign comes before the fill. */
     if (pad == '0' && sign) sink_put(s, *sign);
     while (fill--) sink_put(s, pad);
     if (pad != '0' && sign) sink_put(s, *sign);
@@ -110,7 +110,7 @@ static void emit_int(sink_t *s, s64 v, unsigned width, bool left, bool zero_pad)
 
     if (v < 0) {
         sign = "-";
-        /* -(-2^63) 은 넘친다. 부호를 먼저 떼어내 피한다. */
+        /* -(-2^63) overflows. Take the sign off first to avoid it. */
         mag = (u64)(-(v + 1)) + 1;
     } else {
         mag = (u64)v;
@@ -126,7 +126,7 @@ static void format(sink_t *s, const char *fmt, va_list ap)
         if (*fmt != '%') { sink_put(s, *fmt++); continue; }
         fmt++;
 
-        /* 플래그는 순서에 상관없이 올 수 있다 ("%-05d" 도 유효) */
+        /* Flags may come in any order; "%-05d" is valid too. */
         bool left_align = false, zero_pad = false;
         for (;;) {
             if (*fmt == '-') { left_align = true; fmt++; continue; }
@@ -226,7 +226,7 @@ int snprintf(char *buf, size_t size, const char *fmt, ...)
         size_t end = (s.len < size - 1) ? s.len : size - 1;
         buf[end] = '\0';
     }
-    return (int)s.len;   /* 잘렸어도 필요했던 전체 길이를 돌려준다 */
+    return (int)s.len;   /* the full length needed, even when truncated */
 }
 
 int fputs(const char *s, int fd)
@@ -265,15 +265,19 @@ long readline(int fd, char *buf, size_t size)
         if (c == '\n')
             break;
 
-        /* 백스페이스: 커널 라인 편집이 없을 때를 위한 최소 처리 */
+        /* Backspace: the bare minimum, for when the kernel is not doing
+         *
+         * line editing. Erase a character, not a byte: Hangul is 3 bytes,
+         * and erasing one would leave a broken fragment in the buffer. */
         if (c == 0x7F || c == '\b') {
-            if (n) n--;
+            if (n)
+                n = utf8_prev(buf, n);
             continue;
         }
 
         if (n < size - 1)
             buf[n++] = c;
-        /* 넘치면 버린다. 잘림은 호출자가 길이로 알 수 있다. */
+        /* Drop the overflow. The caller sees truncation in the length. */
     }
 
     buf[n] = '\0';

@@ -1,4 +1,4 @@
-/* types.h - 자체 libc 기본 타입. 시스템 헤더를 쓰지 않는다. */
+/* types.h - base types for our own libc. No system headers. */
 #ifndef _LP_TYPES_H
 #define _LP_TYPES_H
 
@@ -27,6 +27,6 @@ typedef _Bool bool;
 #define true  1
 #define false 0
 
-_Static_assert(sizeof(long) == 8, "AArch64 LP64 를 가정한다");
+_Static_assert(sizeof(long) == 8, "this assumes AArch64 LP64");
 
 #endif /* _LP_TYPES_H */

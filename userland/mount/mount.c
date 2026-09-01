@@ -1,14 +1,14 @@
-/* mount - 파일시스템 마운트/해제.
+/* mount - mount and unmount filesystems.
  *
- *   mount                          마운트 목록 (/proc/mounts)
- *   mount <장치> <위치>            타입 자동 추정
- *   mount -t <타입> <장치> <위치>
- *   mount -o ro ...                읽기 전용
- *   umount <위치>                  (argv[0] 이 umount 면)
+ *   mount                        list what is mounted (/proc/mounts)
+ *   mount <device> <dir>         guess the filesystem type
+ *   mount -t <type> <device> <dir>
+ *   mount -o ro ...              read only
+ *   umount <dir>                 (when argv[0] is umount)
  *
- * 타입을 안 주면 아래 목록을 차례로 시도한다. 커널이 맞지 않는 타입에는
- * EINVAL 을 돌려주므로 하나씩 넣어보면 된다. 우리 커널에 들어 있는
- * 파일시스템이 몇 개 안 되므로 금방 끝난다. */
+ * With no type given we try the list below in order. The kernel returns
+ * EINVAL for a type that does not fit, so trying them one by one works.
+ * Our kernel only carries a handful of filesystems, so this is quick. */
 #include "types.h"
 #include "string.h"
 #include "stdio.h"
@@ -21,8 +21,8 @@ static int show_mounts(void)
 {
     long fd = lp_open("/proc/mounts", O_RDONLY, 0);
     if (fd < 0) {
-        dprintf(STDERR_FILENO, "mount: /proc/mounts 를 읽을 수 없습니다"
-                " (/proc 가 마운트되어 있습니까?)\n");
+        dprintf(STDERR_FILENO, "mount: cannot read /proc/mounts"
+                " (is /proc mounted?)\n");
         return 1;
     }
 
@@ -40,7 +40,7 @@ static int do_umount(const char *target)
 {
     long rc = sys_call2(SYS_umount2, (long)target, 0);
     if (rc < 0) {
-        dprintf(STDERR_FILENO, "umount: %s: 실패 (%ld)\n", target, -rc);
+        dprintf(STDERR_FILENO, "umount: %s: failed (%ld)\n", target, -rc);
         return 1;
     }
     return 0;
@@ -48,13 +48,13 @@ static int do_umount(const char *target)
 
 int main(int argc, char **argv)
 {
-    /* argv[0] 로 umount 여부를 판단한다 (같은 바이너리를 두 이름으로 둔다) */
+    /* argv[0] decides: the same binary is installed under both names. */
     const char *base = strrchr(argv[0], '/');
     base = base ? base + 1 : argv[0];
 
     if (strcmp(base, "umount") == 0) {
         if (argc < 2) {
-            dprintf(STDERR_FILENO, "사용법: umount <위치>\n");
+            dprintf(STDERR_FILENO, "usage: umount <dir>\n");
             return 2;
         }
         return do_umount(argv[1]);
@@ -84,18 +84,18 @@ int main(int argc, char **argv)
 
     if (nargs < 2) {
         dprintf(STDERR_FILENO,
-                "사용법: mount [-t 타입] [-o ro|bind] <원본> <위치>\n");
+                "usage: mount [-t type] [-o ro|bind] <source> <dir>\n");
         return 2;
     }
 
     const char *src = args[0], *dst = args[1];
 
-    /* bind 마운트는 파일시스템 타입이 없다. 디렉터리를 다른 위치에도
-     * 보이게 하는 것이라 원본의 타입을 그대로 쓴다. */
+    /* A bind mount has no filesystem type. It makes a directory visible at
+     * a second place, so it keeps the type of the original. */
     if (flags & MS_BIND) {
         long rc = lp_mount(src, dst, NULL, flags, NULL);
         if (rc < 0) {
-            dprintf(STDERR_FILENO, "mount: bind %s -> %s: 실패 (%ld)\n",
+            dprintf(STDERR_FILENO, "mount: bind %s -> %s: failed (%ld)\n",
                     src, dst, -rc);
             return 1;
         }
@@ -105,14 +105,14 @@ int main(int argc, char **argv)
     if (type) {
         long rc = lp_mount(src, dst, type, flags, NULL);
         if (rc < 0) {
-            dprintf(STDERR_FILENO, "mount: %s -> %s (%s): 실패 (%ld)\n",
+            dprintf(STDERR_FILENO, "mount: %s -> %s (%s): failed (%ld)\n",
                     src, dst, type, -rc);
             return 1;
         }
         return 0;
     }
 
-    /* 타입 자동 추정 */
+    /* Guess the type. */
     long last = -1;
     for (int i = 0; AUTO_TYPES[i]; i++) {
         long rc = lp_mount(src, dst, AUTO_TYPES[i], flags, NULL);
@@ -123,7 +123,7 @@ int main(int argc, char **argv)
         last = rc;
     }
 
-    dprintf(STDERR_FILENO, "mount: %s -> %s: 맞는 파일시스템이 없습니다 (%ld)\n",
+    dprintf(STDERR_FILENO, "mount: %s -> %s: no filesystem fits (%ld)\n",
             src, dst, -last);
     return 1;
 }

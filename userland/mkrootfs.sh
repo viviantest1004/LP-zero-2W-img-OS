@@ -113,23 +113,26 @@ chmod 700 "${ROOT_DIR}/root/.ssh" "${ROOT_DIR}/root"
 cat > "${ROOT_DIR}/etc/motd" <<'MOTD'
 LP-zero OS
 
-  펌웨어(베어메탈) -> 리눅스 커널 -> 자체 libc -> 자체 init -> 자체 셸
+  bare-metal firmware -> Linux kernel -> own libc -> own init -> own shell
 
-★ 저장 위치에 주의하세요
+Where files live
 
-  /data     SD 카드. 재부팅해도 남습니다.
-  /root     홈. /data 에 붙어 있어 남습니다.
-  그 밖     RAM. 재부팅하면 사라집니다 (/tmp, /etc 포함).
+  /data     the SD card. Survives a reboot.
+  /root     home. Bound to /data, so it survives too.
+  anywhere else   RAM. Gone on reboot, including /tmp and /etc.
 
-  파일을 남기려면 /data 나 홈(/root) 안에 두세요.
+  To keep a file, put it under /data or in your home directory.
 
-명령      help          내장 명령 목록
-계산      calc 2+3*4    사칙연산·16진수·2진수 (즉시 실행)
-파이썬    python        /data 에 있습니다
-상태      sysinfo / zram status / ls /data
-시각      ntp           이 보드에는 시계 배터리가 없습니다.
-                        시각이 틀리면 HTTPS 인증서 검증이 실패합니다.
-자동실행  /data/rc.local 에 적어두면 부팅할 때 실행됩니다
+  help        list the built-in commands
+  edit FILE   text editor        touch FILE   create an empty file
+  calc 2+3*4  decimal, hex and binary at once
+  date        the time. This board has no clock battery, and a wrong
+              clock makes every HTTPS certificate check fail.
+              'ntp' sets it from the network, 'date -z list' picks a zone.
+  python      on /data
+  sysinfo     how the machine is doing
+
+  Commands in /data/rc.local run at every boot.
 MOTD
 
 echo ""

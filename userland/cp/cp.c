@@ -1,21 +1,21 @@
-/* cp - 파일을 복사한다.
+/* cp - copy files.
  *
- *   cp <원본> <대상>
- *   cp <원본>... <디렉터리>
- *   cp -r <원본>... <대상>      디렉터리째
- *   cp -n <원본> <대상>         대상이 이미 있으면 그대로 둔다 (성공)
- *   cp -q <원본> <대상>         원본이 없어도 오류 메시지를 내지 않는다
- *                               (종료 코드는 여전히 실패)
+ *   cp <source> <dest>
+ *   cp <source>... <directory>
+ *   cp -r <source>... <dest>    including directories
+ *   cp -n <source> <dest>       leave the destination alone if it exists (success)
+ *   cp -q <source> <dest>       stay quiet when the source is missing
+ *                               (the exit status still says it failed)
  *
- * -n 과 -q 는 부팅 스크립트(/etc/rc)를 위한 것이다. 우리 셸에는 if 도
- * test 도 없어서 "있으면 건너뛰고 없으면 만든다"를 표현할 방법이
- * 이것뿐이다.
+ * -n and -q exist for the boot script (/etc/rc). Our shell has neither if
+ * nor test, so this is the only way to say "skip it if it is already there,
+ * create it if it is not".
  *
- * 권한은 원본을 따라간다. 소유자·시각은 옮기지 않는다 - 이 시스템은
- * 사용자가 root 하나뿐이라 의미가 없다.
+ * Permissions follow the source. Owner and timestamps do not - there is
+ * only one user on this system, so they would mean nothing.
  *
- * 원본과 대상이 같은 파일이면 거절한다. 그대로 열면 O_TRUNC 로 원본을
- * 먼저 비워버려 내용이 사라진다.
+ * Copying a file onto itself is refused. Opening it would truncate the
+ * source before reading it, and the contents would be gone.
  */
 #include "types.h"
 #include "string.h"
@@ -24,8 +24,8 @@
 
 #define BUF_SIZE  32768
 
-/* linux_dirent64 의 오프셋. 구조체를 정의하지 않는 이유는
- * 컴파일러의 패딩 규칙에 의존하지 않기 위해서다. (ls.c 와 같다) */
+/* linux_dirent64 offsets. We read by offset rather than declaring a
+ * struct, so nothing depends on the compiler's padding. (Same as ls.c) */
 #define DIRENT_RECLEN 16
 #define DIRENT_NAME   19
 #define EEXIST    17
@@ -40,12 +40,12 @@ static int  failures   = 0;
 static void oops(const char *what, const char *path, long rc)
 {
     if (quiet && rc == -ENOENT)
-        return;                 /* 조용히. 실패 표시는 그대로 남긴다. */
+        return;                 /* stay quiet, but still count it as a failure */
     dprintf(STDERR_FILENO, "cp: %s: %s (%ld)\n", path, what, -rc);
     failures = 1;
 }
 
-/* 경로의 마지막 요소. "/a/b/c" -> "c", "/a/b/" -> "b" */
+/* Last element of a path. "/a/b/c" -> "c", "/a/b/" -> "b" */
 static const char *basename_of(const char *path)
 {
     const char *last = path;
@@ -55,7 +55,7 @@ static const char *basename_of(const char *path)
     return last;
 }
 
-/* dir 과 name 을 이어 붙인다. 넘치면 false. */
+/* Join dir and name. false if it would not fit. */
 static bool join(char *out, size_t cap, const char *dir, const char *name)
 {
     size_t n = strlcpy(out, dir, cap);
@@ -71,44 +71,44 @@ static bool join(char *out, size_t cap, const char *dir, const char *name)
 static int copy_file(const char *src, const char *dst)
 {
     if (no_clobber && lp_exists(dst))
-        return 0;               /* 이미 있다. 건드리지 않는 것이 성공이다. */
+        return 0;               /* already there - leaving it alone is success */
 
     lp_stat_t st;
     long r = lp_stat(src, &st, true);
     if (r < 0) {
-        oops("읽을 수 없습니다", src, r);
+        oops("cannot read", src, r);
         if (quiet) failures = 1;
         return 1;
     }
 
-    /* 같은 파일을 자기 자신에 복사하면 내용을 잃는다. 미리 막는다.
-     * 경로 문자열이 아니라 파일 실체(장치+아이노드)로 비교해야 하지만
-     * 우리 stat 은 그 필드를 담지 않는다. 문자열 비교로 흔한 실수만
-     * 잡는다. */
+    /* Copying a file onto itself would lose it. Catch it first.
+     * The right comparison is device+inode, not the path string, but our
+     * stat does not carry those fields. A string compare catches the
+     * common mistake. */
     if (strcmp(src, dst) == 0) {
-        dprintf(STDERR_FILENO, "cp: %s 와 대상이 같은 파일입니다\n", src);
+        dprintf(STDERR_FILENO, "cp: %s and the destination are the same file\n", src);
         failures = 1;
         return 1;
     }
 
     long in = lp_open(src, O_RDONLY, 0);
-    if (in < 0) { oops("열 수 없습니다", src, in); return 1; }
+    if (in < 0) { oops("cannot open", src, in); return 1; }
 
-    /* 원본 권한 그대로 만든다 (실행 파일이 실행 파일로 남게) */
+    /* Create it with the source's permissions, so an executable stays one. */
     long out = lp_open(dst, O_WRONLY | O_CREAT | O_TRUNC, st.mode & 07777);
-    if (out < 0) { lp_close((int)in); oops("만들 수 없습니다", dst, out); return 1; }
+    if (out < 0) { lp_close((int)in); oops("cannot create", dst, out); return 1; }
 
     static char buf[BUF_SIZE];
     int rc = 0;
     for (;;) {
         long n = lp_read((int)in, buf, sizeof(buf));
         if (n == 0) break;
-        if (n < 0) { oops("읽기 실패", src, n); rc = 1; break; }
+        if (n < 0) { oops("read failed", src, n); rc = 1; break; }
 
         long off = 0;
         while (off < n) {
             long w = lp_write((int)out, buf + off, (size_t)(n - off));
-            if (w <= 0) { oops("쓰기 실패", dst, w); rc = 1; break; }
+            if (w <= 0) { oops("write failed", dst, w); rc = 1; break; }
             off += w;
         }
         if (rc) break;
@@ -117,7 +117,7 @@ static int copy_file(const char *src, const char *dst)
     lp_close((int)in);
     lp_close((int)out);
 
-    /* O_CREAT 의 mode 는 umask 에 깎인다. 확실히 맞춘다. */
+    /* umask trims the mode O_CREAT asked for. Set it exactly. */
     if (rc == 0)
         lp_chmod(dst, st.mode & 07777);
     return rc;
@@ -128,7 +128,7 @@ static int copy_any(const char *src, const char *dst);
 static int copy_dir(const char *src, const char *dst)
 {
     if (!recursive) {
-        dprintf(STDERR_FILENO, "cp: %s 는 디렉터리입니다 (-r 을 쓰세요)\n", src);
+        dprintf(STDERR_FILENO, "cp: %s is a directory (use -r)\n", src);
         failures = 1;
         return 1;
     }
@@ -137,21 +137,21 @@ static int copy_dir(const char *src, const char *dst)
     if (lp_stat(src, &st, true) < 0) return 1;
 
     long r = lp_mkdir(dst, st.mode & 07777);
-    if (r < 0 && r != -EEXIST) { oops("만들 수 없습니다", dst, r); return 1; }
+    if (r < 0 && r != -EEXIST) { oops("cannot create", dst, r); return 1; }
 
     long fd = lp_open(src, O_RDONLY | O_DIRECTORY, 0);
-    if (fd < 0) { oops("열 수 없습니다", src, fd); return 1; }
+    if (fd < 0) { oops("cannot open", src, fd); return 1; }
 
-    /* 버퍼를 스택에 둔다. static 으로 하면 재귀 호출이 부모의 버퍼를
-     * 덮어써서 항목이 조용히 사라진다. 재귀 한 단계당 8KB 다. */
+    /* Keep the buffer on the stack. As a static, a recursive call would
+     * overwrite the parent's and entries would vanish silently. 8KB a level. */
     char dbuf[8192];
     int  rc = 0;
 
-    /* getdents 는 한 번에 다 주지 않는다. 0 이 나올 때까지 돈다. */
+    /* getdents does not hand over everything at once. Loop until it returns 0. */
     for (;;) {
         long n = sys_getdents((int)fd, dbuf, sizeof(dbuf));
         if (n == 0) break;
-        if (n < 0) { oops("읽기 실패", src, n); rc = 1; break; }
+        if (n < 0) { oops("read failed", src, n); rc = 1; break; }
 
         for (long off = 0; off < n; ) {
             char       *rec  = dbuf + off;
@@ -165,7 +165,7 @@ static int copy_dir(const char *src, const char *dst)
             char s[512], t[512];
             if (!join(s, sizeof(s), src, name) ||
                 !join(t, sizeof(t), dst, name)) {
-                dprintf(STDERR_FILENO, "cp: 경로가 너무 깁니다: %s\n", name);
+                dprintf(STDERR_FILENO, "cp: path too long: %s\n", name);
                 rc = 1;
                 continue;
             }
@@ -180,17 +180,17 @@ static int copy_dir(const char *src, const char *dst)
 static int copy_any(const char *src, const char *dst)
 {
     lp_stat_t st;
-    long r = lp_stat(src, &st, false);        /* 링크는 링크로 본다 */
-    if (r < 0) { oops("읽을 수 없습니다", src, r); return 1; }
+    long r = lp_stat(src, &st, false);        /* look at the link, not its target */
+    if (r < 0) { oops("cannot read", src, r); return 1; }
 
     if ((st.mode & LP_S_IFMT) == LP_S_IFLNK) {
         char target[512];
         long n = lp_readlink(src, target, sizeof(target) - 1);
-        if (n < 0) { oops("링크를 읽을 수 없습니다", src, n); return 1; }
+        if (n < 0) { oops("cannot read the link", src, n); return 1; }
         target[n] = '\0';
-        lp_unlink(dst);                        /* 있으면 지우고 새로 */
+        lp_unlink(dst);                        /* replace any existing entry */
         long lr = lp_symlink(target, dst);
-        if (lr < 0) { oops("링크를 만들 수 없습니다", dst, lr); return 1; }
+        if (lr < 0) { oops("cannot create the link", dst, lr); return 1; }
         return 0;
     }
 
@@ -212,7 +212,7 @@ int main(int argc, char **argv)
     }
 
     if (argc - first < 2) {
-        dprintf(STDERR_FILENO, "사용법: cp [-r] [-n] [-q] <원본>... <대상>\n");
+        dprintf(STDERR_FILENO, "usage: cp [-r] [-n] [-q] <source>... <dest>\n");
         return 2;
     }
 
@@ -220,10 +220,10 @@ int main(int argc, char **argv)
     bool dst_is_dir = lp_is_dir(dst);
     int  nsrc = argc - 1 - first;
 
-    /* 원본이 여러 개면 대상은 반드시 디렉터리여야 한다.
-     * 아니면 앞의 것들이 차례로 덮여 마지막 하나만 남는다. */
+    /* With several sources the destination must be a directory, or each
+     * would overwrite the last and only one would survive. */
     if (nsrc > 1 && !dst_is_dir) {
-        dprintf(STDERR_FILENO, "cp: 원본이 여러 개면 대상은 디렉터리여야 합니다\n");
+        dprintf(STDERR_FILENO, "cp: with several sources the destination must be a directory\n");
         return 2;
     }
 
@@ -231,7 +231,7 @@ int main(int argc, char **argv)
         if (dst_is_dir) {
             char full[512];
             if (!join(full, sizeof(full), dst, basename_of(argv[i]))) {
-                dprintf(STDERR_FILENO, "cp: 경로가 너무 깁니다\n");
+                dprintf(STDERR_FILENO, "cp: path too long\n");
                 failures = 1;
                 continue;
             }

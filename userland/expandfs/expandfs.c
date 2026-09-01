@@ -1,19 +1,19 @@
-/* expandfs - 데이터 파티션을 SD 카드 끝까지 늘린다.
+/* expandfs - grow the data partition to the end of the card.
  *
- * 우리 이미지는 256MB 다. 32GB 카드에 구우면 31.7GB 가 미할당으로 남아
- * 아무것도 하지 않는다. 라즈베리파이 OS 가 첫 부팅에 하는 일을 우리도 한다.
+ * Our image is 256MB. Written to a 32GB card that leaves 31.7GB
+ * unallocated and idle. This does what Raspberry Pi OS does on first boot.
  *
- * 순서:
- *   1) 블록 장치의 실제 크기를 묻는다 (BLKGETSIZE64)
- *   2) MBR 의 2번 항목을 장치 끝까지로 늘려 다시 쓴다
- *   3) 커널에 파티션 테이블을 다시 읽으라고 한다 (BLKRRPART)
- *   4) 마운트한 뒤 ext4 를 늘린다 (EXT4_IOC_RESIZE_FS)
+ * Steps:
+ *   1) ask the block device for its real size (BLKGETSIZE64)
+ *   2) rewrite MBR entry 2 to reach the end of the device
+ *   3) tell the kernel to re-read the partition table (BLKRRPART)
+ *   4) mount it and grow the ext4 (EXT4_IOC_RESIZE_FS)
  *
- * resize2fs 를 가져오지 않는 이유: ext4 는 커널이 온라인 확장을 직접
- * 지원한다. ioctl 하나면 커널이 블록 그룹을 추가한다. 유저스페이스
- * 도구는 그 ioctl 을 부르는 게 일의 대부분이다.
+ * We do not pull in resize2fs because the kernel grows a mounted ext4
+ * itself: one ioctl and it adds the block groups. Calling that ioctl is
+ * most of what the userspace tool does anyway.
  *
- * 안전장치: 늘리기만 한다. 줄이는 경로는 아예 없다.
+ * Safety: this only ever grows. There is no shrink path at all.
  */
 #include "types.h"
 #include "string.h"
@@ -21,33 +21,33 @@
 #include "unistd.h"
 #include "syscall.h"
 
-/* 기본은 SD 카드. QEMU 등에서 다른 장치를 쓰려면 인자로 준다.
+/* Defaults to the SD card. Pass arguments to use another device, e.g.
  *   expandfs /dev/vda /dev/vda2 */
 static const char *dev_disk = "/dev/mmcblk0";
 static const char *dev_part = "/dev/mmcblk0p2";
 #define DEV_DISK      dev_disk
 #define DEV_PART      dev_part
 #define MOUNT_POINT   "/data"
-#define PART_INDEX    2            /* 1-기반 */
+#define PART_INDEX    2            /* 1-based */
 #define SECTOR_SIZE   512
 #define MBR_SIZE      512
 #define PART_TABLE_OFF 446
 #define PART_ENTRY_LEN 16
 #define PART_TYPE_LINUX 0x83
 
-/* 블록 장치 ioctl */
-#define BLKRRPART      0x125F      /* _IO(0x12, 95)  파티션 테이블 재읽기 */
-#define BLKGETSIZE64   0x80081272  /* _IOR(0x12, 114, size_t)  바이트 크기 */
+/* Block device ioctls */
+#define BLKRRPART      0x125F      /* _IO(0x12, 95)  re-read partition table */
+#define BLKGETSIZE64   0x80081272  /* _IOR(0x12, 114, size_t)  size in bytes */
 
-/* ext4 온라인 확장. _IOW('f', 16, __u64) */
+/* ext4 online grow. _IOW('f', 16, __u64) */
 #define EXT4_IOC_RESIZE_FS  0x40086610
 
-/* struct statfs (arm64) 에서 필요한 오프셋 */
+/* The offsets we need out of struct statfs (arm64) */
 #define STATFS_SIZE     120
 #define STATFS_BSIZE    8
 #define STATFS_BLOCKS   16
 
-/* 늘릴 가치가 있는 최소 크기. 이보다 적게 남으면 건드리지 않는다. */
+/* Not worth growing for less than this. */
 #define MIN_GROW_MB     16
 
 static long dev_ioctl(const char *path, unsigned long req, void *arg, int flags)
@@ -60,7 +60,7 @@ static long dev_ioctl(const char *path, unsigned long req, void *arg, int flags)
     return rc;
 }
 
-/* MBR 의 파티션 항목 하나를 읽는다 */
+/* Read one MBR partition entry. */
 static bool read_part_entry(const u8 *mbr, int index, u8 *type,
                             u32 *start, u32 *count)
 {
@@ -77,38 +77,39 @@ static void write_part_count(u8 *mbr, int index, u32 count)
 {
     u8 *e = mbr + PART_TABLE_OFF + (index - 1) * PART_ENTRY_LEN;
     memcpy(e + 12, &count, 4);
-    /* 끝 CHS 는 1023 실린더를 넘으면 표현할 수 없다. 관례대로 최대값을
-     * 넣는다. 리눅스도 라즈베리파이 부트롬도 LBA 를 보므로 형식상 값이다. */
+    /* The end CHS cannot express more than 1023 cylinders. Write the
+     * conventional maximum: both Linux and the Pi boot ROM read LBA, so
+     * this value is a formality. */
     e[5] = 0xFE; e[6] = 0xFF; e[7] = 0xFF;
 }
 
-/* 파티션 테이블을 늘린다. 이미 최대면 false (할 일 없음) */
+/* Grow the partition table. false when it is already at the maximum. */
 static bool grow_partition(u64 *new_bytes_out)
 {
     u64 dev_bytes = 0;
     long rc = dev_ioctl(DEV_DISK, BLKGETSIZE64, &dev_bytes, O_RDONLY);
     if (rc < 0) {
-        dprintf(STDERR_FILENO, "expandfs: %s 크기를 알 수 없습니다 (%ld)\n",
+        dprintf(STDERR_FILENO, "expandfs: cannot get the size of %s (%ld)\n",
                 DEV_DISK, -rc);
         return false;
     }
 
     long fd = lp_open(DEV_DISK, O_RDWR, 0);
     if (fd < 0) {
-        dprintf(STDERR_FILENO, "expandfs: %s 를 열 수 없습니다 (%ld)\n",
+        dprintf(STDERR_FILENO, "expandfs: cannot open %s (%ld)\n",
                 DEV_DISK, -fd);
         return false;
     }
 
     u8 mbr[MBR_SIZE];
     if (lp_read((int)fd, mbr, sizeof(mbr)) != (long)sizeof(mbr)) {
-        dprintf(STDERR_FILENO, "expandfs: MBR 을 읽지 못했습니다\n");
+        dprintf(STDERR_FILENO, "expandfs: could not read the MBR\n");
         lp_close((int)fd);
         return false;
     }
 
     if (mbr[510] != 0x55 || mbr[511] != 0xAA) {
-        dprintf(STDERR_FILENO, "expandfs: MBR 시그니처가 없습니다\n");
+        dprintf(STDERR_FILENO, "expandfs: no MBR signature\n");
         lp_close((int)fd);
         return false;
     }
@@ -118,32 +119,32 @@ static bool grow_partition(u64 *new_bytes_out)
 
     if (type != PART_TYPE_LINUX) {
         dprintf(STDERR_FILENO,
-                "expandfs: 파티션 %d 이 리눅스 타입이 아닙니다 (0x%02x)."
-                " 안전을 위해 중단합니다\n", PART_INDEX, type);
+                "expandfs: partition %d is not a Linux partition (0x%02x)."
+                " Stopping, to be safe\n", PART_INDEX, type);
         lp_close((int)fd);
         return false;
     }
 
     u64 total_sectors = dev_bytes / SECTOR_SIZE;
     if (total_sectors <= start) {
-        dprintf(STDERR_FILENO, "expandfs: 장치가 파티션보다 작습니다\n");
+        dprintf(STDERR_FILENO, "expandfs: the device is smaller than the partition\n");
         lp_close((int)fd);
         return false;
     }
 
     u64 max_count = total_sectors - start;
     if (max_count > 0xFFFFFFFFULL)
-        max_count = 0xFFFFFFFFULL;      /* MBR 은 32비트까지 (약 2TB) */
+        max_count = 0xFFFFFFFFULL;      /* MBR is 32-bit, about 2TB */
 
-    /* 늘리기만 한다 */
+    /* Grow only. */
     if (max_count <= count + (MIN_GROW_MB * 1024 * 1024 / SECTOR_SIZE)) {
-        printf("expandfs: 이미 최대 크기입니다 (%lu MB)\n",
+        printf("expandfs: already at full size (%lu MB)\n",
                (unsigned long)(count / 2048));
         lp_close((int)fd);
         return false;
     }
 
-    printf("expandfs: 파티션 %d 을 %lu MB -> %lu MB 로 늘립니다\n",
+    printf("expandfs: growing partition %d from %lu MB to %lu MB\n",
            PART_INDEX,
            (unsigned long)(count / 2048),
            (unsigned long)(max_count / 2048));
@@ -152,26 +153,26 @@ static bool grow_partition(u64 *new_bytes_out)
 
     if (lp_lseek((int)fd, 0, 0) < 0 ||
         lp_write((int)fd, mbr, sizeof(mbr)) != (long)sizeof(mbr)) {
-        dprintf(STDERR_FILENO, "expandfs: MBR 쓰기 실패\n");
+        dprintf(STDERR_FILENO, "expandfs: writing the MBR failed\n");
         lp_close((int)fd);
         return false;
     }
     lp_sync();
     lp_close((int)fd);
 
-    /* 커널에 새 파티션 테이블을 읽히게 한다.
-     * 이 시점에 해당 파티션이 마운트되어 있으면 EBUSY 가 난다. */
+    /* Make the kernel re-read the partition table. This returns EBUSY if
+     * the partition is mounted at this point. */
     rc = dev_ioctl(DEV_DISK, BLKRRPART, NULL, O_RDONLY);
     if (rc < 0)
         dprintf(STDERR_FILENO,
-                "expandfs: 파티션 테이블 재읽기 실패 (%ld)."
-                " 재부팅하면 반영됩니다\n", -rc);
+                "expandfs: could not re-read the partition table (%ld)."
+                " A reboot will pick it up\n", -rc);
 
     *new_bytes_out = max_count * SECTOR_SIZE;
     return true;
 }
 
-/* 마운트된 ext4 를 늘린다 */
+/* Grow a mounted ext4. */
 static bool grow_filesystem(u64 part_bytes)
 {
     u8 st[STATFS_SIZE];
@@ -179,31 +180,31 @@ static bool grow_filesystem(u64 part_bytes)
 
     long rc = sys_call2(SYS_statfs, (long)MOUNT_POINT, (long)st);
     if (rc < 0) {
-        dprintf(STDERR_FILENO, "expandfs: statfs 실패 (%ld)\n", -rc);
+        dprintf(STDERR_FILENO, "expandfs: statfs failed (%ld)\n", -rc);
         return false;
     }
 
     u64 bsize  = *(u64 *)(st + STATFS_BSIZE);
     u64 blocks = *(u64 *)(st + STATFS_BLOCKS);
     if (bsize == 0) {
-        dprintf(STDERR_FILENO, "expandfs: 블록 크기를 알 수 없습니다\n");
+        dprintf(STDERR_FILENO, "expandfs: cannot determine the block size\n");
         return false;
     }
 
     u64 want = part_bytes / bsize;
     if (want <= blocks) {
-        printf("expandfs: 파일시스템이 이미 파티션을 채웁니다\n");
+        printf("expandfs: the filesystem already fills the partition\n");
         return true;
     }
 
-    printf("expandfs: 파일시스템을 %lu MB -> %lu MB 로 늘립니다\n",
+    printf("expandfs: growing the filesystem from %lu MB to %lu MB\n",
            (unsigned long)(blocks * bsize / 1048576),
            (unsigned long)(want * bsize / 1048576));
 
-    /* 커널이 블록 그룹을 추가한다. 마운트된 채로 동작한다(온라인 확장). */
+    /* The kernel adds the block groups. This works while mounted. */
     long fd = lp_open(MOUNT_POINT, O_RDONLY | O_DIRECTORY, 0);
     if (fd < 0) {
-        dprintf(STDERR_FILENO, "expandfs: %s 를 열 수 없습니다 (%ld)\n",
+        dprintf(STDERR_FILENO, "expandfs: cannot open %s (%ld)\n",
                 MOUNT_POINT, -fd);
         return false;
     }
@@ -212,11 +213,11 @@ static bool grow_filesystem(u64 part_bytes)
     lp_close((int)fd);
 
     if (rc < 0) {
-        dprintf(STDERR_FILENO, "expandfs: 확장 실패 (%ld)\n", -rc);
+        dprintf(STDERR_FILENO, "expandfs: grow failed (%ld)\n", -rc);
         return false;
     }
 
-    printf("expandfs: 완료\n");
+    printf("expandfs: done\n");
     return true;
 }
 
@@ -227,16 +228,16 @@ int main(int argc, char **argv)
         dev_part = argv[2];
     } else if (argc == 2) {
         dprintf(STDERR_FILENO,
-                "사용법: expandfs [디스크 파티션]\n"
-                "  예:   expandfs /dev/mmcblk0 /dev/mmcblk0p2\n");
+                "usage: expandfs [disk partition]\n"
+                "  e.g.  expandfs /dev/mmcblk0 /dev/mmcblk0p2\n");
         return 2;
     }
 
     u64 part_bytes = 0;
     bool grew = grow_partition(&part_bytes);
 
-    /* 파티션을 늘리지 않았어도 파일시스템이 뒤처져 있을 수 있다
-     * (예: 지난번에 재읽기가 실패해 재부팅으로 반영된 경우). */
+    /* Even when the partition did not change, the filesystem can be behind
+     * (say a re-read failed last time and a reboot picked it up). */
     if (!grew) {
         long fd = lp_open(DEV_PART, O_RDONLY, 0);
         if (fd >= 0) {
@@ -250,7 +251,7 @@ int main(int argc, char **argv)
     if (part_bytes == 0)
         return 1;
 
-    /* 확장하려면 마운트되어 있어야 한다 */
+    /* Growing requires it to be mounted. */
     bool mounted_here = false;
     if (!lp_is_dir(MOUNT_POINT))
         lp_mkdir(MOUNT_POINT, 0755);
@@ -258,15 +259,15 @@ int main(int argc, char **argv)
     long rc = lp_mount(DEV_PART, MOUNT_POINT, "ext4", 0, NULL);
     if (rc == 0) {
         mounted_here = true;
-    } else if (rc != -16) {         /* -16 = EBUSY, 이미 마운트됨 */
-        dprintf(STDERR_FILENO, "expandfs: %s 마운트 실패 (%ld)\n",
+    } else if (rc != -16) {         /* -16 = EBUSY, already mounted */
+        dprintf(STDERR_FILENO, "expandfs: cannot mount %s (%ld)\n",
                 DEV_PART, -rc);
         return 1;
     }
 
     bool ok = grow_filesystem(part_bytes);
 
-    /* 우리가 마운트했으면 우리가 푼다. rc 스크립트가 다시 마운트한다. */
+    /* If we mounted it, we unmount it. The rc script mounts it again. */
     if (mounted_here)
         sys_call2(SYS_umount2, (long)MOUNT_POINT, 0);
 

@@ -21,7 +21,16 @@ BLOB_DIR="${REPO_ROOT}/blobs"
 OUT_DIR="${REPO_ROOT}/sdcard"
 IMAGE="${OUT_DIR}/lp-zero.img"
 MODE=firmware
-[[ "${1:-}" == "--linux" ]] && MODE=linux
+WITH_MPY=true          # MicroPython 을 데이터 파티션에 넣을지
+for arg in "$@"; do
+    case "$arg" in
+        --linux)           MODE=linux ;;
+        --no-micropython)  WITH_MPY=false ;;
+        *) printf 'error: 알 수 없는 인자: %s\n' "$arg" >&2
+           printf '사용법: mksdcard.sh [--linux] [--no-micropython]\n' >&2
+           exit 2 ;;
+    esac
+done
 PART_IMG="${OUT_DIR}/.boot-part.img"
 
 # 이미지 레이아웃
@@ -141,59 +150,86 @@ if [[ "$MODE" == "linux" ]]; then
     log "복사: wpa_supplicant.conf                 (무선 설정)"
     mcopy -i "$PART_IMG" "${REPO_ROOT}/boot/rootfs-overlay/etc/wpa_supplicant.conf" ::
 
+    # ── UEFI 로도 부팅되게 ──────────────────────────────────────
+    # 같은 카드 하나로 셋 다 부팅시키기 위한 장치다.
+    #
+    #   실기 Pi     GPU 펌웨어(start.elf)가 config.txt 의 kernel= 을 읽는다
+    #   QEMU/UTM    PCI 도 GPU 펌웨어도 없다. 대신 UEFI 펌웨어가
+    #               FAT 파티션에서 EFI/BOOT/BOOTAA64.EFI 를 찾아 실행한다
+    #
+    # arm64 커널은 CONFIG_EFI_STUB=y 로 지으면 그 자체가 PE 실행 파일이다
+    # (오프셋 0x40 에 PE 헤더가 있다). 그래서 같은 Image 를 이름만 바꿔
+    # 넣으면 UEFI 가 바로 부팅한다. 별도의 부트로더가 필요 없다.
+    #
+    # 커맨드라인은 커널에 박힌 CONFIG_CMDLINE 을 쓴다. UEFI 로 올 때는
+    # 부트로더가 bootargs 를 주지 않기 때문이다.
+    if python3 -c "
+import struct, sys
+d = open('$KERNEL','rb').read(0x100)
+sys.exit(0 if d[:2] == b'MZ' and d[struct.unpack_from('<I', d, 0x3c)[0]:][:4] == b'PE\\0\\0' else 1)
+" 2>/dev/null; then
+        mmd -i "$PART_IMG" ::EFI 2>/dev/null || true
+        mmd -i "$PART_IMG" ::EFI/BOOT 2>/dev/null || true
+        mcopy -o -i "$PART_IMG" "$KERNEL" ::EFI/BOOT/BOOTAA64.EFI
+        log "복사: EFI/BOOT/BOOTAA64.EFI            (UEFI 부팅용 - QEMU/UTM)"
+    else
+        echo "  경고: 커널에 EFI 스텁이 없습니다 (CONFIG_EFI_STUB)."
+        echo "        QEMU/UTM 에서 UEFI 로 부팅되지 않습니다."
+    fi
+
     README="${OUT_DIR}/.README.txt"
     cat > "$README" <<'READMEEOF'
 LP-zero OS
 
-이 파티션은 FAT32 라 윈도우와 맥에서도 보입니다.
-아래 두 파일을 고치면 다음 부팅에 자동으로 적용됩니다.
-(SD 카드를 다시 구울 필요가 없습니다)
+This partition is FAT32, so Windows and macOS can both see it.
+Edit the two files below and the next boot picks them up. You do not
+have to burn the card again.
 
-  authorized_keys       SSH 로 접속할 공개키.
-                        ★ 여기에 공개키를 넣어야 원격 접속이 됩니다 ★
-                        접속할 PC 에서:
+  authorized_keys       The SSH public key allowed to log in.
+                        *** Without this, nobody can connect. ***
+                        On the PC you will connect from:
                             ssh-keygen -t ed25519 -f ~/.ssh/lpzero
-                            type %USERPROFILE%\.ssh\lpzero.pub    (윈도우)
-                            cat ~/.ssh/lpzero.pub                 (맥/리눅스)
-                        나온 한 줄을 이 파일 맨 아래에 붙이세요.
+                            type %USERPROFILE%\.ssh\lpzero.pub   (Windows)
+                            cat ~/.ssh/lpzero.pub                (macOS/Linux)
+                        Paste that one line at the end of this file.
 
-                        이 파일이 SSH 키의 원본입니다. 매 부팅마다
-                        기기로 복사됩니다. 기기 안에서 직접 관리하고
-                        싶으면 이 파일을 지우세요.
+                        This file is the source of truth for SSH keys and
+                        is copied to the machine on every boot. To manage
+                        keys on the machine itself instead, delete it.
 
-  wpa_supplicant.conf   무선 공유기 이름과 비밀번호.
+  wpa_supplicant.conf   Your WiFi network name and password.
 
-  config.txt            GPU 부팅 설정. 화면 해상도 등.
-  cmdline.txt           커널 커맨드라인.
+  config.txt            GPU boot settings, screen resolution and so on.
+  cmdline.txt           The kernel command line.
 
-접속 방법
-  1. 위 두 파일을 채운다
-  2. SD 를 꽂고 전원을 넣는다
-  3. 공유기 관리 페이지에서 받은 IP 를 확인한다
-     (또는 시리얼 콘솔에 IP 가 찍힙니다)
-  4. ssh -i ~/.ssh/lpzero root@<그 IP>
+How to connect
+  1. Fill in the two files above
+  2. Put the card in and apply power
+  3. Find the address it was given, in your router's admin page
+     (it is also printed on the serial console)
+  4. ssh -i ~/.ssh/lpzero root@<that address>
 
-비밀번호 인증은 빌드 단계에서 아예 빼놓았습니다. 네트워크에 열린
-기기에서 비밀번호는 무차별 대입의 표적이 되기 때문입니다.
-공개키가 없으면 아무도 들어올 수 없습니다 - 본인 포함입니다.
+Password authentication was left out of the build entirely. On a machine
+open to a network a password is just a target for brute force. With no
+public key, nobody gets in - including you.
 
-저장 위치
-  기기에서 파일을 남기려면 /data 나 홈(/root) 안에 두세요.
-  그 밖은 RAM 이라 재부팅하면 사라집니다.
+Where files live
+  To keep a file on the machine, put it under /data or in /root.
+  Everything else is in RAM and disappears on reboot.
 
-파이썬
-  /data/bin/micropython      가볍고 빠릅니다
-  /data/python/bin/python3.12  표준 CPython (있는 이미지에 한함)
-  둘 중 하나가 'python' 입니다.
+The clock
+  This board has no battery-backed clock. At power-on it starts at 1970.
+  It fetches the time from the internet at boot (ntp), but that fails if
+  your router or network blocks UDP 123. A wrong clock makes every HTTPS
+  certificate check fail, so if Python reports a certificate error, check
+  the time first with 'date'.
 
-시계
-  이 보드에는 배터리로 도는 시계(RTC)가 없습니다. 전원을 넣으면
-  1970년에서 시작합니다. 부팅할 때 자동으로 인터넷에서 시각을
-  받아오지만(ntp), 공유기나 회사망이 UDP 123 을 막으면 실패합니다.
-  시각이 틀리면 HTTPS 인증서 검증이 전부 실패하므로,
-  파이썬에서 인증서 오류가 나면 먼저 시각을 확인하세요.
+Python
+  /data/bin/micropython        small and quick to start
+  /data/python/bin/python3.12  full CPython (in the images that carry it)
+  One of them is 'python'.
 
-부팅할 때 실행할 명령은 기기의 /data/rc.local 에 적어두면 됩니다.
+Commands you put in /data/rc.local run at every boot.
 READMEEOF
     log "복사: README.txt                          (설정 안내)"
     mcopy -i "$PART_IMG" "$README" ::README.txt
@@ -251,7 +287,7 @@ if command -v debugfs >/dev/null 2>&1; then
     # /data 는 첫 부팅에 카드 전체로 늘어나므로 크기가 문제되지 않는다.
     MPY="${MICROPYTHON_BIN:-/home/user/kernel-work/thirdparty/micropython/ports/unix/build-lpzero/micropython}"
     HAVE_MPY=0
-    if [[ -f "$MPY" ]]; then
+    if $WITH_MPY && [[ -f "$MPY" ]]; then
         d_put "$MPY" bin/micropython 0100755
         HAVE_MPY=1
         log "데이터: bin/micropython  ($(stat -c%s "$MPY") bytes)"

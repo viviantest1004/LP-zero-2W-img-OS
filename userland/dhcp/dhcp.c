@@ -1,17 +1,17 @@
-/* dhcp - 최소 DHCP 클라이언트 (RFC 2131).
+/* dhcp - a minimal DHCP client (RFC 2131).
  *
- * 왜 직접 만드나: DHCP 는 암호가 없는 단순한 UDP 프로토콜이다. SSH 처럼
- * 직접 구현하면 위험한 물건이 아니라서, 외부 의존을 하나 줄일 수 있다.
- * 전체가 400줄이 안 되고 udhcpc 나 dhcpcd 를 가져오는 것보다 작다.
+ * Why write our own: DHCP is a plain UDP protocol with no cryptography.
+ * Unlike SSH it is not dangerous to implement yourself, so this removes
+ * one external dependency. Under 400 lines, smaller than udhcpc or dhcpcd.
  *
- * 흐름:
- *   DISCOVER (브로드캐스트)  ->  OFFER    (서버가 주소를 제안)
- *   REQUEST  (브로드캐스트)  ->  ACK      (확정)
- * 확정되면 인터페이스에 주소/넷마스크를 설정하고 기본 경로를 추가한 뒤
- * /etc/resolv.conf 를 쓴다.
+ * The exchange:
+ *   DISCOVER (broadcast)  ->  OFFER  (the server proposes an address)
+ *   REQUEST  (broadcast)  ->  ACK    (it is settled)
+ * Once settled we set the address and netmask on the interface, add the
+ * default route and write /etc/resolv.conf.
  *
- * 다루지 않는 것: 임대 갱신(renew), DECLINE, 여러 서버 중 고르기.
- * 가정용 공유기 한 대에 붙는 데는 필요 없다.
+ * Not handled: lease renewal, DECLINE, choosing among several servers.
+ * None of that is needed to join one home router.
  */
 #include "types.h"
 #include "string.h"
@@ -28,14 +28,14 @@
 #define BOOTREQUEST  1
 #define BOOTREPLY    2
 
-/* 옵션 53 값 */
+/* Option 53 values */
 #define DHCPDISCOVER 1
 #define DHCPOFFER    2
 #define DHCPREQUEST  3
 #define DHCPACK      5
 #define DHCPNAK      6
 
-/* 옵션 번호 */
+/* Option numbers */
 #define OPT_SUBNET_MASK   1
 #define OPT_ROUTER        3
 #define OPT_DNS           6
@@ -46,10 +46,10 @@
 #define OPT_PARAM_LIST   55
 #define OPT_END         255
 
-#define BOOTP_FIXED_LEN  236        /* 옵션 앞까지의 고정 길이 */
-#define PKT_SIZE         576        /* RFC 최소 DHCP 메시지 크기 */
+#define BOOTP_FIXED_LEN  236        /* fixed part, before the options */
+#define PKT_SIZE         576        /* the RFC's minimum DHCP message size */
 
-/* BOOTP/DHCP 헤더. 커널이 아니라 네트워크 배치라 패킹이 필요하다. */
+/* BOOTP/DHCP header. This is a wire layout, so it must be packed. */
 typedef struct __attribute__((packed)) {
     u8  op, htype, hlen, hops;
     u32 xid;
@@ -63,15 +63,15 @@ typedef struct __attribute__((packed)) {
 } dhcp_pkt_t;
 
 typedef struct {
-    u32 addr;       /* 받은 주소 (네트워크 순서) */
+    u32 addr;       /* the address we got (network order) */
     u32 mask;
     u32 router;
     u32 dns;
     u32 server;
-    u32 lease;      /* 초 (호스트 순서) */
+    u32 lease;      /* seconds (host order) */
 } lease_t;
 
-/* ── 옵션 조립 ── */
+/* ── Building options ── */
 
 static u8 *put_opt(u8 *p, u8 code, u8 len, const void *val)
 {
@@ -81,9 +81,9 @@ static u8 *put_opt(u8 *p, u8 code, u8 len, const void *val)
     return p;
 }
 
-/* ── 옵션 파싱 ──
- * 길이 필드를 그대로 믿으면 조작된 패킷에 버퍼 밖을 읽는다.
- * 항상 끝 경계와 대조한다. */
+/* ── Parsing options ──
+ * Trusting the length field would let a crafted packet read past the
+ * buffer. Always check it against the end. */
 static bool parse_options(const u8 *opt, size_t len, lease_t *out, u8 *msg_type)
 {
     const u8 *end = opt + len;
@@ -92,12 +92,12 @@ static bool parse_options(const u8 *opt, size_t len, lease_t *out, u8 *msg_type)
     while (opt < end) {
         u8 code = *opt++;
 
-        if (code == 0) continue;            /* 패딩 */
+        if (code == 0) continue;            /* padding */
         if (code == OPT_END) break;
-        if (opt >= end) return false;       /* 길이 바이트가 없다 */
+        if (opt >= end) return false;       /* no length byte */
 
         u8 olen = *opt++;
-        if (opt + olen > end) return false; /* 값이 버퍼를 넘는다 */
+        if (opt + olen > end) return false; /* the value runs past the buffer */
 
         switch (code) {
         case OPT_MSG_TYPE:
@@ -129,17 +129,17 @@ static bool parse_options(const u8 *opt, size_t len, lease_t *out, u8 *msg_type)
     return true;
 }
 
-/* ── 패킷 조립/송신 ── */
+/* ── Building and sending packets ── */
 
 static size_t build_packet(dhcp_pkt_t *p, u8 type, u32 xid, const u8 mac[6],
                            u32 req_addr, u32 server)
 {
     memset(p, 0, sizeof(*p));
     p->op    = BOOTREQUEST;
-    p->htype = 1;               /* 이더넷 */
+    p->htype = 1;               /* Ethernet */
     p->hlen  = 6;
     p->xid   = xid;
-    p->flags = htons(0x8000);   /* 브로드캐스트로 답해 달라 */
+    p->flags = htons(0x8000);   /* ask for a broadcast reply */
     memcpy(p->chaddr, mac, 6);
     p->magic = htonl(DHCP_MAGIC);
 
@@ -149,7 +149,7 @@ static size_t build_packet(dhcp_pkt_t *p, u8 type, u32 xid, const u8 mac[6],
     if (req_addr) o = put_opt(o, OPT_REQUESTED_IP, 4, &req_addr);
     if (server)   o = put_opt(o, OPT_SERVER_ID,    4, &server);
 
-    /* 받고 싶은 정보 목록 */
+    /* What we are asking the server for */
     static const u8 want[] = { OPT_SUBNET_MASK, OPT_ROUTER, OPT_DNS };
     o = put_opt(o, OPT_PARAM_LIST, sizeof(want), want);
 
@@ -168,7 +168,7 @@ static long send_bcast(int fd, const void *buf, size_t len)
     return lp_sendto(fd, buf, len, 0, &dst, sizeof(dst));
 }
 
-/* 원하는 타입의 응답을 기다린다. 타임아웃은 소켓 옵션으로 건다. */
+/* Wait for a reply of the wanted type. The timeout is a socket option. */
 static bool wait_reply(int fd, u32 xid, u8 want_type, lease_t *out)
 {
     dhcp_pkt_t pkt;
@@ -176,11 +176,11 @@ static bool wait_reply(int fd, u32 xid, u8 want_type, lease_t *out)
     for (int tries = 0; tries < 8; tries++) {
         long n = lp_recvfrom(fd, &pkt, sizeof(pkt), 0, NULL, NULL);
         if (n < 0)
-            return false;                    /* 타임아웃 또는 오류 */
+            return false;                    /* timed out, or an error */
         if ((size_t)n < BOOTP_FIXED_LEN + 4)
-            continue;                        /* 너무 짧다 */
+            continue;                        /* too short */
         if (pkt.op != BOOTREPLY || pkt.xid != xid)
-            continue;                        /* 내 요청이 아니다 */
+            continue;                        /* not a reply to our request */
         if (ntohl(pkt.magic) != DHCP_MAGIC)
             continue;
 
@@ -212,7 +212,7 @@ static void write_resolv_conf(u32 dns_be)
 
     long fd = lp_open("/etc/resolv.conf", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
-        dprintf(STDERR_FILENO, "dhcp: /etc/resolv.conf 를 쓸 수 없습니다 (%ld)\n", -fd);
+        dprintf(STDERR_FILENO, "dhcp: cannot write /etc/resolv.conf (%ld)\n", -fd);
         return;
     }
     dprintf((int)fd, "nameserver %s\n", ip);
@@ -228,24 +228,24 @@ static int apply_lease(const char *ifname, const lease_t *l)
 
     long rc = net_set_addr(ifname, l->addr);
     if (rc < 0) {
-        dprintf(STDERR_FILENO, "dhcp: 주소 설정 실패 (%ld)\n", -rc);
+        dprintf(STDERR_FILENO, "dhcp: cannot set the address (%ld)\n", -rc);
         return 1;
     }
     if (l->mask) {
         rc = net_set_netmask(ifname, l->mask);
         if (rc < 0)
-            dprintf(STDERR_FILENO, "dhcp: 넷마스크 설정 실패 (%ld)\n", -rc);
+            dprintf(STDERR_FILENO, "dhcp: cannot set the netmask (%ld)\n", -rc);
     }
     if (l->router) {
         rc = net_add_default_route(ifname, l->router);
         if (rc < 0)
-            dprintf(STDERR_FILENO, "dhcp: 기본 경로 추가 실패 (%ld)\n", -rc);
+            dprintf(STDERR_FILENO, "dhcp: cannot add the default route (%ld)\n", -rc);
     }
 
     write_resolv_conf(l->dns);
 
-    printf("dhcp: %s  주소 %s  넷마스크 %s  게이트웨이 %s  임대 %u초\n",
-           ifname, a, m, l->router ? g : "(없음)", l->lease);
+    printf("dhcp: %s  address %s  netmask %s  gateway %s  lease %us\n",
+           ifname, a, m, l->router ? g : "(none)", l->lease);
     return 0;
 }
 
@@ -255,27 +255,27 @@ int main(int argc, char **argv)
 
     u8 mac[6];
     if (net_if_hwaddr(ifname, mac) < 0) {
-        dprintf(STDERR_FILENO, "dhcp: %s 의 MAC 주소를 읽을 수 없습니다\n", ifname);
+        dprintf(STDERR_FILENO, "dhcp: cannot read the MAC address of %s\n", ifname);
         return 1;
     }
 
     if (net_if_up(ifname) < 0)
-        dprintf(STDERR_FILENO, "dhcp: %s 를 올리지 못했습니다 (계속 시도)\n", ifname);
+        dprintf(STDERR_FILENO, "dhcp: could not bring %s up (trying anyway)\n", ifname);
 
     long fd = lp_socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
-        dprintf(STDERR_FILENO, "dhcp: 소켓 생성 실패 (%ld)\n", -fd);
+        dprintf(STDERR_FILENO, "dhcp: cannot create a socket (%ld)\n", -fd);
         return 1;
     }
 
     int one = 1;
     lp_setsockopt((int)fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
-    /* 주소가 아직 없으므로 인터페이스에 직접 묶는다.
-     * 이게 없으면 경로가 없어서 송신이 실패한다. */
+    /* We have no address yet, so bind straight to the interface.
+     * Without this there is no route and sending fails. */
     lp_setsockopt((int)fd, SOL_SOCKET, SO_BINDTODEVICE, ifname,
                   (u32)strlen(ifname) + 1);
 
-    /* 응답 대기 3초. struct __kernel_timespec { s64 sec; s64 nsec; } */
+    /* Wait 3s for a reply. struct __kernel_timespec { s64 sec; s64 nsec; } */
     s64 tv[2] = { 3, 0 };
     lp_setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO_NEW, tv, sizeof(tv));
 
@@ -285,31 +285,31 @@ int main(int argc, char **argv)
         .sin_addr   = 0,
     };
     if (lp_bind((int)fd, &me, sizeof(me)) < 0) {
-        dprintf(STDERR_FILENO, "dhcp: 포트 %d 바인드 실패\n", DHCP_CLIENT_PORT);
+        dprintf(STDERR_FILENO, "dhcp: cannot bind port %d\n", DHCP_CLIENT_PORT);
         lp_close((int)fd);
         return 1;
     }
 
     u32 xid = 0;
     if (lp_getrandom(&xid, sizeof(xid), 0) != (long)sizeof(xid) || xid == 0)
-        xid = (u32)lp_getpid() * 2654435761u;   /* 폴백 */
+        xid = (u32)lp_getpid() * 2654435761u;   /* fallback */
 
     dhcp_pkt_t pkt;
     lease_t lease;
 
-    /* DISCOVER 를 몇 번 재시도한다. 무선은 연결 직후 잠깐 못 받을 수 있다. */
+    /* Retry DISCOVER a few times. WiFi can miss replies just after joining. */
     for (int attempt = 1; attempt <= 4; attempt++) {
         memset(&lease, 0, sizeof(lease));
 
         size_t len = build_packet(&pkt, DHCPDISCOVER, xid, mac, 0, 0);
         if (send_bcast((int)fd, &pkt, len) < 0) {
-            dprintf(STDERR_FILENO, "dhcp: DISCOVER 송신 실패\n");
+            dprintf(STDERR_FILENO, "dhcp: sending DISCOVER failed\n");
             lp_sleep_ms(1000);
             continue;
         }
 
         if (!wait_reply((int)fd, xid, DHCPOFFER, &lease)) {
-            printf("dhcp: 응답 없음 (%d/4)\n", attempt);
+            printf("dhcp: no reply (%d/4)\n", attempt);
             continue;
         }
 
@@ -320,11 +320,11 @@ int main(int argc, char **argv)
         lease_t ack;
         memset(&ack, 0, sizeof(ack));
         if (!wait_reply((int)fd, xid, DHCPACK, &ack)) {
-            printf("dhcp: ACK 없음 (%d/4)\n", attempt);
+            printf("dhcp: no ACK (%d/4)\n", attempt);
             continue;
         }
 
-        /* ACK 에 없는 값은 OFFER 것을 쓴다 */
+        /* Anything the ACK left out, take from the OFFER. */
         if (!ack.mask)   ack.mask   = lease.mask;
         if (!ack.router) ack.router = lease.router;
         if (!ack.dns)    ack.dns    = lease.dns;
@@ -334,6 +334,6 @@ int main(int argc, char **argv)
     }
 
     lp_close((int)fd);
-    dprintf(STDERR_FILENO, "dhcp: %s 에서 주소를 받지 못했습니다\n", ifname);
+    dprintf(STDERR_FILENO, "dhcp: got no address on %s\n", ifname);
     return 1;
 }

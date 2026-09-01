@@ -1,15 +1,15 @@
-/* unistd.c - 시스템콜 위에 얹은 얇은 래퍼. */
+/* unistd.c - thin wrappers over the system calls. */
 #include "unistd.h"
 #include "syscall.h"
 #include "string.h"
 
 char **environ = NULL;
 
-/* ── 파일 ─────────────────────────────────────────────────────── */
+/* ── Files ─────────────────────────────────────────────────────── */
 
 long lp_open(const char *path, int flags, mode_t mode)
 {
-    /* AArch64 에는 open 이 없다. openat 에 AT_FDCWD 를 준다. */
+    /* AArch64 has no open. Use openat with AT_FDCWD. */
     return sys_call4(SYS_openat, AT_FDCWD, (long)path, flags, (long)mode);
 }
 
@@ -23,7 +23,7 @@ long lp_dup(int fd) { return sys_call1(SYS_dup, fd); }
 long lp_dup2(int oldfd, int newfd)
 {
     if (oldfd == newfd)
-        return newfd;                    /* dup3 는 같으면 EINVAL 이다 */
+        return newfd;                    /* dup3 returns EINVAL when they match */
     return sys_call3(SYS_dup3, oldfd, newfd, 0);
 }
 
@@ -36,8 +36,8 @@ long lp_getcwd(char *b, size_t n)        { return sys_call2(SYS_getcwd, (long)b,
 long lp_access(const char *p, int mode)  { return sys_call4(SYS_faccessat, AT_FDCWD, (long)p, mode, 0); }
 long sys_getdents(int fd, void *buf, size_t size) { return sys_call3(SYS_getdents64, fd, (long)buf, (long)size); }
 
-/* newfstatat 의 struct stat 은 arm64 에서 128바이트다.
- * 전체 정의 대신 필요한 필드(st_mode)만 오프셋으로 읽는다.
+/* newfstatat's struct stat is 128 bytes on arm64. Rather than declaring
+ * the whole thing we read the one field we need (st_mode) by offset.
  *   offset 16 : st_mode (u32) */
 #define STAT_BUF_SIZE   128
 #define STAT_MODE_OFF   16
@@ -68,10 +68,10 @@ bool lp_is_dir(const char *path)
     return (mode & S_IFMT) == S_IFDIR;
 }
 
-/* struct stat 에서 우리가 쓰는 두 필드의 오프셋:
+/* Offsets of the two struct stat fields we use:
  *   16  st_mode (u32)
  *   48  st_size (s64)
- * 나머지는 건너뛴다. */
+ * everything else is skipped. */
 #define STAT_SIZE_OFF       48
 #define AT_SYMLINK_NOFOLLOW 0x100
 
@@ -107,14 +107,14 @@ long lp_readlink(const char *path, char *buf, size_t n)
     return sys_call4(SYS_readlinkat, AT_FDCWD, (long)path, (long)buf, (long)n);
 }
 
-/* ── 프로세스 ─────────────────────────────────────────────────── */
+/* ── Processes ─────────────────────────────────────────────────── */
 
 pid_t lp_fork(void)
 {
-    /* AArch64 에는 fork 시스템콜이 없다. clone 의 인자는
+    /* AArch64 has no fork system call. clone's arguments are
      *   clone(flags, stack, parent_tid, tls, child_tid)
-     * flags 에 종료 시그널만 주고 나머지를 0 으로 두면 fork 와 같다.
-     * stack=0 이면 자식이 부모 스택을 copy-on-write 로 이어받는다. */
+     * Passing only the exit signal in flags and zero for the rest is fork.
+     * With stack=0 the child inherits the parent's stack copy-on-write. */
     return (pid_t)sys_call5(SYS_clone, SIGCHLD, 0, 0, 0, 0);
 }
 
@@ -150,7 +150,7 @@ long lp_sleep_ms(long ms)
     return sys_call2(SYS_nanosleep, (long)ts, 0);
 }
 
-/* ── 시스템 ───────────────────────────────────────────────────── */
+/* ── System ────────────────────────────────────────────────────── */
 
 long lp_mount(const char *src, const char *tgt, const char *fstype,
               unsigned long flags, const void *data)
@@ -165,10 +165,109 @@ long lp_reboot(int cmd)
                      (long)LINUX_REBOOT_MAGIC2, cmd, 0);
 }
 
-/* ── 시각 ─────────────────────────────────────────────────────── */
+/* ── The terminal ──────────────────────────────────────────────── */
 
-/* struct timespec 은 arm64 에서 { s64 tv_sec; s64 tv_nsec; } 16바이트다.
- * 구조체를 정의하는 대신 배열로 다룬다. */
+long lp_ioctl(int fd, unsigned long req, void *arg)
+{
+    return sys_call3(SYS_ioctl, fd, (long)req, (long)arg);
+}
+
+#define TCGETS       0x5401
+#define TCSETS       0x5402
+#define TIOCGWINSZ   0x5413
+
+/* struct termios layout (arm64):
+ *    0  c_iflag (u32)
+ *    4  c_oflag (u32)
+ *    8  c_cflag (u32)
+ *   12  c_lflag (u32)
+ *   16  c_line  (u8)
+ *   17  c_cc[19]
+ */
+#define T_IFLAG  0
+#define T_OFLAG  1
+#define T_LFLAG  3
+#define T_CC     17
+#define VTIME    5
+#define VMIN     6
+
+/* c_lflag */
+#define ISIG    0x0001
+#define ICANON  0x0002
+#define ECHO    0x0008
+#define IEXTEN  0x8000
+/* c_iflag */
+#define BRKINT  0x0002
+#define ISTRIP  0x0020
+#define INLCR   0x0040
+#define ICRNL   0x0100
+#define IXON    0x0400
+/* IUTF8: the kernel's line erase treats UTF-8 as whole characters */
+#define IUTF8   0x4000
+/* c_oflag */
+#define OPOST   0x0001
+
+long lp_term_raw(int fd, lp_termios_t *saved)
+{
+    long r = lp_ioctl(fd, TCGETS, saved->raw);
+    if (r < 0)
+        return r;
+
+    lp_termios_t t = *saved;
+    u32 *f = (u32 *)t.raw;
+
+    /* Turn off the kernel's line editing, echo and signals - we draw it
+     * all ourselves. IXON has to go or Ctrl-S freezes the screen instead
+     * of reaching us. ICRNL has to go so Enter arrives as a plain CR.
+     * OPOST has to go so \n is not turned into CRLF - we emit that. */
+    f[T_LFLAG] &= ~(u32)(ICANON | ECHO | ISIG | IEXTEN);
+    f[T_IFLAG] &= ~(u32)(IXON | ICRNL | BRKINT | ISTRIP | INLCR);
+    f[T_OFLAG] &= ~(u32)OPOST;
+
+    /* Return as soon as one byte arrives (VMIN=1, VTIME=0). */
+    f[T_IFLAG] |= IUTF8;        /* keep telling the terminal it is UTF-8 */
+
+    t.raw[T_CC + VMIN]  = 1;
+    t.raw[T_CC + VTIME] = 0;
+
+    return lp_ioctl(fd, TCSETS, t.raw);
+}
+
+long lp_term_restore(int fd, const lp_termios_t *saved)
+{
+    return lp_ioctl(fd, TCSETS, (void *)saved->raw);
+}
+
+long lp_term_set_utf8(int fd)
+{
+    lp_termios_t t;
+    long r = lp_ioctl(fd, TCGETS, t.raw);
+    if (r < 0)
+        return r;
+    u32 *f = (u32 *)t.raw;
+    f[T_IFLAG] |= IUTF8;
+    return lp_ioctl(fd, TCSETS, t.raw);
+}
+
+long lp_term_size(int fd, int *rows, int *cols)
+{
+    /* struct winsize { u16 row, col, xpixel, ypixel; } */
+    u16 ws[4] = { 0, 0, 0, 0 };
+    long r = lp_ioctl(fd, TIOCGWINSZ, ws);
+    if (r < 0 || ws[0] == 0 || ws[1] == 0) {
+        *rows = 24;
+        *cols = 80;
+        return -1;
+    }
+    *rows = ws[0];
+    *cols = ws[1];
+    return 0;
+}
+
+/* ── Time ──────────────────────────────────────────────────────── */
+
+/* struct timespec on arm64 is { s64 tv_sec; s64 tv_nsec; }, 16 bytes.
+ * We use an array rather than declaring the struct. */
 #define CLOCK_REALTIME 0
 
 s64 lp_time(void)
@@ -185,6 +284,76 @@ long lp_settime(s64 unix_seconds)
     return sys_call2(SYS_clock_settime, CLOCK_REALTIME, (long)ts);
 }
 
+/* Leap years: divisible by 4, except by 100, unless also by 400.
+ * So 2000 was a leap year and 1900 was not. */
+static bool is_leap(int y)
+{
+    return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+}
+
+static const int MDAYS[12] = { 31, 28, 31, 30, 31, 30,
+                               31, 31, 30, 31, 30, 31 };
+
+static int days_in_month(int y, int m)   /* m: 0-11 */
+{
+    return (m == 1 && is_leap(y)) ? 29 : MDAYS[m];
+}
+
+void lp_gmtime(s64 t, lp_tm_t *out)
+{
+    /* Negative values (before 1970) have to work too. C division truncates
+     * toward zero, which would be a day out, so we floor it instead. */
+    s64 days = t / 86400;
+    s64 rem  = t % 86400;
+    if (rem < 0) { rem += 86400; days--; }
+
+    out->hour = (int)(rem / 3600);
+    out->min  = (int)((rem % 3600) / 60);
+    out->sec  = (int)(rem % 60);
+
+    /* 1970-01-01 was a Thursday (4). */
+    out->wday = (int)((days % 7 + 11) % 7);
+
+    int y = 1970;
+    while (days < 0) {
+        y--;
+        days += is_leap(y) ? 366 : 365;
+    }
+    for (;;) {
+        int len = is_leap(y) ? 366 : 365;
+        if (days < len) break;
+        days -= len;
+        y++;
+    }
+    out->year = y;
+
+    int m = 0;
+    while (m < 11 && days >= days_in_month(y, m)) {
+        days -= days_in_month(y, m);
+        m++;
+    }
+    out->mon = m + 1;
+    out->day = (int)days + 1;
+}
+
+s64 lp_timegm(const lp_tm_t *tm)
+{
+    s64 days = 0;
+
+    if (tm->year >= 1970) {
+        for (int y = 1970; y < tm->year; y++)
+            days += is_leap(y) ? 366 : 365;
+    } else {
+        for (int y = tm->year; y < 1970; y++)
+            days -= is_leap(y) ? 366 : 365;
+    }
+    for (int m = 0; m < tm->mon - 1; m++)
+        days += days_in_month(tm->year, m);
+    days += tm->day - 1;
+
+    return days * 86400 + tm->hour * 3600 + tm->min * 60 + tm->sec;
+}
+
 long lp_sync(void)            { return sys_call0(SYS_sync); }
 
 long lp_swapon(const char *path, int flags)
@@ -197,8 +366,8 @@ long lp_swapoff(const char *path)
     return sys_call1(SYS_swapoff, (long)path);
 }
 
-/* /proc 파일은 크기가 0 으로 보고되므로 stat 으로 미리 알 수 없다.
- * 그냥 버퍼가 찰 때까지 읽는다. */
+/* /proc files report a size of 0, so stat tells us nothing in advance.
+ * Just read until the buffer is full. */
 long proc_read(const char *path, char *buf, size_t size)
 {
     long fd = lp_open(path, O_RDONLY, 0);
@@ -218,14 +387,14 @@ long proc_read(const char *path, char *buf, size_t size)
     return (long)total;
 }
 
-/* "MemAvailable:  483252 kB" 같은 줄에서 숫자를 뽑는다. */
+/* Pull the number out of a line like "MemAvailable:  483252 kB". */
 long proc_find_kv(const char *text, const char *key)
 {
     size_t klen = strlen(key);
 
     for (const char *p = text; *p; ) {
-        /* 줄 시작에서만 비교한다. 부분 문자열 오탐을 막기 위해서다
-         * (예: "SwapFree" 를 찾는데 "MemFree" 에 걸리지 않도록) */
+        /* Match only at the start of a line, so a substring cannot fool us
+         * (looking for "SwapFree" must not match inside "MemFree"). */
         if (strncmp(p, key, klen) == 0 && p[klen] == ':') {
             p += klen + 1;
             while (*p == ' ' || *p == '\t') p++;
@@ -237,7 +406,7 @@ long proc_find_kv(const char *text, const char *key)
                 v = v * 10 + (*p++ - '0');
             return v;
         }
-        /* 다음 줄로 */
+        /* on to the next line */
         while (*p && *p != '\n') p++;
         if (*p) p++;
     }

@@ -1,4 +1,4 @@
-/* cat - 파일 또는 표준입력을 표준출력으로. */
+/* cat - copy files, or standard input, to standard output. */
 #include "types.h"
 #include "string.h"
 #include "stdio.h"
@@ -6,7 +6,7 @@
 
 #define BUF_SIZE 8192
 
-/* fd 하나를 끝까지 복사한다. 성공 0, 실패 1. */
+/* Copy one fd to the end. 0 on success, 1 on failure. */
 static int copy_fd(int fd, const char *label)
 {
     static char buf[BUF_SIZE];
@@ -16,16 +16,16 @@ static int copy_fd(int fd, const char *label)
         if (n == 0)
             return 0;
         if (n < 0) {
-            dprintf(STDERR_FILENO, "cat: %s: 읽기 실패 (%ld)\n", label, -n);
+            dprintf(STDERR_FILENO, "cat: %s: read failed (%ld)\n", label, -n);
             return 1;
         }
 
-        /* write 는 요청보다 적게 쓸 수 있다. 전부 나갈 때까지 반복. */
+        /* write may take less than asked. Loop until it is all out. */
         long off = 0;
         while (off < n) {
             long w = lp_write(STDOUT_FILENO, buf + off, (size_t)(n - off));
             if (w <= 0) {
-                dprintf(STDERR_FILENO, "cat: 쓰기 실패 (%ld)\n", -w);
+                dprintf(STDERR_FILENO, "cat: write failed (%ld)\n", -w);
                 return 1;
             }
             off += w;
@@ -47,7 +47,7 @@ int main(int argc, char **argv)
 
         long fd = lp_open(argv[i], O_RDONLY, 0);
         if (fd < 0) {
-            dprintf(STDERR_FILENO, "cat: %s: 열 수 없습니다 (%ld)\n",
+            dprintf(STDERR_FILENO, "cat: %s: cannot open (%ld)\n",
                     argv[i], -fd);
             rc = 1;
             continue;

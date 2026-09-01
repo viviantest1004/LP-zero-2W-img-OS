@@ -1,21 +1,21 @@
-/* calc - 정수 계산기.
+/* calc - integer calculator.
  *
- *   calc "1 + 2 * 3"          인자로 한 번 계산
- *   calc                      대화형 모드 (빈 줄이나 Ctrl-D 로 종료)
+ *   calc "1 + 2 * 3"        evaluate once, from the argument
+ *   calc                    interactive (blank line or Ctrl-D to leave)
  *
- * 지원:
- *   산술    + - * / % **        (** 는 거듭제곱)
- *   비트    & | ^ ~ << >>
- *   괄호    ( )
- *   입력    10진수, 0x16진수, 0b2진수
+ * Supported:
+ *   arithmetic  + - * / % **      (** is power)
+ *   bitwise     & | ^ ~ << >>
+ *   grouping    ( )
+ *   input       decimal, 0x hex, 0b binary
  *
- * 결과를 10진수/16진수/2진수로 함께 보여준다. 이 프로젝트에서는
- * 주소나 비트마스크를 다룰 일이 많아 그때마다 변환하는 것보다 낫다.
+ * Every result is shown in decimal, hex and binary at once. This project
+ * deals with addresses and bit masks constantly, and converting by hand
  *
- * 64비트 정수만 다룬다. 부동소수점은 없다 - 우리 printf 가 지원하지
- * 않고, 넣으면 코드가 몇 배로 커진다.
+ * every time is worse. 64-bit integers only. No floating point - our
+ * printf does not do it, and adding it would multiply the code size.
  *
- * 재귀 하향 파서다. 우선순위가 낮은 것부터 높은 것으로 내려간다:
+ * A recursive descent parser, from lowest precedence down to highest:
  *   or -> xor -> and -> shift -> add -> mul -> unary -> power -> atom
  */
 #include "types.h"
@@ -34,7 +34,7 @@ static s64 parse_or(parser_t *ps);
 
 static void fail(parser_t *ps, const char *msg)
 {
-    if (!ps->error) {          /* 첫 오류만 기억한다 */
+    if (!ps->error) {          /* keep only the first error */
         ps->error = true;
         ps->msg = msg;
     }
@@ -45,8 +45,8 @@ static void skip_space(parser_t *ps)
     while (*ps->p == ' ' || *ps->p == '\t') ps->p++;
 }
 
-/* 다음이 op 면 소비하고 true. 두 글자 연산자를 먼저 봐야 한다
- * (** 를 * 로, << 를 < 로 읽으면 안 된다). */
+/* Consume op and return true if it is next. Two-character operators must
+ * be tested first, or ** reads as * and << reads as <. */
 static bool eat(parser_t *ps, const char *op)
 {
     skip_space(ps);
@@ -64,11 +64,11 @@ static s64 parse_atom(parser_t *ps)
     if (eat(ps, "(")) {
         s64 v = parse_or(ps);
         if (!eat(ps, ")"))
-            fail(ps, "닫는 괄호가 없습니다");
+            fail(ps, "missing closing parenthesis");
         return v;
     }
 
-    /* 0x / 0b 접두사 */
+    /* 0x / 0b prefixes */
     int base = 10;
     if (ps->p[0] == '0' && (ps->p[1] == 'x' || ps->p[1] == 'X')) {
         base = 16; ps->p += 2;
@@ -94,13 +94,13 @@ static s64 parse_atom(parser_t *ps)
     }
 
     if (ps->p == start) {
-        fail(ps, "숫자가 와야 합니다");
+        fail(ps, "expected a number");
         return 0;
     }
     return v;
 }
 
-/* 거듭제곱은 오른쪽 결합이다: 2**3**2 = 2**(3**2) */
+/* Power is right associative: 2**3**2 = 2**(3**2) */
 static s64 parse_power(parser_t *ps)
 {
     s64 base = parse_atom(ps);
@@ -109,14 +109,14 @@ static s64 parse_power(parser_t *ps)
 
     s64 exp = parse_power(ps);
     if (exp < 0) {
-        fail(ps, "음수 지수는 정수 계산에서 쓸 수 없습니다");
+        fail(ps, "a negative exponent has no integer result");
         return 0;
     }
 
     s64 r = 1;
     while (exp-- > 0) {
         r *= base;
-        if (exp > 62) { fail(ps, "너무 큽니다"); return 0; }
+        if (exp > 62) { fail(ps, "too large"); return 0; }
     }
     return r;
 }
@@ -135,18 +135,18 @@ static s64 parse_mul(parser_t *ps)
     s64 v = parse_unary(ps);
     for (;;) {
         skip_space(ps);
-        /* ** 는 거듭제곱이므로 * 로 읽으면 안 된다 */
+        /* ** is power, so it must not be read as * */
         if (ps->p[0] == '*' && ps->p[1] == '*') return v;
 
         if (eat(ps, "*")) { v *= parse_unary(ps); continue; }
         if (eat(ps, "/")) {
             s64 d = parse_unary(ps);
-            if (d == 0) { fail(ps, "0 으로 나눌 수 없습니다"); return 0; }
+            if (d == 0) { fail(ps, "division by zero"); return 0; }
             v /= d; continue;
         }
         if (eat(ps, "%")) {
             s64 d = parse_unary(ps);
-            if (d == 0) { fail(ps, "0 으로 나눌 수 없습니다"); return 0; }
+            if (d == 0) { fail(ps, "division by zero"); return 0; }
             v %= d; continue;
         }
         return v;
@@ -174,7 +174,7 @@ static s64 parse_shift(parser_t *ps)
     }
 }
 
-/* & | ^ 는 << >> 보다 낮은 우선순위 (C 와 같다) */
+/* & | ^ bind less tightly than << >>, as in C */
 static s64 parse_and(parser_t *ps)
 {
     s64 v = parse_shift(ps);
@@ -199,7 +199,7 @@ static s64 parse_or(parser_t *ps)
     return v;
 }
 
-/* 2진수는 앞의 0 을 떼고 4자리씩 끊어 보여준다 */
+/* Binary: drop leading zeros and group in fours */
 static void print_binary(u64 v)
 {
     if (v == 0) { printf("0"); return; }
@@ -227,7 +227,7 @@ static int evaluate(const char *expr, bool verbose)
 
     skip_space(&ps);
     if (!ps.error && *ps.p)
-        fail(&ps, "식 뒤에 알 수 없는 문자가 있습니다");
+        fail(&ps, "unexpected characters after the expression");
 
     if (ps.error) {
         dprintf(STDERR_FILENO, "calc: %s\n", ps.msg);
@@ -244,7 +244,7 @@ static int evaluate(const char *expr, bool verbose)
 int main(int argc, char **argv)
 {
     if (argc > 1) {
-        /* 인자를 모두 이어붙인다. 셸이 공백으로 나눠 넘기기 때문이다. */
+        /* Join all arguments: the shell splits them on spaces. */
         char expr[512];
         expr[0] = '\0';
         for (int i = 1; i < argc; i++) {
@@ -255,7 +255,7 @@ int main(int argc, char **argv)
         return evaluate(expr, true);
     }
 
-    printf("calc - 정수 계산기.  빈 줄이나 Ctrl-D 로 종료\n");
+    printf("calc - integer calculator.  Blank line or Ctrl-D to leave.\n");
     printf("  + - * / %% **   & | ^ ~ << >>   ( )   0x.. 0b..\n\n");
 
     char line[512];

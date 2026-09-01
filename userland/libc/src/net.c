@@ -1,8 +1,9 @@
-/* net.c - 소켓 래퍼와 인터페이스 설정.
+/* net.c - socket wrappers and interface configuration.
  *
- * 인터페이스 설정은 netlink 대신 옛 ioctl 방식을 쓴다. IPv4 주소·넷마스크·
- * 플래그·기본 경로만 필요한데, 그 정도는 ioctl 로 충분하고 코드가 몇 배
- * 짧다. netlink 는 IPv6 나 여러 주소를 다룰 때 필요해진다. */
+ * Interfaces are configured through the old ioctl interface rather than
+ * netlink. We only need an IPv4 address, a netmask, the flags and a
+ * default route; ioctl covers that in a fraction of the code. netlink
+ * starts to matter with IPv6 or several addresses per interface. */
 #include "net.h"
 #include "syscall.h"
 #include "string.h"
@@ -42,10 +43,11 @@ long lp_setsockopt(int fd, int level, int opt, const void *val, u32 len)
     return sys_call5(SYS_setsockopt, fd, level, opt, (long)val, (long)len);
 }
 
-/* ── 인터페이스 ioctl ─────────────────────────────────────────────
+/* ── Interface ioctls ─────────────────────────────────────────────
  *
- * struct ifreq 는 이름 16바이트 + 유니온이다. 유니온 안에 sockaddr,
- * 플래그, 인덱스 등이 겹쳐 있다. 커널 헤더를 가져오지 않고 직접 배치한다.
+ * struct ifreq is a 16-byte name followed by a union. The union overlays
+ * a sockaddr, the flags, the index and more. We lay it out ourselves
+ * rather than pulling in kernel headers.
  *
  *   offset 0..15   ifr_name
  *   offset 16..    ifr_addr / ifr_flags / ifr_ifindex / ifr_hwaddr
@@ -61,8 +63,8 @@ static void ifreq_init(ifreq_t r, const char *ifname)
     strlcpy((char *)r, ifname, IFNAMSIZ);
 }
 
-/* AF_INET 소켓 하나를 열어 ioctl 을 건다. 소켓은 통신용이 아니라
- * ioctl 을 태울 통로일 뿐이다. */
+/* Open an AF_INET socket to carry the ioctl. The socket is never used
+ * to communicate - it is just the handle the ioctl rides on. */
 static long if_ioctl(unsigned long req, ifreq_t r)
 {
     long fd = lp_socket(AF_INET, SOCK_DGRAM, 0);
@@ -132,12 +134,12 @@ long net_if_hwaddr(const char *ifname, u8 mac[6])
     if (rc < 0)
         return rc;
 
-    /* ifr_hwaddr 는 sockaddr: 앞 2바이트가 sa_family, 그 다음이 데이터 */
+    /* ifr_hwaddr is a sockaddr: 2 bytes of sa_family, then the data. */
     memcpy(mac, r + IFR_UNION + 2, 6);
     return 0;
 }
 
-/* 주소/넷마스크 설정은 유니온 자리에 sockaddr_in 을 얹는다 */
+/* Setting an address or netmask puts a sockaddr_in in the union. */
 static long if_set_inaddr(const char *ifname, unsigned long req, u32 addr_be)
 {
     ifreq_t r;
@@ -175,13 +177,13 @@ long net_set_netmask(const char *ifname, u32 mask_be)
     return if_set_inaddr(ifname, SIOCSIFNETMASK, mask_be);
 }
 
-/* struct rtentry - 경로 추가용. 커널 배치를 직접 옮긴다.
+/* struct rtentry, for adding a route. The kernel's layout, by hand.
  *   0   unsigned long rt_pad1
- *   8   struct sockaddr rt_dst      (16바이트)
- *   24  struct sockaddr rt_gateway  (16바이트)
- *   40  struct sockaddr rt_genmask  (16바이트)
+ *   8   struct sockaddr rt_dst      (16 bytes)
+ *   24  struct sockaddr rt_gateway  (16 bytes)
+ *   40  struct sockaddr rt_genmask  (16 bytes)
  *   56  short rt_flags
- *   ... 나머지는 0 이면 된다
+ *   ... the rest can stay zero
  */
 #define RTENTRY_SIZE   120
 #define RT_DST_OFF       8
@@ -198,7 +200,7 @@ long net_add_default_route(const char *ifname, u32 gw_be)
     u8 rt[RTENTRY_SIZE];
     memset(rt, 0, sizeof(rt));
 
-    /* 기본 경로: 목적지 0.0.0.0, 넷마스크 0.0.0.0, 게이트웨이 지정 */
+    /* The default route: destination 0.0.0.0, netmask 0.0.0.0, via the gateway. */
     sockaddr_in_t *dst  = (sockaddr_in_t *)(rt + RT_DST_OFF);
     sockaddr_in_t *gw   = (sockaddr_in_t *)(rt + RT_GATEWAY_OFF);
     sockaddr_in_t *mask = (sockaddr_in_t *)(rt + RT_GENMASK_OFF);
@@ -222,7 +224,7 @@ long net_add_default_route(const char *ifname, u32 gw_be)
     return rc;
 }
 
-/* ── 주소 문자열 ──────────────────────────────────────────────── */
+/* ── Address strings ───────────────────────────────────────────── */
 
 bool ipv4_parse(const char *s, u32 *out_be)
 {
@@ -248,7 +250,7 @@ bool ipv4_parse(const char *s, u32 *out_be)
     if (*s != '\0')
         return false;
 
-    /* 네트워크 바이트 순서 = 첫 옥텟이 최하위 바이트에 오도록 */
+    /* Network byte order: the first octet ends up in the lowest byte. */
     *out_be = octets[0] | (octets[1] << 8) | (octets[2] << 16) | (octets[3] << 24);
     return true;
 }
