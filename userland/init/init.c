@@ -17,7 +17,10 @@
 
 #define SHELL_PATH   "/bin/sh"
 #define RC_SCRIPT    "/etc/rc"
-#define RESPAWN_MS   1000   /* 셸이 즉시 죽을 때 폭주 방지 대기 */
+#define SERVICES     "/etc/services"
+#define RESPAWN_MS   1000   /* 즉시 죽을 때 폭주 방지 대기 */
+#define MAX_SERVICES 8
+#define MAX_SVC_ARGS 16
 
 /* 마운트할 가상 파일시스템 목록.
  * 이것들이 없으면 ps 도 안 되고 /dev/null 도 없다. */
@@ -80,6 +83,133 @@ static void banner(void)
     printf("  LP-zero OS\n");
     printf("  init (pid %d)\n", lp_getpid());
     printf("\n");
+}
+
+/* ── 서비스 감시 ──────────────────────────────────────────────────
+ *
+ * PID 1 의 본래 역할이다. /etc/services 의 각 줄을 프로그램으로 띄우고,
+ * 죽으면 다시 띄운다.
+ *
+ * 왜 /etc/rc 가 아니라 여기서 띄우나: rc 는 한 번 실행하고 끝난다.
+ * rc 가 띄운 프로그램이 죽으면 아무도 되살리지 않는다. SSH 서버가
+ * 그렇게 죽으면 원격에서 손을 쓸 방법이 사라진다. init 은 어차피
+ * 모든 자식의 종료를 받아보므로 여기서 감시하는 것이 자연스럽다. */
+
+typedef struct {
+    char   line[256];               /* 원본 (argv 가 이 안을 가리킨다) */
+    char  *argv[MAX_SVC_ARGS + 1];
+    pid_t  pid;
+    int    fails;                   /* 연속 실패 횟수 */
+} service_t;
+
+static service_t services[MAX_SERVICES];
+static int       nservices;
+
+/* 한 줄을 공백으로 잘라 argv 를 만든다. 따옴표는 다루지 않는다 -
+ * 서비스 명령줄에 공백 있는 인자가 필요해진 적이 없다. */
+static bool parse_service(const char *line, service_t *svc)
+{
+    strlcpy(svc->line, line, sizeof(svc->line));
+
+    int n = 0;
+    char *p = svc->line;
+
+    while (*p && n < MAX_SVC_ARGS) {
+        while (*p == ' ' || *p == '\t') *p++ = '\0';
+        if (*p == '\0') break;
+
+        svc->argv[n++] = p;
+        while (*p && *p != ' ' && *p != '\t') p++;
+    }
+    svc->argv[n] = NULL;
+    return n > 0;
+}
+
+static void start_service(service_t *svc)
+{
+    pid_t pid = lp_fork();
+    if (pid < 0) {
+        dprintf(STDERR_FILENO, "init: %s 를 위한 fork 실패\n", svc->argv[0]);
+        svc->pid = -1;
+        return;
+    }
+
+    if (pid == 0) {
+        char *envp[] = {
+            (char *)"PATH=/bin:/sbin:/usr/bin:/usr/sbin",
+            (char *)"HOME=/root",
+            NULL
+        };
+        lp_execve(svc->argv[0], svc->argv, envp);
+
+        /* PATH 를 직접 뒤진다. execve 는 PATH 를 보지 않는다. */
+        char path[256];
+        snprintf(path, sizeof(path), "/bin/%s", svc->argv[0]);
+        lp_execve(path, svc->argv, envp);
+
+        dprintf(STDERR_FILENO, "init: %s 를 실행할 수 없습니다\n", svc->argv[0]);
+        lp_exit(127);
+    }
+
+    svc->pid = pid;
+}
+
+static void load_services(void)
+{
+    char buf[2048];
+    long n = proc_read(SERVICES, buf, sizeof(buf));
+    if (n <= 0)
+        return;
+
+    char *p = buf;
+    while (*p && nservices < MAX_SERVICES) {
+        char *eol = strchr(p, '\n');
+        if (eol) *eol = '\0';
+
+        /* 빈 줄과 주석은 건너뛴다 */
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p && *p != '#') {
+            if (parse_service(p, &services[nservices])) {
+                start_service(&services[nservices]);
+                printf("init: 서비스 시작 %s (pid %d)\n",
+                       services[nservices].argv[0],
+                       (int)services[nservices].pid);
+                nservices++;
+            }
+        }
+
+        if (!eol) break;
+        p = eol + 1;
+    }
+}
+
+/* 죽은 자식이 감시 대상이면 다시 띄운다. 처리했으면 true. */
+static bool respawn_service(pid_t dead, int status)
+{
+    for (int i = 0; i < nservices; i++) {
+        if (services[i].pid != dead)
+            continue;
+
+        int code = LP_WIFEXITED(status) ? LP_WEXITSTATUS(status) : -1;
+        dprintf(STDERR_FILENO, "init: 서비스 %s 종료 (코드 %d) - 재시작\n",
+                services[i].argv[0], code);
+
+        /* 즉시 죽는 것이 반복되면 폭주한다. 실패가 쌓이면 더 오래 쉰다. */
+        services[i].fails++;
+        long wait_ms = RESPAWN_MS * (services[i].fails > 5 ? 10 : 1);
+        if (services[i].fails > 20) {
+            dprintf(STDERR_FILENO,
+                    "init:   %s 가 계속 실패합니다. 감시를 멈춥니다\n",
+                    services[i].argv[0]);
+            services[i].pid = -1;
+            return true;
+        }
+
+        lp_sleep_ms(wait_ms);
+        start_service(&services[i]);
+        return true;
+    }
+    return false;
 }
 
 /* 부팅 스크립트를 실행하고 끝날 때까지 기다린다.
@@ -171,8 +301,10 @@ int main(int argc, char **argv)
 
     banner();
 
-    if (is_pid1)
+    if (is_pid1) {
         run_rc();
+        load_services();
+    }
 
     pid_t shell_pid = spawn_shell();
 
@@ -189,6 +321,9 @@ int main(int argc, char **argv)
             lp_sleep_ms(200);
             continue;
         }
+
+        if (respawn_service(pid, status))
+            continue;           /* 감시 대상이었다 */
 
         if (pid != shell_pid)
             continue;           /* 고아 프로세스를 거둔 것뿐 */
