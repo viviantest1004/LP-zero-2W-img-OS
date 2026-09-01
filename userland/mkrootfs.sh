@@ -108,8 +108,17 @@ chmod 700 "${ROOT_DIR}/root/.ssh" "${ROOT_DIR}/root"
 cat > "${ROOT_DIR}/etc/motd" <<'MOTD'
 LP-zero OS
 
-펌웨어(베어메탈) -> 리눅스 커널 -> 자체 libc -> 자체 init -> 자체 셸
-'help' 로 명령 목록.
+  펌웨어(베어메탈) -> 리눅스 커널 -> 자체 libc -> 자체 init -> 자체 셸
+
+★ 저장 위치에 주의하세요
+
+  /data     SD 카드. 재부팅해도 남습니다.
+  그 밖     RAM. 재부팅하면 사라집니다 (/root, /tmp 포함).
+
+  파일을 남기려면 /data 안에 두세요.
+
+명령: help
+상태: zram status / memwatch / ls /data
 MOTD
 
 echo ""

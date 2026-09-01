@@ -11,6 +11,12 @@ zram on 256 || echo "[rc]   zram 없이 계속합니다"
 # init/셸/SSH/무선은 보호 대상이라 죽이지 않는다.
 memwatch -d -r 32 -w 64 || echo "[rc]   memwatch 시작 실패"
 
+echo "[rc] 데이터 파티션 확장 확인"
+# 이미지가 256MB 라 큰 카드에 구우면 나머지가 미할당으로 남는다.
+# 첫 부팅에 파티션과 파일시스템을 카드 끝까지 늘린다.
+# 이미 최대면 아무것도 하지 않고 넘어간다.
+expandfs || echo "[rc]   확장 없음"
+
 echo "[rc] 데이터 파티션 마운트"
 mount /dev/mmcblk0p2 /data || echo "[rc]   없음 - 내장 설정으로 진행합니다"
 
