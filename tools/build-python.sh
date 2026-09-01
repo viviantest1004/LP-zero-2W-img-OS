@@ -25,6 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY_SRC="${PY_SRC:-/home/user/kernel-work/thirdparty/Python-3.12.3}"
 BUILD_PY="${BUILD_PY:-/usr/bin/python3.12}"
 STAGE="${STAGE:-/home/user/kernel-work/python-stage}"
+SYSROOT="${SYSROOT:-/home/user/kernel-work/thirdparty/sysroot}"
 JOBS="${JOBS:-$(nproc)}"
 CROSS=aarch64-linux-gnu-
 
@@ -32,6 +33,10 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 step() { printf '\n==> %s\n' "$*"; }
 
 [[ -d "$PY_SRC" ]] || die "소스가 없습니다: $PY_SRC"
+# _ctypes 는 libffi, zlib 모듈은 zlib 를 요구한다. 둘 다 aarch64 로
+# 미리 크로스 빌드해 sysroot 에 넣어두어야 한다.
+[[ -f "${SYSROOT}/include/ffi.h" ]]  || die "libffi 가 없습니다: ${SYSROOT}"
+[[ -f "${SYSROOT}/include/zlib.h" ]] || die "zlib 가 없습니다: ${SYSROOT}"
 command -v "$BUILD_PY" >/dev/null || die "$BUILD_PY 가 없습니다"
 command -v "${CROSS}gcc" >/dev/null || die "${CROSS}gcc 가 없습니다"
 
@@ -46,7 +51,26 @@ esac
 step "설정 (소스 ${SRC_VER}, 호스트 파이썬 ${HOST_VER})"
 cd "$PY_SRC"
 
+# 설정을 바꿔 다시 빌드할 때는 이전 Makefile 을 지워야 한다
+[[ -f Makefile && "${RECONFIGURE:-0}" == "1" ]] && make distclean >/dev/null 2>&1
+
 if [[ ! -f Makefile ]]; then
+    # 외부 라이브러리가 필요한 모듈은 끈다. 우리 시스템에는 그 라이브러리가
+    # 없고, 파이썬을 스크립팅 용도로 쓰는 데는 없어도 된다.
+    #   _ssl/_hashlib  OpenSSL     _sqlite3  SQLite
+    #   _curses        ncurses     readline  libreadline
+    #   _lzma/_bz2     xz/bzip2    _dbm/_gdbm  BerkeleyDB/GDBM
+    # 필요해지면 그 라이브러리를 크로스 빌드해 sysroot 에 넣고 여기서 뺀다.
+    DISABLED=(
+        py_cv_module__ssl=n/a      py_cv_module__hashlib=n/a
+        py_cv_module__sqlite3=n/a  py_cv_module__curses=n/a
+        py_cv_module__curses_panel=n/a
+        py_cv_module_readline=n/a  py_cv_module__lzma=n/a
+        py_cv_module__bz2=n/a      py_cv_module__dbm=n/a
+        py_cv_module__gdbm=n/a     py_cv_module__tkinter=n/a
+        py_cv_module_nis=n/a       py_cv_module__uuid=n/a
+    )
+
     ./configure \
         --host=aarch64-linux-gnu \
         --build=x86_64-linux-gnu \
@@ -65,8 +89,11 @@ if [[ ! -f Makefile ]]; then
         AR="${CROSS}ar" \
         RANLIB="${CROSS}ranlib" \
         READELF="${CROSS}readelf" \
-        CFLAGS="-Os -fno-semantic-interposition" \
-        LDFLAGS="-static" \
+        CFLAGS="-Os -fno-semantic-interposition -I${SYSROOT}/include" \
+        CPPFLAGS="-I${SYSROOT}/include" \
+        LDFLAGS="-static -L${SYSROOT}/lib" \
+        LIBFFI_INCLUDEDIR="${SYSROOT}/include" \
+        "${DISABLED[@]}" \
         > /tmp/py-conf.log 2>&1 || { tail -25 /tmp/py-conf.log; die "configure 실패"; }
     echo "  완료"
 else
