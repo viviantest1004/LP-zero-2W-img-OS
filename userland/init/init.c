@@ -180,6 +180,9 @@ typedef struct {
     char  *argv[MAX_SVC_ARGS + 1];
     pid_t  pid;
     int    fails;                   /* consecutive failures */
+    s64    retry_at;                /* monotonic ms to start it again, 0 = none */
+    s64    started_at;              /* monotonic ms, to tell a crash loop from
+                                       a service that ran for a week */
 } service_t;
 
 static service_t services[MAX_SERVICES];
@@ -305,6 +308,7 @@ static void load_services(void)
                     continue;
                 }
                 start_service(&services[nservices]);
+                services[nservices].started_at = lp_monotonic_ms();
                 printf("init: started service %s (pid %d)\n",
                        services[nservices].argv[0],
                        (int)services[nservices].pid);
@@ -317,32 +321,79 @@ static void load_services(void)
     }
 }
 
-/* Restart a dead child if it is one we supervise. true if we handled it. */
+/* Note that a supervised service died, and when to try it again.
+ * true if it was one of ours.
+ *
+ * The restart is scheduled, not slept through. init used to sleep here,
+ * which meant that while one service was backing off, pid 1 was not
+ * reaping anything or restarting the shell - the whole machine waited
+ * on the one thing that was already broken.
+ *
+ * The delay doubles each time, up to half a minute. Without that, a
+ * service that cannot possibly start - the watchdog daemon on a board
+ * with no watchdog - takes the console with it: twenty restarts and
+ * forty lines of the same message, in the second and a half it takes
+ * anyone to read the first one. */
 static bool respawn_service(pid_t dead, int status)
 {
     for (int i = 0; i < nservices; i++) {
         if (services[i].pid != dead)
             continue;
 
-        int code = LP_WIFEXITED(status) ? LP_WEXITSTATUS(status) : -1;
-        dprintf(STDERR_FILENO, "init: service %s exited (code %d) - restarting\n",
-                services[i].argv[0], code);
-
-        /* Something that dies instantly would spin. Back off as failures add up. */
+        services[i].pid = -1;
+        /* A service that stayed up for a minute was not failing to
+         * start - it died of something else. Do not make it serve a
+         * backoff earned months ago. */
+        if (lp_monotonic_ms() - services[i].started_at > 60000)
+            services[i].fails = 0;
         services[i].fails++;
-        long wait_ms = RESPAWN_MS * (services[i].fails > 5 ? 10 : 1);
-        if (services[i].fails > 20) {
+
+        if (services[i].fails > 12) {
             dprintf(STDERR_FILENO,
                     "init:   %s keeps failing. Giving up on it\n",
                     services[i].argv[0]);
-            services[i].pid = -1;
+            services[i].retry_at = 0;
             return true;
         }
 
-        lp_sleep_ms(wait_ms);
-        start_service(&services[i]);
+        long wait_ms = RESPAWN_MS;
+        for (int n = 1; n < services[i].fails && wait_ms < 30000; n++)
+            wait_ms *= 2;
+        if (wait_ms > 30000) wait_ms = 30000;
+
+        int code = LP_WIFEXITED(status) ? LP_WEXITSTATUS(status) : -1;
+        dprintf(STDERR_FILENO,
+                "init: service %s exited (code %d) - again in %lds\n",
+                services[i].argv[0], code, wait_ms / 1000);
+
+        services[i].retry_at = lp_monotonic_ms() + wait_ms;
         return true;
     }
+    return false;
+}
+
+/* Start whatever is due. Called every time round the main loop. */
+static void restart_due_services(void)
+{
+    s64 now = lp_monotonic_ms();
+    for (int i = 0; i < nservices; i++) {
+        if (services[i].pid > 0 || services[i].retry_at == 0)
+            continue;
+        if (now < services[i].retry_at)
+            continue;
+        services[i].retry_at = 0;
+        start_service(&services[i]);
+        services[i].started_at = lp_monotonic_ms();
+    }
+}
+
+/* Is anything waiting to be restarted? Only then does the main loop have
+ * to poll instead of blocking in wait(). */
+static bool services_pending(void)
+{
+    for (int i = 0; i < nservices; i++)
+        if (services[i].pid <= 0 && services[i].retry_at != 0)
+            return true;
     return false;
 }
 
@@ -546,10 +597,26 @@ int main(int argc, char **argv)
             printf("init: a second shell is on the screen (tty1)\n");
     }
 
-    /* Main loop: reap dead children, and restart the shell when it exits. */
+    /* Main loop: reap dead children, restart services whose backoff has
+     * run out, and restart the shell when it exits.
+     *
+     * The wait does not block: a service waiting to be restarted has a
+     * time to be restarted at, and nothing would notice it passing if
+     * pid 1 were parked in wait(). */
     for (;;) {
+        restart_due_services();
+
         int status = 0;
-        pid_t pid = lp_wait(&status);
+        bool pending = services_pending();
+        pid_t pid = pending ? lp_waitpid(-1, &status, WNOHANG)
+                            : lp_wait(&status);
+
+        if (pid == 0) {
+            /* Children, but none of them finished, and something is
+             * waiting on the clock. Look again shortly. */
+            lp_sleep_ms(200);
+            continue;
+        }
 
         if (pid < 0) {
             /* No children to wait for (ECHILD = 10). PID 1 must not exit,

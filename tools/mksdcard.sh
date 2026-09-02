@@ -176,15 +176,27 @@ if [[ "$MODE" == "linux" ]]; then
     #
     # 커맨드라인은 커널에 박힌 CONFIG_CMDLINE 을 쓴다. UEFI 로 올 때는
     # 부트로더가 bootargs 를 주지 않기 때문이다.
+    #
+    # UEFI 경로에는 vmlinuz.efi(EFI_ZBOOT 산물)를 쓴다. 같은 커널을
+    # 압축해 EFI 스텁으로 감싼 것이라 크기가 절반 이하다. 압축을 푸는
+    # 주체가 EFI 부트 서비스이므로 실기 Pi 에서는 쓸 수 없고, 그쪽은
+    # config.txt 의 kernel= 이 가리키는 압축되지 않은 Image 를 그대로
+    # 쓴다. 두 파일이 같은 커널이라는 점이 중요하다.
+    EFI_KERNEL="${REPO_ROOT}/kernel/out/vmlinuz.efi"
+    EFI_LABEL="vmlinuz.efi - 압축"
+    if [[ ! -f "$EFI_KERNEL" ]]; then
+        EFI_KERNEL="$KERNEL"
+        EFI_LABEL="Image - 비압축"
+    fi
     if python3 -c "
 import struct, sys
-d = open('$KERNEL','rb').read(0x100)
+d = open('$EFI_KERNEL','rb').read(0x100)
 sys.exit(0 if d[:2] == b'MZ' and d[struct.unpack_from('<I', d, 0x3c)[0]:][:4] == b'PE\\0\\0' else 1)
 " 2>/dev/null; then
         mmd -i "$PART_IMG" ::EFI 2>/dev/null || true
         mmd -i "$PART_IMG" ::EFI/BOOT 2>/dev/null || true
-        mcopy -o -i "$PART_IMG" "$KERNEL" ::EFI/BOOT/BOOTAA64.EFI
-        log "복사: EFI/BOOT/BOOTAA64.EFI            (UEFI 부팅용 - QEMU/UTM)"
+        mcopy -o -i "$PART_IMG" "$EFI_KERNEL" ::EFI/BOOT/BOOTAA64.EFI
+        log "복사: EFI/BOOT/BOOTAA64.EFI            (UEFI 부팅용, ${EFI_LABEL})"
     else
         echo "  경고: 커널에 EFI 스텁이 없습니다 (CONFIG_EFI_STUB)."
         echo "        QEMU/UTM 에서 UEFI 로 부팅되지 않습니다."

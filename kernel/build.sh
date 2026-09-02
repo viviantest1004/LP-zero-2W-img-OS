@@ -33,6 +33,10 @@ step() { printf '\n==> %s\n' "$*"; }
 [[ -d "$LINUX_SRC" ]]  || die "커널 소스가 없습니다: $LINUX_SRC"
 [[ -f "$FRAGMENT" ]]   || die "설정 조각이 없습니다: $FRAGMENT"
 command -v "${CROSS}gcc" >/dev/null || die "${CROSS}gcc 가 없습니다 (apt install gcc-aarch64-linux-gnu)"
+# EFI_ZBOOT 가 vmlinuz.efi 를 만들 때 커널 Makefile 이 hexdump 로 이미지
+# 크기를 읽는다. 없으면 "truncate: Invalid number" 라는, 원인이 전혀
+# 드러나지 않는 오류로 7분짜리 빌드가 끝난다.
+command -v hexdump >/dev/null || die "hexdump 가 없습니다 (apt install bsdextrautils)"
 
 # 유저랜드가 준비되어 있어야 커널에 내장할 수 있다
 if [[ ! -d "$ROOTFS" ]]; then
@@ -130,11 +134,24 @@ fi
 
 # ── 3. 빌드 ──────────────────────────────────────────────────────
 step "빌드 시작 (-j${JOBS}) — 몇 분 걸립니다"
-time make "${MAKE_ARGS[@]}" -j"$JOBS" Image dtbs
+# vmlinuz.efi 는 EFI_ZBOOT 의 산물이다. Image 를 압축해 EFI 스텁으로
+# 감싼 것으로, UEFI 부팅 경로(QEMU/UTM)에서 FAT 파티션 공간을 절반 넘게
+# 아낀다. 실기 Pi 는 GPU 펌웨어가 압축을 풀 줄 모르므로 Image 를 그대로
+# 쓴다 - 그래서 둘 다 만든다.
+time make "${MAKE_ARGS[@]}" -j"$JOBS" Image vmlinuz.efi dtbs
 
 # ── 4. 결과 수집 ─────────────────────────────────────────────────
 step "결과"
 cp "${BUILD_DIR}/arch/arm64/boot/Image" "${OUT_DIR}/Image"
+
+ZBOOT="${BUILD_DIR}/arch/arm64/boot/vmlinuz.efi"
+if [[ -f "$ZBOOT" ]]; then
+    cp "$ZBOOT" "${OUT_DIR}/vmlinuz.efi"
+else
+    rm -f "${OUT_DIR}/vmlinuz.efi"
+    echo "  경고: vmlinuz.efi 가 없습니다 (CONFIG_EFI_ZBOOT)."
+    echo "        UEFI 경로도 압축되지 않은 Image 를 쓰게 됩니다."
+fi
 
 DTB_SRC="${BUILD_DIR}/arch/arm64/boot/dts/broadcom/bcm2710-rpi-zero-2-w.dtb"
 if [[ -f "$DTB_SRC" ]]; then
@@ -159,5 +176,10 @@ done
 
 IMG_SIZE=$(stat -c%s "${OUT_DIR}/Image")
 printf "  Image %s bytes (%.1f MB)\n" "$IMG_SIZE" "$(echo "scale=2; $IMG_SIZE/1048576" | bc)"
+if [[ -f "${OUT_DIR}/vmlinuz.efi" ]]; then
+    Z_SIZE=$(stat -c%s "${OUT_DIR}/vmlinuz.efi")
+    printf "  vmlinuz.efi %s bytes (%.1f MB) - UEFI 부팅용\n" \
+        "$Z_SIZE" "$(echo "scale=2; $Z_SIZE/1048576" | bc)"
+fi
 echo ""
 echo "  출력: ${OUT_DIR}"

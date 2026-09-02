@@ -105,6 +105,38 @@ static int check_label(const char *part)
 /* Block device ioctls */
 #define BLKRRPART      0x125F      /* _IO(0x12, 95)  re-read partition table */
 #define BLKGETSIZE64   0x80081272  /* _IOR(0x12, 114, size_t)  size in bytes */
+#define BLKPG          0x1269      /* _IO(0x12, 105) change one partition */
+
+/* BLKPG: tell the kernel the new size of a single partition.
+ *
+ * BLKRRPART re-reads the whole table, and the kernel refuses that with
+ * EBUSY while any partition on the disk is mounted. /boot is mounted
+ * before this runs - e2fsck lives there - so BLKRRPART now always
+ * fails, and without this the first boot would grow the partition,
+ * fail to tell the kernel, and then fail the filesystem resize with
+ * ENOSPC because the kernel still believes the old size.
+ *
+ * BLKPG changes one partition and does not care what else is mounted.
+ * The kernel checks that the start offset is unchanged, so it cannot be
+ * used to move a partition out from under a mounted filesystem - only
+ * to resize the one we just resized in the table. */
+#define BLKPG_RESIZE_PARTITION  3
+
+typedef struct {
+    s64  start;                /* bytes, must match what the kernel has */
+    s64  length;               /* bytes, the new size */
+    int  pno;
+    char devname[64];
+    char volname[64];
+} blkpg_partition_t;
+
+typedef struct {
+    int   op;
+    int   flags;
+    int   datalen;
+    int   pad;
+    void *data;
+} blkpg_arg_t;
 
 /* ext4 online grow. _IOW('f', 16, __u64) */
 #define EXT4_IOC_RESIZE_FS  0x40086610
@@ -308,13 +340,43 @@ static bool grow_partition(u64 *new_bytes_out)
     lp_sync();
     lp_close((int)fd);
 
-    /* Make the kernel re-read the partition table. This returns EBUSY if
-     * the partition is mounted at this point. */
-    rc = dev_ioctl(DEV_DISK, BLKRRPART, NULL, O_RDONLY);
+    /* Now tell the running kernel about it, or the filesystem resize
+     * below asks for more blocks than the block device admits to having
+     * and comes back ENOSPC.
+     *
+     * BLKPG first: it resizes the one partition and works with other
+     * partitions on the same disk mounted, which is always the case
+     * here because /boot is. BLKRRPART is the fallback for a kernel or
+     * a device that does not do BLKPG; it re-reads the whole table and
+     * returns EBUSY whenever anything on the disk is in use. */
+    blkpg_partition_t part;
+    memset(&part, 0, sizeof part);
+    part.start  = (s64)start * SECTOR_SIZE;
+    part.length = (s64)max_count * SECTOR_SIZE;
+    part.pno    = PART_INDEX;
+
+    blkpg_arg_t arg;
+    memset(&arg, 0, sizeof arg);
+    arg.op      = BLKPG_RESIZE_PARTITION;
+    arg.datalen = (int)sizeof part;
+    arg.data    = &part;
+
+    rc = dev_ioctl(DEV_DISK, BLKPG, &arg, O_RDONLY);
     if (rc < 0)
+        rc = dev_ioctl(DEV_DISK, BLKRRPART, NULL, O_RDONLY);
+
+    if (rc < 0) {
+        /* The table on the card is right; the kernel just has not taken
+         * it. Growing the filesystem now would fail, so say what is
+         * true and let the next boot - which runs this again, and by
+         * then reads the new size from the card - finish the job. */
         dprintf(STDERR_FILENO,
-                "expandfs: could not re-read the partition table (%ld)."
-                " A reboot will pick it up\n", -rc);
+                "expandfs: the partition was grown on the card, but this"
+                " kernel would not take the new size (%ld).\n"
+                "expandfs: reboot once and the filesystem will follow.\n",
+                -rc);
+        return false;
+    }
 
     *new_bytes_out = max_count * SECTOR_SIZE;
     return true;
