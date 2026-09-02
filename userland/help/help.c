@@ -122,7 +122,7 @@ static const entry_t KNOWN[] = {
     { "ifconfig", "network", "look at or set an interface", "ifconfig [<if> [up|down|<address>]]" },
     { "route",    "network", "where packets go",            "route [add default gw <address>]" },
     { "nslookup", "network", "what address a name has",     "nslookup <name>..." },
-    { "wget",     "network", "download a file (http only)", "wget <url> [file]" },
+    { "wget",     "network", "download a file",             "wget <url> [file]" },
     { "wpa_supplicant", "network", "join a WiFi network",   "wpa_supplicant -B -i wlan0 -c <conf>" },
     { "wpa_cli",  "network", "talk to wpa_supplicant",      "wpa_cli" },
     { "dropbear", "network", "the SSH server",              "(started by init)" },

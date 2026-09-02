@@ -27,14 +27,25 @@
  * ── What the checking does and does not cover ──
  * Everything downloaded is checked against the SHA-256 in the index, so
  * a corrupted transfer or a mirror serving the wrong bytes is caught.
- * The index itself arrives over HTTP, and this machine has no TLS in C -
- * so someone able to rewrite your traffic could serve their own index
- * and their own packages, and the hashes would agree with each other.
  *
- * That is a real limit and worth stating plainly rather than implying a
- * safety that is not there. When it matters: fetch the file yourself
- * over HTTPS with python3, check it, and use "pkg add". That path never
- * touches the network here at all.
+ * Whether that is worth anything depends on how the index arrived. Over
+ * plain HTTP it is worth very little: someone able to rewrite your
+ * traffic serves their own index and their own packages, and the hashes
+ * agree with each other perfectly. Over HTTPS the index is authenticated
+ * as coming from the server it claims to, and then the hashes mean what
+ * they look like they mean.
+ *
+ * So set an https:// repository. It works now - the download goes
+ * through python3 on /data, which has a real TLS stack, and the
+ * certificate is checked against Mozilla's roots in /data/ssl/cert.pem.
+ * An http:// repository still works, and pkg says so out loud when the
+ * repository is one, because the difference is not cosmetic.
+ *
+ * What this still does not do is prove that the index was written by
+ * anyone in particular - there are no package signatures. A server that
+ * is compromised serves bad packages over a perfectly valid certificate.
+ * For something that matters: fetch it yourself, check it, and use
+ * "pkg add", which never touches the network at all.
  */
 #include "types.h"
 #include "string.h"
@@ -489,7 +500,7 @@ static int cmd_repo(const char *url)
             printf("%s\n", cur);
         else
             printf("no repository set. Set one with:\n"
-                   "  pkg repo http://your.server/lpzero\n");
+                   "  pkg repo https://your.server/lpzero\n");
         return 0;
     }
 
@@ -502,6 +513,10 @@ static int cmd_repo(const char *url)
     dprintf((int)fd, "%s\n", url);
     lp_close((int)fd);
     printf("pkg: repository is %s\n", url);
+    if (strncmp(url, "http://", 7) == 0)
+        printf("pkg:   this is plain HTTP. Anyone between here and that\n"
+               "pkg:   server can replace both the index and the packages,\n"
+               "pkg:   and the checksums will still agree. https:// works.\n");
     printf("     run 'pkg update' to fetch its index\n");
     return 0;
 }

@@ -11,6 +11,10 @@
 #include "stdio.h"
 #include "stdlib.h"
 
+/* Mozilla's root certificates, put on the data partition by
+ * tools/mksdcard.sh. Only used for https:// - see net_https_get. */
+#define CA_BUNDLE "/data/ssl/cert.pem"
+
 long lp_socket(int family, int type, int proto)
 {
     return sys_call3(SYS_socket, family, type, proto);
@@ -467,15 +471,133 @@ static bool url_split(const char *url, char *host, size_t hsize,
     return true;
 }
 
+/* ── HTTPS ────────────────────────────────────────────────────────
+ *
+ * There is no TLS in this userland and there is not going to be. A
+ * hand-written TLS stack is the one piece of code in a system like this
+ * that is both very hard to get right and catastrophic when it is
+ * wrong, and getting it wrong is silent - a certificate that is not
+ * really checked looks exactly like one that is.
+ *
+ * CPython has a real one, with OpenSSL statically linked into it, and
+ * it is already on the data partition for other reasons. So an https://
+ * URL is handed to it. That costs a few seconds of interpreter startup
+ * and only works on an image that carries Python, which is the honest
+ * trade: the alternative is either no HTTPS at all or a bad HTTPS.
+ *
+ * The certificates come from /data/ssl/cert.pem - Mozilla's root list,
+ * copied in by tools/build-sysroot.sh, deliberately not the build
+ * machine's own bundle, which in a CI container has that CI's TLS
+ * interception CA in it. */
+static const char *find_python(void)
+{
+    static const char *candidates[] = {
+        "/data/python/bin/python3.12",
+        "/data/bin/python3",
+        "/bin/python3",
+        0
+    };
+    for (int i = 0; candidates[i]; i++)
+        if (lp_exists(candidates[i]))
+            return candidates[i];
+    return 0;
+}
+
+static long net_https_get(const char *url, const char *dest)
+{
+    const char *py = find_python();
+    if (!py) {
+        dprintf(STDERR_FILENO,
+                "%s: https needs python3, which is not on this image.\n"
+                "  This userland has no TLS of its own - see net.c.\n"
+                "  An http:// URL works without it.\n", url);
+        return -1;
+    }
+    if (!lp_exists(CA_BUNDLE)) {
+        dprintf(STDERR_FILENO,
+                "%s: no root certificates at %s, so nothing could be\n"
+                "  checked. Refusing rather than trusting whatever answers.\n",
+                url, CA_BUNDLE);
+        return -1;
+    }
+
+    /* Everything the child needs is in argv; nothing is interpolated
+     * into the program text, so a URL cannot become code.
+     *
+     * The exception handling is not decoration. Left to itself, a
+     * rejected certificate comes out of Python as forty lines of
+     * traceback through urllib and ssl, and the one line that says what
+     * went wrong is in the middle of it. A command that failed should
+     * say so in a sentence. */
+    static const char *prog =
+        "import os,ssl,sys,urllib.request\n"
+        "url,ca,dest=sys.argv[1],sys.argv[2],sys.argv[3]\n"
+        "n=0\n"
+        "try:\n"
+        "    c=ssl.create_default_context(cafile=ca)\n"
+        "    r=urllib.request.urlopen(url,timeout=30,context=c)\n"
+        "    f=open(dest,'wb')\n"
+        "    while True:\n"
+        "        b=r.read(65536)\n"
+        "        if not b: break\n"
+        "        f.write(b); n+=len(b)\n"
+        "    f.close()\n"
+        "except Exception as e:\n"
+        "    m=str(e).replace('\\n',' ')\n"
+        "    sys.stderr.write('https: '+m+'\\n')\n"
+        "    if 'CERTIFICATE_VERIFY' in m:\n"
+        "        sys.stderr.write('  checked against '+ca+'. A clock that"
+        " is wrong makes every\\n  certificate look invalid, so try ntp"
+        " before anything else.\\n')\n"
+        "    try: os.unlink(dest)\n"
+        "    except OSError: pass\n"
+        "    sys.exit(4)\n"
+        "sys.exit(0 if n else 3)\n";
+
+    char *argv[] = { (char *)py, (char *)"-c", (char *)prog,
+                     (char *)url, (char *)CA_BUNDLE, (char *)dest, 0 };
+
+    pid_t pid = lp_fork();
+    if (pid < 0) {
+        dprintf(STDERR_FILENO, "%s: cannot start %s\n", url, py);
+        return -1;
+    }
+    if (pid == 0) {
+        lp_execve(py, argv, environ);
+        lp_exit(127);
+    }
+
+    int status = 0;
+    lp_waitpid(pid, &status, 0);
+    int code = LP_WIFEXITED(status) ? LP_WEXITSTATUS(status) : -1;
+    if (code != 0) {
+        /* Code 4 means the child already said what was wrong. */
+        if (code == 127)
+            dprintf(STDERR_FILENO, "%s: could not run %s\n", url, py);
+        else if (code == 3)
+            dprintf(STDERR_FILENO, "%s: the server sent nothing\n", url);
+        else if (code != 4)
+            dprintf(STDERR_FILENO, "%s: download failed\n", url);
+        return -1;
+    }
+
+    lp_stat_t st;
+    if (lp_stat(dest, &st, true) < 0)
+        return -1;
+    return (long)st.size;
+}
+
 long net_http_get(const char *url, const char *dest)
 {
     char host[128], path[512];
     int  port;
 
+    if (strncmp(url, "https://", 8) == 0)
+        return net_https_get(url, dest);
+
     if (!url_split(url, host, sizeof(host), &port, path, sizeof(path))) {
         dprintf(STDERR_FILENO,
-                "%s: only http:// URLs work here - there is no TLS in\n"
-                "this userland. python3 has one, and is on /data.\n", url);
+                "%s: this is not an http:// or https:// URL\n", url);
         return -1;
     }
 

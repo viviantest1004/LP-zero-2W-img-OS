@@ -2,11 +2,12 @@
  *
  *   wget <url> [file]
  *
- * http:// only. There is no TLS in this userland, so an https:// URL
- * cannot be fetched here at all - python3 on /data has a full TLS stack
- * and is the answer when the URL is one:
- *
- *   python3 -c "import urllib.request,sys; urllib.request.urlretrieve(*sys.argv[1:])" <url> <file>
+ * http:// is fetched here. https:// is handed to python3 on /data,
+ * which has a real TLS stack with OpenSSL inside it - there is none in
+ * this userland, and writing one would be the worst possible place to
+ * be nearly right. So https costs a few seconds of interpreter startup
+ * and needs an image that carries Python; see net_https_get in
+ * libc/src/net.c.
  *
  * With no file name given, the last part of the URL path is used.
  */
@@ -20,8 +21,9 @@ int main(int argc, char **argv)
 {
     if (argc < 2 || strcmp(argv[1], "-h") == 0) {
         printf("usage: wget <url> [file]\n");
-        printf("  http:// only - see 'help wget' for why, and what to\n");
-        printf("  use instead for https://\n");
+        printf("  https:// works too, by way of python3 on /data -\n");
+        printf("  a few seconds slower to start, and it checks the\n");
+        printf("  certificate against /data/ssl/cert.pem\n");
         return argc < 2 ? 2 : 0;
     }
 
