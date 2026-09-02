@@ -29,6 +29,30 @@ SYSROOT="${SYSROOT:-/home/user/kernel-work/thirdparty/sysroot}"
 JOBS="${JOBS:-$(nproc)}"
 CROSS=aarch64-linux-gnu-
 
+# ── Static or dynamic ────────────────────────────────────────────────
+#
+# It was static, and that was the right first answer: one file, no
+# loader, nothing outside our own libc anywhere on the system.
+#
+# It also meant pip could only ever install packages written purely in
+# Python. Anything with a C extension ships a .so, a static binary
+# cannot load one, and every wheel on PyPI is built against glibc, which
+# this system does not have. numpy, cryptography, pillow - all refused
+# at the door.
+#
+# So the default is now dynamic, and glibc is staged alongside Python on
+# /data. This does not change what the operating system is made of: the
+# kernel, init, the shell and every command still run on the libc in
+# userland/libc with nothing else linked in. glibc is baggage that one
+# external program - CPython - carries for its own packages, on the data
+# partition, where the system image never sees it.
+#
+# STATIC=1 builds the old way. Smaller, self-contained, and pure-Python
+# packages only.
+GLIBC_DIR="/data/glibc"
+GLIBC_SRC="${GLIBC_SRC:-/usr/aarch64-linux-gnu/lib}"
+STATIC="${STATIC:-0}"
+
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 step() { printf '\n==> %s\n' "$*"; }
 
@@ -53,7 +77,30 @@ case "$SRC_VER" in
     *) die "버전 불일치: 소스 $SRC_VER, 호스트 $HOST_VER" ;;
 esac
 
-step "설정 (소스 ${SRC_VER}, 호스트 파이썬 ${HOST_VER})"
+# The link line, and the one decision that follows from it.
+#
+#   --dynamic-linker  the loader's path is written into the binary. It
+#                     is on /data because that is where glibc lives, and
+#                     the system image has no /lib to put it in.
+#   -rpath            where to look for libc.so.6 and friends.
+#   --disable-new-dtags  emit DT_RPATH rather than DT_RUNPATH. RUNPATH
+#                     applies only to the binary's own dependencies, and
+#                     a .so that pip installs later is not one of those.
+#                     RPATH is inherited through the whole search, which
+#                     is exactly what an extension module needs.
+if [[ "$STATIC" == "1" ]]; then
+    LINK_FLAGS="-static -L${SYSROOT}/lib"
+    LINK_DESC="static (pure-Python packages only)"
+else
+    LINK_FLAGS="-L${SYSROOT}/lib"
+    LINK_FLAGS+=" -Wl,--dynamic-linker=${GLIBC_DIR}/ld-linux-aarch64.so.1"
+    LINK_FLAGS+=" -Wl,-rpath,${GLIBC_DIR} -Wl,--disable-new-dtags"
+    LINK_DESC="dynamic against glibc in ${GLIBC_DIR}"
+    [[ -f "${GLIBC_SRC}/ld-linux-aarch64.so.1" ]] \
+        || die "aarch64 glibc 가 없습니다: ${GLIBC_SRC} (apt install libc6-arm64-cross)"
+fi
+
+step "설정 (소스 ${SRC_VER}, 호스트 파이썬 ${HOST_VER}, ${LINK_DESC})"
 cd "$PY_SRC"
 
 # 설정을 바꿔 다시 빌드할 때는 이전 Makefile 을 지워야 한다
@@ -115,7 +162,6 @@ if [[ ! -f Makefile ]]; then
         --prefix=/data/python \
         --disable-shared \
         --disable-test-modules \
-        --without-ensurepip \
         --with-ensurepip=no \
         --with-openssl="$SYSROOT" \
         --with-readline=readline \
@@ -130,7 +176,7 @@ if [[ ! -f Makefile ]]; then
         READELF="${CROSS}readelf" \
         CFLAGS="-Os -fno-semantic-interposition -I${SYSROOT}/include" \
         CPPFLAGS="-I${SYSROOT}/include" \
-        LDFLAGS="-static -L${SYSROOT}/lib" \
+        LDFLAGS="$LINK_FLAGS" \
         LIBFFI_INCLUDEDIR="${SYSROOT}/include" \
         LIBREADLINE_CFLAGS="-I${SYSROOT}/include -I${SYSROOT}/include/ncursesw" \
         LIBREADLINE_LIBS="-L${SYSROOT}/lib -lreadline -lncursesw" \
@@ -206,6 +252,41 @@ make install DESTDIR="$STAGE" > /tmp/py-install.log 2>&1 \
 PYDIR="${STAGE}/data/python"
 [[ -d "$PYDIR" ]] || die "설치 결과가 없습니다: $PYDIR"
 
+# ── pip ──────────────────────────────────────────────────────────────
+#
+# Not through ensurepip: that runs the target interpreter to install
+# itself, and the target interpreter does not run here. But a wheel is a
+# zip of files that belong in site-packages, and pip is pure Python - so
+# unpacking the wheel CPython already ships is the same install, done by
+# hand and without needing to run anything.
+if [[ "$STATIC" != "1" ]]; then
+    step "pip 설치 (번들 휠에서)"
+    PIP_WHEEL=$(ls "${PY_SRC}/Lib/ensurepip/_bundled/"pip-*.whl 2>/dev/null | head -1 || true)
+    SITE="${PYDIR}/lib/python${HOST_VER}/site-packages"
+
+    if [[ -n "$PIP_WHEEL" ]]; then
+        mkdir -p "$SITE"
+        "$BUILD_PY" -c "
+import sys, zipfile
+zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])
+" "$PIP_WHEEL" "$SITE"
+
+        # The console script the wheel does not carry. Its shebang is the
+        # path on the device, not on this machine.
+        cat > "${PYDIR}/bin/pip" <<PIPEOF
+#!/data/python/bin/python${HOST_VER}
+import sys
+from pip._internal.cli.main import main
+sys.exit(main())
+PIPEOF
+        chmod 755 "${PYDIR}/bin/pip"
+        cp "${PYDIR}/bin/pip" "${PYDIR}/bin/pip3"
+        echo "  $(basename "$PIP_WHEEL")"
+    else
+        echo "  경고: 번들 pip 휠이 없습니다 (${PY_SRC}/Lib/ensurepip/_bundled/)"
+    fi
+fi
+
 step "불필요한 것 정리"
 BEFORE=$(du -sm "$PYDIR" | cut -f1)
 
@@ -242,6 +323,53 @@ find "$PYDIR" -name '*.pyc' -delete 2>/dev/null || true
 
 AFTER=$(du -sm "$PYDIR" | cut -f1)
 echo "  ${BEFORE}MB -> ${AFTER}MB"
+
+# ── glibc ────────────────────────────────────────────────────────────
+#
+# What a dynamically linked Python and the extension modules pip
+# installs actually need at runtime. Not the whole of glibc - the
+# loader, the C library, and the two libraries a compiled extension is
+# likely to have been built against.
+#
+# libm and libpthread stopped being separate files in glibc 2.34; they
+# are inside libc.so.6 now, and the .so.6 / .so.0 names are kept only so
+# that older binaries still resolve. We copy them when they are there.
+if [[ "$STATIC" != "1" ]]; then
+    step "glibc 스테이징 (${GLIBC_SRC} -> ${STAGE}${GLIBC_DIR})"
+    GDIR="${STAGE}${GLIBC_DIR}"
+    rm -rf "$GDIR"
+    mkdir -p "$GDIR"
+
+    for lib in ld-linux-aarch64.so.1 libc.so.6 libm.so.6 libdl.so.2 \
+               libpthread.so.0 librt.so.1 libutil.so.1 libresolv.so.2 \
+               libgcc_s.so.1 libstdc++.so.6; do
+        if [[ -e "${GLIBC_SRC}/${lib}" ]]; then
+            cp -L "${GLIBC_SRC}/${lib}" "${GDIR}/${lib}"
+            "${CROSS}strip" --strip-unneeded "${GDIR}/${lib}" 2>/dev/null || true
+        fi
+    done
+
+    echo "  $(ls "$GDIR" | wc -l)개 파일, $(du -sh "$GDIR" | cut -f1)"
+
+    # The loader path written into the binary has to be the one we just
+    # staged, or the device gets "No such file or directory" for a file
+    # that is plainly there - which is the loader missing, not the
+    # program.
+    INTERP=$("${CROSS}readelf" -l "${PYDIR}/bin/python${HOST_VER}" 2>/dev/null \
+             | sed -n 's/.*interpreter: \([^]]*\)\]/\1/p')
+    [[ "$INTERP" == "${GLIBC_DIR}/ld-linux-aarch64.so.1" ]] \
+        || die "인터프리터 경로가 다릅니다: '${INTERP}'"
+    echo "  인터프리터: $INTERP"
+
+    # Extension modules resolve PyObject_* out of the executable, which
+    # only works if it exports them. Without -export-dynamic every
+    # "import numpy" would fail on an undefined symbol.
+    if ! "${CROSS}readelf" --dyn-syms "${PYDIR}/bin/python${HOST_VER}" 2>/dev/null \
+         | grep -q "PyObject_Init"; then
+        die "동적 심볼이 없습니다 - C 확장 모듈을 import 할 수 없습니다"
+    fi
+    echo "  동적 심볼: 있음 (C 확장 모듈 import 가능)"
+fi
 
 step "결과"
 file "${PYDIR}/bin/python${HOST_VER}" 2>/dev/null | cut -c1-100 || true

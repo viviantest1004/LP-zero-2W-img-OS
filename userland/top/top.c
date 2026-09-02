@@ -538,7 +538,11 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (lp_term_raw(STDIN_FILENO, &saved_term) < 0) {
+    /* cbreak, not raw: we want keys without Enter, but we print whole
+     * lines and need \n to still return the cursor to column one. Full
+     * raw mode turns that off and the listing walks off the right of the
+     * screen, one column further with every row. */
+    if (lp_term_cbreak(STDIN_FILENO, &saved_term) < 0) {
         /* No terminal - fall back to printing once rather than failing. */
         scan_procs();
         lp_sleep_ms(300);
@@ -578,7 +582,11 @@ int main(int argc, char **argv)
             }
             acted = true;
             switch (c) {
-            case 'q': case 'Q':
+            /* Ctrl-C and Ctrl-D as well as q. The terminal is in
+             * cbreak mode, so Ctrl-C arrives as a byte rather than as a
+             * signal - if we do not act on it here, nothing does, and
+             * the one key everybody reaches for does nothing at all. */
+            case 'q': case 'Q': case 3: case 4:
                 restore_term();
                 printf("\x1b[2J\x1b[H");
                 return 0;

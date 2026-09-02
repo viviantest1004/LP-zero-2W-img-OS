@@ -206,6 +206,7 @@ long lp_ioctl(int fd, unsigned long req, void *arg)
 #define IUTF8   0x4000
 /* c_oflag */
 #define OPOST   0x0001
+#define ONLCR   0x0004
 
 long lp_term_raw(int fd, lp_termios_t *saved)
 {
@@ -226,6 +227,53 @@ long lp_term_raw(int fd, lp_termios_t *saved)
 
     /* Return as soon as one byte arrives (VMIN=1, VTIME=0). */
     f[T_IFLAG] |= IUTF8;        /* keep telling the terminal it is UTF-8 */
+
+    t.raw[T_CC + VMIN]  = 1;
+    t.raw[T_CC + VTIME] = 0;
+
+    return lp_ioctl(fd, TCSETS, t.raw);
+}
+
+/* Put a terminal back into the state a person expects.
+ *
+ * A program that dies while it owns the terminal - killed, or crashed -
+ * leaves it however it was: no echo, no line editing, newlines that do
+ * not return to column one. The shell then looks broken, and the way
+ * out is to type a command you cannot see into a terminal that is not
+ * listening properly.
+ *
+ * So the shell puts it back after every command rather than trusting
+ * each program to clean up after itself. This sets only the flags that
+ * matter for a usable terminal and leaves the rest - baud rate, control
+ * characters - as they were. */
+long lp_term_sane(int fd)
+{
+    lp_termios_t t;
+    if (lp_ioctl(fd, TCGETS, t.raw) < 0)
+        return -1;
+
+    u32 *f = (u32 *)t.raw;
+    f[T_LFLAG] |= (u32)(ICANON | ECHO | ISIG | IEXTEN);
+    f[T_IFLAG] |= (u32)(ICRNL | BRKINT | IXON | IUTF8);
+    f[T_OFLAG] |= (u32)(OPOST | ONLCR);
+
+    return lp_ioctl(fd, TCSETS, t.raw);
+}
+
+/* The same, minus the output processing. See the header. */
+long lp_term_cbreak(int fd, lp_termios_t *saved)
+{
+    long r = lp_ioctl(fd, TCGETS, saved->raw);
+    if (r < 0)
+        return r;
+
+    lp_termios_t t = *saved;
+    u32 *f = (u32 *)t.raw;
+
+    f[T_LFLAG] &= ~(u32)(ICANON | ECHO | ISIG | IEXTEN);
+    f[T_IFLAG] &= ~(u32)(IXON | ICRNL | BRKINT | ISTRIP | INLCR);
+    f[T_IFLAG] |= IUTF8;
+    /* OPOST is deliberately left alone. */
 
     t.raw[T_CC + VMIN]  = 1;
     t.raw[T_CC + VTIME] = 0;
@@ -355,6 +403,32 @@ s64 lp_timegm(const lp_tm_t *tm)
 }
 
 long lp_sync(void)            { return sys_call0(SYS_sync); }
+
+/* ── Signals ──────────────────────────────────────────────────────────
+ * The kernel's struct sigaction on arm64, which has no sa_restorer:
+ *
+ *    0  sa_handler   SIG_DFL is 0, SIG_IGN is 1
+ *    8  sa_flags
+ *   16  sa_mask      one 64-bit word, hence the size argument of 8
+ *
+ * A real handler would need a restorer to return through. SIG_DFL and
+ * SIG_IGN never run any of our code, so there is nothing to return
+ * from and nothing else to fill in. */
+#define SA_SIZE      24
+#define SA_HANDLER    0
+#define SA_MASK_SIZE  8
+
+static long set_disposition(int sig, unsigned long handler)
+{
+    u8 act[SA_SIZE];
+    memset(act, 0, sizeof(act));
+    *(unsigned long *)(act + SA_HANDLER) = handler;
+
+    return sys_call4(SYS_rt_sigaction, (long)sig, (long)act, 0, SA_MASK_SIZE);
+}
+
+long lp_signal_ignore(int sig)  { return set_disposition(sig, 1); }
+long lp_signal_default(int sig) { return set_disposition(sig, 0); }
 
 /* ── Scheduling priority ──────────────────────────────────────────────
  * PRIO_PROCESS = 0. The kernel does not hand the nice value back as it

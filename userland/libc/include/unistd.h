@@ -34,6 +34,20 @@
 #define SIGKILL  9
 #define SIGSEGV 11
 #define SIGTERM 15
+#define SIGQUIT  3
+
+/* ── Signals ──
+ * Only two things are needed here, and neither runs a handler:
+ *
+ *   ignore    the interactive shell ignores Ctrl-C, so that interrupting
+ *             a command does not take the shell down with it
+ *   default   a child undoes that before it runs a command, so Ctrl-C
+ *             reaches the thing you meant to interrupt
+ *
+ * Running an actual handler would need a return trampoline and a
+ * signal frame, and nothing here has ever wanted one. */
+long  lp_signal_ignore(int sig);
+long  lp_signal_default(int sig);
 #define SIGCHLD 17
 
 /* mount flags */
@@ -85,6 +99,21 @@ typedef struct { u8 raw[64]; } lp_termios_t;
 
 /* Save the current settings into saved and switch to raw. 0 on success. */
 long  lp_term_raw(int fd, lp_termios_t *saved);
+
+/* Like lp_term_raw, but the kernel still turns \n into a carriage
+ * return and a line feed on the way out (OPOST stays on).
+ *
+ * Full raw mode is right for a program that positions every character
+ * itself - an editor. It is wrong for one that prints ordinary lines and
+ * only wants keys without waiting for Enter: there, \n moves down a row
+ * and leaves the column alone, so every line starts where the last one
+ * ended and the screen turns into a staircase. */
+long  lp_term_cbreak(int fd, lp_termios_t *saved);
+
+/* Put the terminal back to something usable - echo on, line editing on,
+ * newlines that return to column one. For after a program that owned the
+ * terminal died without tidying up. */
+long  lp_term_sane(int fd);
 /* Restore from saved. This must run before the program exits, or the
  * shell is left unable to read input. */
 long  lp_term_restore(int fd, const lp_termios_t *saved);

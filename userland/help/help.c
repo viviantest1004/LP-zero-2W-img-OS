@@ -75,6 +75,7 @@ static const entry_t KNOWN[] = {
     { "ps",       "system",  "what is running, once",       "ps [-l]" },
     { "df",       "system",  "how full each filesystem is", "df [-b]" },
     { "free",     "system",  "how much memory is left",     "free [-b]" },
+    { "usage",    "system",  "memory and disk at a glance", "usage" },
     { "clear",    "system",  "wipe the screen",             "clear" },
     { "kill",     "system",  "stop a process",              "kill [-9] <pid>..." },
     { "sleep",    "system",  "wait",                        "sleep <seconds>" },

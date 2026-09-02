@@ -733,6 +733,22 @@ static void run_pipeline(cmd_t *cmds, int n, bool background)
 
         if (pid == 0) {
             /* ── child ── */
+            /* Ctrl-C is for whatever is running, not for the shell. The
+             * shell ignores it; a command has to have it back, or there
+             * is no way to stop one that will not stop by itself.
+             *
+             * A background job keeps ignoring it: & means "get on with
+             * this while I do other things", and it would be a surprise
+             * for interrupting a foreground command to take it out too -
+             * they share a process group, so the signal reaches both. */
+            if (background) {
+                lp_signal_ignore(SIGINT);
+                lp_signal_ignore(SIGQUIT);
+            } else {
+                lp_signal_default(SIGINT);
+                lp_signal_default(SIGQUIT);
+            }
+
             if (prev_read >= 0) {
                 lp_dup2(prev_read, STDIN_FILENO);
                 lp_close(prev_read);
@@ -1472,6 +1488,16 @@ int main(int argc, char **argv)
      * name for the prompt. A shell running /etc/rc gets none of this. */
     char prompt[384];
     if (interactive) {
+        /* Ctrl-C interrupts the command, never the shell. Without this
+         * the signal goes to the whole process group - the child and us
+         * - and the shell dies along with what you were stopping, which
+         * on the console means init restarts it and the screen clears.
+         *
+         * A shell running a script keeps the default: a boot script that
+         * cannot be interrupted is worse than one that can. */
+        lp_signal_ignore(SIGINT);
+        lp_signal_ignore(SIGQUIT);
+
         read_hostname();
         hist_load();
         if (lp_is_dir(HOME_DIR))
@@ -1482,6 +1508,10 @@ int main(int argc, char **argv)
         long len;
 
         if (interactive) {
+            /* Whatever just ran may have left the terminal in raw mode -
+             * killed partway through, or simply careless. Put it back
+             * before drawing a prompt into it. */
+            lp_term_sane(STDIN_FILENO);
             reap_jobs();
             int pw = build_prompt(prompt, sizeof(prompt));
             len = edit_line(prompt, pw, line, sizeof(line));

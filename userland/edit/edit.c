@@ -6,7 +6,7 @@
  *   arrows          move           Home/End       start/end of line
  *   PgUp/PgDn       one screen     Ctrl-Home/End  start/end of file
  *   Backspace/Del   erase          Enter          split the line
- *   Ctrl-S          save           Ctrl-Q         quit
+ *   Ctrl-S          save           Ctrl-Q/Ctrl-C  quit
  *   Ctrl-K          delete line    Ctrl-G         help
  *
  * Why this exists:
@@ -604,7 +604,7 @@ static void show_help(void)
     outs("  Enter            split the line\r\n");
     outs("  Ctrl-K           delete this line\r\n");
     outs("  Ctrl-S           save\r\n");
-    outs("  Ctrl-Q           quit (press twice if there are changes)\r\n\r\n");
+    outs("  Ctrl-Q, Ctrl-C   quit (press twice if there are changes)\r\n\r\n");
     outs("  Saving writes a temporary file and renames it over.\r\n");
     outs("  If the write fails, the original is left untouched.\r\n\r\n");
     outs("Press any key...");
@@ -719,6 +719,7 @@ int main(int argc, char **argv)
             break;
 
         case 17:                           /* Ctrl-Q */
+        case 3:                            /* Ctrl-C - the habit */
             was_quit_key = true;
             if (modified && quit_confirm == 0) {
                 set_status("unsaved changes. Press Ctrl-Q again to quit anyway.");
