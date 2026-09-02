@@ -22,12 +22,18 @@ OUT_DIR="${REPO_ROOT}/sdcard"
 IMAGE="${OUT_DIR}/lp-zero.img"
 MODE=firmware
 WITH_MPY=true          # MicroPython 을 데이터 파티션에 넣을지
+# --uefi-only: 커널을 EFI/BOOT/BOOTAA64.EFI 로만 넣고, 라즈베리파이 GPU
+# 펌웨어가 읽는 이름으로는 넣지 않는다. 커널이 24MB 라 두 벌이면 이미지가
+# 그만큼 커지는데, 가상머신에서만 쓸 이미지에는 한 벌이면 충분하다.
+# 이 이미지는 실기에서 부팅하지 않는다.
+UEFI_ONLY=false
 for arg in "$@"; do
     case "$arg" in
         --linux)           MODE=linux ;;
         --no-micropython)  WITH_MPY=false ;;
+        --uefi-only)       UEFI_ONLY=true ;;
         *) printf 'error: 알 수 없는 인자: %s\n' "$arg" >&2
-           printf '사용법: mksdcard.sh [--linux] [--no-micropython]\n' >&2
+           printf '사용법: mksdcard.sh [--linux] [--no-micropython] [--uefi-only]\n' >&2
            exit 2 ;;
     esac
 done
@@ -112,8 +118,12 @@ done
 log "복사: config.txt                          (GPU 부팅 설정)"
 mcopy -i "$PART_IMG" "$CONFIG_SRC" ::config.txt
 
-log "복사: ${KERNEL_NAME}"
-mcopy -i "$PART_IMG" "$KERNEL" "::${KERNEL_NAME}"
+if $UEFI_ONLY; then
+    log "건너뜀: ${KERNEL_NAME}                (--uefi-only: 가상머신 전용)"
+else
+    log "복사: ${KERNEL_NAME}"
+    mcopy -i "$PART_IMG" "$KERNEL" "::${KERNEL_NAME}"
+fi
 
 if [[ "$MODE" == "linux" ]]; then
     log "복사: $(basename "$DTB")            (디바이스 트리)"
@@ -231,6 +241,20 @@ Python
 
 Commands you put in /data/rc.local run at every boot.
 READMEEOF
+    if $UEFI_ONLY; then
+        cat >> "$README" <<'UEFIEOF'
+
+────────────────────────────────────────────────────────────
+이 이미지는 가상머신(UTM / QEMU) 전용입니다.
+
+라즈베리파이 보드에서는 부팅하지 않습니다. 크기를 줄이려고 GPU
+펌웨어가 읽는 커널 사본을 빼고, UEFI 가 읽는 EFI/BOOT/BOOTAA64.EFI
+한 벌만 넣었습니다.
+
+실기에 쓰시려면 범용 이미지(.xz)를 받으세요.
+────────────────────────────────────────────────────────────
+UEFIEOF
+    fi
     log "복사: README.txt                          (설정 안내)"
     mcopy -i "$PART_IMG" "$README" ::README.txt
     rm -f "$README"
