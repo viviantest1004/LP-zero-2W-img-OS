@@ -85,6 +85,78 @@ static void setup_console(void)
         lp_close((int)fd);
 }
 
+/* Put the boot screen up.
+ *
+ * It runs as a separate program rather than as code in here: drawing
+ * needs a font and some arithmetic, and none of that should be resident
+ * in PID 1 for the life of the machine when it is wanted once, for a
+ * second, at boot. Forking it costs a few milliseconds and it exits.
+ *
+ * Failure is normal and silent - a board with nothing plugged into HDMI
+ * has no framebuffer, and there is nothing to say about that. */
+static pid_t splash_pid = -1;
+
+static void show_splash(void)
+{
+    pid_t pid = lp_fork();
+    if (pid < 0)
+        return;
+
+    if (pid == 0) {
+        char *argv[] = { (char *)"splash", NULL };
+        char *envp[] = { NULL };
+        lp_execve("/bin/splash", argv, envp);
+        lp_exit(127);
+    }
+
+    /* Deliberately not waited for. splash sits watching for /dev/fb0 to
+     * turn up, which can take a second or two while the graphics device
+     * is probed - and the boot has better things to do meanwhile. */
+    splash_pid = pid;
+}
+
+/* Let the splash finish before anything else draws on the screen.
+ *
+ * They are drawing to the same pixels by two different routes - splash
+ * straight into the framebuffer, the shell through the console driver -
+ * and if the splash lands second it covers a prompt that is still live,
+ * which is worse than no splash at all. By the time this is called the
+ * boot script has already run, so normally there is nothing to wait for.
+ * The three seconds is a ceiling, not a delay. */
+static void wait_for_splash(void)
+{
+    if (splash_pid <= 0)
+        return;
+
+    for (int waited = 0; waited < 3000; waited += 100) {
+        int   status = 0;
+        pid_t r = lp_waitpid(splash_pid, &status, WNOHANG);
+        if (r == splash_pid) {
+            splash_pid = -1;
+            return;
+        }
+        lp_sleep_ms(100);
+    }
+}
+
+/* What the screen says when a shell starts on it.
+ *
+ * The serial console has seen every line of the boot; the screen has
+ * seen the splash and whatever the kernel decided was important. Someone
+ * sitting in front of it needs to be told where they are and what to
+ * type, or a bare prompt is all they get. */
+static void screen_greeting(int fd)
+{
+    dprintf(fd, "\x1b[H\x1b[2J");        /* clear, and go to the top */
+    dprintf(fd, "  test_a_123_LPzero2W_img\n");
+    dprintf(fd, "  Raspberry Pi Zero 2 W  -  built from scratch\n\n");
+    dprintf(fd, "  help     every command there is\n");
+    dprintf(fd, "  sysinfo  what this machine is and how it is doing\n");
+    dprintf(fd, "  top      what is running\n\n");
+    dprintf(fd, "  Tab completes. The arrow keys go back through what you\n");
+    dprintf(fd, "  have typed. Files under /data and /root survive a reboot.\n\n");
+}
+
 static void banner(void)
 {
     printf("\n");
@@ -250,7 +322,7 @@ static void run_rc(void)
         char *argv[] = { (char *)SHELL_PATH, (char *)RC_SCRIPT, NULL };
         char *envp[] = {
             (char *)"PATH=/bin:/data/bin:/sbin:/usr/bin:/usr/sbin",
-            (char *)"HOME=/",
+            (char *)"HOME=/root",
             NULL
         };
         lp_execve(SHELL_PATH, argv, envp);
@@ -299,12 +371,17 @@ static pid_t spawn_shell_on(const char *tty)
             if (fd > STDERR_FILENO)
                 lp_close((int)fd);
             lp_term_set_utf8(STDIN_FILENO);
+
+            /* Only the screen gets a greeting. On the serial console the
+             * boot log is right there above the prompt and says more
+             * than any greeting would. */
+            screen_greeting(STDOUT_FILENO);
         }
 
         char *argv[] = { (char *)SHELL_PATH, NULL };
         char *envp[] = {
             (char *)"PATH=/bin:/data/bin:/sbin:/usr/bin:/usr/sbin",
-            (char *)"HOME=/",
+            (char *)"HOME=/root",
             (char *)"TERM=linux",
             NULL
         };
@@ -376,6 +453,7 @@ int main(int argc, char **argv)
     if (is_pid1) {
         mount_filesystems();
         setup_console();
+        show_splash();
     } else
         printf("init: not pid 1, skipping the mounts (test mode)\n");
 
@@ -392,6 +470,7 @@ int main(int argc, char **argv)
      * unless we put a shell there too. */
     pid_t screen_pid = -1;
     if (is_pid1 && screen_needs_its_own_shell()) {
+        wait_for_splash();
         screen_pid = spawn_shell_on("/dev/tty1");
         if (screen_pid > 0)
             printf("init: a second shell is on the screen (tty1)\n");

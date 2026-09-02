@@ -14,6 +14,12 @@
 #define MAX_CMDS   8        /* stages in one pipeline */
 #define MAX_PIPES  8        /* pipelines joined by && || ; */
 
+/* linux_dirent64 offsets, for tab completion (the same ones ls uses) */
+#define DIRENT_RECLEN 16
+#define DIRENT_TYPE   18
+#define DIRENT_NAME   19
+#define DT_DIR        4
+
 typedef struct {
     char *argv[MAX_ARGS + 1];   /* NULL terminated, for execve */
     int   argc;
@@ -29,11 +35,16 @@ typedef struct {
     cmd_t  cmds[MAX_CMDS];
     int    ncmds;
     link_t link;        /* the operator in front of this pipeline */
+    bool   background;  /* it ended in & - do not wait for it */
 } pipeline_t;
 
 /* /data/bin is on the data partition. Large programs such as Python live
  * there rather than in the system image (the initramfs inside the kernel). */
 static const char *DEFAULT_PATH = "/bin:/data/bin:/sbin:/usr/bin:/usr/sbin";
+
+/* Home. It is a bind mount from the data partition, so what is saved
+ * there survives a reboot - unlike the rest of the root filesystem. */
+#define HOME_DIR "/root"
 static bool shell_running = true;
 static int  last_status   = 0;
 
@@ -55,6 +66,7 @@ typedef enum {
     TOK_AND,            /* && */
     TOK_OR,             /* || */
     TOK_SEMI,           /* ;  */
+    TOK_AMP,            /* &  - run the pipeline before it in the background */
     TOK_REDIR_IN,
     TOK_REDIR_OUT,
     TOK_REDIR_APPEND,
@@ -62,7 +74,13 @@ typedef enum {
 
 static bool is_space(char c) { return c == ' ' || c == '\t' || c == '\r'; }
 
-static char   arena[MAX_LINE * 2];
+static bool is_name_char(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+static char   arena[8192];
 static size_t arena_used;
 
 /* Copy a token into the arena and return the pointer. NULL if it is full. */
@@ -78,6 +96,53 @@ static char *arena_push(const char *src, size_t len)
     return dst;
 }
 
+/* Set by next_token, read by parse_line: a quoted word is never expanded
+ * into file names, and a word with no * or ? never needs looking at. */
+static bool tok_quoted   = false;
+static bool tok_has_glob = false;
+
+/* Replace $NAME, ${NAME} or $? starting at *sp. Returns the new length.
+ *
+ * An undefined variable becomes nothing at all, which is what every other
+ * shell does and what makes "cd $SOMEWHERE" fail loudly rather than
+ * quietly doing something else. */
+static size_t expand_dollar(char **sp, char *buf, size_t n, size_t size)
+{
+    char *s = *sp + 1;              /* step over the $ */
+
+    if (*s == '?') {                /* the last exit code */
+        char num[16];
+        snprintf(num, sizeof(num), "%d", last_status);
+        for (char *q = num; *q && n < size; q++) buf[n++] = *q;
+        *sp = s + 1;
+        return n;
+    }
+
+    bool braced = (*s == '{');
+    if (braced) s++;
+
+    char name[64];
+    size_t k = 0;
+    while ((is_name_char(*s)) && k < sizeof(name) - 1)
+        name[k++] = *s++;
+    name[k] = '\0';
+
+    if (braced && *s == '}') s++;
+
+    if (k == 0) {                   /* a bare $: leave it as typed */
+        if (n < size) buf[n++] = '$';
+        *sp = s;
+        return n;
+    }
+
+    const char *val = getenv(name);
+    if (val)
+        while (*val && n < size) buf[n++] = *val++;
+
+    *sp = s;
+    return n;
+}
+
 /* Read one token. For TOK_WORD, *word_out gets the arena pointer. */
 static tok_type_t next_token(char **p, char **word_out)
 {
@@ -89,6 +154,7 @@ static tok_type_t next_token(char **p, char **word_out)
     /* An operator is a token in itself. Two-character ones (&& ||) must
      * be checked before the single-character ones (|). */
     if (*s == '&' && s[1] == '&') { *p = s + 2; return TOK_AND;  }
+    if (*s == '&')                { *p = s + 1; return TOK_AMP;  }
     if (*s == '|' && s[1] == '|') { *p = s + 2; return TOK_OR;   }
     if (*s == '|')                { *p = s + 1; return TOK_PIPE; }
     if (*s == ';')                { *p = s + 1; return TOK_SEMI; }
@@ -99,20 +165,52 @@ static tok_type_t next_token(char **p, char **word_out)
         return TOK_REDIR_OUT;
     }
 
-    /* A word: gather it, stripping quotes. */
+    /* A word: gather it, stripping quotes and expanding as we go.
+     *
+     * Three things get replaced here:
+     *   ~        home, but only at the very start of the word
+     *   $NAME    a variable, ${NAME} when the name runs into other text
+     *   $?       what the last command returned
+     *
+     * Single quotes stop all of it, the way they do everywhere else -
+     * inside them a $ is just a dollar sign. Double quotes stop the word
+     * from being split but not the expansion. */
     char   buf[MAX_LINE];
     size_t n = 0;
 
+    tok_quoted = false;
+    tok_has_glob = false;
+
+    /* ~ or ~/... at the start of a word. Not ~user: there is one user. */
+    if (*s == '~' && (s[1] == '\0' || s[1] == '/' || is_space(s[1]))) {
+        const char *home = HOME_DIR;
+        while (*home && n < sizeof(buf)) buf[n++] = *home++;
+        s++;
+    }
+
     while (*s && !is_space(*s) &&
            *s != '|' && *s != '<' && *s != '>' && *s != ';' && *s != '&') {
-        if (*s == '"' || *s == '\'') {
-            char quote = *s++;
-            while (*s && *s != quote) {
+        if (*s == '\'') {                 /* single quotes: nothing expands */
+            tok_quoted = true;
+            s++;
+            while (*s && *s != '\'') {
                 if (n < sizeof(buf)) buf[n++] = *s;
                 s++;
             }
-            if (*s == quote) s++;       /* closing quote; without one, to end of line */
+            if (*s == '\'') s++;
+        } else if (*s == '"') {
+            tok_quoted = true;
+            s++;
+            while (*s && *s != '"') {
+                if (*s == '$') n = expand_dollar(&s, buf, n, sizeof(buf));
+                else { if (n < sizeof(buf)) buf[n++] = *s; s++; }
+            }
+            if (*s == '"') s++;
+        } else if (*s == '$') {
+            n = expand_dollar(&s, buf, n, sizeof(buf));
         } else {
+            if (*s == '*' || *s == '?')
+                tok_has_glob = true;
             if (n < sizeof(buf)) buf[n++] = *s;
             s++;
         }
@@ -127,6 +225,167 @@ static tok_type_t next_token(char **p, char **word_out)
     return TOK_WORD;
 }
 
+/* ── Wildcards ────────────────────────────────────────────────────────
+ *
+ * The shell expands * and ? before the command ever runs, which is why
+ * "rm *.log" means the same thing as "grep *.log" - the program only ever
+ * sees a list of real names. Doing it in each program instead would make
+ * every one of them subtly different.
+ *
+ * A pattern that matches nothing is left exactly as typed. That is what
+ * every Bourne shell does, and it means "echo 2*3" prints 2*3 rather
+ * than an error.
+ */
+static bool glob_match(const char *pat, const char *name)
+{
+    while (*pat) {
+        if (*pat == '*') {
+            pat++;
+            if (!*pat)
+                return true;             /* trailing * takes the rest */
+            /* Try every place the rest of the pattern could start. */
+            for (const char *n = name; ; n++) {
+                if (glob_match(pat, n))
+                    return true;
+                if (!*n)
+                    return false;
+            }
+        }
+        if (!*name)
+            return false;
+        if (*pat != '?' && *pat != *name)
+            return false;
+        pat++;
+        name++;
+    }
+    return *name == '\0';
+}
+
+#define GLOB_MAX      128
+#define GLOB_NAME_MAX 128
+
+static char glob_names[GLOB_MAX][GLOB_NAME_MAX];
+static int  nglob;
+
+/* Expand one word. Returns how many names it produced, 0 for none. */
+static int glob_expand(const char *word, cmd_t *c)
+{
+    nglob = 0;
+
+    /* Only the last component may hold a wildcard. Expanding a pattern in
+     * the middle of a path means walking the tree, and every use of it
+     * here is "the files in one directory". */
+    const char *slash = strrchr(word, '/');
+    char        dir[256];
+    const char *pat;
+
+    if (!slash) {
+        strlcpy(dir, ".", sizeof(dir));
+        pat = word;
+    } else {
+        size_t dlen = (size_t)(slash - word);
+        if (dlen == 0) {
+            strlcpy(dir, "/", sizeof(dir));
+        } else {
+            if (dlen >= sizeof(dir)) return 0;
+            memcpy(dir, word, dlen);
+            dir[dlen] = '\0';
+        }
+        pat = slash + 1;
+    }
+
+    long fd = lp_open(dir, O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0)
+        return 0;
+
+    char buf[8192];
+    for (;;) {
+        long n = sys_getdents((int)fd, buf, sizeof(buf));
+        if (n <= 0)
+            break;
+        for (long off = 0; off < n && nglob < GLOB_MAX; ) {
+            char       *rec  = buf + off;
+            u16         len  = *(u16 *)(rec + DIRENT_RECLEN);
+            const char *name = rec + DIRENT_NAME;
+            off += len;
+
+            if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+                continue;
+            /* A * does not match a leading dot unless the pattern has
+             * one. Otherwise "rm *" would take .ssh with it. */
+            if (name[0] == '.' && pat[0] != '.')
+                continue;
+            if (!glob_match(pat, name))
+                continue;
+
+            /* Put the directory back on the front, so the name still
+             * points where it was typed. */
+            if (slash)
+                snprintf(glob_names[nglob], GLOB_NAME_MAX, "%s%s%s",
+                         dir, strcmp(dir, "/") == 0 ? "" : "/", name);
+            else
+                strlcpy(glob_names[nglob], name, GLOB_NAME_MAX);
+            nglob++;
+        }
+    }
+    lp_close((int)fd);
+
+    if (nglob == 0)
+        return 0;
+
+    /* getdents hands them over in whatever order the filesystem keeps
+     * them, which for ext4 is a hash. Sort, or "ls *" comes out scrambled
+     * and every listing looks different. */
+    for (int i = 1; i < nglob; i++) {
+        char tmp[GLOB_NAME_MAX];
+        strlcpy(tmp, glob_names[i], GLOB_NAME_MAX);
+        int j = i - 1;
+        while (j >= 0 && strcmp(glob_names[j], tmp) > 0) {
+            strlcpy(glob_names[j + 1], glob_names[j], GLOB_NAME_MAX);
+            j--;
+        }
+        strlcpy(glob_names[j + 1], tmp, GLOB_NAME_MAX);
+    }
+
+    int added = 0;
+    for (int i = 0; i < nglob && c->argc < MAX_ARGS; i++) {
+        char *w = arena_push(glob_names[i], strlen(glob_names[i]));
+        if (!w)
+            break;
+        c->argv[c->argc++] = w;
+        added++;
+    }
+    return added;
+}
+
+/* NAME=value in front of a command.
+ *
+ * Ours sets the variable for good, not just for that one command the way
+ * a POSIX shell does. With no subshells and no export there is nowhere
+ * else for it to live, and "PATH=/data/bin:$PATH" doing what it looks
+ * like it does is worth more than the distinction. */
+static bool try_assignment(const char *word)
+{
+    const char *eq = strchr(word, '=');
+    if (!eq || eq == word)
+        return false;
+    if (*word >= '0' && *word <= '9')
+        return false;                    /* not a name */
+    for (const char *q = word; q < eq; q++)
+        if (!is_name_char(*q))
+            return false;
+
+    char   name[64];
+    size_t n = (size_t)(eq - word);
+    if (n >= sizeof(name))
+        return false;
+    memcpy(name, word, n);
+    name[n] = '\0';
+
+    setenv(name, eq + 1, 1);
+    return true;
+}
+
 /* Parse one line into a list of pipelines.
  *
  *   cmd1 | cmd2 && cmd3 || cmd4 ; cmd5
@@ -136,6 +395,7 @@ static tok_type_t next_token(char **p, char **word_out)
 static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
 {
     arena_used = 0;
+    bool assigned = false;      /* the line held at least one NAME=value */
 
     int np = 1;
     pipeline_t *pl = &pipes[0];
@@ -159,6 +419,19 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
                 dprintf(STDERR_FILENO, "sh: too many arguments\n");
                 return -1;
             }
+
+            /* NAME=value, but only in front of the command. Anywhere else
+             * it is an ordinary argument: echo A=B has to print A=B. */
+            if (c->argc == 0 && !tok_quoted && try_assignment(word)) {
+                assigned = true;
+                continue;
+            }
+
+            /* A pattern turns into the names it matched, or stays as it
+             * was written when it matched nothing. */
+            if (tok_has_glob && !tok_quoted && glob_expand(word, c) > 0)
+                continue;
+
             c->argv[c->argc++] = word;
             continue;
         }
@@ -178,7 +451,10 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
             continue;
         }
 
-        if (t == TOK_AND || t == TOK_OR || t == TOK_SEMI) {
+        if (t == TOK_AND || t == TOK_OR || t == TOK_SEMI || t == TOK_AMP) {
+            if (t == TOK_AMP)
+                pl->background = true;
+
             if (c->argc == 0) {
                 dprintf(STDERR_FILENO, "sh: no command before the operator\n");
                 return -1;
@@ -222,6 +498,10 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
     while (np > 0 && pipes[np - 1].cmds[0].argc == 0)
         np--;
 
+    /* "FOO=bar" on its own is a whole command, and it succeeded. */
+    if (np == 0 && assigned)
+        last_status = 0;
+
     return np;
 }
 
@@ -255,7 +535,7 @@ static bool run_builtin(cmd_t *c)
     }
 
     if (strcmp(cmd, "cd") == 0) {
-        const char *dir = (c->argc > 1) ? c->argv[1] : "/";
+        const char *dir = (c->argc > 1) ? c->argv[1] : HOME_DIR;
         long r = lp_chdir(dir);
         if (r < 0) {
             dprintf(STDERR_FILENO, "cd: %s: cannot change to it (%ld)\n", dir, -r);
@@ -378,8 +658,58 @@ static void apply_redirects(cmd_t *c)
     }
 }
 
+/* ── Background jobs ──────────────────────────────────────────────────
+ *
+ * A command ending in & runs without the shell waiting for it. There is
+ * no job control beyond that - no fg, no bg, no Ctrl-Z - because those
+ * need process groups and terminal ownership, and what & is actually for
+ * here is starting something long and carrying on typing.
+ *
+ * We do have to collect them when they finish, or every one leaves a
+ * zombie behind. That happens just before each prompt, which is also the
+ * only moment it is polite to print "Done". */
+#define MAX_JOBS 16
+
+typedef struct {
+    pid_t pid;
+    int   id;
+    char  cmd[48];
+} job_t;
+
+static job_t jobs[MAX_JOBS];
+static int   njobs = 0;
+static int   next_job_id = 1;
+
+static void job_add(pid_t pid, const char *cmd)
+{
+    if (njobs >= MAX_JOBS) {
+        printf("[&] %d %s\n", (int)pid, cmd);
+        return;                     /* still running, just not tracked */
+    }
+    jobs[njobs].pid = pid;
+    jobs[njobs].id  = next_job_id++;
+    strlcpy(jobs[njobs].cmd, cmd, sizeof(jobs[njobs].cmd));
+    printf("[%d] %d\n", jobs[njobs].id, (int)pid);
+    njobs++;
+}
+
+static void reap_jobs(void)
+{
+    for (int i = 0; i < njobs; ) {
+        int   status = 0;
+        pid_t r = lp_waitpid(jobs[i].pid, &status, WNOHANG);
+        if (r == jobs[i].pid) {
+            printf("[%d] done   %s\n", jobs[i].id, jobs[i].cmd);
+            jobs[i] = jobs[njobs - 1];
+            njobs--;
+        } else {
+            i++;
+        }
+    }
+}
+
 /* Run a pipeline: fork each stage and join them with pipes. */
-static void run_pipeline(cmd_t *cmds, int n)
+static void run_pipeline(cmd_t *cmds, int n, bool background)
 {
     int  prev_read = -1;      /* read end handed over by the previous stage */
     pid_t pids[MAX_CMDS];
@@ -442,6 +772,16 @@ static void run_pipeline(cmd_t *cmds, int n)
     if (prev_read >= 0)
         lp_close(prev_read);
 
+    /* In the background we do not wait at all - the last stage becomes
+     * the job, and the earlier stages of a pipeline are collected with
+     * it when it goes. */
+    if (background) {
+        if (npids > 0)
+            job_add(pids[npids - 1], cmds[0].argv[0]);
+        last_status = 0;
+        return;
+    }
+
     /* Wait for every stage. The last stage's status is the pipeline's. */
     for (int i = 0; i < npids; i++) {
         int status = 0;
@@ -499,19 +839,601 @@ static void run_builtin_redirected(cmd_t *c)
     if (saved_out >= 0) { lp_dup2(saved_out, STDOUT_FILENO); lp_close(saved_out); }
 }
 
+/* ── The line editor ──────────────────────────────────────────────────
+ *
+ * The kernel will edit a line for us - that is what canonical mode is -
+ * but it only knows backspace. No history, no cursor keys, no
+ * completion. On a board reached over a serial cable or a screen with no
+ * scrollback, retyping a long command because of one typo near the start
+ * is the difference between a system you use and one you tolerate.
+ *
+ * So we take the terminal raw and draw the line ourselves:
+ *
+ *   left/right, Ctrl-A, Ctrl-E     move
+ *   up/down                        history
+ *   tab                            complete a command or a path
+ *   Ctrl-U, Ctrl-K, Ctrl-W         cut to start, to end, one word back
+ *   Ctrl-L                         clear the screen
+ *   Ctrl-C                         abandon the line
+ *   Ctrl-D                         end of input, or delete forwards
+ *
+ * Everything moves by character, not by byte, so a Hangul syllable -
+ * three bytes, two columns wide - behaves like the single character it
+ * is. The line scrolls sideways when it outgrows the screen.
+ */
+
+#define HIST_MAX      64
+#define HIST_FILE     "/root/.sh_history"
+
+static char *history[HIST_MAX];
+static int   hist_count = 0;
+
+static int   term_cols = 80;
+
+/* Width of a slice of the buffer, in screen columns. */
+static int slice_width(const char *s, size_t from, size_t to)
+{
+    return (int)utf8_str_width(s + from, to - from);
+}
+
+static void hist_add(const char *line)
+{
+    if (!line[0])
+        return;
+    /* Do not store the same command twice in a row. */
+    if (hist_count && strcmp(history[hist_count - 1], line) == 0)
+        return;
+
+    char *copy = malloc(strlen(line) + 1);
+    if (!copy)
+        return;
+    strcpy(copy, line);
+
+    if (hist_count == HIST_MAX) {
+        free(history[0]);
+        for (int i = 1; i < HIST_MAX; i++)
+            history[i - 1] = history[i];
+        hist_count--;
+    }
+    history[hist_count++] = copy;
+}
+
+/* History lives on the data partition, so it survives a reboot. Appending
+ * as we go rather than writing it all out at exit means a power cut does
+ * not take the session with it. */
+static void hist_load(void)
+{
+    long fd = lp_open(HIST_FILE, O_RDONLY, 0);
+    if (fd < 0)
+        return;
+    char line[MAX_LINE];
+    while (readline((int)fd, line, sizeof(line)) >= 0)
+        hist_add(line);
+    lp_close((int)fd);
+}
+
+static void hist_save_one(const char *line)
+{
+    if (!line[0])
+        return;
+    long fd = lp_open(HIST_FILE, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0)
+        return;                     /* home is read-only or absent */
+    lp_write((int)fd, line, strlen(line));
+    lp_write((int)fd, "\n", 1);
+    lp_close((int)fd);
+}
+
+typedef struct {
+    char   buf[MAX_LINE];
+    size_t len;                     /* bytes in use */
+    size_t cur;                     /* cursor, as a byte index */
+} line_t;
+
+/* Redraw the whole line and put the cursor back where it belongs.
+ *
+ * When the line is wider than the screen we show a window of it that
+ * keeps the cursor visible - the alternative is wrapping, and wrapping
+ * needs to know how many rows we spilled onto, which the terminal will
+ * not tell us. */
+static void redraw(const char *prompt, int prompt_w, line_t *l)
+{
+    int avail = term_cols - prompt_w - 1;
+    if (avail < 8)
+        avail = 8;
+
+    /* Slide the window forward until the cursor fits inside it. */
+    size_t start = 0;
+    while (slice_width(l->buf, start, l->cur) > avail)
+        start = utf8_next(l->buf, l->len, start);
+
+    /* Fill the window from there. */
+    size_t end = start;
+    while (end < l->len) {
+        size_t next = utf8_next(l->buf, l->len, end);
+        if (slice_width(l->buf, start, next) > avail)
+            break;
+        end = next;
+    }
+
+    fputs("\r", STDOUT_FILENO);
+    fputs(prompt, STDOUT_FILENO);
+    lp_write(STDOUT_FILENO, l->buf + start, end - start);
+    fputs("\x1b[K", STDOUT_FILENO);          /* erase whatever was longer */
+
+    int back = slice_width(l->buf, l->cur, end);
+    if (back > 0) {
+        char mv[16];
+        snprintf(mv, sizeof(mv), "\x1b[%dD", back);
+        fputs(mv, STDOUT_FILENO);
+    }
+}
+
+static void line_insert(line_t *l, const char *text, size_t n)
+{
+    if (l->len + n >= sizeof(l->buf))
+        return;
+    memmove(l->buf + l->cur + n, l->buf + l->cur, l->len - l->cur);
+    memcpy(l->buf + l->cur, text, n);
+    l->len += n;
+    l->cur += n;
+    l->buf[l->len] = '\0';
+}
+
+static void line_delete(line_t *l, size_t from, size_t to)
+{
+    if (from >= to)
+        return;
+    memmove(l->buf + from, l->buf + to, l->len - to);
+    l->len -= (to - from);
+    l->cur  = from;
+    l->buf[l->len] = '\0';
+}
+
+static void line_set(line_t *l, const char *text)
+{
+    strlcpy(l->buf, text, sizeof(l->buf));
+    l->len = strlen(l->buf);
+    l->cur = l->len;
+}
+
+/* Start of the word the cursor sits in - where completion begins. */
+static size_t word_start(const line_t *l)
+{
+    size_t i = l->cur;
+    while (i > 0 && l->buf[i - 1] != ' ' && l->buf[i - 1] != '\t')
+        i--;
+    return i;
+}
+
+/* Is the word at `start` the first one on the line? Then it is a command
+ * name and gets completed from PATH, not from the current directory. */
+static bool is_command_position(const line_t *l, size_t start)
+{
+    for (size_t i = 0; i < start; i++) {
+        char c = l->buf[i];
+        if (c == ' ' || c == '\t')
+            continue;
+        /* Everything after one of these starts a fresh command. */
+        if (c == '|' || c == ';' || c == '&')
+            continue;
+        return false;
+    }
+    return true;
+}
+
+/* ── Completion ──
+ * Candidates are collected into one buffer of names. There is no sorting
+ * and no deduplication beyond what the directory gives us: this is a list
+ * a person is about to read, and it is short. */
+#define COMP_MAX      128
+#define COMP_NAME_MAX 64
+
+static char comp[COMP_MAX][COMP_NAME_MAX];
+static int  ncomp;
+
+static void comp_add(const char *name, bool is_dir)
+{
+    if (ncomp >= COMP_MAX)
+        return;
+    for (int i = 0; i < ncomp; i++)
+        if (strcmp(comp[i], name) == 0)
+            return;
+    strlcpy(comp[ncomp], name, COMP_NAME_MAX);
+    if (is_dir)
+        strlcat(comp[ncomp], "/", COMP_NAME_MAX);
+    ncomp++;
+}
+
+/* Every name in `dir` starting with `prefix`. */
+static void comp_scan_dir(const char *dir, const char *prefix, bool mark_dirs)
+{
+    long fd = lp_open(dir, O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0)
+        return;
+
+    size_t plen = strlen(prefix);
+    char   buf[8192];
+
+    for (;;) {
+        long n = sys_getdents((int)fd, buf, sizeof(buf));
+        if (n <= 0)
+            break;
+        for (long off = 0; off < n; ) {
+            char       *rec  = buf + off;
+            u16         len  = *(u16 *)(rec + DIRENT_RECLEN);
+            u8          type = *(u8 *)(rec + DIRENT_TYPE);
+            const char *name = rec + DIRENT_NAME;
+            off += len;
+
+            if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+                continue;
+            /* A leading dot is only offered when it was asked for. */
+            if (name[0] == '.' && prefix[0] != '.')
+                continue;
+            if (plen && strncmp(name, prefix, plen) != 0)
+                continue;
+
+            comp_add(name, mark_dirs && type == DT_DIR);
+        }
+    }
+    lp_close((int)fd);
+}
+
+static void comp_commands(const char *prefix)
+{
+    for (int i = 0; BUILTINS[i]; i++)
+        if (strncmp(BUILTINS[i], prefix, strlen(prefix)) == 0)
+            comp_add(BUILTINS[i], false);
+
+    const char *path = getenv("PATH");
+    if (!path || !*path)
+        path = DEFAULT_PATH;
+
+    char dir[256];
+    while (*path) {
+        size_t i = 0;
+        while (*path && *path != ':' && i < sizeof(dir) - 1)
+            dir[i++] = *path++;
+        dir[i] = '\0';
+        if (i)
+            comp_scan_dir(dir, prefix, false);
+        if (*path == ':')
+            path++;
+    }
+}
+
+/* Split "some/path/pre" into the directory to look in and the prefix to
+ * match. The directory part stays in the line; only the prefix is
+ * replaced by what we complete. */
+static void comp_files(const char *word, char *dirbuf, size_t dirsize,
+                       const char **prefix_out)
+{
+    const char *slash = strrchr(word, '/');
+    if (!slash) {
+        strlcpy(dirbuf, ".", dirsize);
+        *prefix_out = word;
+    } else {
+        size_t dlen = (size_t)(slash - word);
+        if (dlen == 0) {                 /* "/pre" - the root itself */
+            strlcpy(dirbuf, "/", dirsize);
+        } else {
+            if (dlen >= dirsize) dlen = dirsize - 1;
+            memcpy(dirbuf, word, dlen);
+            dirbuf[dlen] = '\0';
+        }
+        *prefix_out = slash + 1;
+    }
+    comp_scan_dir(dirbuf, *prefix_out, true);
+}
+
+/* How much of the candidates is identical - what we can safely insert
+ * without choosing for the user. */
+static size_t common_prefix_len(void)
+{
+    if (ncomp == 0)
+        return 0;
+    size_t n = strlen(comp[0]);
+    for (int i = 1; i < ncomp; i++) {
+        size_t j = 0;
+        while (j < n && comp[i][j] && comp[0][j] == comp[i][j])
+            j++;
+        n = j;
+    }
+    return n;
+}
+
+static void complete(const char *prompt, int prompt_w, line_t *l,
+                     bool second_tab)
+{
+    ncomp = 0;
+
+    size_t ws = word_start(l);
+    char   word[MAX_LINE];
+    size_t wlen = l->cur - ws;
+    if (wlen >= sizeof(word))
+        return;
+    memcpy(word, l->buf + ws, wlen);
+    word[wlen] = '\0';
+
+    const char *prefix = word;
+    char        dirbuf[256];
+
+    if (is_command_position(l, ws) && !strchr(word, '/'))
+        comp_commands(word);
+    else
+        comp_files(word, dirbuf, sizeof(dirbuf), &prefix);
+
+    if (ncomp == 0)
+        return;
+
+    size_t plen   = strlen(prefix);
+    size_t common = common_prefix_len();
+
+    /* Insert whatever every candidate agrees on. */
+    if (common > plen) {
+        line_insert(l, comp[0] + plen, common - plen);
+        /* One candidate, fully typed: add a space so the next word can
+         * start. A directory ends in / instead, to keep going. */
+        if (ncomp == 1 && comp[0][common - 1] != '/')
+            line_insert(l, " ", 1);
+        redraw(prompt, prompt_w, l);
+        return;
+    }
+
+    /* Nothing to add. Show what the choices are, but only when asked
+     * twice - one tab that prints a list nobody wanted is noise. */
+    if (!second_tab)
+        return;
+
+    fputs("\r\n", STDOUT_FILENO);
+    int col = 0;
+    for (int i = 0; i < ncomp; i++) {
+        char cell[COMP_NAME_MAX + 4];
+        snprintf(cell, sizeof(cell), "%-18s", comp[i]);
+        fputs(cell, STDOUT_FILENO);
+        if (++col >= (term_cols / 18 > 0 ? term_cols / 18 : 1)) {
+            fputs("\r\n", STDOUT_FILENO);
+            col = 0;
+        }
+    }
+    if (col)
+        fputs("\r\n", STDOUT_FILENO);
+    redraw(prompt, prompt_w, l);
+}
+
+/* Read one line with editing. Returns its length, or -1 at end of input.
+ * The prompt is printed here rather than by the caller, because every
+ * redraw has to reprint it. */
+static long edit_line(const char *prompt, int prompt_w,
+                      char *out, size_t size)
+{
+    lp_termios_t saved;
+    if (lp_term_raw(STDIN_FILENO, &saved) < 0) {
+        /* Not a terminal after all - fall back to the kernel's own line
+         * editing, which is what a pipe or a serial log wants anyway. */
+        fputs(prompt, STDOUT_FILENO);
+        return readline(STDIN_FILENO, out, size);
+    }
+
+    int rows = 24;
+    lp_term_size(STDOUT_FILENO, &rows, &term_cols);
+
+    line_t l;
+    l.buf[0] = '\0';
+    l.len = 0;
+    l.cur = 0;
+
+    int  hist_pos = hist_count;      /* one past the end: the new line */
+    char pending[MAX_LINE];          /* the line being typed, parked while
+                                        we walk back through history */
+    pending[0] = '\0';
+    bool last_was_tab = false;
+    long result = 0;
+
+    redraw(prompt, prompt_w, &l);
+
+    for (;;) {
+        char c;
+        long n = lp_read(STDIN_FILENO, &c, 1);
+        if (n <= 0) {                /* the terminal went away */
+            result = -1;
+            break;
+        }
+
+        /* Two tabs in a row means "show me the choices". Remember what
+         * the previous key was before this one overwrites it. */
+        bool was_tab = last_was_tab;
+        last_was_tab = (c == '\t');
+
+        if (c == '\r' || c == '\n') {
+            fputs("\r\n", STDOUT_FILENO);
+            result = (long)l.len;
+            break;
+        }
+
+        if (c == 3) {                /* Ctrl-C */
+            fputs("^C\r\n", STDOUT_FILENO);
+            l.buf[0] = '\0';
+            l.len = l.cur = 0;
+            result = 0;
+            break;
+        }
+
+        if (c == 4) {                /* Ctrl-D */
+            if (l.len == 0) {
+                result = -1;
+                break;
+            }
+            if (l.cur < l.len)
+                line_delete(&l, l.cur, utf8_next(l.buf, l.len, l.cur));
+            redraw(prompt, prompt_w, &l);
+            continue;
+        }
+
+        if (c == 127 || c == 8) {    /* backspace */
+            if (l.cur > 0) {
+                size_t prev = utf8_prev(l.buf, l.cur);
+                line_delete(&l, prev, l.cur);
+            }
+            redraw(prompt, prompt_w, &l);
+            continue;
+        }
+
+        if (c == 1) { l.cur = 0;      redraw(prompt, prompt_w, &l); continue; }
+        if (c == 5) { l.cur = l.len;  redraw(prompt, prompt_w, &l); continue; }
+
+        if (c == 21) {               /* Ctrl-U: cut back to the start */
+            line_delete(&l, 0, l.cur);
+            redraw(prompt, prompt_w, &l);
+            continue;
+        }
+
+        if (c == 11) {               /* Ctrl-K: cut to the end */
+            l.len = l.cur;
+            l.buf[l.len] = '\0';
+            redraw(prompt, prompt_w, &l);
+            continue;
+        }
+
+        if (c == 23) {               /* Ctrl-W: cut the word before us */
+            size_t i = l.cur;
+            while (i > 0 && l.buf[i - 1] == ' ') i--;
+            while (i > 0 && l.buf[i - 1] != ' ') i--;
+            line_delete(&l, i, l.cur);
+            redraw(prompt, prompt_w, &l);
+            continue;
+        }
+
+        if (c == 12) {               /* Ctrl-L: clear the screen */
+            fputs("\x1b[H\x1b[2J", STDOUT_FILENO);
+            redraw(prompt, prompt_w, &l);
+            continue;
+        }
+
+        if (c == '\t') {
+            complete(prompt, prompt_w, &l, was_tab);
+            continue;
+        }
+
+        if (c == 27) {               /* an escape sequence */
+            char a, b;
+            if (lp_read(STDIN_FILENO, &a, 1) <= 0) continue;
+            if (a != '[' && a != 'O') continue;
+            if (lp_read(STDIN_FILENO, &b, 1) <= 0) continue;
+
+            if (b == 'A' || b == 'B') {          /* up / down */
+                if (hist_count == 0)
+                    continue;
+                if (b == 'A' && hist_pos > 0) {
+                    if (hist_pos == hist_count)
+                        strlcpy(pending, l.buf, sizeof(pending));
+                    line_set(&l, history[--hist_pos]);
+                } else if (b == 'B' && hist_pos < hist_count) {
+                    hist_pos++;
+                    line_set(&l, hist_pos == hist_count
+                                 ? pending : history[hist_pos]);
+                }
+                redraw(prompt, prompt_w, &l);
+                continue;
+            }
+
+            if (b == 'C') {                      /* right */
+                if (l.cur < l.len)
+                    l.cur = utf8_next(l.buf, l.len, l.cur);
+                redraw(prompt, prompt_w, &l);
+                continue;
+            }
+            if (b == 'D') {                      /* left */
+                if (l.cur > 0)
+                    l.cur = utf8_prev(l.buf, l.cur);
+                redraw(prompt, prompt_w, &l);
+                continue;
+            }
+            if (b == 'H') { l.cur = 0;     redraw(prompt, prompt_w, &l); continue; }
+            if (b == 'F') { l.cur = l.len; redraw(prompt, prompt_w, &l); continue; }
+
+            /* The numbered ones end in ~: 1 home, 3 delete, 4 end. */
+            if (b >= '1' && b <= '8') {
+                char tilde;
+                if (lp_read(STDIN_FILENO, &tilde, 1) <= 0) continue;
+                if (b == '1') l.cur = 0;
+                if (b == '4') l.cur = l.len;
+                if (b == '3' && l.cur < l.len)
+                    line_delete(&l, l.cur, utf8_next(l.buf, l.len, l.cur));
+                redraw(prompt, prompt_w, &l);
+            }
+            continue;
+        }
+
+        if ((unsigned char)c < 32)
+            continue;                /* a control key we do not use */
+
+        /* A character may be several bytes. Read the rest of it before
+         * inserting, so the buffer never holds half a character. */
+        char seq[8];
+        seq[0] = c;
+        int want = utf8_seq_len((unsigned char)c);
+        if (want < 1 || want > 4)
+            want = 1;
+        for (int i = 1; i < want; i++)
+            if (lp_read(STDIN_FILENO, &seq[i], 1) <= 0) { want = i; break; }
+
+        line_insert(&l, seq, (size_t)want);
+        redraw(prompt, prompt_w, &l);
+    }
+
+    lp_term_restore(STDIN_FILENO, &saved);
+
+    strlcpy(out, l.buf, size);
+    return result;
+}
+
 /* ── Main loop ─────────────────────────────────────────────────── */
 
-static void print_prompt(void)
+static char hostname[64] = "lpzero";
+
+static void read_hostname(void)
+{
+    char buf[80];
+    if (proc_read("/proc/sys/kernel/hostname", buf, sizeof(buf)) <= 0)
+        return;
+    char *nl = strchr(buf, '\n');
+    if (nl) *nl = '\0';
+    if (buf[0] && strcmp(buf, "(none)") != 0)
+        strlcpy(hostname, buf, sizeof(hostname));
+}
+
+/* Build the prompt, and report how wide it is on screen.
+ *
+ * The width is not the length: the directory may have Hangul in it, and
+ * the line editor has to know which column the typed line starts at or
+ * every redraw lands in the wrong place. */
+static int build_prompt(char *out, size_t size)
 {
     char cwd[256];
     if (lp_getcwd(cwd, sizeof(cwd)) < 0)
         strlcpy(cwd, "?", sizeof(cwd));
 
-    /* Show a non-zero exit code in the prompt. */
+    /* Home shows as ~, the way every other shell writes it. */
+    const char *shown = cwd;
+    char   collapsed[300];
+    size_t hlen = strlen(HOME_DIR);
+    if (strncmp(cwd, HOME_DIR, hlen) == 0 &&
+        (cwd[hlen] == '\0' || cwd[hlen] == '/')) {
+        snprintf(collapsed, sizeof(collapsed), "~%s", cwd + hlen);
+        shown = collapsed;
+    }
+
+    /* A failed command leaves its exit code in front of the prompt. It is
+     * the one piece of state that is easy to miss and annoying to ask
+     * for after the fact. */
     if (last_status)
-        printf("[%d] %s $ ", last_status, cwd);
+        snprintf(out, size, "[%d] root@%s:%s# ", last_status, hostname, shown);
     else
-        printf("%s $ ", cwd);
+        snprintf(out, size, "root@%s:%s# ", hostname, shown);
+
+    return (int)utf8_str_width(out, strlen(out));
 }
 
 int main(int argc, char **argv)
@@ -545,11 +1467,28 @@ int main(int argc, char **argv)
         interactive = false;
     }
 
-    while (shell_running) {
-        if (interactive)
-            print_prompt();
+    /* An interactive shell is somebody sitting at a terminal: start where
+     * their files are, remember what they type, and know the machine's
+     * name for the prompt. A shell running /etc/rc gets none of this. */
+    char prompt[384];
+    if (interactive) {
+        read_hostname();
+        hist_load();
+        if (lp_is_dir(HOME_DIR))
+            lp_chdir(HOME_DIR);
+    }
 
-        long len = readline(input_fd, line, sizeof(line));
+    while (shell_running) {
+        long len;
+
+        if (interactive) {
+            reap_jobs();
+            int pw = build_prompt(prompt, sizeof(prompt));
+            len = edit_line(prompt, pw, line, sizeof(line));
+        } else {
+            len = readline(input_fd, line, sizeof(line));
+        }
+
         if (len < 0) {              /* EOF: Ctrl-D, or the end of the file */
             if (interactive)
                 printf("\n");
@@ -557,6 +1496,11 @@ int main(int argc, char **argv)
         }
         if (len == 0)
             continue;
+
+        if (interactive) {
+            hist_add(line);
+            hist_save_one(line);
+        }
 
         /* Skip comments when running a script. */
         if (line[0] == '#')
@@ -580,7 +1524,7 @@ int main(int argc, char **argv)
             if (n == 1 && cmds[0].argc > 0 && is_builtin(cmds[0].argv[0]))
                 run_builtin_redirected(&cmds[0]);
             else
-                run_pipeline(cmds, n);
+                run_pipeline(cmds, n, pipes[i].background);
         }
     }
 

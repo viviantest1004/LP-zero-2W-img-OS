@@ -46,6 +46,14 @@ static int list_dir(const char *path, bool show_header, bool show_all)
 {
     long fd = lp_open(path, O_RDONLY | O_DIRECTORY, 0);
     if (fd < 0) {
+        /* Not a directory: name it and stop. "ls *.c" hands us files,
+         * not directories, and each one is its own answer - opening it
+         * as a directory fails with ENOTDIR, which is not an error to
+         * report, it is the ordinary case. */
+        if (fd == -20 /* ENOTDIR */ || lp_exists(path)) {
+            printf("%s\n", path);
+            return 0;
+        }
         dprintf(STDERR_FILENO, "ls: %s: cannot open (%ld)\n", path, -fd);
         return 1;
     }

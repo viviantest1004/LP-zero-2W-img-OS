@@ -139,9 +139,10 @@ void *realloc(void *p, size_t n)
     return np;
 }
 
+extern char **environ;
+
 char *getenv(const char *name)
 {
-    extern char **environ;
     if (!environ)
         return NULL;
 
@@ -151,6 +152,81 @@ char *getenv(const char *name)
             return *e + len + 1;
     }
     return NULL;
+}
+
+/* Set a variable, and make sure children inherit it.
+ *
+ * The environment we were handed by execve is an array we do not own and
+ * cannot extend, so the first write copies it somewhere we can grow. From
+ * then on the array is ours: environ points at it, and execve passes it
+ * to every child. There is no unsetenv because nothing here needs one -
+ * an empty value does the job. */
+static char **env_owned  = NULL;
+static int    env_count  = 0;
+static int    env_capacity = 0;
+
+int setenv(const char *name, const char *value, int overwrite)
+{
+    size_t nlen = strlen(name);
+
+    /* Already there? Replace the whole "NAME=value" string. */
+    if (environ) {
+        for (int i = 0; environ[i]; i++) {
+            if (strncmp(environ[i], name, nlen) != 0 || environ[i][nlen] != '=')
+                continue;
+            if (!overwrite)
+                return 0;
+
+            char *entry = malloc(nlen + strlen(value) + 2);
+            if (!entry)
+                return -1;
+            strcpy(entry, name);
+            entry[nlen] = '=';
+            strcpy(entry + nlen + 1, value);
+            environ[i] = entry;
+            return 0;
+        }
+    }
+
+    /* Take a copy of the array we can extend. */
+    if (!env_owned) {
+        env_count = 0;
+        if (environ)
+            while (environ[env_count])
+                env_count++;
+
+        env_capacity = env_count + 16;
+        env_owned = malloc(sizeof(char *) * (size_t)(env_capacity + 1));
+        if (!env_owned)
+            return -1;
+        for (int i = 0; i < env_count; i++)
+            env_owned[i] = environ[i];
+        env_owned[env_count] = NULL;
+        environ = env_owned;
+    }
+
+    if (env_count + 1 >= env_capacity) {
+        int   grown = env_capacity * 2;
+        char **bigger = malloc(sizeof(char *) * (size_t)(grown + 1));
+        if (!bigger)
+            return -1;
+        for (int i = 0; i < env_count; i++)
+            bigger[i] = env_owned[i];
+        env_owned    = bigger;
+        env_capacity = grown;
+        environ      = env_owned;
+    }
+
+    char *entry = malloc(nlen + strlen(value) + 2);
+    if (!entry)
+        return -1;
+    strcpy(entry, name);
+    entry[nlen] = '=';
+    strcpy(entry + nlen + 1, value);
+
+    env_owned[env_count++] = entry;
+    env_owned[env_count]   = NULL;
+    return 0;
 }
 
 int atoi(const char *s)

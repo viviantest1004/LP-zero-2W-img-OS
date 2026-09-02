@@ -7,6 +7,11 @@
 # && || ; all work, so every step carries a fallback and a failure never
 # stops the boot.
 
+echo "[rc] naming the machine"
+# Without this the hostname is "(none)", which shows up in the shell
+# prompt and in every log line. One word, and the machine has a name.
+echo lpzero > /proc/sys/kernel/hostname || echo "[rc]   could not set it"
+
 echo "[rc] arming the watchdog"
 # The watchdog daemon starts from /etc/services, which is after this
 # script finishes - so a boot that hangs partway through this file would

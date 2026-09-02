@@ -56,24 +56,39 @@ static const entry_t KNOWN[] = {
     { "mount",    "files",   "mount a filesystem",          "mount [-t type] <dev> <dir>" },
     { "umount",   "files",   "unmount a filesystem",        "umount <dir>" },
     { "expandfs", "files",   "grow /data to fill the card", "expandfs [disk part]" },
+    { "find",     "files",   "walk a directory tree",       "find [path] [-name pat] [-type f|d]" },
+    { "du",       "files",   "how much space it takes",     "du [-s] [-b] [path]..." },
+    { "chmod",    "files",   "change what may be done",     "chmod 755|+x|-w <file>..." },
 
     { "cat",      "text",    "print a file",                "cat [file]..." },
     { "edit",     "text",    "edit a file on screen",       "edit <file>" },
+    { "more",     "text",    "read it a screen at a time",  "more [file]..." },
+    { "grep",     "text",    "print the lines that match",  "grep [-invclq] <pattern> [file]..." },
+    { "head",     "text",    "the first lines",             "head [-n count] [file]..." },
+    { "tail",     "text",    "the last lines",              "tail [-n count] [-f] [file]" },
+    { "wc",       "text",    "count lines, words, characters", "wc [-l] [-w] [-c] [file]..." },
 
     { "date",     "time",    "show or set the clock",       "date [-u|-e|-s TIME|-z ZONE]" },
     { "ntp",      "time",    "set the clock from the net",  "ntp [-r|-d] [server]" },
 
     { "top",      "system",  "what is running, and stop it","top [-1] [-n count]" },
+    { "ps",       "system",  "what is running, once",       "ps [-l]" },
+    { "df",       "system",  "how full each filesystem is", "df [-b]" },
+    { "free",     "system",  "how much memory is left",     "free [-b]" },
+    { "clear",    "system",  "wipe the screen",             "clear" },
     { "kill",     "system",  "stop a process",              "kill [-9] <pid>..." },
     { "sleep",    "system",  "wait",                        "sleep <seconds>" },
     { "watchdog", "system",  "reboot the board if it hangs","watchdog [-t s] [-x]" },
     { "logd",     "system",  "collect logs to /data/log",   "(started by init)" },
+    { "dmesg",    "system",  "the kernel's own log",        "dmesg [-n]" },
     { "sysinfo",  "system",  "memory, CPU, disks, network", "sysinfo" },
     { "zram",     "system",  "compressed swap in RAM",      "zram on|off|status" },
     { "guard",    "system",  "the safety net (memory, heat, power, CPU)",
                                                              "guard [-d]" },
     { "bootcount","system",  "detect a reboot loop",        "bootcount" },
     { "calc",     "system",  "integer calculator",          "calc \"1 + 2 * 3\"" },
+    { "pkg",      "system",  "install and remove packages", "pkg list|add|remove|install" },
+    { "splash",   "system",  "draw the boot screen",        "splash [device]" },
 
     { "dhcp",     "network", "get an address from a router","dhcp <interface>" },
     { "wpa_supplicant", "network", "join a WiFi network",   "wpa_supplicant -B -i wlan0 -c <conf>" },
@@ -163,14 +178,24 @@ static bool available(const entry_t *e)
     return already_found(e->name);
 }
 
-static void print_one(const entry_t *e)
+/* Everything below goes through the pager rather than printf.
+ *
+ * This list is longer than the screen, and a screen on this board has no
+ * scrollback - what scrolls off is gone. Printing it all at once means
+ * the top half can never be read. Piped or redirected it prints straight
+ * through, so "help | grep zram" and "help > list.txt" work as expected. */
+static bool print_one(const entry_t *e)
 {
-    printf("  %-14s %s\n", e->name, e->what);
+    char buf[128];
+    snprintf(buf, sizeof(buf), "  %-14s %s", e->name, e->what);
+    return page_line(buf);
 }
 
 static void print_all(void)
 {
-    printf("LP-zero OS commands\n");
+    page_begin();
+
+    if (!page_line("LP-zero OS commands")) goto done;
 
     for (int g = 0; GROUPS[g]; g++) {
         bool header = false;
@@ -180,10 +205,11 @@ static void print_all(void)
             if (!available(&KNOWN[i]))
                 continue;           /* python may not be installed */
             if (!header) {
-                printf("\n%s\n", GROUPS[g]);
+                if (!page_line("")) goto done;
+                if (!page_line(GROUPS[g])) goto done;
                 header = true;
             }
-            print_one(&KNOWN[i]);
+            if (!print_one(&KNOWN[i])) goto done;
         }
     }
 
@@ -194,22 +220,29 @@ static void print_all(void)
         if (lookup(found[i]))
             continue;
         if (!other) {
-            printf("\nother\n");
+            if (!page_line("")) goto done;
+            if (!page_line("other")) goto done;
             other = true;
         }
-        printf("  %s\n", found[i]);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "  %s", found[i]);
+        if (!page_line(buf)) goto done;
     }
 
-    printf("\n"
-           "  help <command>   how to use one of them\n"
-           "  <command> -h     most of them explain themselves too\n");
-    printf("\n"
-           "The shell takes < > >> for redirection, | for pipes,\n"
-           "and && || ; between commands. It has no variables,\n"
-           "no wildcards and no if.\n");
-    printf("\n"
-           "Files under /data and /root survive a reboot.\n"
-           "Everything else is in RAM and does not.\n");
+    if (!page_line("")) goto done;
+    if (!page_line("  help <command>   how to use one of them")) goto done;
+    if (!page_line("  <command> -h     most of them explain themselves too")) goto done;
+    if (!page_line("")) goto done;
+    if (!page_line("The shell takes < > >> for redirection, | for pipes,")) goto done;
+    if (!page_line("and && || ; between commands. Tab completes, the arrow")) goto done;
+    if (!page_line("keys go back through what you have typed, and * matches")) goto done;
+    if (!page_line("file names.")) goto done;
+    if (!page_line("")) goto done;
+    if (!page_line("Files under /data and /root survive a reboot.")) goto done;
+    if (!page_line("Everything else is in RAM and does not.")) goto done;
+
+done:
+    page_end();
 }
 
 int main(int argc, char **argv)

@@ -18,6 +18,47 @@
 
 static const char *AUTO_TYPES[] = { "ext4", "vfat", "ext2", NULL };
 
+/* Work out what is on a device by looking at it.
+ *
+ * Trying each filesystem in turn does work - the kernel says EINVAL for
+ * one that does not fit - but every failed attempt is a line in the
+ * kernel log, and those lines land on the screen during boot where they
+ * read as something having gone wrong. Nothing has: we asked a question
+ * and got an answer. Reading the superblock ourselves asks it quietly.
+ *
+ *   ext2/3/4   magic 0xEF53, 56 bytes into the superblock, which itself
+ *              starts 1024 bytes in
+ *   FAT        the boot sector ends in 0x55 0xAA and names itself, at
+ *              0x36 for FAT12/16 and 0x52 for FAT32
+ *
+ * NULL when it is none of those, and then we fall back to trying. */
+static const char *sniff_type(const char *dev)
+{
+    long fd = lp_open(dev, O_RDONLY, 0);
+    if (fd < 0)
+        return NULL;
+
+    static u8 buf[2048];
+    long n = lp_read((int)fd, buf, sizeof(buf));
+    lp_close((int)fd);
+
+    if (n < 2048)
+        return NULL;
+
+    /* ext: superblock at 1024, s_magic at +56 */
+    u16 magic = (u16)(buf[1024 + 56] | (buf[1024 + 57] << 8));
+    if (magic == 0xEF53)
+        return "ext4";              /* ext2 and ext3 mount as ext4 too */
+
+    if (buf[510] == 0x55 && buf[511] == 0xAA) {
+        if (memcmp(buf + 0x52, "FAT", 3) == 0 ||
+            memcmp(buf + 0x36, "FAT", 3) == 0)
+            return "vfat";
+    }
+
+    return NULL;
+}
+
 static int show_mounts(void)
 {
     long fd = lp_open("/proc/mounts", O_RDONLY, 0);
@@ -161,6 +202,28 @@ int main(int argc, char **argv)
             return 1;
         }
         return 0;
+    }
+
+    /* A device that is not there is not an error worth a kernel log
+     * entry. /etc/rc tries four names for the disk on purpose, knowing
+     * three of them will not exist, and the boot screen should not fill
+     * up with the kernel saying so. */
+    if (strncmp(src, "/dev/", 5) == 0 && !lp_exists(src)) {
+        dprintf(STDERR_FILENO, "mount: %s: no such device\n", src);
+        return 1;
+    }
+
+    /* Ask the device what it holds before asking the kernel to guess. */
+    const char *sniffed = sniff_type(src);
+    if (sniffed) {
+        long rc = lp_mount(src, dst, sniffed, flags, data);
+        if (rc == 0) {
+            printf("mount: %s -> %s (%s)\n", src, dst, sniffed);
+            return 0;
+        }
+        /* It said one thing and would not mount as it: fall through and
+         * try the rest, rather than trusting our own reading over the
+         * filesystem driver's. */
     }
 
     /* Guess the type. */

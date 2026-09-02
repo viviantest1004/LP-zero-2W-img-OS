@@ -223,9 +223,40 @@ Password authentication was left out of the build entirely. On a machine
 open to a network a password is just a target for brute force. With no
 public key, nobody gets in - including you.
 
+Using it
+  help              every command there is, a screen at a time
+  help <command>    how one of them works
+  sysinfo           what this machine is and how it is doing
+  top               what is running, and how to stop it
+
+  The shell completes with Tab, remembers what you typed (arrow keys),
+  expands * and ?, takes NAME=value, and runs a command in the
+  background with & at the end. Pipes, < > >> and && || ; all work.
+
+  There is no scrollback on a screen, so long output pauses at the
+  bottom - space for the next screen, q to stop. Piped or redirected it
+  runs straight through.
+
 Where files live
   To keep a file on the machine, put it under /data or in /root.
   Everything else is in RAM and disappears on reboot.
+
+The boot screen and the kernel log
+  cmdline.txt carries loglevel=4, so only warnings and worse reach the
+  screen - otherwise kernel messages land in the middle of whatever you
+  are typing. Nothing is lost: 'dmesg' shows the whole log and logd
+  keeps a copy in /data/log/messages. Take loglevel=4 out of
+  cmdline.txt to watch a boot in full.
+
+Installing things
+  pkg add <file.tar>     install a package you already have
+  pkg repo <url>         where packages come from
+  pkg update             fetch its index
+  pkg install <name>     fetch, check the SHA-256, install
+  pkg list / remove      what is installed, and take it out again
+
+  A package is a plain uncompressed tar. Paths inside it land under
+  /data, so bin/foo becomes /data/bin/foo, already on PATH.
 
 The clock
   This board has no battery-backed clock. At power-on it starts at 1970.

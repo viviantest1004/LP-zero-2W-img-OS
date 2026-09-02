@@ -121,6 +121,7 @@ pid_t lp_fork(void);                 /* built on clone(SIGCHLD) */
 long  lp_execve(const char *path, char *const argv[], char *const envp[]);
 pid_t lp_wait(int *status);
 pid_t lp_waitpid(pid_t pid, int *status, int options);
+#define WNOHANG 1        /* return at once when the child is still running */
 pid_t lp_getpid(void);
 long  lp_setsid(void);
 long  lp_kill(pid_t pid, int sig);

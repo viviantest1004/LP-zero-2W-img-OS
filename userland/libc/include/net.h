@@ -79,6 +79,13 @@ long net_set_addr(const char *ifname, u32 addr_be);      /* network order */
 long net_set_netmask(const char *ifname, u32 mask_be);
 long net_add_default_route(const char *ifname, u32 gw_be);
 
+/* ── Names ── */
+/* Resolve a host name to an IPv4 address in network byte order, by
+ * asking the nameserver /etc/resolv.conf points at. A numeric address is
+ * returned unchanged, so callers never have to tell the two apart.
+ * 0 means it could not be resolved - no nameserver, or no answer. */
+u32  net_resolve(const char *host);
+
 /* "192.168.0.1" -> u32 in network order. false on failure. */
 bool ipv4_parse(const char *s, u32 *out_be);
 /* u32 in network order -> "192.168.0.1". buf must hold 16 bytes. */

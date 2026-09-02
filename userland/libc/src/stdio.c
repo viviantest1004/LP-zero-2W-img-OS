@@ -283,3 +283,91 @@ long readline(int fd, char *buf, size_t size)
     buf[n] = '\0';
     return (long)n;
 }
+
+/* ── Paged output ─────────────────────────────────────────────────────
+ * See stdio.h. The state is a handful of file-scope variables because
+ * only one thing can be paging at a time - this is a terminal, and there
+ * is exactly one screen and one person reading it. */
+static int  page_rows  = 0;    /* 0 means "not paging, print straight" */
+static int  page_shown = 0;    /* lines printed on this screenful */
+static int  page_tty   = -1;
+static bool page_own_tty = false;
+
+void page_begin(void)
+{
+    page_rows  = 0;
+    page_shown = 0;
+    page_tty   = -1;
+    page_own_tty = false;
+
+    int rows = 0, cols = 0;
+    if (lp_term_size(STDOUT_FILENO, &rows, &cols) < 0)
+        return;                      /* redirected: nothing to page */
+    if (rows < 4)
+        return;                      /* too small to be worth stopping */
+
+    /* The keys have to come from the terminal, not from stdin - stdin may
+     * be the pipe carrying the text we are paging. */
+    long fd = lp_open("/dev/tty", O_RDONLY, 0);
+    if (fd >= 0) {
+        page_tty = (int)fd;
+        page_own_tty = true;
+    } else {
+        page_tty = STDIN_FILENO;
+    }
+
+    page_rows = rows;
+}
+
+/* Ask, and wait. Returns false if the answer was "stop". */
+static bool page_wait(void)
+{
+    fputs("-- more -- (space, enter, q) ", STDOUT_FILENO);
+
+    lp_termios_t saved;
+    bool raw = (lp_term_raw(page_tty, &saved) == 0);
+
+    char c = ' ';
+    long n = lp_read(page_tty, &c, 1);
+
+    if (raw)
+        lp_term_restore(page_tty, &saved);
+
+    /* Wipe the prompt so it does not stay in the output. */
+    fputs("\r                              \r", STDOUT_FILENO);
+
+    if (n <= 0)
+        return false;                /* the terminal went away */
+    if (c == 'q' || c == 'Q' || c == 3 /* Ctrl-C */)
+        return false;
+
+    if (c == '\r' || c == '\n')
+        page_shown = page_rows - 2;  /* one more line, then ask again */
+    else
+        page_shown = 0;              /* a whole screen */
+    return true;
+}
+
+bool page_line(const char *text)
+{
+    fputs(text, STDOUT_FILENO);
+    fputs("\n", STDOUT_FILENO);
+
+    if (page_rows == 0)
+        return true;
+
+    /* One line is kept for the prompt itself. */
+    if (++page_shown >= page_rows - 1)
+        return page_wait();
+
+    return true;
+}
+
+void page_end(void)
+{
+    if (page_own_tty && page_tty >= 0)
+        lp_close(page_tty);
+    page_rows  = 0;
+    page_tty   = -1;
+    page_own_tty = false;
+}

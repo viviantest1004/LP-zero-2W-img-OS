@@ -18,4 +18,24 @@ int  putchar(int c);
  * Returns the length read, or -1 at EOF. */
 long readline(int fd, char *buf, size_t size);
 
+/* ── Paged output ─────────────────────────────────────────────────────
+ * A framebuffer console keeps no scrollback. Anything that scrolls off
+ * the top is not "further up" - it is gone, and there is no key that
+ * brings it back. So output longer than the screen has to stop at the
+ * bottom and wait, or it may as well not have been printed.
+ *
+ * This only happens when the output really is going to a screen. Piped
+ * or redirected, every line goes straight through and nothing waits for
+ * a key that will never come.
+ *
+ *   page_begin();
+ *   while (...) if (!page_line(text)) break;   // false: the user quit
+ *   page_end();
+ *
+ * Keys come from the terminal itself rather than stdin, so `foo | more`
+ * still reads them while stdin carries the data being paged. */
+void page_begin(void);
+bool page_line(const char *text);
+void page_end(void);
+
 #endif /* _LP_STDIO_H */

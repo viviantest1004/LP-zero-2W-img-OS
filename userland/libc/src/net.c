@@ -269,3 +269,157 @@ void ipv4_format(u32 addr_be, char *buf)
     }
     *p = '\0';
 }
+
+/* ── Resolving a name ─────────────────────────────────────────────────
+ *
+ * A full resolver is a large thing: caching, search domains, CNAME
+ * chains, TCP fallback for long answers, IPv6. None of that is needed to
+ * turn one host name into one address, which is the only question anyone
+ * on this machine asks. So this sends a single A query to the first
+ * nameserver in /etc/resolv.conf and reads the first A record back.
+ *
+ * A numeric address is returned as it stands, so every caller can take a
+ * name or an address without checking which it has. */
+
+/* First nameserver from /etc/resolv.conf. 0 if we cannot read one. */
+static u32 read_nameserver(void)
+{
+    char buf[512];
+    long fd = lp_open("/etc/resolv.conf", O_RDONLY, 0);
+    if (fd < 0)
+        return 0;
+    long n = lp_read((int)fd, buf, sizeof(buf) - 1);
+    lp_close((int)fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+
+    /* Look for a "nameserver 1.2.3.4" line. */
+    for (char *p = buf; *p; ) {
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p) *p++ = '\0';
+
+        static const char key[] = "nameserver";
+        if (strncmp(line, key, sizeof(key) - 1) != 0)
+            continue;
+        char *ip = line + sizeof(key) - 1;
+        while (*ip == ' ' || *ip == '\t') ip++;
+
+        u32 addr = 0;
+        if (ipv4_parse(ip, &addr))
+            return addr;        /* network byte order */
+    }
+    return 0;
+}
+
+/* Encode a name for a DNS query: "a.b.com" -> 1'a' 1'b' 3'c''o''m' 0
+ * Returns the bytes written, or 0 if it would not fit. */
+static size_t encode_name(u8 *out, size_t cap, const char *host)
+{
+    size_t o = 0;
+    const char *p = host;
+
+    while (*p) {
+        const char *dot = p;
+        while (*dot && *dot != '.') dot++;
+        size_t len = (size_t)(dot - p);
+        if (len == 0 || len > 63 || o + len + 1 >= cap)
+            return 0;
+        out[o++] = (u8)len;
+        memcpy(out + o, p, len);
+        o += len;
+        p = (*dot == '.') ? dot + 1 : dot;
+    }
+    if (o + 1 > cap)
+        return 0;
+    out[o++] = 0;
+    return o;
+}
+
+/* Name to IPv4. The address in network order, or 0 on failure. */
+u32 net_resolve(const char *host)
+{
+    /* Already a numeric address? Use it as is. */
+    u32 direct = 0;
+    if (ipv4_parse(host, &direct))
+        return direct;
+
+    u32 ns = read_nameserver();
+    if (ns == 0)
+        return 0;               /* no nameserver: run dhcp first */
+
+    u8     query[512];
+    size_t qlen = 0;
+
+    /* 12-byte header: ID, flags (recursion desired), one question. */
+    u16 id = (u16)(lp_getpid() & 0xFFFF);
+    query[qlen++] = (u8)(id >> 8);   query[qlen++] = (u8)id;
+    query[qlen++] = 0x01;            query[qlen++] = 0x00;   /* RD */
+    query[qlen++] = 0x00;            query[qlen++] = 0x01;   /* QDCOUNT=1 */
+    query[qlen++] = 0x00;            query[qlen++] = 0x00;
+    query[qlen++] = 0x00;            query[qlen++] = 0x00;
+    query[qlen++] = 0x00;            query[qlen++] = 0x00;
+
+    size_t nlen = encode_name(query + qlen, sizeof(query) - qlen - 4, host);
+    if (nlen == 0)
+        return 0;
+    qlen += nlen;
+    query[qlen++] = 0x00; query[qlen++] = 0x01;   /* QTYPE = A */
+    query[qlen++] = 0x00; query[qlen++] = 0x01;   /* QCLASS = IN */
+
+    long fd = lp_socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return 0;
+    /* struct __kernel_sock_timeval { s64 tv_sec; s64 tv_usec; } */
+    s64 tv[2] = { 3, 0 };
+    lp_setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO_NEW, tv, sizeof(tv));
+
+    sockaddr_in_t to = { 0 };
+    to.sin_family = AF_INET;
+    to.sin_port   = htons(53);
+    to.sin_addr   = ns;
+
+    u32 result = 0;
+    if (lp_sendto((int)fd, query, qlen, 0, &to, sizeof(to)) > 0) {
+        u8   resp[512];
+        long n = lp_recvfrom((int)fd, resp, sizeof(resp), 0, NULL, NULL);
+
+        /* Skip the header and the question, then walk the answers. A name
+         * compression pointer (0xC0) is 2 bytes; otherwise skip the label. */
+        if (n > 12 && resp[0] == (u8)(id >> 8) && resp[1] == (u8)id) {
+            u16 ancount = (u16)((resp[6] << 8) | resp[7]);
+            long off = 12;
+
+            /* The name in the question section */
+            while (off < n && resp[off] != 0) {
+                if ((resp[off] & 0xC0) == 0xC0) { off += 2; goto qtype; }
+                off += resp[off] + 1;
+            }
+            off += 1;
+qtype:
+            off += 4;               /* QTYPE + QCLASS */
+
+            for (u16 i = 0; i < ancount && off + 12 <= n; i++) {
+                if ((resp[off] & 0xC0) == 0xC0) {
+                    off += 2;
+                } else {
+                    while (off < n && resp[off] != 0) off += resp[off] + 1;
+                    off += 1;
+                }
+                if (off + 10 > n) break;
+                u16 type   = (u16)((resp[off] << 8) | resp[off + 1]);
+                u16 rdlen  = (u16)((resp[off + 8] << 8) | resp[off + 9]);
+                off += 10;
+                if (type == 1 && rdlen == 4 && off + 4 <= n) {
+                    memcpy(&result, resp + off, 4);   /* already network order */
+                    break;
+                }
+                off += rdlen;
+            }
+        }
+    }
+
+    lp_close((int)fd);
+    return result;
+}
