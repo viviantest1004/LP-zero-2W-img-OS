@@ -491,6 +491,12 @@ long net_http_get(const char *url, const char *dest)
 
     s64 tv[2] = { 20, 0 };
     lp_setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO_NEW, tv, sizeof(tv));
+    /* Give up on an unanswered SYN in about twenty seconds instead of
+     * two minutes. Without this, one unreachable host - or one port the
+     * firewall is dropping - makes the whole program look hung. */
+    int syn_tries = 3;
+    lp_setsockopt((int)fd, IPPROTO_TCP, IPPROTO_TCP_SYNCNT,
+                  &syn_tries, sizeof(syn_tries));
 
     sockaddr_in_t sa = { 0 };
     sa.sin_family = AF_INET;

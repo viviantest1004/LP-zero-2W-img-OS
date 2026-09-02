@@ -249,6 +249,17 @@ echo "[rc] requesting an address"
 #   usb0   USB gadget - when plugged into a PC
 dhcp wlan0 || dhcp eth0 || dhcp usb0 || echo "[rc]   got no address"
 
+echo "[rc] the firewall"
+# Applied after the address is up and before rc.local, so anything the
+# owner starts from rc.local is already behind it.
+#
+# `firewall boot` does whatever /boot/firewall.conf says - on, strict, or
+# nothing at all - and the standard policy when the file is not there.
+# The whole ruleset goes to the kernel as one transaction, so there is no
+# instant in which the drop policy is in force and the rule that keeps
+# SSH open is not. A failure leaves no rules rather than half of them.
+firewall boot || echo "[rc]   no firewall - every port is open"
+
 echo "[rc] setting the time"
 # HTTPS depends on this. The boot carries on either way, but with the
 # clock wrong Python's certificate checks will fail.

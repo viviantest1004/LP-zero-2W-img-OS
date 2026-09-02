@@ -41,7 +41,7 @@ LIBC_ASM  := $(wildcard $(LIBC_DIR)/src/*.S)
 LIBC_OBJS := $(patsubst $(LIBC_DIR)/src/%.c,$(OBJDIR)/libc/%.o,$(LIBC_SRCS)) \
              $(patsubst $(LIBC_DIR)/src/%.S,$(OBJDIR)/libc/%.o,$(LIBC_ASM))
 
-PROGS := init sh cat ls cp mv rm touch edit help more dhcp ntp date mount zram guard bootcount expandfs mkdir sleep kill top watchdog logd sysinfo calc clear wc head tail free df grep ps find du chmod splash pkg dmesg usage ping nslookup wget ifconfig route ln uname hostname uptime whoami sort uniq cut tee sha256sum reset stat fsck authkey integrity tar run ipconfig chattr dropprivs
+PROGS := init sh cat ls cp mv rm touch edit help more dhcp ntp date mount zram guard bootcount expandfs mkdir sleep kill top watchdog logd sysinfo calc clear wc head tail free df grep ps find du chmod splash pkg dmesg usage ping nslookup wget ifconfig route ln uname hostname uptime whoami sort uniq cut tee sha256sum reset stat fsck authkey integrity tar run ipconfig chattr dropprivs firewall
 BINS  := $(addprefix $(BINDIR)/,$(PROGS))
 
 .PHONY: all clean size test

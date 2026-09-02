@@ -128,6 +128,7 @@ static const entry_t KNOWN[] = {
     { "dropbear", "network", "the SSH server",              "(started by init)" },
     { "dropbearkey", "network", "make an SSH host key",     "dropbearkey -t ed25519 -f <file>" },
     { "authkey",  "network", "keep a way in over SSH",      "authkey [-l]" },
+    { "firewall", "network", "which ports are open",        "firewall [on|strict|off]" },
 
     { "python",   "python",  "CPython 3.12",                "python [file]" },
     { "python3",  "python",  "the same as python",          "python3 [file]" },

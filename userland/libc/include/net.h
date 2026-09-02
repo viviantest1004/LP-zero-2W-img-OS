@@ -15,6 +15,7 @@
 #define SOCK_RAW        3
 
 #define IPPROTO_IP      0
+#define IPPROTO_TCP     6
 #define IPPROTO_UDP    17
 
 /* setsockopt */
@@ -23,6 +24,18 @@
 #define SO_BROADCAST    6
 #define SO_BINDTODEVICE 25
 #define SO_RCVTIMEO_NEW 66
+
+/* How many times to retransmit a SYN before connect() gives up.
+ *
+ * There is no timeout on connect() and no poll() here to build one out
+ * of, so this is the only lever. The default is six retries with the
+ * interval doubling each time, which is a little over two minutes of a
+ * program looking like it has hung. Three retries is about twenty
+ * seconds, measured - long enough for a slow WiFi link to answer, and
+ * short enough that a person waits for it rather than reaching for the
+ * power. It matters most when a firewall is dropping the packets,
+ * because then nothing ever answers at all. */
+#define IPPROTO_TCP_SYNCNT 7
 
 /* Interface ioctls */
 #define SIOCGIFFLAGS    0x8913
