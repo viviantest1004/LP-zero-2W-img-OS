@@ -75,8 +75,9 @@ int main(int argc, char **argv)
             printf("  -t <s>   reboot if not petted for this long (default %d)\n",
                    DEFAULT_TIMEOUT);
             printf("  -x       disarm the watchdog and exit\n");
-        printf("  -1       arm it and exit without petting (the board\n");
-        printf("           then reboots - for testing that path)\n\n");
+        printf("  -1       arm it and exit without petting. /etc/rc uses\n");
+        printf("           this to cover the boot itself, before this\n");
+        printf("           program is running to pet it\n\n");
             printf("Runs in the foreground; init keeps it alive.\n");
             return 0;
         } else {
@@ -125,8 +126,8 @@ int main(int argc, char **argv)
          * normally disarm it, but only if 'V' is written first - the
          * kernel's "magic close". We deliberately do not, so the timer
          * keeps counting and the board reboots in `timeout` seconds. */
-        printf("watchdog: armed for %ds and exiting without petting - "
-               "the board should reboot\n", timeout);
+        printf("watchdog: armed for %ds and exiting - the board reboots"
+               " unless something takes over petting it\n", timeout);
         lp_close((int)fd);
         return 0;
     }

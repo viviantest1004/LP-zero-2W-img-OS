@@ -356,6 +356,57 @@ s64 lp_timegm(const lp_tm_t *tm)
 
 long lp_sync(void)            { return sys_call0(SYS_sync); }
 
+/* ── Scheduling priority ──────────────────────────────────────────────
+ * PRIO_PROCESS = 0. The kernel does not hand the nice value back as it
+ * went in: getpriority returns 20 - nice, so that a valid result is
+ * never negative and cannot be mistaken for an error code. We undo
+ * that here, so callers see the nice value they set. */
+#define PRIO_PROCESS 0
+
+long lp_setpriority(pid_t pid, int nice_value)
+{
+    return sys_call3(SYS_setpriority, PRIO_PROCESS, (long)pid,
+                     (long)nice_value);
+}
+
+int lp_getpriority(pid_t pid)
+{
+    long rc = sys_call2(SYS_getpriority, PRIO_PROCESS, (long)pid);
+    if (rc < 0)
+        return 0;
+    return (int)(20 - rc);
+}
+
+/* ── Filesystem space ─────────────────────────────────────────────────
+ * struct statfs64 on arm64, the three fields we need:
+ *    8  f_bsize    block size
+ *   16  f_blocks   blocks in total
+ *   32  f_bavail   blocks an ordinary user may still use
+ * f_bfree (24) is larger: it includes the 5% ext4 keeps back for root.
+ * f_bavail is the honest number. */
+#define STATFS_BUF_SIZE   120
+#define STATFS_OFF_BSIZE    8
+#define STATFS_OFF_BLOCKS  16
+#define STATFS_OFF_BAVAIL  32
+
+long lp_fs_space(const char *path, u64 *free_bytes, u64 *total_bytes)
+{
+    u8 buf[STATFS_BUF_SIZE];
+    memset(buf, 0, sizeof(buf));
+
+    long rc = sys_call2(SYS_statfs, (long)path, (long)buf);
+    if (rc < 0)
+        return rc;
+
+    u64 bsize  = *(u64 *)(buf + STATFS_OFF_BSIZE);
+    u64 blocks = *(u64 *)(buf + STATFS_OFF_BLOCKS);
+    u64 avail  = *(u64 *)(buf + STATFS_OFF_BAVAIL);
+
+    if (free_bytes)  *free_bytes  = avail * bsize;
+    if (total_bytes) *total_bytes = blocks * bsize;
+    return 0;
+}
+
 long lp_swapon(const char *path, int flags)
 {
     return sys_call2(SYS_swapon, (long)path, flags);

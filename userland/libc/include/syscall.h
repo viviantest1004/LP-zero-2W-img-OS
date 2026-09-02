@@ -60,6 +60,8 @@
 #define SYS_rt_sigaction    134
 #define SYS_rt_sigprocmask  135
 #define SYS_reboot          142
+#define SYS_setpriority     140
+#define SYS_getpriority     141
 #define SYS_setpgid         154
 #define SYS_getpgid         155
 #define SYS_setsid          157

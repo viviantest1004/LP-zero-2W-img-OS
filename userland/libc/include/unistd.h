@@ -163,6 +163,16 @@ long  proc_read(const char *path, char *buf, size_t size);
  * -1 if it is not there. */
 long  proc_find_kv(const char *text, const char *key);
 long  lp_sync(void);
+
+/* Scheduling priority ("nice"): -20 gets the CPU first, 19 last, 0 is
+ * the default. Lowering it needs root. */
+long  lp_setpriority(pid_t pid, int nice_value);
+/* The nice value of a process, or 0 when it cannot be read. */
+int   lp_getpriority(pid_t pid);
+
+/* Free and total bytes of the filesystem holding `path`.
+ * "free" is what an unprivileged process may still use. */
+long  lp_fs_space(const char *path, u64 *free_bytes, u64 *total_bytes);
 long  lp_uname(void *buf);
 long  lp_getrandom(void *buf, size_t n, unsigned flags);           /* struct utsname is 390 bytes */
 

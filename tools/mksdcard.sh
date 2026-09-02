@@ -240,6 +240,25 @@ Python
   One of them is 'python'.
 
 Commands you put in /data/rc.local run at every boot.
+  If a mistake in that file hangs the machine, it is not fatal: after
+  five boots that did not last five minutes the file is skipped and the
+  system comes up plain. Fix it, then run 'bootcount -c'.
+
+Where it boots from
+  SD card, USB (a stick or a disk in an enclosure), NVMe and VirtIO all
+  work from the same image. On the board, USB is worth using for /data:
+  it is faster than the card and it does not wear out the way a cheap
+  card does.
+
+If it looks after itself
+  'guard' watches memory, temperature, the power supply, runaway
+  processes and disk space, and it keeps SSH reachable while any of them
+  goes wrong. 'sysinfo' shows all of it, including whether the power
+  supply has ever sagged - which is the usual reason SD cards go bad,
+  and is otherwise completely silent. A thin cable or a phone charger
+  will do it. Use 5V at 2.5A or better.
+
+  A board that stops answering resets itself after 15 seconds.
 READMEEOF
     if $UEFI_ONLY; then
         cat >> "$README" <<'UEFIEOF'

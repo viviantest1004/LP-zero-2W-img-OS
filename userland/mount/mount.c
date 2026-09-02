@@ -3,7 +3,8 @@
  *   mount                        list what is mounted (/proc/mounts)
  *   mount <device> <dir>         guess the filesystem type
  *   mount -t <type> <device> <dir>
- *   mount -o ro ...              read only
+ *   mount -o ro,nosuid ...       flags, and filesystem options such as
+ *                                size=64M or errors=remount-ro
  *   umount <dir>                 (when argv[0] is umount)
  *
  * With no type given we try the list below in order. The kernel returns
@@ -46,6 +47,55 @@ static int do_umount(const char *target)
     return 0;
 }
 
+/* Split an -o string into the two things it actually holds.
+ *
+ * Some option words describe this mount and the kernel takes them as
+ * bits - nosuid, ro. The rest describe the filesystem and are handed to
+ * it as a string: size=64M for tmpfs, errors=remount-ro for ext4. They
+ * have to be separated, because a filesystem's own parser rejects the
+ * words it has never heard of, and "nosuid" is one of those.
+ *
+ * Returns the flags; `rest` gets everything not consumed. */
+static unsigned long opt_flag(const char *word)
+{
+    if (strcmp(word, "bind")   == 0) return MS_BIND;
+    if (strcmp(word, "ro")     == 0) return MS_RDONLY;
+    if (strcmp(word, "noexec") == 0) return MS_NOEXEC;
+    if (strcmp(word, "nosuid") == 0) return MS_NOSUID;
+    if (strcmp(word, "nodev")  == 0) return MS_NODEV;
+    return 0;
+}
+
+static unsigned long parse_options(const char *opts, char *rest, size_t size)
+{
+    unsigned long flags = 0;
+
+    for (const char *p = opts; *p; ) {
+        const char *comma = strchr(p, ',');
+        size_t len = comma ? (size_t)(comma - p) : strlen(p);
+
+        char word[64];
+        if (len >= sizeof(word))
+            len = sizeof(word) - 1;
+        memcpy(word, p, len);
+        word[len] = '\0';
+
+        unsigned long f = opt_flag(word);
+        if (f) {
+            flags |= f;
+        } else if (word[0]) {
+            if (rest[0])
+                strlcat(rest, ",", size);
+            strlcat(rest, word, size);
+        }
+
+        if (!comma)
+            break;
+        p = comma + 1;
+    }
+    return flags;
+}
+
 int main(int argc, char **argv)
 {
     /* argv[0] decides: the same binary is installed under both names. */
@@ -65,18 +115,19 @@ int main(int argc, char **argv)
 
     const char *type   = NULL;
     unsigned long flags = 0;
+    char  data_buf[256];
+    const char *data   = NULL;
     const char *args[2] = { NULL, NULL };
     int nargs = 0;
+
+    data_buf[0] = '\0';
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
             type = argv[++i];
         } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
-            i++;
-            if (strstr(argv[i], "bind"))   flags |= MS_BIND;
-            if (strstr(argv[i], "ro"))     flags |= MS_RDONLY;
-            if (strstr(argv[i], "noexec")) flags |= MS_NOEXEC;
-            if (strstr(argv[i], "nosuid")) flags |= MS_NOSUID;
+            flags |= parse_options(argv[++i], data_buf, sizeof(data_buf));
+            data = data_buf[0] ? data_buf : NULL;
         } else if (nargs < 2) {
             args[nargs++] = argv[i];
         }
@@ -84,7 +135,7 @@ int main(int argc, char **argv)
 
     if (nargs < 2) {
         dprintf(STDERR_FILENO,
-                "usage: mount [-t type] [-o ro|bind] <source> <dir>\n");
+                "usage: mount [-t type] [-o options] <source> <dir>\n");
         return 2;
     }
 
@@ -103,7 +154,7 @@ int main(int argc, char **argv)
     }
 
     if (type) {
-        long rc = lp_mount(src, dst, type, flags, NULL);
+        long rc = lp_mount(src, dst, type, flags, data);
         if (rc < 0) {
             dprintf(STDERR_FILENO, "mount: %s -> %s (%s): failed (%ld)\n",
                     src, dst, type, -rc);
@@ -115,7 +166,7 @@ int main(int argc, char **argv)
     /* Guess the type. */
     long last = -1;
     for (int i = 0; AUTO_TYPES[i]; i++) {
-        long rc = lp_mount(src, dst, AUTO_TYPES[i], flags, NULL);
+        long rc = lp_mount(src, dst, AUTO_TYPES[i], flags, data);
         if (rc == 0) {
             printf("mount: %s -> %s (%s)\n", src, dst, AUTO_TYPES[i]);
             return 0;

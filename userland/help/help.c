@@ -70,7 +70,9 @@ static const entry_t KNOWN[] = {
     { "logd",     "system",  "collect logs to /data/log",   "(started by init)" },
     { "sysinfo",  "system",  "memory, CPU, disks, network", "sysinfo" },
     { "zram",     "system",  "compressed swap in RAM",      "zram on|off|status" },
-    { "memwatch", "system",  "the out-of-memory guard",     "memwatch [-d]" },
+    { "guard",    "system",  "the safety net (memory, heat, power, CPU)",
+                                                             "guard [-d]" },
+    { "bootcount","system",  "detect a reboot loop",        "bootcount" },
     { "calc",     "system",  "integer calculator",          "calc \"1 + 2 * 3\"" },
 
     { "dhcp",     "network", "get an address from a router","dhcp <interface>" },

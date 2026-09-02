@@ -26,6 +26,8 @@
 #define STATFS_BLOCKS   16
 #define STATFS_BAVAIL   32
 
+#define CPUFREQ_DIR "/sys/devices/system/cpu/cpu0/cpufreq/"
+
 static void hr(void) { printf("─────────────────────────────────────────────\n"); }
 
 /* Value of the first occurrence of a key in /proc/cpuinfo. The format is
@@ -158,6 +160,83 @@ static void show_cpu(void)
         long mc = strtol(t, NULL, 10);
         printf("  temp       %ld.%ld C\n", mc / 1000, (mc % 1000) / 100);
     }
+
+    /* What it is actually running at, and who is deciding.
+     * "powersave" here normally means guard is holding it down because
+     * the board is hot or the power supply is not keeping up. */
+    char f[32], g[32];
+    long khz = 0;
+    if (proc_read(CPUFREQ_DIR "scaling_cur_freq", f, sizeof(f)) > 0)
+        khz = strtol(f, NULL, 10);
+    if (proc_read(CPUFREQ_DIR "scaling_governor", g, sizeof(g)) > 0) {
+        char *nl = strchr(g, '\n');
+        if (nl) *nl = '\0';
+        if (khz > 0)
+            printf("  speed      %ld MHz  (%s)\n", khz / 1000, g);
+        else
+            printf("  speed      %s\n", g);
+    }
+}
+
+/* ── Health ───────────────────────────────────────────────────────────
+ * The GPU firmware records every time it has had to step in to keep the
+ * board running. Undervoltage in particular leaves no other trace: the
+ * board does not crash, it corrupts the card quietly weeks later. If
+ * anything here is not "ok", it is worth acting on.
+ *
+ * The file does not exist on a virtual machine, and this section is then
+ * left out entirely rather than printing four reassuring lies. */
+static const char *THROTTLE_PATHS[] = {
+    "/sys/devices/platform/soc/soc:firmware/get_throttled",
+    "/sys/devices/platform/soc:firmware/get_throttled",
+    "/sys/firmware/raspberrypi/get_throttled",
+    NULL
+};
+
+static void show_health(void)
+{
+    char buf[32];
+    long thr = -1;
+
+    for (int i = 0; THROTTLE_PATHS[i]; i++)
+        if (proc_read(THROTTLE_PATHS[i], buf, sizeof(buf)) > 0) {
+            thr = strtol(buf, NULL, 16);
+            break;
+        }
+
+    long boots = 0;
+    if (proc_read("/data/boot_count", buf, sizeof(buf)) > 0)
+        boots = strtol(buf, NULL, 10);
+
+    /* Nothing to say: no firmware to ask, and no failed boot behind us.
+     * A count of 1 is this boot, which has simply not been up for five
+     * minutes yet. */
+    if (thr < 0 && boots <= 1)
+        return;
+
+    printf("\n[health]\n");
+
+    if (thr >= 0) {
+        /* Bits 0-3 are "right now", bits 16-19 the same four as "has
+         * happened at some point since this board was powered on". */
+        printf("  power      %s\n",
+               (thr & 0x1)     ? "** UNDERVOLTAGE NOW - fix the supply"
+             : (thr & 0x10000) ? "undervoltage has happened since boot"
+                               : "ok");
+        printf("  throttling %s\n",
+               (thr & 0x4)     ? "** throttled right now"
+             : (thr & 0x2)     ? "frequency capped right now"
+             : (thr & 0x40000) ? "has been throttled since boot"
+                               : "none");
+        if (thr & 0x8)
+            printf("  heat       ** at the soft temperature limit\n");
+    }
+
+    /* 1 is the current boot, which has simply not been up for five
+     * minutes yet. From 2 up, a previous boot really did fail. */
+    if (boots > 1)
+        printf("  boots      %ld in a row did not last 5 minutes\n",
+               boots - 1);
 }
 
 static void show_memory(void)
@@ -277,6 +356,7 @@ int main(int argc, char **argv)
 
     show_system();
     show_cpu();
+    show_health();
     show_memory();
     show_storage();
     show_network();

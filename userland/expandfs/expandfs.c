@@ -221,17 +221,50 @@ static bool grow_filesystem(u64 part_bytes)
     return true;
 }
 
+/* Wait for a device node to show up.
+ *
+ * An SD card and a virtio disk are there before init runs. A USB disk is
+ * not: the controller resets the port, asks the device what it is, spins
+ * it up and only then does /dev/sda appear, which takes the better part
+ * of a second. Without this the boot looks at an empty /dev, decides
+ * there is no storage and carries on in RAM. */
+static bool wait_for_dev(const char *path, long timeout_ms)
+{
+    for (long waited = 0; ; waited += 50) {
+        if (lp_exists(path))
+            return true;
+        if (waited >= timeout_ms)
+            return false;
+        lp_sleep_ms(50);
+    }
+}
+
+#define WAIT_MS 4000
+
 int main(int argc, char **argv)
 {
+    bool wait = false;
+
+    /* -w: the device may not be there yet. Only worth passing for USB. */
+    if (argc >= 2 && strcmp(argv[1], "-w") == 0) {
+        wait = true;
+        argc--;
+        argv++;
+    }
+
     if (argc >= 3) {
         dev_disk = argv[1];
         dev_part = argv[2];
     } else if (argc == 2) {
         dprintf(STDERR_FILENO,
-                "usage: expandfs [disk partition]\n"
-                "  e.g.  expandfs /dev/mmcblk0 /dev/mmcblk0p2\n");
+                "usage: expandfs [-w] [disk partition]\n"
+                "  e.g.  expandfs /dev/mmcblk0 /dev/mmcblk0p2\n"
+                "  -w    wait up to 4s for the device (USB takes a moment)\n");
         return 2;
     }
+
+    if (wait && !wait_for_dev(DEV_PART, WAIT_MS))
+        return 1;
 
     u64 part_bytes = 0;
     bool grew = grow_partition(&part_bytes);

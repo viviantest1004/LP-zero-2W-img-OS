@@ -41,7 +41,7 @@ LIBC_ASM  := $(wildcard $(LIBC_DIR)/src/*.S)
 LIBC_OBJS := $(patsubst $(LIBC_DIR)/src/%.c,$(OBJDIR)/libc/%.o,$(LIBC_SRCS)) \
              $(patsubst $(LIBC_DIR)/src/%.S,$(OBJDIR)/libc/%.o,$(LIBC_ASM))
 
-PROGS := init sh cat ls cp mv rm touch edit help dhcp ntp date mount zram memwatch expandfs mkdir sleep kill top watchdog logd sysinfo calc
+PROGS := init sh cat ls cp mv rm touch edit help dhcp ntp date mount zram guard bootcount expandfs mkdir sleep kill top watchdog logd sysinfo calc
 BINS  := $(addprefix $(BINDIR)/,$(PROGS))
 
 .PHONY: all clean size test
