@@ -47,12 +47,26 @@ def main():
         print("error: 부트 파티션이 데이터 파티션과 겹칩니다", file=sys.stderr)
         return 1
 
-    table = entry(b_start, b_count, 0x0C)    # FAT32 (LBA)
-    table += entry(d_start, d_count, 0x83)   # Linux
+    # The boot flag on partition 1. UEFI does not read it - it looks for
+    # EFI/BOOT/BOOTAA64.EFI on any FAT volume it can see - and neither
+    # does the Pi's boot ROM. But firmware that predates UEFI does, and
+    # some of it refuses a disk where no partition is marked active. It
+    # costs one bit to be unambiguous about which partition boots.
+    table = entry(b_start, b_count, 0x0C, bootable=True)   # FAT32 (LBA)
+    table += entry(d_start, d_count, 0x83)                 # Linux
     table += b"\x00" * 32                    # 파티션 3, 4 는 비움
     assert len(table) == 64
 
     with open(image, "r+b") as f:
+        # The disk signature, at offset 440. It identifies this disk, and
+        # firmware puts it in the device path of everything on it -
+        # HD(1,MBR,<signature>,...). Left at zero, every image we ever
+        # write has the same identity, and firmware that remembers boot
+        # entries by device path can match a stale one against the wrong
+        # disk. A fixed non-zero value is enough: it is our image.
+        f.seek(440)
+        f.write(struct.pack("<I", 0x4C50305A))   # "LP0Z"
+
         f.seek(446)
         f.write(table)
         f.seek(510)
