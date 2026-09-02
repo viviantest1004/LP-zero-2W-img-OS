@@ -256,7 +256,8 @@ int main(int argc, char **argv)
     }
 
     printf("calc - integer calculator.  Blank line or Ctrl-D to leave.\n");
-    printf("  + - * / %% **   & | ^ ~ << >>   ( )   0x.. 0b..\n\n");
+    printf("  + - * / %% **   & | ^ ~ << >>   ( )   0x.. 0b..\n");
+    printf("  ^ is xor, as in C. Powers are **, so 2**10 is 1024.\n\n");
 
     char line[512];
     for (;;) {
