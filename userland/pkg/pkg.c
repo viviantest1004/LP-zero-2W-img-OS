@@ -172,6 +172,18 @@ static long tar_extract(const char *archive, int list_fd, bool dry_run)
         else
             strlcpy(name, base, sizeof(name));
 
+        /* "tar -cf x.tar ." names everything ./bin/foo, which extracts
+         * to the right place but is recorded as /data/./bin/foo - and
+         * that is what `pkg info` then shows somebody. Strip it here
+         * rather than in the tool that builds packages, because the
+         * archive can have been made by anyone's tar. Repeated, since
+         * "././bin" is legal too, and path_is_safe still sees whatever
+         * is left. */
+        while (name[0] == '.' && name[1] == '/')
+            memmove(name, name + 2, strlen(name + 2) + 1);
+        if (!name[0] || strcmp(name, ".") == 0)
+            continue;                             /* the archive root */
+
         u64  size = tar_octal(hdr + TAR_SIZE, 12);
         u32  mode = (u32)tar_octal(hdr + TAR_MODE, 8);
         char type = (char)hdr[TAR_TYPE];

@@ -10,7 +10,8 @@
 #   make clean         정리
 
 .PHONY: all firmware userland initramfs kernel kernel-test blobs verify-blobs \
-        sdcard sdcard-linux all-in-one qemu qemu-log qemu-shot disasm syms clean distclean help
+        sdcard sdcard-linux image all-in-one qemu qemu-log qemu-shot disasm syms \
+        sysroot thirdparty python sdk dist clean distclean help
 
 all: firmware
 
@@ -56,7 +57,31 @@ sdcard: firmware
 sdcard-linux: kernel
 	@./tools/mksdcard.sh --linux
 
+# 짧은 이름. 매일 도는 것은 이쪽이다.
+image: sdcard-linux
+
+# 배포용 두 개 (dist/)
+dist: kernel
+	@./tools/mkdist.sh
+
 all-in-one: blobs firmware sdcard
+
+# ── 한 번만 도는 빌드 ───────────────────────────────────────────
+# 이 셋은 이미지가 아니라 이미지에 들어갈 재료를 만든다. 오래 걸리고,
+# 그것들이 바뀔 때만 다시 돌리면 된다. 순서가 중요하다:
+# sysroot -> thirdparty -> python.
+sysroot:
+	@./tools/build-sysroot.sh
+
+thirdparty:
+	@./tools/build-thirdparty.sh
+
+python:
+	@./tools/build-python.sh
+
+# 이 시스템용 C 프로그램을 지을 수 있는 최소 SDK
+sdk:
+	@./tools/build-sdk.sh
 
 # ── QEMU 에뮬레이션 (실기 없이 테스트) ──────────────────────────
 # 주의: SD 이미지가 아니라 커널 이미지를 직접 올린다.
@@ -93,6 +118,14 @@ help:
 	@echo "  make verify-blobs  받은 블롭 체크섬 검증"
 	@echo "  make sdcard        SD 이미지 (베어메탈 펌웨어 부팅)"
 	@echo "  make sdcard-linux  SD 이미지 (우리 리눅스 커널 부팅)"
+	@echo "  make image         sdcard-linux 와 같다 (짧은 이름)"
+	@echo "  make dist          배포용 .img.xz 와 .zip"
+	@echo ""
+	@echo "  한 번만 도는 것 (순서대로):"
+	@echo "  make sysroot       CPython 이 링크할 라이브러리들"
+	@echo "  make thirdparty    dropbear, wpa_supplicant"
+	@echo "  make python        CPython 3.12 + pip + glibc"
+	@echo "  make sdk           이 시스템용 C 프로그램을 짓는 SDK"
 	@echo "  make all-in-one    blobs + firmware + sdcard"
 	@echo "  make qemu          QEMU 에서 실행 (대화형)"
 	@echo "  make qemu-log      QEMU 실행 후 시리얼 로그"

@@ -23,3 +23,9 @@ userland/rootfs/
 userland/initramfs.cpio.gz
 kernel/out/
 dist/
+
+# tools/build-sdk.sh 가 만든다 (userland/libc 에서 뽑아낸 것뿐)
+sdk/
+
+# tools/mkpkg.sh 가 만든 로컬 패키지 저장소
+repo/
