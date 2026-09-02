@@ -164,10 +164,20 @@ static void start_service(service_t *svc)
 
 static void load_services(void)
 {
-    char buf[2048];
+    /* Big enough for the file plus the comments explaining it. When this
+     * was 2048 the file grew past it and the last service - the watchdog -
+     * was silently cut off: it never started, and nothing said so. A
+     * service quietly missing is the worst way for this to fail, so the
+     * truncation is now reported. */
+    char buf[8192];
     long n = proc_read(SERVICES, buf, sizeof(buf));
     if (n <= 0)
         return;
+
+    if (n >= (long)sizeof(buf) - 1)
+        dprintf(STDERR_FILENO,
+                "init: %s is larger than %d bytes - the end was cut off\n",
+                SERVICES, (int)sizeof(buf));
 
     char *p = buf;
     while (*p && nservices < MAX_SERVICES) {

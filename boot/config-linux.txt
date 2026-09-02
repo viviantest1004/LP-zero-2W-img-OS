@@ -41,4 +41,10 @@ boot_delay=0
 
 # ── 메모리 분할 ─────────────────────────────────────────────────
 # 프레임버퍼를 아직 안 쓰므로 최소값. 화면을 켤 때 64 로 올린다.
-gpu_mem=16
+# The GPU firmware carves the HDMI framebuffer out of this. 16MB is
+# enough for a headless board but leaves no room for a 1080p console
+# (1920x1080x4 = 8.3MB plus the firmware's own working memory), and the
+# screen can come up blank. 32MB fits it with room to spare, and costs
+# 16MB of the 512MB the ARM side gets. We use no video decoding and no
+# 3D, so nothing else needs this memory.
+gpu_mem=32

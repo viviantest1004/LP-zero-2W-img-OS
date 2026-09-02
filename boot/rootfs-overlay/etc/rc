@@ -40,6 +40,10 @@ echo "[rc] storage"
 expandfs || expandfs /dev/vda /dev/vda2 || expandfs /dev/nvme0n1 /dev/nvme0n1p2 || echo "[rc]   nothing to expand"
 mount /dev/mmcblk0p2 /data || mount /dev/vda2 /data || mount /dev/nvme0n1p2 /data || echo "[rc]   no data partition - continuing in RAM"
 
+# Somewhere for logd to write. It starts from /etc/services right
+# after this script, so the directory has to exist by now.
+mkdir -p /data/log
+
 echo "[rc] restoring the clock"
 # The Pi Zero 2 W has no battery-backed clock. At power-on the kernel
 # clock starts at 1970. Left that way, file timestamps are nonsense and

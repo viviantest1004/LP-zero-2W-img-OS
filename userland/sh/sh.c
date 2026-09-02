@@ -227,26 +227,12 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
 
 /* ── Builtins ───────────────────────────────────────────────────── */
 
-static void builtin_help(void)
-{
-    printf("LP-zero shell\n\n");
-    printf("  cd [dir]      change directory (to / with no argument)\n");
-    printf("  pwd           where you are\n");
-    printf("  echo ...      print the arguments\n");
-    printf("  env           list the environment\n");
-    printf("  exit [n]      leave the shell\n");
-    printf("  reboot        restart the machine\n");
-    printf("  poweroff      shut down\n");
-    printf("  help          this help\n\n");
-    printf("Redirection < > >> , pipes | , and && || ; all work.\n\n");
-    printf("files:  ls  cat  cp  mv  rm  mkdir  touch  edit\n");
-    printf("time:   date   date -z list   date -s \"2026-09-01 12:00:00\"   ntp\n");
-    printf("system: sysinfo  zram  memwatch  mount  expandfs  dhcp\n");
-    printf("other:  calc \"2+3*4\"      python (on /data)\n");
-}
 
 static const char *BUILTINS[] = {
-    "exit", "cd", "pwd", "echo", "env", "help", "reboot", "poweroff", NULL
+    /* "help" is deliberately not here. It is /bin/help, a real program,
+     * so it can scan PATH and list what is actually installed - a
+     * builtin would only ever know what was hardcoded into the shell. */
+    "exit", "cd", "pwd", "echo", "env", "reboot", "poweroff", NULL
 };
 
 static bool is_builtin(const char *name)
@@ -300,12 +286,6 @@ static bool run_builtin(cmd_t *c)
         if (environ)
             for (char **e = environ; *e; e++)
                 printf("%s\n", *e);
-        last_status = 0;
-        return true;
-    }
-
-    if (strcmp(cmd, "help") == 0) {
-        builtin_help();
         last_status = 0;
         return true;
     }

@@ -29,3 +29,22 @@ dropbear -F -R -E -p 22 -r /data/dropbear_ed25519_host_key
 #   -d  writes the time to /data/.clock every 30s and resyncs from the
 #       network hourly. /etc/rc restores that value at boot.
 ntp -d
+
+
+# Log collector.
+#   Without this, everything printed goes to the console and is gone as
+#   soon as it scrolls. If the board wedges overnight there is no record
+#   of what happened - which is when you most want one.
+#   Collects the kernel ring buffer and /dev/log into /data/log/messages,
+#   rotating at 512KB so it can never fill the card.
+logd
+
+# Watchdog.
+#   The BCM2835 has a hardware countdown that reboots the board when it
+#   reaches zero. The kernel driver was always in the build; nothing was
+#   resetting the timer, so it was never armed and never fired.
+#   Now: if the system wedges hard enough that this stops running, the
+#   board reboots itself in 15 seconds instead of waiting for someone to
+#   walk over and pull the power.
+#   (No watchdog hardware in a VM - it exits with a clear message there.)
+watchdog -t 15
