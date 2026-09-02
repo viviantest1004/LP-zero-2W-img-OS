@@ -5,6 +5,7 @@
  *   mount -t <type> <device> <dir>
  *   mount -o ro,nosuid ...       flags, and filesystem options such as
  *                                size=64M or errors=remount-ro
+ *   mount -L <label> ...         only if the filesystem carries it
  *   umount <dir>                 (when argv[0] is umount)
  *
  * With no type given we try the list below in order. The kernel returns
@@ -17,6 +18,66 @@
 #include "syscall.h"
 
 static const char *AUTO_TYPES[] = { "ext4", "vfat", "ext2", NULL };
+
+/* ── Is this the filesystem we meant? ─────────────────────────────────
+ *
+ * /etc/rc tries four device names for the data partition, because it is
+ * called something different depending on whether the machine booted
+ * from an SD card, a USB stick, NVMe or a virtual disk. Only one of
+ * them exists - normally.
+ *
+ * Boot from USB with an unrelated SD card still in the slot and there
+ * are two, and the SD card is tried first. It would be mounted as
+ * /data, and the log, the SSH host key and the boot counter would all
+ * be written onto somebody else's card.
+ *
+ * So the partition can be required to carry a label. mksdcard.sh writes
+ * LPZERODATA on the one it makes, and -L makes mount check for it. The
+ * label lives in the ext4 superblock, 1024 bytes into the partition and
+ * 120 bytes into that.
+ *
+ * An unlabelled ext4 is allowed through: images made before the label
+ * existed are still in use, and refusing them would break upgrades for
+ * a check that is about not touching what is definitely not ours.
+ */
+#define EXT_SB_OFFSET  1024
+#define EXT_MAGIC_OFF    56
+#define EXT_LABEL_OFF   120
+#define EXT_LABEL_LEN    16
+#define EXT_MAGIC    0xEF53
+
+static bool label_matches(const char *dev, const char *want)
+{
+    long fd = lp_open(dev, O_RDONLY, 0);
+    if (fd < 0)
+        return false;
+
+    u8 sb[512];
+    memset(sb, 0, sizeof(sb));
+
+    if (lp_lseek((int)fd, EXT_SB_OFFSET, 0) < 0) {
+        lp_close((int)fd);
+        return false;
+    }
+    long n = lp_read((int)fd, sb, sizeof(sb));
+    lp_close((int)fd);
+
+    if (n < (long)sizeof(sb))
+        return false;
+
+    u16 magic = (u16)(sb[EXT_MAGIC_OFF] | (sb[EXT_MAGIC_OFF + 1] << 8));
+    if (magic != EXT_MAGIC)
+        return false;
+
+    char label[EXT_LABEL_LEN + 1];
+    memcpy(label, sb + EXT_LABEL_OFF, EXT_LABEL_LEN);
+    label[EXT_LABEL_LEN] = '\0';
+
+    if (label[0] == '\0')
+        return true;                 /* unlabelled: from an older image */
+
+    return strcmp(label, want) == 0;
+}
 
 /* Work out what is on a device by looking at it.
  *
@@ -155,6 +216,7 @@ int main(int argc, char **argv)
         return show_mounts();
 
     const char *type   = NULL;
+    const char *want_label = NULL;
     unsigned long flags = 0;
     char  data_buf[256];
     const char *data   = NULL;
@@ -169,6 +231,8 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             flags |= parse_options(argv[++i], data_buf, sizeof(data_buf));
             data = data_buf[0] ? data_buf : NULL;
+        } else if (strcmp(argv[i], "-L") == 0 && i + 1 < argc) {
+            want_label = argv[++i];
         } else if (nargs < 2) {
             args[nargs++] = argv[i];
         }
@@ -176,7 +240,8 @@ int main(int argc, char **argv)
 
     if (nargs < 2) {
         dprintf(STDERR_FILENO,
-                "usage: mount [-t type] [-o options] <source> <dir>\n");
+                "usage: mount [-t type] [-o options] [-L label]"
+                " <source> <dir>\n");
         return 2;
     }
 
@@ -210,6 +275,13 @@ int main(int argc, char **argv)
      * up with the kernel saying so. */
     if (strncmp(src, "/dev/", 5) == 0 && !lp_exists(src)) {
         dprintf(STDERR_FILENO, "mount: %s: no such device\n", src);
+        return 1;
+    }
+
+    if (want_label && !label_matches(src, want_label)) {
+        dprintf(STDERR_FILENO,
+                "mount: %s is not labelled %s - leaving it alone\n",
+                src, want_label);
         return 1;
     }
 

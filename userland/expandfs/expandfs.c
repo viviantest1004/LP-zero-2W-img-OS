@@ -35,6 +35,73 @@ static const char *dev_part = "/dev/mmcblk0p2";
 #define PART_ENTRY_LEN 16
 #define PART_TYPE_LINUX 0x83
 
+/* ── Making sure this is our disk ─────────────────────────────────────
+ *
+ * This program rewrites a partition table. Pointed at the wrong disk it
+ * destroys somebody else's data, and it is the only thing in this
+ * system that can damage something other than itself.
+ *
+ * Which is not hypothetical. /etc/rc tries four device names because
+ * the disk is called something different depending on whether it is an
+ * SD card, a USB stick, NVMe or a virtual disk. Boot from USB with an
+ * unrelated SD card left in the slot and the SD card is the first name
+ * tried - a card from another Raspberry Pi would pass every check we
+ * had, because it also has a Linux partition in slot 2.
+ *
+ * So the filesystem is asked what it is called. mksdcard.sh labels the
+ * data partition LPZERO-DATA, and nothing without that label is touched.
+ * The label sits in the ext4 superblock, which starts 1024 bytes into
+ * the partition, 120 bytes in and 16 bytes long - no library needed to
+ * read it.
+ *
+ * An unlabelled filesystem is accepted, with a warning. Images written
+ * before labels existed are still out there and refusing to grow them
+ * would be worse than the risk: the check is here to stop us touching
+ * something that is definitely not ours, and an empty label is not
+ * evidence either way.
+ */
+#define EXT_SB_OFFSET     1024
+#define EXT_MAGIC_OFF       56      /* within the superblock */
+#define EXT_LABEL_OFF      120
+#define EXT_LABEL_LEN       16
+#define EXT_MAGIC       0xEF53
+
+#define OUR_LABEL "LPZERODATA"   /* what mksdcard.sh writes */
+
+/* -1 cannot read, 0 not ours, 1 ours, 2 unlabelled */
+static int check_label(const char *part)
+{
+    long fd = lp_open(part, O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+
+    u8 sb[512];
+    memset(sb, 0, sizeof(sb));
+
+    if (lp_lseek((int)fd, EXT_SB_OFFSET, 0) < 0) {
+        lp_close((int)fd);
+        return -1;
+    }
+    long n = lp_read((int)fd, sb, sizeof(sb));
+    lp_close((int)fd);
+
+    if (n < (long)sizeof(sb))
+        return -1;
+
+    u16 magic = (u16)(sb[EXT_MAGIC_OFF] | (sb[EXT_MAGIC_OFF + 1] << 8));
+    if (magic != EXT_MAGIC)
+        return -1;                   /* not ext at all */
+
+    char label[EXT_LABEL_LEN + 1];
+    memcpy(label, sb + EXT_LABEL_OFF, EXT_LABEL_LEN);
+    label[EXT_LABEL_LEN] = '\0';
+
+    if (label[0] == '\0')
+        return 2;
+
+    return strcmp(label, OUR_LABEL) == 0 ? 1 : 0;
+}
+
 /* Block device ioctls */
 #define BLKRRPART      0x125F      /* _IO(0x12, 95)  re-read partition table */
 #define BLKGETSIZE64   0x80081272  /* _IOR(0x12, 114, size_t)  size in bytes */
@@ -49,6 +116,87 @@ static const char *dev_part = "/dev/mmcblk0p2";
 
 /* Not worth growing for less than this. */
 #define MIN_GROW_MB     16
+
+/* ── Keeping the watchdog quiet while this runs ───────────────────────
+ *
+ * /etc/rc arms the hardware watchdog for 120 seconds before anything
+ * else, so that a boot which hangs still recovers. Growing a filesystem
+ * is the one step at boot that can legitimately take longer than that:
+ * a large card behind a slow reader, on a first boot, resizing a
+ * filesystem to a couple of hundred gigabytes.
+ *
+ * If the timer fires in the middle, it resets the board between writing
+ * the new partition table and finishing the resize - which leaves a
+ * partition that is bigger than the filesystem inside it. That usually
+ * recovers on the next boot, because this runs again. Usually is not a
+ * word to rely on when the alternative is four lines.
+ *
+ * So we pet it as we go. Not disarm it: a machine that wedges here
+ * should still recover, and disarming would take that away for exactly
+ * the operation most likely to wedge.
+ */
+#define WDIOC_KEEPALIVE  0x80045705
+
+static int wd_fd = -1;
+
+static void watchdog_open(void)
+{
+    long fd = lp_open("/dev/watchdog", O_WRONLY, 0);
+    wd_fd = (fd < 0) ? -1 : (int)fd;
+}
+
+static void watchdog_pet(void)
+{
+    if (wd_fd < 0)
+        return;
+    int dummy = 0;
+    lp_ioctl(wd_fd, WDIOC_KEEPALIVE, &dummy);
+}
+
+/* Closing /dev/watchdog would normally disarm it - but only if 'V' is
+ * written first, which we deliberately do not do. The timer keeps
+ * running and the daemon started from /etc/services takes over. */
+static void watchdog_close(void)
+{
+    if (wd_fd >= 0) {
+        lp_close(wd_fd);
+        wd_fd = -1;
+    }
+}
+
+/* The resize is one ioctl that does not return until it is finished, so
+ * there is nowhere in this process to pet from while it runs. A second
+ * process does it instead, and is stopped when the work is done.
+ *
+ * Returns the pid, or -1 when there is no watchdog to pet. */
+static pid_t watchdog_petter_start(void)
+{
+    watchdog_open();
+    if (wd_fd < 0)
+        return -1;
+
+    pid_t pid = lp_fork();
+    if (pid < 0)
+        return -1;
+
+    if (pid == 0) {
+        for (;;) {
+            watchdog_pet();
+            lp_sleep_ms(5000);
+        }
+    }
+    return pid;
+}
+
+static void watchdog_petter_stop(pid_t pid)
+{
+    if (pid > 0) {
+        lp_kill(pid, SIGKILL);
+        int status = 0;
+        lp_waitpid(pid, &status, 0);
+    }
+    watchdog_close();
+}
 
 static long dev_ioctl(const char *path, unsigned long req, void *arg, int flags)
 {
@@ -266,6 +414,21 @@ int main(int argc, char **argv)
     if (wait && !wait_for_dev(DEV_PART, WAIT_MS))
         return 1;
 
+    /* Before anything is written: is this ours? */
+    int owned = check_label(DEV_PART);
+    if (owned == 0) {
+        dprintf(STDERR_FILENO,
+                "expandfs: %s belongs to something else - not touching it\n"
+                "expandfs:   (its label is not %s)\n", DEV_PART, OUR_LABEL);
+        return 1;
+    }
+    if (owned == 2)
+        dprintf(STDERR_FILENO,
+                "expandfs: %s has no label. Growing it anyway, but a\n"
+                "expandfs:   labelled partition is how this tells our disk\n"
+                "expandfs:   from one that happens to be plugged in.\n",
+                DEV_PART);
+
     u64 part_bytes = 0;
     bool grew = grow_partition(&part_bytes);
 
@@ -298,7 +461,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Growing a large filesystem can outlast the 120 seconds /etc/rc
+     * arms the watchdog for, and a reset partway through leaves the
+     * partition bigger than the filesystem in it. */
+    pid_t petter = watchdog_petter_start();
+
     bool ok = grow_filesystem(part_bytes);
+
+    watchdog_petter_stop(petter);
 
     /* If we mounted it, we unmount it. The rc script mounts it again. */
     if (mounted_here)

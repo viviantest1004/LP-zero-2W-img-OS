@@ -57,21 +57,126 @@ static void open_log(void)
     written = (lp_stat(log_path, &st, true) == 0) ? (long)st.size : 0;
 }
 
-/* At the limit, move the file aside and start a new one. Keeping one
- * generation is the whole policy - more would need pruning logic that
- * could itself fail and fill the card. */
+/* At the limit, move the file aside and start a new one.
+ *
+ * Two generations, not one. When something goes wrong the interesting
+ * lines are usually just before the current file starts - and guard
+ * deletes the oldest log when the disk is nearly full, which with a
+ * single generation means the evidence goes exactly when a full disk is
+ * the thing being investigated. Two files at 512KB is 1MB, which is
+ * nothing against a partition measured in gigabytes.
+ *
+ *   messages     what is happening now
+ *   messages.1   the one before
+ *   messages.2   the one before that, deleted here to make room
+ */
 static void rotate(void)
 {
-    char old[512];
-    if (snprintf(old, sizeof(old), "%s.1", log_path) >= (int)sizeof(old))
+    char first[512], second[512];
+
+    if (snprintf(first,  sizeof(first),  "%s.1", log_path) >= (int)sizeof(first))
+        return;
+    if (snprintf(second, sizeof(second), "%s.2", log_path) >= (int)sizeof(second))
         return;
 
     if (out_fd >= 0)
         lp_close(out_fd);
 
-    lp_unlink(old);
-    lp_rename(log_path, old);
+    lp_unlink(second);
+    lp_rename(first, second);
+    lp_rename(log_path, first);
     open_log();
+}
+
+/* ── The authentication log ───────────────────────────────────────────
+ *
+ * dropbear writes its login attempts to the console, and everything on
+ * the console lands in messages along with the kernel's chatter about
+ * USB devices and filesystems. Which means that after a break-in, the
+ * one question worth asking - who logged in, from where, and when - is
+ * answered by reading a megabyte of unrelated text, if the lines have
+ * not already been rotated out by ordinary noise.
+ *
+ * So they get their own file, with its own rotation. It is small, it
+ * fills slowly, and an attacker cannot push the record of their own
+ * arrival off the end of it by generating traffic.
+ *
+ * Matching by text rather than by process: dropbear's messages are
+ * distinctive and there is no syslog facility to key on here. */
+static int  auth_fd    = -1;
+static long auth_bytes = 0;
+static char auth_path[512];
+
+static bool is_auth_line(const char *msg, size_t len)
+{
+    /* Bounded copy, because the message is not NUL terminated. */
+    char line[256];
+    size_t n = len < sizeof(line) - 1 ? len : sizeof(line) - 1;
+    memcpy(line, msg, n);
+    line[n] = '\0';
+
+    static const char *marks[] = {
+        "Password auth succeeded",
+        "Pubkey auth succeeded",
+        "Public key auth succeeded",
+        "Auth succeeded",
+        "Bad password",
+        "Login attempt",
+        "Exit before auth",
+        "Exit (",
+        "exit before auth",
+        "Child connection from",
+        "bad packet length",
+        NULL
+    };
+
+    for (int i = 0; marks[i]; i++)
+        if (strstr(line, marks[i]))
+            return true;
+    return false;
+}
+
+static void auth_open(void)
+{
+    if (auth_path[0] == '\0')
+        return;
+    long fd = lp_open(auth_path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0)
+        return;
+    auth_fd = (int)fd;
+
+    lp_stat_t st;
+    auth_bytes = (lp_stat(auth_path, &st, true) == 0) ? (long)st.size : 0;
+}
+
+static void auth_emit(const char *head, int hlen, const char *msg, size_t len)
+{
+    if (auth_fd < 0) {
+        auth_open();
+        if (auth_fd < 0)
+            return;
+    }
+
+    lp_write(auth_fd, head, (size_t)hlen);
+    lp_write(auth_fd, msg, len);
+    if (len == 0 || msg[len - 1] != '\n')
+        lp_write(auth_fd, "\n", 1);
+
+    auth_bytes += hlen + (long)len + 1;
+
+    /* Its own limit, a quarter of the main one: this file grows only
+     * when someone connects, so it takes a long time to fill, and a
+     * long history is exactly what it is for. */
+    if (auth_bytes >= max_bytes / 4) {
+        char old[520];
+        if (snprintf(old, sizeof(old), "%s.1", auth_path) < (int)sizeof(old)) {
+            lp_close(auth_fd);
+            auth_fd = -1;
+            lp_unlink(old);
+            lp_rename(auth_path, old);
+            auth_open();
+        }
+    }
 }
 
 static void emit(const char *tag, const char *msg, size_t len)
@@ -99,6 +204,12 @@ static void emit(const char *tag, const char *msg, size_t len)
     written += hlen + (long)len + 1;
     if (written >= max_bytes)
         rotate();
+
+    /* Anything about somebody arriving goes to both files: the main log
+     * keeps the sequence of events in context, the auth log keeps it
+     * where it can be found. */
+    if (is_auth_line(msg, len))
+        auth_emit(head, hlen, msg, len);
 }
 
 /* /dev/kmsg lines look like "6,123,456789,-;the message".
@@ -128,10 +239,26 @@ int main(int argc, char **argv)
             printf("  -f <path>  where to write (default %s)\n", DEFAULT_PATH);
             printf("  -s <KB>    rotate past this size (default %d)\n", DEFAULT_KB);
             printf("\nRead the log with:  cat %s\n", DEFAULT_PATH);
+            printf("Logins are also kept apart, in auth beside it, with\n");
+            printf("their own rotation - so a break-in cannot be pushed\n");
+            printf("off the end of the log by ordinary traffic.\n");
             return 0;
         } else {
             dprintf(STDERR_FILENO, "logd: unknown option: %s\n", argv[i]);
             return 2;
+        }
+    }
+
+    /* The auth log sits beside the main one, whatever it was named. */
+    {
+        char base[512];
+        strlcpy(base, log_path, sizeof(base));
+        char *slash = strrchr(base, '/');
+        if (slash) {
+            *slash = '\0';
+            snprintf(auth_path, sizeof(auth_path), "%s/auth", base);
+        } else {
+            strlcpy(auth_path, "auth", sizeof(auth_path));
         }
     }
 

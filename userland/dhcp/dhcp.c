@@ -249,18 +249,25 @@ static int apply_lease(const char *ifname, const lease_t *l)
     return 0;
 }
 
-int main(int argc, char **argv)
+/* One full exchange: DISCOVER, OFFER, REQUEST, ACK. Returns 0 when an
+ * address was applied.
+ *
+ * `known` is the address we already hold, or 0. A renewal names it in
+ * the REQUEST, which is how a server knows to give the same one back -
+ * and getting the same address back is the whole point: everything that
+ * reaches this machine does so by the address the router handed out. */
+static int get_lease(const char *ifname, u32 known, lease_t *out)
 {
-    const char *ifname = (argc > 1) ? argv[1] : "wlan0";
-
     u8 mac[6];
     if (net_if_hwaddr(ifname, mac) < 0) {
-        dprintf(STDERR_FILENO, "dhcp: cannot read the MAC address of %s\n", ifname);
+        dprintf(STDERR_FILENO,
+                "dhcp: cannot read the MAC address of %s\n", ifname);
         return 1;
     }
 
     if (net_if_up(ifname) < 0)
-        dprintf(STDERR_FILENO, "dhcp: could not bring %s up (trying anyway)\n", ifname);
+        dprintf(STDERR_FILENO,
+                "dhcp: could not bring %s up (trying anyway)\n", ifname);
 
     long fd = lp_socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
@@ -270,12 +277,9 @@ int main(int argc, char **argv)
 
     int one = 1;
     lp_setsockopt((int)fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
-    /* We have no address yet, so bind straight to the interface.
-     * Without this there is no route and sending fails. */
     lp_setsockopt((int)fd, SOL_SOCKET, SO_BINDTODEVICE, ifname,
                   (u32)strlen(ifname) + 1);
 
-    /* Wait 3s for a reply. struct __kernel_timespec { s64 sec; s64 nsec; } */
     s64 tv[2] = { 3, 0 };
     lp_setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO_NEW, tv, sizeof(tv));
 
@@ -297,11 +301,10 @@ int main(int argc, char **argv)
     dhcp_pkt_t pkt;
     lease_t lease;
 
-    /* Retry DISCOVER a few times. WiFi can miss replies just after joining. */
     for (int attempt = 1; attempt <= 4; attempt++) {
         memset(&lease, 0, sizeof(lease));
 
-        size_t len = build_packet(&pkt, DHCPDISCOVER, xid, mac, 0, 0);
+        size_t len = build_packet(&pkt, DHCPDISCOVER, xid, mac, known, 0);
         if (send_bcast((int)fd, &pkt, len) < 0) {
             dprintf(STDERR_FILENO, "dhcp: sending DISCOVER failed\n");
             lp_sleep_ms(1000);
@@ -324,16 +327,153 @@ int main(int argc, char **argv)
             continue;
         }
 
-        /* Anything the ACK left out, take from the OFFER. */
         if (!ack.mask)   ack.mask   = lease.mask;
         if (!ack.router) ack.router = lease.router;
         if (!ack.dns)    ack.dns    = lease.dns;
 
         lp_close((int)fd);
+        if (out)
+            *out = ack;
         return apply_lease(ifname, &ack);
     }
 
     lp_close((int)fd);
     dprintf(STDERR_FILENO, "dhcp: got no address on %s\n", ifname);
     return 1;
+}
+
+/* ── Staying on the network ───────────────────────────────────────────
+ *
+ * A lease is a loan with a deadline. A home router usually lends an
+ * address for a day or a week, and expects to be asked again before
+ * then. Ask, and it hands back the same address; do not ask, and it
+ * takes the address back and eventually gives it to something else.
+ *
+ * A board that only asks once at boot therefore works perfectly for
+ * days and then, silently, is not on the network any more. Nothing here
+ * notices: the machine has not crashed, so the watchdog is content;
+ * memory and temperature are fine, so guard is content. It is the one
+ * failure with no automatic recovery at all - and this is a system whose
+ * entire purpose is being left alone for months.
+ *
+ * The protocol says renew at half the lease and rebind at seven eighths.
+ * We do the first: at half time, ask again. That is the part that keeps
+ * the address, and the rest of the state machine exists for networks
+ * with several servers, which a home router is not.
+ *
+ * If the renewal fails we retry, backing off, and keep the address in
+ * the meantime - it usually still works, because the router has not
+ * handed it to anyone else yet. Giving it up early would guarantee the
+ * outage we are trying to avoid.
+ */
+/* The interfaces this board can have, in the order worth trying:
+ *   wlan0  the built-in WiFi
+ *   eth0   a USB Ethernet adapter
+ *   usb0   the gadget port, when it is plugged into a PC
+ * Only one of them is usually there. */
+static const char *IFACES[] = { "wlan0", "eth0", "usb0", NULL };
+
+static int run_daemon(const char *given)
+{
+    lease_t held;
+    memset(&held, 0, sizeof(held));
+
+    char ifbuf[16];
+    const char *ifname = given;
+
+    /* With no interface named, find the one that answers. A service
+     * line in /etc/services cannot know which of the three this
+     * particular board has. */
+    if (!ifname) {
+        for (int i = 0; IFACES[i]; i++) {
+            if (get_lease(IFACES[i], 0, &held) == 0) {
+                strlcpy(ifbuf, IFACES[i], sizeof(ifbuf));
+                ifname = ifbuf;
+                break;
+            }
+        }
+        if (!ifname) {
+            /* Nothing answered. Keep the daemon alive and keep trying:
+             * WiFi may associate a minute from now, and a board that
+             * gave up at boot would stay off the network for good. */
+            dprintf(STDERR_FILENO,
+                    "dhcp: no interface answered - retrying every 60s\n");
+            for (;;) {
+                lp_sleep_ms(60000);
+                for (int i = 0; IFACES[i]; i++) {
+                    if (get_lease(IFACES[i], 0, &held) == 0) {
+                        strlcpy(ifbuf, IFACES[i], sizeof(ifbuf));
+                        ifname = ifbuf;
+                        break;
+                    }
+                }
+                if (ifname)
+                    break;
+            }
+        }
+    } else if (get_lease(ifname, 0, &held) != 0) {
+        dprintf(STDERR_FILENO,
+                "dhcp: no address yet on %s - will keep trying\n", ifname);
+    }
+
+    for (;;) {
+        u32 lease_secs = held.lease ? held.lease : 600;
+
+        /* Half the lease, and never longer than a day: a router that
+         * offers a week-long lease is not a reason to go a week without
+         * checking that the network still works. */
+        u32 wait = lease_secs / 2;
+        if (wait < 30)    wait = 30;
+        if (wait > 43200) wait = 43200;
+
+        for (u32 slept = 0; slept < wait; slept += 10)
+            lp_sleep_ms(10000);
+
+        lease_t fresh;
+        memset(&fresh, 0, sizeof(fresh));
+
+        if (get_lease(ifname, held.addr, &fresh) == 0) {
+            if (held.addr && fresh.addr != held.addr) {
+                char before[16], after[16];
+                ipv4_format(held.addr, before);
+                ipv4_format(fresh.addr, after);
+                printf("dhcp: the address changed: %s -> %s\n", before, after);
+            }
+            held = fresh;
+            continue;
+        }
+
+        /* The renewal failed. Keep what we have and try again sooner -
+         * the address is very likely still ours. */
+        dprintf(STDERR_FILENO,
+                "dhcp: could not renew on %s - keeping the address and"
+                " retrying\n", ifname);
+        held.lease = held.lease > 120 ? held.lease / 2 : 120;
+    }
+}
+
+int main(int argc, char **argv)
+{
+    const char *ifname = NULL;
+    bool daemon = false;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-d") == 0) {
+            daemon = true;
+        } else if (strcmp(argv[i], "-h") == 0) {
+            printf("usage: dhcp [-d] <interface>\n");
+            printf("  -d  stay running and renew the lease before it\n");
+            printf("      expires. Without this the address is held\n");
+            printf("      until the router takes it back, and the board\n");
+            printf("      falls off the network with nothing to notice.\n");
+            return 0;
+        } else if (!ifname) {
+            ifname = argv[i];
+        }
+    }
+
+    if (daemon)
+        return run_daemon(ifname);       /* NULL means "find one" */
+
+    return get_lease(ifname ? ifname : "wlan0", 0, NULL);
 }

@@ -63,6 +63,9 @@
 #define SYS_reboot          142
 #define SYS_setpriority     140
 #define SYS_getpriority     141
+#define SYS_setgid          144
+#define SYS_setuid          146
+#define SYS_setgroups       159
 #define SYS_setpgid         154
 #define SYS_getpgid         155
 #define SYS_setsid          157

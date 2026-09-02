@@ -305,6 +305,18 @@ READMEEOF
 ────────────────────────────────────────────────────────────
 UEFIEOF
     fi
+    # e2fsck, for repairing the data partition from the machine itself.
+    # It goes here rather than into the system image because the image is
+    # unpacked into RAM and stays there: 1.4MB of memory for the life of
+    # the board, for a program that does nothing on a healthy boot. Here
+    # it costs none, and this partition is mounted read-only, so the tool
+    # cannot be damaged by the failure it exists to repair.
+    E2FSCK="${REPO_ROOT}/userland/prebuilt/e2fsck"
+    if [[ -f "$E2FSCK" ]]; then
+        mcopy -i "$PART_IMG" "$E2FSCK" ::e2fsck
+        log "복사: e2fsck                              ($(stat -c%s "$E2FSCK") bytes, /data 복구용)"
+    fi
+
     log "복사: README.txt                          (설정 안내)"
     mcopy -i "$PART_IMG" "$README" ::README.txt
     rm -f "$README"
@@ -383,6 +395,27 @@ if command -v debugfs >/dev/null 2>&1; then
         log "데이터: python/  ($(du -sh "$PYSTAGE" | cut -f1))"
     fi
 
+    # glibc, next to Python and only for Python.
+    #
+    # The operating system does not use it: init, the shell and every
+    # command run on the libc in userland/libc with nothing else linked
+    # in. This is here so that CPython can be dynamically linked, and it
+    # has to be, because every wheel on PyPI carrying a compiled
+    # extension is built against glibc. Static Python could not load one
+    # at all - "pip install numpy" got as far as downloading it.
+    #
+    # It lives on the data partition, so the system image is exactly the
+    # size it was.
+    GLIBCSTAGE="${GLIBCSTAGE:-/home/user/kernel-work/python-stage/data/glibc}"
+    if [[ -d "$GLIBCSTAGE" ]]; then
+        GPARENT="$(cd "$(dirname "$GLIBCSTAGE")" && pwd)"
+        ( cd "$GPARENT"
+          find glibc -type d -printf 'mkdir /%p\n'
+          find glibc -type f -printf "write ${GPARENT}/%p %p\n"
+          find glibc -type f -printf 'sif %p mode 0100755\n' ) >> "$DBG"
+        log "데이터: glibc/  ($(du -sh "$GLIBCSTAGE" | cut -f1), 파이썬 확장 모듈용)"
+    fi
+
     # 루트 인증서. OpenSSL 을 --openssldir=/data/ssl 로 지었으므로
     # 파이썬과 다른 프로그램이 여기를 본다. 없으면 HTTPS 접속이
     # CERTIFICATE_VERIFY_FAILED 로 죽는다.
@@ -420,6 +453,13 @@ if command -v debugfs >/dev/null 2>&1; then
     if [[ -d "$PYSTAGE" ]]; then
         d_link /bin/python3 /data/python/bin/python3.12
         d_link /bin/python  /data/python/bin/python3.12
+        # pip lives beside the interpreter, and /data/python/bin is not
+        # on PATH - only /data/bin is. Without these, "pip install"
+        # answers "command not found" on a system that has pip.
+        if [[ -f "${PYSTAGE}/bin/pip" ]]; then
+            d_link /bin/pip  /data/python/bin/pip
+            d_link /bin/pip3 /data/python/bin/pip
+        fi
     elif [[ "$HAVE_MPY" == "1" ]]; then
         d_link /bin/python3 /data/bin/micropython
         d_link /bin/python  /data/bin/micropython

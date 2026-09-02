@@ -512,8 +512,118 @@ static const char *BUILTINS[] = {
     /* "help" is deliberately not here. It is /bin/help, a real program,
      * so it can scan PATH and list what is actually installed - a
      * builtin would only ever know what was hardcoded into the shell. */
-    "exit", "cd", "pwd", "echo", "env", "reboot", "poweroff", NULL
+    "exit", "cd", "pwd", "echo", "env", "reboot", "poweroff",
+    "test", "[", "true", "false", NULL
 };
+
+/* ── test ─────────────────────────────────────────────────────────────
+ *
+ *   test -f <path>      a file exists
+ *   test -d <path>      a directory exists
+ *   test -e <path>      either
+ *   test -s <path>      exists and is not empty
+ *   test -z <string>    the string is empty
+ *   test -n <string>    the string is not
+ *   test a = b          equal      a != b   not equal
+ *   test a -eq b        numbers    -ne -lt -le -gt -ge
+ *   test <string>       not empty
+ *
+ * "[" is the same thing spelled differently, and wants a closing "]".
+ *
+ * A builtin rather than a program because the exit code is the whole
+ * point and the shell has to see it directly - and because a script
+ * calling this in a loop should not be forking for it.
+ *
+ * Why this and not a full if: with && and || an exit code is already a
+ * branch, and the boot script has used that from the start. What was
+ * missing was a way to ask a question about a file. So:
+ *
+ *   test -s /data/rc.local && sh /data/rc.local
+ *   test -f /data/x || echo "not there"
+ */
+static bool str_is_num(const char *s)
+{
+    if (*s == '-' || *s == '+') s++;
+    if (!*s) return false;
+    for (; *s; s++)
+        if (*s < '0' || *s > '9')
+            return false;
+    return true;
+}
+
+/* Returns the exit code: 0 is true, the way the shell counts. */
+static int run_test(char **argv, int argc)
+{
+    /* "[ ... ]": drop the closing bracket. */
+    if (strcmp(argv[0], "[") == 0) {
+        if (argc < 2 || strcmp(argv[argc - 1], "]") != 0) {
+            dprintf(STDERR_FILENO, "[: missing ]\n");
+            return 2;
+        }
+        argc--;
+    }
+
+    /* "test" on its own is false; one argument is true when non-empty. */
+    if (argc == 1)
+        return 1;
+    if (argc == 2)
+        return argv[1][0] ? 0 : 1;
+
+    /* Negation, which is worth having because "not" reads better than
+     * inverting the whole condition. */
+    if (strcmp(argv[1], "!") == 0)
+        return run_test(argv + 1, argc - 1) == 0 ? 1 : 0;
+
+    if (argc == 3) {
+        const char *op  = argv[1];
+        const char *arg = argv[2];
+
+        if (strcmp(op, "-e") == 0) return lp_exists(arg) ? 0 : 1;
+        if (strcmp(op, "-d") == 0) return lp_is_dir(arg) ? 0 : 1;
+
+        if (strcmp(op, "-f") == 0) {
+            lp_stat_t st;
+            if (lp_stat(arg, &st, true) < 0) return 1;
+            return (st.mode & LP_S_IFMT) == LP_S_IFREG ? 0 : 1;
+        }
+        if (strcmp(op, "-s") == 0) {
+            lp_stat_t st;
+            if (lp_stat(arg, &st, true) < 0) return 1;
+            return st.size > 0 ? 0 : 1;
+        }
+        if (strcmp(op, "-z") == 0) return arg[0] ? 1 : 0;
+        if (strcmp(op, "-n") == 0) return arg[0] ? 0 : 1;
+
+        dprintf(STDERR_FILENO, "test: %s: unknown test\n", op);
+        return 2;
+    }
+
+    if (argc == 4) {
+        const char *a  = argv[1];
+        const char *op = argv[2];
+        const char *b  = argv[3];
+
+        if (strcmp(op, "=")  == 0) return strcmp(a, b) == 0 ? 0 : 1;
+        if (strcmp(op, "!=") == 0) return strcmp(a, b) != 0 ? 0 : 1;
+
+        if (op[0] == '-' && str_is_num(a) && str_is_num(b)) {
+            long x = strtol(a, NULL, 10);
+            long y = strtol(b, NULL, 10);
+            if (strcmp(op, "-eq") == 0) return x == y ? 0 : 1;
+            if (strcmp(op, "-ne") == 0) return x != y ? 0 : 1;
+            if (strcmp(op, "-lt") == 0) return x <  y ? 0 : 1;
+            if (strcmp(op, "-le") == 0) return x <= y ? 0 : 1;
+            if (strcmp(op, "-gt") == 0) return x >  y ? 0 : 1;
+            if (strcmp(op, "-ge") == 0) return x >= y ? 0 : 1;
+        }
+
+        dprintf(STDERR_FILENO, "test: %s: unknown comparison\n", op);
+        return 2;
+    }
+
+    dprintf(STDERR_FILENO, "test: too many arguments\n");
+    return 2;
+}
 
 static bool is_builtin(const char *name)
 {
@@ -527,6 +637,14 @@ static bool is_builtin(const char *name)
 static bool run_builtin(cmd_t *c)
 {
     const char *cmd = c->argv[0];
+
+    if (strcmp(cmd, "test") == 0 || strcmp(cmd, "[") == 0) {
+        last_status = run_test(c->argv, c->argc);
+        return true;
+    }
+
+    if (strcmp(cmd, "true") == 0)  { last_status = 0; return true; }
+    if (strcmp(cmd, "false") == 0) { last_status = 1; return true; }
 
     if (strcmp(cmd, "exit") == 0) {
         shell_running = false;
@@ -572,6 +690,40 @@ static bool run_builtin(cmd_t *c)
 
     if (strcmp(cmd, "reboot") == 0 || strcmp(cmd, "poweroff") == 0) {
         printf("%s...\n", cmd);
+
+        /* ── Shutting down properly ──
+         *
+         * This used to ask the kernel to reset immediately, which makes
+         * every reboot indistinguishable from pulling the plug. ext4's
+         * journal protects the filesystem's own structure, but not the
+         * contents of files being written - and logd is writing all the
+         * time. The result was a machine with no clean shutdown path at
+         * all: the watchdog's reset, a power cut and a deliberate
+         * reboot were the same event.
+         *
+         * So: ask everything to stop, give it a moment, flush, and put
+         * the data partition into a state where nothing is in flight.
+         *
+         * SIGTERM to everything except ourselves and init. Nothing here
+         * needs a graceful shutdown of its own; what matters is that
+         * they stop writing before the sync. */
+        printf("  stopping services\n");
+        /* Ourselves first: kill(-1) reaches every process this one may
+         * signal, and that includes this shell. Without this the shell
+         * dies here and the machine never actually reboots. init is
+         * excluded by the kernel, so it survives to see us go. */
+        lp_signal_ignore(SIGTERM);
+        lp_kill(-1, SIGTERM);
+        lp_sleep_ms(400);
+
+        printf("  flushing to disk\n");
+        lp_sync();
+
+        /* Read-only, so anything still holding a file cannot write
+         * during the reset. It fails harmlessly when /data is not
+         * mounted, which is the case on a board running from RAM. */
+        lp_mount(NULL, "/data", NULL, MS_REMOUNT | MS_RDONLY, NULL);
+        lp_sync();
 
         /* Write the time down just before we go. This board has no
          * battery-backed clock, so without this the next boot starts at 1970.
@@ -1405,6 +1557,368 @@ static long edit_line(const char *prompt, int prompt_w,
     return result;
 }
 
+/* Run one ordinary line - pipelines, redirection, && || ; - which is
+ * everything the shell did before control structures existed. */
+static void run_logical_line(char *line)
+{
+    static pipeline_t pipes[MAX_PIPES];
+
+    if (line[0] == '#')
+        return;
+
+    int np = parse_line(line, pipes, MAX_PIPES);
+    if (np <= 0)
+        return;
+
+    for (int i = 0; i < np && shell_running; i++) {
+        if (pipes[i].link == LINK_AND && last_status != 0) continue;
+        if (pipes[i].link == LINK_OR  && last_status == 0) continue;
+
+        cmd_t *cmds = pipes[i].cmds;
+        int    n    = pipes[i].ncmds;
+
+        if (n == 1 && cmds[0].argc > 0 && is_builtin(cmds[0].argv[0]))
+            run_builtin_redirected(&cmds[0]);
+        else
+            run_pipeline(cmds, n, pipes[i].background);
+    }
+}
+
+/* ── Control structures ───────────────────────────────────────────────
+ *
+ *   if <command> ; then <commands> ; elif <command> ; then ... ;
+ *      else <commands> ; fi
+ *   while <command> ; do <commands> ; done
+ *   for NAME in a b c ; do <commands> ; done
+ *
+ * All three work spread over several lines as well, which is how they
+ * are written in a script.
+ *
+ * ── How this sits on top of the existing shell ──
+ * Everything below works on whole logical lines. A line is one of these
+ * keywords, or it is an ordinary command that the parser already knows
+ * how to run. Splitting on ';' first turns
+ *
+ *     if test -f x ; then echo yes ; fi
+ *
+ * into three lines, which is the same thing written out - so one piece
+ * of code handles both shapes and neither is a special case.
+ *
+ * ── Why now ──
+ * && and || have carried the boot script from the start, and they are
+ * genuinely enough for "try this, otherwise that". What they cannot do
+ * is ask a question once and act on the answer in two places, or repeat
+ * something, or walk a list. Every one of those turned up as soon as
+ * there was anything to script.
+ */
+#define MAX_BLOCK 256
+
+typedef char block_line_t[MAX_LINE];
+
+/* The first word of a line, for deciding whether it is a keyword. */
+static void first_word(const char *line, char *out, size_t size)
+{
+    while (*line == ' ' || *line == '\t') line++;
+
+    size_t n = 0;
+    while (*line && *line != ' ' && *line != '\t' && n < size - 1)
+        out[n++] = *line++;
+    out[n] = '\0';
+}
+
+static bool is_keyword(const char *w)
+{
+    static const char *kw[] = {
+        "if", "then", "elif", "else", "fi",
+        "while", "do", "done", "for", NULL
+    };
+    for (int i = 0; kw[i]; i++)
+        if (strcmp(w, kw[i]) == 0)
+            return true;
+    return false;
+}
+
+/* Does this line open a block that needs a matching fi or done? */
+static bool opens_block(const char *w)
+{
+    return strcmp(w, "if") == 0 || strcmp(w, "while") == 0 ||
+           strcmp(w, "for") == 0;
+}
+
+static bool closes_block(const char *w)
+{
+    return strcmp(w, "fi") == 0 || strcmp(w, "done") == 0;
+}
+
+/* Split a line on ';' into logical lines, but only where a keyword is
+ * involved - otherwise "a ; b" would stop being one thing the existing
+ * parser handles, and it handles it correctly already. */
+static int split_statements(const char *line, block_line_t *out, int max)
+{
+    char w[32];
+    first_word(line, w, sizeof(w));
+
+    /* No keyword anywhere: leave it exactly as typed. */
+    if (!is_keyword(w) && !strstr(line, "; then") && !strstr(line, "; do") &&
+        !strstr(line, "; fi") && !strstr(line, "; done") &&
+        !strstr(line, ";then") && !strstr(line, ";do") &&
+        !strstr(line, ";fi") && !strstr(line, ";done")) {
+        strlcpy(out[0], line, MAX_LINE);
+        return 1;
+    }
+
+    int  n = 0;
+    const char *p = line;
+
+    while (*p && n < max) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+
+        const char *semi = strchr(p, ';');
+        size_t len = semi ? (size_t)(semi - p) : strlen(p);
+        if (len >= MAX_LINE) len = MAX_LINE - 1;
+
+        memcpy(out[n], p, len);
+        out[n][len] = '\0';
+
+        /* Trim the trailing space so first_word sees the keyword. */
+        for (size_t i = len; i > 0 && (out[n][i-1] == ' ' || out[n][i-1] == '\t'); i--)
+            out[n][i-1] = '\0';
+
+        if (out[n][0]) {
+            /* "then echo yes" is the keyword and a command on one line.
+             * Split them, so that every keyword sits on a line of its
+             * own and the block finder never has to look inside one.
+             *
+             * Only then, do and else: after if, elif and while what
+             * follows is the condition, which belongs to the keyword,
+             * and after for it is the variable and the word list. */
+            char kw[32];
+            first_word(out[n], kw, sizeof(kw));
+
+            bool splittable = (strcmp(kw, "then") == 0 ||
+                               strcmp(kw, "do")   == 0 ||
+                               strcmp(kw, "else") == 0);
+
+            if (splittable && n + 1 < max) {
+                char *rest = strstr(out[n], kw) + strlen(kw);
+                while (*rest == ' ' || *rest == '\t') rest++;
+
+                if (*rest) {
+                    strlcpy(out[n + 1], rest, MAX_LINE);
+                    strlcpy(out[n], kw, MAX_LINE);
+                    n += 2;
+                } else {
+                    n++;
+                }
+            } else {
+                n++;
+            }
+        }
+
+        if (!semi) break;
+        p = semi + 1;
+    }
+
+    return n ? n : 1;
+}
+
+static void run_logical_line(char *line);
+static int  exec_block(block_line_t *lines, int n);
+
+/* Find the line index of the next keyword at this nesting level.
+ * Returns -1 when there is none. */
+static int find_at_depth(block_line_t *lines, int n, int from,
+                         const char *a, const char *b, const char *c)
+{
+    int depth = 0;
+    char w[32];
+
+    for (int i = from; i < n; i++) {
+        first_word(lines[i], w, sizeof(w));
+
+        if (depth == 0) {
+            if ((a && strcmp(w, a) == 0) ||
+                (b && strcmp(w, b) == 0) ||
+                (c && strcmp(w, c) == 0))
+                return i;
+        }
+
+        if (opens_block(w))  depth++;
+        if (closes_block(w)) depth--;
+    }
+    return -1;
+}
+
+/* if COND ; then BODY ; [elif COND ; then BODY ;]... [else BODY ;] fi
+ * Returns the index just past the fi. */
+static int exec_if(block_line_t *lines, int n, int start)
+{
+    int end = find_at_depth(lines, n, start + 1, "fi", NULL, NULL);
+    if (end < 0) {
+        dprintf(STDERR_FILENO, "sh: if without fi\n");
+        return n;
+    }
+
+    int cursor = start;
+    for (;;) {
+        /* The condition is everything between here and the next "then",
+         * minus the leading keyword on this line. */
+        int then_at = find_at_depth(lines, n, cursor + 1, "then", NULL, NULL);
+        if (then_at < 0 || then_at > end) {
+            dprintf(STDERR_FILENO, "sh: if without then\n");
+            return end + 1;
+        }
+
+        /* "if test -f x" - run what follows the keyword. */
+        char cond[MAX_LINE];
+        char w[32];
+        first_word(lines[cursor], w, sizeof(w));
+        const char *rest = strstr(lines[cursor], w) + strlen(w);
+        strlcpy(cond, rest, sizeof(cond));
+
+        if (cond[0])
+            run_logical_line(cond);
+
+        /* Any further lines before "then" are part of the condition too,
+         * and the last one decides. */
+        for (int i = cursor + 1; i < then_at; i++)
+            run_logical_line(lines[i]);
+
+        int body_end = find_at_depth(lines, n, then_at + 1,
+                                     "elif", "else", "fi");
+        if (body_end < 0)
+            body_end = end;
+
+        if (last_status == 0) {
+            exec_block(lines + then_at + 1, body_end - then_at - 1);
+            return end + 1;
+        }
+
+        first_word(lines[body_end], w, sizeof(w));
+
+        if (strcmp(w, "elif") == 0) {
+            cursor = body_end;
+            continue;
+        }
+
+        if (strcmp(w, "else") == 0) {
+            exec_block(lines + body_end + 1, end - body_end - 1);
+            return end + 1;
+        }
+
+        /* It was fi: the condition was false and there is no else. */
+        last_status = 0;
+        return end + 1;
+    }
+}
+
+/* while COND ; do BODY ; done */
+static int exec_while(block_line_t *lines, int n, int start)
+{
+    int do_at = find_at_depth(lines, n, start + 1, "do", NULL, NULL);
+    int end   = find_at_depth(lines, n, start + 1, "done", NULL, NULL);
+
+    if (do_at < 0 || end < 0 || do_at > end) {
+        dprintf(STDERR_FILENO, "sh: while without do or done\n");
+        return n;
+    }
+
+    /* A loop that cannot be interrupted is a machine that has to be
+     * power-cycled. Ctrl-C reaches the command inside the loop, and this
+     * stops the loop when that command was killed by a signal. */
+    for (int rounds = 0; shell_running; rounds++) {
+        char cond[MAX_LINE], w[32];
+        first_word(lines[start], w, sizeof(w));
+        const char *rest = strstr(lines[start], w) + strlen(w);
+        strlcpy(cond, rest, sizeof(cond));
+
+        if (cond[0])
+            run_logical_line(cond);
+        for (int i = start + 1; i < do_at; i++)
+            run_logical_line(lines[i]);
+
+        if (last_status != 0)
+            break;
+
+        exec_block(lines + do_at + 1, end - do_at - 1);
+
+        if (last_status >= 128)      /* killed by a signal */
+            break;
+        if (rounds > 1000000) {
+            dprintf(STDERR_FILENO, "sh: while: a million rounds - stopping\n");
+            break;
+        }
+    }
+
+    last_status = 0;
+    return end + 1;
+}
+
+/* for NAME in a b c ; do BODY ; done */
+static int exec_for(block_line_t *lines, int n, int start)
+{
+    int do_at = find_at_depth(lines, n, start + 1, "do", NULL, NULL);
+    int end   = find_at_depth(lines, n, start + 1, "done", NULL, NULL);
+
+    if (do_at < 0 || end < 0 || do_at > end) {
+        dprintf(STDERR_FILENO, "sh: for without do or done\n");
+        return n;
+    }
+
+    /* Parse "for NAME in w1 w2 w3" through the ordinary tokenizer, so
+     * that $VAR and * are expanded exactly as they are everywhere else. */
+    char       header[MAX_LINE];
+    strlcpy(header, lines[start], sizeof(header));
+
+    static pipeline_t hp[MAX_PIPES];
+    int hn = parse_line(header, hp, MAX_PIPES);
+    if (hn <= 0 || hp[0].cmds[0].argc < 3 ||
+        strcmp(hp[0].cmds[0].argv[2], "in") != 0) {
+        dprintf(STDERR_FILENO, "sh: for NAME in words... ; do ... ; done\n");
+        return end + 1;
+    }
+
+    cmd_t *c = &hp[0].cmds[0];
+    char   name[64];
+    strlcpy(name, c->argv[1], sizeof(name));
+
+    /* The words are copied out first: running the body re-uses the
+     * arena the tokenizer put them in. */
+    static char words[64][256];
+    int nwords = 0;
+    for (int i = 3; i < c->argc && nwords < 64; i++)
+        strlcpy(words[nwords++], c->argv[i], 256);
+
+    for (int i = 0; i < nwords && shell_running; i++) {
+        setenv(name, words[i], 1);
+        exec_block(lines + do_at + 1, end - do_at - 1);
+        if (last_status >= 128)
+            break;
+    }
+
+    return end + 1;
+}
+
+/* Run a run of logical lines, handling any control structures in them. */
+static int exec_block(block_line_t *lines, int n)
+{
+    int i = 0;
+    while (i < n && shell_running) {
+        char w[32];
+        first_word(lines[i], w, sizeof(w));
+
+        if      (strcmp(w, "if") == 0)    i = exec_if(lines, n, i);
+        else if (strcmp(w, "while") == 0) i = exec_while(lines, n, i);
+        else if (strcmp(w, "for") == 0)   i = exec_for(lines, n, i);
+        else {
+            run_logical_line(lines[i]);
+            i++;
+        }
+    }
+    return last_status;
+}
+
 /* ── Main loop ─────────────────────────────────────────────────── */
 
 static char hostname[64] = "lpzero";
@@ -1454,8 +1968,7 @@ static int build_prompt(char *out, size_t size)
 
 int main(int argc, char **argv)
 {
-    char       line[MAX_LINE];
-    pipeline_t pipes[MAX_PIPES];
+    char line[MAX_LINE];
 
     /* Given a file argument, run the commands in it in order. This is for
      * boot scripts like /etc/rc, and there is no prompt in that mode. */
@@ -1486,6 +1999,9 @@ int main(int argc, char **argv)
     /* An interactive shell is somebody sitting at a terminal: start where
      * their files are, remember what they type, and know the machine's
      * name for the prompt. A shell running /etc/rc gets none of this. */
+    static block_line_t block[MAX_BLOCK];
+    int  nblock = 0;
+
     char prompt[384];
     if (interactive) {
         /* Ctrl-C interrupts the command, never the shell. Without this
@@ -1536,26 +2052,56 @@ int main(int argc, char **argv)
         if (line[0] == '#')
             continue;
 
-        int np = parse_line(line, pipes, MAX_PIPES);
-        if (np <= 0)
-            continue;
+        /* Break the line into logical statements, so that the one-line
+         * and multi-line forms of if and while are the same thing. */
+        nblock = split_statements(line, block, MAX_BLOCK);
 
-        for (int i = 0; i < np && shell_running; i++) {
-            /* Short circuit: && only after success, || only after failure. */
-            if (pipes[i].link == LINK_AND && last_status != 0) continue;
-            if (pipes[i].link == LINK_OR  && last_status == 0) continue;
-
-            cmd_t *cmds = pipes[i].cmds;
-            int    n    = pipes[i].ncmds;
-
-            /* Builtins run inside the shell only when the pipeline has one
-             * stage. As part of a pipe they are treated like external commands
-             * in a child, so stdin/stdout hook up naturally. */
-            if (n == 1 && cmds[0].argc > 0 && is_builtin(cmds[0].argv[0]))
-                run_builtin_redirected(&cmds[0]);
-            else
-                run_pipeline(cmds, n, pipes[i].background);
+        /* An unfinished block keeps reading. Interactively that means a
+         * continuation prompt; in a script it just reads on. */
+        int depth = 0;
+        for (int i = 0; i < nblock; i++) {
+            char w[32];
+            first_word(block[i], w, sizeof(w));
+            if (opens_block(w))  depth++;
+            if (closes_block(w)) depth--;
         }
+
+        while (depth > 0 && nblock < MAX_BLOCK - 8 && shell_running) {
+            long more;
+            if (interactive)
+                more = edit_line("> ", 2, line, sizeof(line));
+            else
+                more = readline(input_fd, line, sizeof(line));
+
+            if (more < 0) {
+                dprintf(STDERR_FILENO, "sh: unexpected end - %d block%s left"
+                        " open\n", depth, depth == 1 ? "" : "s");
+                depth = 0;
+                nblock = 0;
+                break;
+            }
+            if (more == 0)
+                continue;
+            if (interactive) {
+                hist_add(line);
+                hist_save_one(line);
+            }
+            if (line[0] == '#')
+                continue;
+
+            int added = split_statements(line, block + nblock,
+                                         MAX_BLOCK - nblock);
+            for (int i = 0; i < added; i++) {
+                char w[32];
+                first_word(block[nblock + i], w, sizeof(w));
+                if (opens_block(w))  depth++;
+                if (closes_block(w)) depth--;
+            }
+            nblock += added;
+        }
+
+        if (nblock > 0)
+            exec_block(block, nblock);
     }
 
     if (input_fd != STDIN_FILENO)

@@ -46,6 +46,12 @@ static const entry_t KNOWN[] = {
     { "reboot",   "shell",   "restart the machine",         "reboot" },
     { "poweroff", "shell",   "shut the machine down",       "poweroff" },
     { "help",     "shell",   "this list",                   "help [command]" },
+    { "test",     "shell",   "ask about a file or a string","test -f <path> && ..." },
+    { "true",     "shell",   "succeed",                     "true" },
+    { "false",    "shell",   "fail",                        "false" },
+    { "if",       "shell",   "branch on a command's result", "if <cmd> ; then ... ; else ... ; fi" },
+    { "while",    "shell",   "repeat while a command works","while <cmd> ; do ... ; done" },
+    { "for",      "shell",   "repeat over a list",          "for x in a b c ; do ... ; done" },
 
     { "ls",       "files",   "list a directory",            "ls [-l] [-a] [path]" },
     { "cp",       "files",   "copy files",                  "cp [-r] [-n] [-q] <src>... <dst>" },
@@ -56,11 +62,15 @@ static const entry_t KNOWN[] = {
     { "mount",    "files",   "mount a filesystem",          "mount [-t type] <dev> <dir>" },
     { "umount",   "files",   "unmount a filesystem",        "umount <dir>" },
     { "expandfs", "files",   "grow /data to fill the card", "expandfs [disk part]" },
+    { "fsck",     "files",   "check and repair /data",      "fsck [-f] <device>..." },
+    { "tar",      "files",   "make and open archives",      "tar -c|-t|-x <archive> ..." },
     { "find",     "files",   "walk a directory tree",       "find [path] [-name pat] [-type f|d]" },
     { "du",       "files",   "how much space it takes",     "du [-s] [-b] [path]..." },
     { "chmod",    "files",   "change what may be done",     "chmod 755|+x|-w <file>..." },
     { "ln",       "files",   "another name for a file",     "ln [-s] <target> <name>" },
     { "stat",     "files",   "what a file is",              "stat <path>..." },
+    { "chattr",   "files",   "flags root has to undo first","chattr +i|+a <path>..." },
+    { "lsattr",   "files",   "show those flags",            "lsattr <path>..." },
 
     { "cat",      "text",    "print a file",                "cat [file]..." },
     { "edit",     "text",    "edit a file on screen",       "edit <file>" },
@@ -84,11 +94,14 @@ static const entry_t KNOWN[] = {
     { "usage",    "system",  "memory and disk at a glance", "usage" },
     { "clear",    "system",  "wipe the screen",             "clear" },
     { "reset",    "system",  "put the terminal back together","reset" },
+    { "run",      "system",  "run an ordinary Linux binary","run <program> [args...]" },
+    { "dropprivs","system",  "run something as not-root",   "dropprivs 1000 <program> ..." },
     { "uname",    "system",  "what this system is",         "uname [-a] [-r] [-m]" },
     { "hostname", "system",  "what this machine calls itself","hostname [name]" },
     { "uptime",   "system",  "how long it has run, and load","uptime" },
     { "whoami",   "system",  "which user this is",          "whoami" },
     { "sha256sum","system",  "the checksum of a file",      "sha256sum [-c hash] <file>..." },
+    { "integrity","system",  "has anything persistent changed","integrity [-c] [-u] [-l]" },
     { "kill",     "system",  "stop a process",              "kill [-9] <pid>..." },
     { "sleep",    "system",  "wait",                        "sleep <seconds>" },
     { "watchdog", "system",  "reboot the board if it hangs","watchdog [-t s] [-x]" },
@@ -103,7 +116,8 @@ static const entry_t KNOWN[] = {
     { "pkg",      "system",  "install and remove packages", "pkg list|add|remove|install" },
     { "splash",   "system",  "draw the boot screen",        "splash [device]" },
 
-    { "dhcp",     "network", "get an address from a router","dhcp <interface>" },
+    { "dhcp",     "network", "get an address, and keep it", "dhcp [-d] <interface>" },
+    { "ipconfig", "network", "a fixed address from a file", "ipconfig [-s] <file>" },
     { "ping",     "network", "is it there, and how far",    "ping [-c count] <host>" },
     { "ifconfig", "network", "look at or set an interface", "ifconfig [<if> [up|down|<address>]]" },
     { "route",    "network", "where packets go",            "route [add default gw <address>]" },
@@ -113,6 +127,7 @@ static const entry_t KNOWN[] = {
     { "wpa_cli",  "network", "talk to wpa_supplicant",      "wpa_cli" },
     { "dropbear", "network", "the SSH server",              "(started by init)" },
     { "dropbearkey", "network", "make an SSH host key",     "dropbearkey -t ed25519 -f <file>" },
+    { "authkey",  "network", "keep a way in over SSH",      "authkey [-l]" },
 
     { "python",   "python",  "CPython 3.12",                "python [file]" },
     { "python3",  "python",  "the same as python",          "python3 [file]" },
@@ -252,9 +267,10 @@ static void print_all(void)
     if (!page_line("  <command> -h     most of them explain themselves too")) goto done;
     if (!page_line("")) goto done;
     if (!page_line("The shell takes < > >> for redirection, | for pipes,")) goto done;
-    if (!page_line("and && || ; between commands. Tab completes, the arrow")) goto done;
-    if (!page_line("keys go back through what you have typed, and * matches")) goto done;
-    if (!page_line("file names.")) goto done;
+    if (!page_line("and && || ; between commands. if, while and for work,")) goto done;
+    if (!page_line("with test to ask about files. Tab completes, the arrow")) goto done;
+    if (!page_line("keys go back through what you have typed, * matches file")) goto done;
+    if (!page_line("names, NAME=value sets a variable and & backgrounds.")) goto done;
     if (!page_line("")) goto done;
     if (!page_line("Files under /data and /root survive a reboot.")) goto done;
     if (!page_line("Everything else is in RAM and does not.")) goto done;

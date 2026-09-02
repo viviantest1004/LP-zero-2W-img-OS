@@ -52,7 +52,9 @@ for p in "${PROGRAMS[@]}"; do
 done
 # mount 는 argv[0] 로 동작을 가른다. 같은 파일을 umount 이름으로도 둔다.
 ln -sf mount "${ROOT_DIR}/bin/umount"
-log "bin/: ${PROGRAMS[*]} umount"
+# chattr 도 argv[0] 로 갈린다. lsattr 은 같은 파일이다.
+ln -sf chattr "${ROOT_DIR}/bin/lsattr"
+log "bin/: ${PROGRAMS[*]} umount lsattr"
 
 # 커널은 initramfs 의 /init 을 PID 1 로 실행한다
 ln -sf bin/init "${ROOT_DIR}/init"
@@ -97,11 +99,44 @@ fi
 # 이 파일이 없으면 로그인이 되지 않는다.
 cat > "${ROOT_DIR}/etc/passwd" <<'PASSWD'
 root:x:0:0:root:/root:/bin/sh
+# 로그인용 계정이 아니다. dropprivs 가 권한을 낮춰 프로그램을 돌릴 때
+# 쓰는 상대이며, 여기 있는 이유는 ls -l 이 숫자 대신 이름을 찍게
+# 하기 위해서다. 셸이 nologin 인 것은 이 계정으로 들어올 수 없다는 뜻.
+#
+#   dropprivs 1000 python3 /data/app.py
+#
+# 네트워크에서 오는 것을 다루는 스크립트는 root 로 돌리지 않는 편이
+# 낫다. 그 스크립트의 실수가 곧 기기 전체를 잃는 일이 되지 않는다.
+user:x:1000:1000:unprivileged:/data/user:/bin/false
 PASSWD
 cat > "${ROOT_DIR}/etc/group" <<'GROUP'
 root:x:0:
+user:x:1000:
 GROUP
-printf 'lp-zero\n' > "${ROOT_DIR}/etc/hostname"
+printf 'lpzero\n' > "${ROOT_DIR}/etc/hostname"
+
+# ── 이미지에 공개키 굽기 ────────────────────────────────────────
+#
+#   AUTHORIZED_KEYS=~/.ssh/id_ed25519.pub ./mkrootfs.sh
+#
+# 여기 넣은 키는 커널 이미지 안에 들어가 매 부팅 램에 펼쳐진다. 어떤
+# 파일시스템에서도 닿을 수 없으므로, /data 가 랜섬웨어로 암호화되고
+# /boot 까지 지워져도 재부팅 한 번이면 다시 SSH 로 들어올 수 있다.
+# 카드를 새로 굽는 것 외에는 지울 방법이 없는 유일한 사본이다.
+#
+# 넣지 않으면 안내문만 들어가고, 부팅 때 authkey 가 "아무도 못 들어옴"
+# 이라고 경고한다.
+if [[ -n "${AUTHORIZED_KEYS:-}" ]]; then
+    [[ -f "$AUTHORIZED_KEYS" ]] \
+        || { echo "error: 공개키 파일이 없습니다: $AUTHORIZED_KEYS" >&2; exit 1; }
+    # 개인키를 실수로 넣는 사고를 막는다. 공개키는 한 줄이고 ssh- 로 시작한다.
+    if grep -q "PRIVATE KEY" "$AUTHORIZED_KEYS"; then
+        echo "error: $AUTHORIZED_KEYS 는 개인키입니다. .pub 파일을 주세요." >&2
+        exit 1
+    fi
+    cat "$AUTHORIZED_KEYS" >> "${ROOT_DIR}/etc/authorized_keys"
+    log "etc/authorized_keys: 이미지에 공개키 $(grep -c "^ssh-" "$AUTHORIZED_KEYS")개 구움"
+fi
 
 # 공개키는 ~/.ssh/authorized_keys 에 있어야 dropbear 가 읽는다.
 if [[ -f "${ROOT_DIR}/etc/authorized_keys" ]]; then

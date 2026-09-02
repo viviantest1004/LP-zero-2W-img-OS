@@ -58,6 +58,7 @@ long  lp_signal_default(int sig);
 /* bind: make an existing directory visible at a second place as well.
  * No filesystem type is given; it keeps the original's. */
 #define MS_BIND     4096
+#define MS_REMOUNT    32
 
 /* reboot magic numbers */
 #define LINUX_REBOOT_MAGIC1     0xfee1dead

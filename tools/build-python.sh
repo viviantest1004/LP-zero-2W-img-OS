@@ -366,10 +366,15 @@ if [[ "$STATIC" != "1" ]]; then
     # "import numpy" would fail on an undefined symbol.
     # -W: without it readelf elides long names to "P[...]@GLIBC" and no
     # symbol we are looking for is ever spelled out.
-    if ! "${CROSS}readelf" -W --dyn-syms "${PYDIR}/bin/python${HOST_VER}" 2>/dev/null \
-         | grep -q "PyObject_Init"; then
-        die "동적 심볼이 없습니다 - C 확장 모듈을 import 할 수 없습니다"
-    fi
+    #
+    # grep -c rather than grep -q, and the count kept in a variable: with
+    # pipefail set, grep -q closes the pipe the moment it matches,
+    # readelf dies of SIGPIPE, and the pipeline reports failure for the
+    # one case that actually succeeded.
+    SYMS=$("${CROSS}readelf" -W --dyn-syms "${PYDIR}/bin/python${HOST_VER}" \
+           2>/dev/null | grep -c "PyObject_Init" || true)
+    [[ "$SYMS" != "0" ]] \
+        || die "동적 심볼이 없습니다 - C 확장 모듈을 import 할 수 없습니다"
     echo "  동적 심볼: 있음 (C 확장 모듈 import 가능)"
 fi
 

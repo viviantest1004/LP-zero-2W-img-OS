@@ -234,6 +234,42 @@ static void start_service(service_t *svc)
     svc->pid = pid;
 }
 
+/* Safe mode: lpzero.safe on the kernel command line.
+ *
+ * The boot partition is FAT32 and cmdline.txt is a text file on it, so
+ * this is one word typed from any PC with a card reader - which is the
+ * only tool available when a machine will not come up far enough to log
+ * into. In safe mode init starts SSH and nothing else, and /etc/rc
+ * skips the user's startup script.
+ *
+ * SSH rather than nothing at all, because a safe mode you cannot reach
+ * is only a slower way of pulling the card out. */
+static bool safe_mode(void)
+{
+    static bool checked = false;
+    static bool safe    = false;
+
+    if (checked)
+        return safe;
+    checked = true;
+
+    char cmdline[1024];
+    if (proc_read("/proc/cmdline", cmdline, sizeof(cmdline)) > 0)
+        safe = (strstr(cmdline, "lpzero.safe") != NULL);
+    return safe;
+}
+
+/* In safe mode, which services still start.
+ *
+ * Only the SSH server. Not ntp - a wrong clock does not stop anyone
+ * logging in. Not logd - it writes to the data partition, which may be
+ * the thing that is wrong. Not the watchdog - if the machine is being
+ * rescued, a reset every fifteen seconds is in the way. */
+static bool wanted_in_safe_mode(const char *program)
+{
+    return strcmp(program, "dropbear") == 0;
+}
+
 static void load_services(void)
 {
     /* Big enough for the file plus the comments explaining it. When this
@@ -260,6 +296,14 @@ static void load_services(void)
         while (*p == ' ' || *p == '\t') p++;
         if (*p && *p != '#') {
             if (parse_service(p, &services[nservices])) {
+                if (safe_mode() &&
+                    !wanted_in_safe_mode(services[nservices].argv[0])) {
+                    printf("init: safe mode - not starting %s\n",
+                           services[nservices].argv[0]);
+                    if (!eol) break;
+                    p = eol + 1;
+                    continue;
+                }
                 start_service(&services[nservices]);
                 printf("init: started service %s (pid %d)\n",
                        services[nservices].argv[0],
@@ -459,6 +503,12 @@ int main(int argc, char **argv)
 
     banner();
 
+    if (is_pid1 && safe_mode()) {
+        printf("  ** SAFE MODE **  (lpzero.safe on the kernel command line)\n");
+        printf("  SSH only. /data/rc.local is skipped.\n");
+        printf("  Take the word out of cmdline.txt to boot normally.\n\n");
+    }
+
     if (is_pid1) {
         run_rc();
         load_services();
@@ -468,8 +518,28 @@ int main(int argc, char **argv)
 
     /* A VM window, or an HDMI screen, is a console nobody is reading
      * unless we put a shell there too. */
+    /* A shell on the screen with no login prompt.
+     *
+     * That is right for a board on a desk being worked on, and wrong for
+     * one in a public place: plugging in a monitor and a keyboard gives
+     * whoever did it root, immediately. There is no password to ask for -
+     * password authentication is compiled out of this system entirely -
+     * so the only choice is whether the shell is there at all.
+     *
+     * lpzero.noscreen on the kernel command line turns it off. The
+     * serial console and SSH are unaffected. cmdline.txt is on the boot
+     * partition, so this is one word typed from any PC. */
+    bool no_screen = false;
+    {
+        char cmdline[1024];
+        if (proc_read("/proc/cmdline", cmdline, sizeof(cmdline)) > 0)
+            no_screen = (strstr(cmdline, "lpzero.noscreen") != NULL);
+    }
+
     pid_t screen_pid = -1;
-    if (is_pid1 && screen_needs_its_own_shell()) {
+    if (is_pid1 && no_screen) {
+        printf("init: no shell on the screen (lpzero.noscreen)\n");
+    } else if (is_pid1 && screen_needs_its_own_shell()) {
         wait_for_splash();
         screen_pid = spawn_shell_on("/dev/tty1");
         if (screen_pid > 0)

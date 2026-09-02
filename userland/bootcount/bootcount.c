@@ -32,6 +32,27 @@
 #define LIMIT       5      /* failed boots before we stop trusting rc.local */
 #define CAP        99      /* do not let the number run away */
 
+/* Safe mode, asked for rather than arrived at.
+ *
+ * The counter above is the automatic version: five boots that did not
+ * last, and the startup script is skipped. This is the same thing on
+ * purpose - add lpzero.safe to cmdline.txt on the boot partition, which
+ * is FAT32 and editable from any PC, and the next boot comes up plain.
+ *
+ * That matters because the automatic version needs five failed boots
+ * first, and each of those takes as long as the machine takes to hang.
+ * When you already know what is wrong, waiting through five of them is
+ * not a recovery procedure. */
+#define SAFE_FLAG   "lpzero.safe"
+
+static bool safe_mode(void)
+{
+    char cmdline[1024];
+    if (proc_read("/proc/cmdline", cmdline, sizeof(cmdline)) <= 0)
+        return false;
+    return strstr(cmdline, SAFE_FLAG) != NULL;
+}
+
 static int read_count(void)
 {
     char buf[32];
@@ -68,7 +89,17 @@ int main(int argc, char **argv)
         printf("usage: bootcount [-c]\n");
         printf("  counts boots that did not last; -c clears the count\n");
         printf("  exits 1 once %d boots in a row have failed\n", LIMIT);
+        printf("  exits 1 straight away when the kernel command line\n");
+        printf("  carries %s (edit cmdline.txt on the boot partition)\n",
+               SAFE_FLAG);
         return 2;
+    }
+
+    if (safe_mode()) {
+        printf("[boot] safe mode (%s on the kernel command line)\n", SAFE_FLAG);
+        printf("[boot]    skipping /data/rc.local. Remove the word from\n");
+        printf("[boot]    cmdline.txt to boot normally again.\n");
+        return 1;
     }
 
     int count = read_count() + 1;

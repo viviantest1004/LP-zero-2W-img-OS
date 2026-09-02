@@ -32,19 +32,24 @@ int main(int argc, char **argv)
     }
 
     bool all = false, rel = false, mach = false, node = false, ver = false;
+    bool sys = false, osname = false;
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-') continue;
         for (const char *o = argv[i] + 1; *o; o++) {
             switch (*o) {
             case 'a': all = true; break;
+            case 's': sys = true; break;
             case 'r': rel = true; break;
             case 'm': mach = true; break;
             case 'n': node = true; break;
             case 'v': ver = true; break;
+            case 'o': osname = true; break;
             case 'h':
-                printf("usage: uname [-a] [-r] [-m] [-n] [-v]\n");
-                printf("  -a all   -r release   -m machine\n");
-                printf("  -n hostname   -v version\n");
+                printf("usage: uname [-asrmnvo]\n");
+                printf("  -a all          -s kernel name (the default)\n");
+                printf("  -r release      -m machine\n");
+                printf("  -n hostname     -v version\n");
+                printf("  -o operating system\n");
                 return 0;
             default:
                 dprintf(STDERR_FILENO, "uname: unknown option -%c\n", *o);
@@ -60,16 +65,23 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (!rel && !mach && !node && !ver) {
+    if (!sys && !rel && !mach && !node && !ver && !osname) {
         printf("%s\n", uts + SYSNAME);
         return 0;
     }
 
+    /* The order is the one uname(1) prints in, not the order the flags
+     * were typed. Anything reading this output - and things do; pip's
+     * vendored distro module runs "uname -rs" - expects that order. */
     bool first = true;
+    if (sys)  { printf("%s%s", first ? "" : " ", uts + SYSNAME);  first = false; }
     if (node) { printf("%s%s", first ? "" : " ", uts + NODENAME); first = false; }
     if (rel)  { printf("%s%s", first ? "" : " ", uts + RELEASE);  first = false; }
     if (ver)  { printf("%s%s", first ? "" : " ", uts + VERSION);  first = false; }
     if (mach) { printf("%s%s", first ? "" : " ", uts + MACHINE);  first = false; }
+    /* There is no field for this in the kernel's struct; it is what the
+     * userland is, and this one is not GNU. */
+    if (osname) { printf("%s%s", first ? "" : " ", "LP-zero"); first = false; }
     printf("\n");
     return 0;
 }

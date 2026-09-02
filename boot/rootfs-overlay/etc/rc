@@ -56,6 +56,30 @@ guard -d -r 32 -w 64 || echo "[rc]   guard did not start"
 # handle - instead of taking the machine down with it.
 mount -t tmpfs -o size=64M,nosuid,nodev tmpfs /tmp || echo "[rc]   /tmp is unbounded"
 
+echo "[rc] the boot partition"
+# Mounted before the data partition, and read-only.
+#
+# Read-only because FAT has no journal: a power cut while it is writable
+# can lose the whole partition, and the kernel is on it. We only ever
+# read from here, so there is nothing given up by it.
+#
+# First because e2fsck lives here. The tool that repairs the data
+# partition cannot be on the data partition, and putting it in the
+# system image would cost 1.4MB of RAM for the life of the machine, for
+# a program that usually does nothing.
+mkdir -p /boot
+mount -o ro /dev/mmcblk0p1 /boot || mount -o ro /dev/vda1 /boot || mount -o ro /dev/nvme0n1p1 /boot || mount -o ro /dev/sda1 /boot || echo "[rc]   could not read the boot partition"
+
+echo "[rc] checking the data partition"
+# Before mounting it, and before expandfs, which mounts it to resize.
+#
+# In preen mode: repair what can be repaired without asking, and do
+# nothing at all when the filesystem is already clean - which reads the
+# superblock and exits, so this costs milliseconds on a normal boot.
+# ext4 mounted errors=remount-ro notices damage and stops writing; this
+# is the part that does something about it afterwards.
+fsck /dev/mmcblk0p2 /dev/vda2 /dev/nvme0n1p2 /dev/sda2
+
 echo "[rc] storage"
 # The image is 256MB, so on a larger card the rest sits unallocated.
 # On the first boot we grow the partition and the filesystem to the end
@@ -74,19 +98,62 @@ echo "[rc] storage"
 # because the bus takes about a second to enumerate, and there is no point
 # paying that when the card is already there.
 #
+# -L LPZERODATA: only mount a partition that says it is ours. Four names
+# are tried because the disk is called something different on an SD card,
+# a USB stick, NVMe and a virtual disk - and if two of them exist at once
+# (booted from USB with a card still in the slot) the wrong one would
+# otherwise become /data, and the log and the SSH host key would be
+# written to somebody else's card.
+#
 # errors=remount-ro: if ext4 hits corruption it goes read-only there and
 # then, rather than carrying on and writing more damage over it. The
 # system stays up and reachable - the root filesystem is in RAM - so
 # there is a chance to look at it.
 #
+# Every device is named explicitly, including the first. It used to be
+# called with no arguments, which meant "the SD card" - and that is the
+# wrong disk when the board booted from USB with somebody else's card
+# still in the slot. expandfs checks the partition label before it
+# writes anything, which is the real defence, but the intent belongs in
+# this file too.
+#
 # These stay on one line each: our shell has no line continuation, and a
 # trailing backslash would be passed through as an argument.
-expandfs || expandfs /dev/vda /dev/vda2 || expandfs /dev/nvme0n1 /dev/nvme0n1p2 || expandfs -w /dev/sda /dev/sda2 || echo "[rc]   nothing to expand"
-mount -o errors=remount-ro /dev/mmcblk0p2 /data || mount -o errors=remount-ro /dev/vda2 /data || mount -o errors=remount-ro /dev/nvme0n1p2 /data || mount -o errors=remount-ro /dev/sda2 /data || echo "[rc]   no data partition - continuing in RAM"
+expandfs /dev/mmcblk0 /dev/mmcblk0p2 || expandfs /dev/vda /dev/vda2 || expandfs /dev/nvme0n1 /dev/nvme0n1p2 || expandfs -w /dev/sda /dev/sda2 || echo "[rc]   nothing to expand"
+mount -L LPZERODATA -o errors=remount-ro /dev/mmcblk0p2 /data || mount -L LPZERODATA -o errors=remount-ro /dev/vda2 /data || mount -L LPZERODATA -o errors=remount-ro /dev/nvme0n1p2 /data || mount -L LPZERODATA -o errors=remount-ro /dev/sda2 /data || echo "[rc]   no data partition - continuing in RAM"
 
 # Somewhere for logd to write. It starts from /etc/services right
 # after this script, so the directory has to exist by now.
 mkdir -p /data/log
+
+echo "[rc] other people's programs"
+# Making an ordinary Linux binary run here.
+#
+# Everything in this system is statically linked against the libc in
+# userland/libc, so there is no dynamic loader anywhere in the image and
+# a program built for any other Linux fails at execve - the kernel looks
+# for its interpreter and does not find one. That covers ripgrep, node,
+# git, and also every piece of prebuilt malware, which is not an
+# accident worth giving up lightly.
+#
+# But CPython is dynamically linked now, so glibc is already on /data
+# for it. These symlinks point the standard paths at that copy, and with
+# them a normal aarch64 binary runs.
+#
+# The trade is deliberate and worth stating: dropping a binary on this
+# machine used to be useless to an attacker, and now it is not. What is
+# kept is that none of this exists in the system image - it appears only
+# when /data carries glibc, and it goes away with the partition. Delete
+# /data/glibc and the door closes again.
+if test -d /data/glibc
+then
+    mkdir -p /lib
+    for lib in ld-linux-aarch64.so.1 libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libresolv.so.2 libutil.so.1 libgcc_s.so.1 libstdc++.so.6
+    do
+        ln -s /data/glibc/$lib /lib/$lib
+    done
+    echo "[rc]   glibc is on /data - ordinary Linux binaries will run"
+fi
 
 echo "[rc] restoring the clock"
 # The Pi Zero 2 W has no battery-backed clock. At power-on the kernel
@@ -101,35 +168,80 @@ echo "[rc] home directory on storage"
 # /root is in RAM and would vanish on reboot. Bind a directory from the
 # data partition over it so whatever is saved in home stays.
 mkdir -p /data/root/.ssh && mount -o bind /data/root /root || echo "[rc]   home is in RAM (lost on reboot)"
-# -n: do not overwrite. A key the user put there must not be wiped by the
-# empty default on every boot.
-cp -n /etc/authorized_keys /root/.ssh/authorized_keys
 
 echo "[rc] reading settings from the boot partition"
-# The boot partition is FAT32, so Windows and macOS see it too. Put a
-# file there from a PC and the next boot picks it up. It is the only way
-# to set this machine up without a Linux box, which makes it important.
-#
-#   authorized_keys       SSH public key (nothing gets in without it)
-#   wpa_supplicant.conf   WiFi router details
-#
-# -q: a missing file is normal here, so do not print an error.
-#
-# Mounted read-only: FAT has no journal, so a power cut while it is
-# writable can lose the boot partition entirely - and with it the
-# kernel. We only ever read from here, so there is nothing to give up.
-mkdir -p /boot
-mount -o ro /dev/mmcblk0p1 /boot || mount -o ro /dev/vda1 /boot || mount -o ro /dev/nvme0n1p1 /boot || mount -o ro /dev/sda1 /boot || echo "[rc]   could not read the boot partition"
-cp -q /boot/authorized_keys /root/.ssh/authorized_keys && echo "[rc]   took the SSH public key"
 cp -q /boot/wpa_supplicant.conf /data/wpa_supplicant.conf && echo "[rc]   took the WiFi settings"
 
+echo "[rc] SSH keys"
+# Losing the data partition must not lock the owner out of their own
+# machine. /root is a bind mount from /data, so the authorized key is on
+# the partition most likely to be destroyed - by ransomware, by a mistake,
+# or by a card wearing out. The machine would then boot perfectly and be
+# unreachable forever, with password authentication compiled out.
+#
+# So the key is kept in three places, each harder to destroy than the
+# last, and merged back here on every boot:
+#
+#   /data     the live one. Assume it is gone.
+#   /boot     FAT32, mounted read-only, writable from any PC.
+#   the image inside the kernel, unpacked into RAM at boot. Nothing on
+#             any filesystem can reach it; only writing a new card can.
+#
+# authkey exits non-zero when the result is empty, which is the one state
+# worth shouting about.
+authkey || echo "[rc]   ** nobody can log in over SSH. See the message above."
+
 echo "[rc] WiFi configuration"
-# The copy on the data partition wins, so the router details can be
-# changed without burning the card again.
-cat /data/wpa_supplicant.conf > /etc/wpa.conf || cat /etc/wpa_supplicant.conf > /etc/wpa.conf
+# The boot partition wins, then the data partition, then the image.
+#
+# This order matters for getting back in. The data partition is the one
+# that gets destroyed, and a file full of encrypted nonsense is still a
+# file: read first, it would win over a perfectly good copy on /boot, the
+# WiFi would not associate, and a machine reached only over SSH would be
+# gone for good. /boot is writable only from a PC with the card in hand,
+# which is as close to "the owner asked for this" as this board gets.
+#
+# The copy on /data is still read when /boot has none, so the settings
+# can be changed from the machine itself.
+cat /boot/wpa_supplicant.conf > /etc/wpa.conf || cat /data/wpa_supplicant.conf > /etc/wpa.conf || cat /etc/wpa_supplicant.conf > /etc/wpa.conf
+
+echo "[rc] checking the SSH host key"
+# dropbear makes a new host key when the file is missing (-R), but a file
+# that exists and is damaged stops it starting at all - and then there is
+# no way in. dropbearkey -y reads the key and fails if it cannot; if it
+# fails, the file goes, and dropbear makes a fresh one.
+#
+# Clients will warn that the host key changed. That is the correct
+# warning to get: it did.
+dropbearkey -y -f /data/dropbear_ed25519_host_key > /dev/null || rm -f /data/dropbear_ed25519_host_key
 
 echo "[rc] starting WiFi"
 wpa_supplicant -B -i wlan0 -c /etc/wpa.conf || echo "[rc]   carrying on without WiFi"
+
+echo "[rc] name resolution"
+# A fallback nameserver, written before DHCP runs and overwritten by it
+# when it succeeds.
+#
+# Without this, a failed DHCP leaves no /etc/resolv.conf at all, and
+# every name lookup on the machine fails - ntp cannot find a time
+# server, and a python script cannot reach anything by name. The board
+# comes up looking healthy and can talk to nobody.
+#
+# These two are the addresses most likely to be reachable from an
+# arbitrary network. If the router does answer DHCP, its own nameserver
+# replaces them a moment later.
+echo "nameserver 1.1.1.1" > /etc/resolv.conf
+echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+
+echo "[rc] network address"
+# A static address, if one was written on the boot partition. Same idea
+# as the WiFi settings and the SSH key: a file any PC can edit, so the
+# machine can be set up without a Linux box.
+#
+# This matters more than it looks. A DHCP lease has to be renewed, and
+# on a network with no DHCP server at all there is nothing to renew -
+# a fixed address is then the only way the board is reachable.
+ipconfig /boot/network.conf || echo "[rc]   no static address configured"
 
 echo "[rc] requesting an address"
 #   wlan0  WiFi
@@ -153,5 +265,17 @@ ntp || echo "[rc]   no time from the network - HTTPS certificate checks may fail
 # skipped - the machine comes up plain and reachable.
 # (sh -q: stay quiet when the file is not there)
 bootcount && sh -q /data/rc.local
+
+echo "[rc] checking what survived the reboot"
+# The root filesystem is inside the kernel image and unpacked into RAM
+# at every boot, so nothing written to it lasts. That leaves the data
+# partition, and on it exactly two files decide whether something runs
+# again or somebody gets back in: /data/rc.local and the authorized
+# keys. Two files is a short enough list to hash on every boot.
+#
+# This notices; it does not prevent. Whoever changed the file could
+# change the record beside it. It is aimed at automated malware and at
+# mistakes, which is what actually happens.
+integrity || echo "[rc]   run 'integrity -u' if that change was yours"
 
 echo "[rc] done (init starts SSH from /etc/services)"

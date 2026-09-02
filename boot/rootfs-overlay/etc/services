@@ -28,6 +28,17 @@ dropbear -F -R -E -p 22 -r /data/dropbear_ed25519_host_key
 #   timestamps nonsense and breaks every HTTPS certificate check.
 #   -d  writes the time to /data/.clock every 30s and resyncs from the
 #       network hourly. /etc/rc restores that value at boot.
+# The DHCP lease has to be renewed or the router takes the address back,
+# and a board that loses its address is off the network with nothing to
+# notice: it has not crashed, so the watchdog is content, and memory and
+# temperature are fine, so guard is content. It was the one failure with
+# no automatic recovery at all - on a system whose whole purpose is
+# being left alone for months.
+#
+# With no interface named it finds the one that answers: wlan0, then a
+# USB Ethernet adapter, then the gadget port.
+dhcp -d
+
 ntp -d
 
 
