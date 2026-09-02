@@ -27,9 +27,18 @@ echo "[rc] storage"
 # The image is 256MB, so on a larger card the rest sits unallocated.
 # On the first boot we grow the partition and the filesystem to the end
 # of the card.
-# Real hardware is /dev/mmcblk0 (SD); QEMU is /dev/vda (virtio). Try both.
-expandfs || expandfs /dev/vda /dev/vda2 || echo "[rc]   nothing to expand"
-mount /dev/mmcblk0p2 /data || mount /dev/vda2 /data || echo "[rc]   no data partition - continuing in RAM"
+# The card shows up under a different name depending on where we are
+# running, and there is no way to ask "which disk did I boot from" with
+# the tools we have. So try each in turn:
+#   mmcblk0   the real board's SD card
+#   vda       VirtIO - QEMU and UTM's default
+#   nvme0n1   NVMe - the other interface UTM offers
+# Only one of them exists at a time, so the failures are silent and cheap.
+#
+# These stay on one line each: our shell has no line continuation, and a
+# trailing backslash would be passed through as an argument.
+expandfs || expandfs /dev/vda /dev/vda2 || expandfs /dev/nvme0n1 /dev/nvme0n1p2 || echo "[rc]   nothing to expand"
+mount /dev/mmcblk0p2 /data || mount /dev/vda2 /data || mount /dev/nvme0n1p2 /data || echo "[rc]   no data partition - continuing in RAM"
 
 echo "[rc] restoring the clock"
 # The Pi Zero 2 W has no battery-backed clock. At power-on the kernel
@@ -57,7 +66,8 @@ echo "[rc] reading settings from the boot partition"
 #   wpa_supplicant.conf   WiFi router details
 #
 # -q: a missing file is normal here, so do not print an error.
-mkdir -p /boot && mount /dev/mmcblk0p1 /boot || mount /dev/vda1 /boot || echo "[rc]   could not read the boot partition"
+mkdir -p /boot
+mount /dev/mmcblk0p1 /boot || mount /dev/vda1 /boot || mount /dev/nvme0n1p1 /boot || echo "[rc]   could not read the boot partition"
 cp -q /boot/authorized_keys /root/.ssh/authorized_keys && echo "[rc]   took the SSH public key"
 cp -q /boot/wpa_supplicant.conf /data/wpa_supplicant.conf && echo "[rc]   took the WiFi settings"
 
