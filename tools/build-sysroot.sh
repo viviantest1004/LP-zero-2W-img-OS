@@ -250,6 +250,34 @@ else
     log "libbz2.a $(stat -c%s "${SYSROOT}/lib/libbz2.a") bytes"
 fi
 
+# ── zlib 공유 라이브러리 ─────────────────────────────────────────
+#
+# 나머지는 전부 정적이면 되지만 libz 만은 공유본이 필요하다.
+# PyPI 의 manylinux 휠은 자기가 링크한 외부 라이브러리를 함께 넣어
+# 배포하는데, libz 는 예외적으로 시스템에 있다고 가정하는 경우가 있다.
+# numpy 가 그렇다: 휠 안의 libscipy_openblas 가 libz.so.1 을 NEEDED 로
+# 걸고 있어서, 이것이 없으면 설치는 성공하고 import 에서 죽는다.
+#
+# 이 파일은 /data/glibc 에 함께 놓인다(tools/build-python.sh). 시스템
+# 이미지에는 여전히 공유 라이브러리가 하나도 없다.
+if [[ -f "${SYSROOT}/lib/libz.so.1" ]]; then
+    log "libz.so.1 이미 있음"
+else
+    step "zlib 공유본"
+    ( cd "${WORK}/zlib"
+      make distclean > /dev/null 2>&1 || true
+      CHOST=aarch64-linux-gnu CC="${CROSS}gcc" AR="${CROSS}ar" \
+          RANLIB="${CROSS}ranlib" ./configure --prefix="${SYSROOT}" \
+          > /tmp/zlib-conf.log 2>&1 \
+          || { tail -10 /tmp/zlib-conf.log; die "zlib configure 실패"; }
+      make -j"$JOBS" > /tmp/zlib-make.log 2>&1 \
+          || { grep -iE "error" /tmp/zlib-make.log | head -10; die "zlib 빌드 실패"; }
+      make install > /tmp/zlib-inst.log 2>&1 \
+          || { tail -10 /tmp/zlib-inst.log; die "zlib 설치 실패"; } )
+    [[ -f "${SYSROOT}/lib/libz.so.1" ]] || die "libz.so.1 이 만들어지지 않았습니다"
+    log "libz.so.1 $(stat -c%s "$(readlink -f "${SYSROOT}/lib/libz.so.1")") bytes"
+fi
+
 # ── 루트 인증서 ──────────────────────────────────────────────────
 # HTTPS 를 쓰려면 서버 인증서를 검증할 루트 CA 목록이 있어야 한다.
 # 없으면 파이썬이 CERTIFICATE_VERIFY_FAILED 로 죽는다.

@@ -340,14 +340,49 @@ if [[ "$STATIC" != "1" ]]; then
     rm -rf "$GDIR"
     mkdir -p "$GDIR"
 
+    # The manylinux policy is a list of libraries a wheel is allowed to
+    # assume the system provides, instead of carrying its own copy. This
+    # is that list, minus the X11 and OpenGL half, which is of no use to
+    # a board with no display:
+    #
+    #   libnsl, libatomic, libanl   on the list, and cheap
+    #   libgomp                     OpenMP. scikit-learn and lightgbm
+    #                               reach for it
+    #   libmvec                     glibc's vectorised math, which gcc
+    #                               emits calls to at -O2 on aarch64
+    #
+    # Anything absent is skipped silently; the set differs between
+    # glibc versions, and libm/libpthread stopped being separate files
+    # in glibc 2.34 (they are inside libc.so.6 now, and the .so.6/.so.0
+    # names survive only so older binaries still resolve).
     for lib in ld-linux-aarch64.so.1 libc.so.6 libm.so.6 libdl.so.2 \
                libpthread.so.0 librt.so.1 libutil.so.1 libresolv.so.2 \
-               libgcc_s.so.1 libstdc++.so.6; do
+               libgcc_s.so.1 libstdc++.so.6 libnsl.so.1 libcrypt.so.1 \
+               libatomic.so.1 libgomp.so.1 libmvec.so.1 libanl.so.1; do
         if [[ -e "${GLIBC_SRC}/${lib}" ]]; then
             cp -L "${GLIBC_SRC}/${lib}" "${GDIR}/${lib}"
             "${CROSS}strip" --strip-unneeded "${GDIR}/${lib}" 2>/dev/null || true
         fi
     done
+
+    # zlib, which is not glibc and not on the manylinux list, and is
+    # needed anyway.
+    #
+    # numpy's wheel carries its own OpenBLAS, and that OpenBLAS has
+    # libz.so.1 in its NEEDED list. Without this file, `pip install
+    # numpy` succeeds, prints "Successfully installed", and then
+    # `import numpy` dies with a linker error four frames deep in
+    # numpy's own troubleshooting text. It is the single most installed
+    # compiled package on PyPI, so 140KB is not a hard trade.
+    for zlib in libz.so.1 libz.so.1.3.1; do
+        if [[ -e "${SYSROOT}/lib/${zlib}" ]]; then
+            cp -L "${SYSROOT}/lib/${zlib}" "${GDIR}/libz.so.1"
+            "${CROSS}strip" --strip-unneeded "${GDIR}/libz.so.1" 2>/dev/null || true
+            break
+        fi
+    done
+    [[ -e "${GDIR}/libz.so.1" ]] \
+        || echo "  경고: libz.so.1 이 없습니다. numpy import 가 실패합니다."
 
     echo "  $(ls "$GDIR" | wc -l)개 파일, $(du -sh "$GDIR" | cut -f1)"
 
