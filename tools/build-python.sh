@@ -364,7 +364,9 @@ if [[ "$STATIC" != "1" ]]; then
     # Extension modules resolve PyObject_* out of the executable, which
     # only works if it exports them. Without -export-dynamic every
     # "import numpy" would fail on an undefined symbol.
-    if ! "${CROSS}readelf" --dyn-syms "${PYDIR}/bin/python${HOST_VER}" 2>/dev/null \
+    # -W: without it readelf elides long names to "P[...]@GLIBC" and no
+    # symbol we are looking for is ever spelled out.
+    if ! "${CROSS}readelf" -W --dyn-syms "${PYDIR}/bin/python${HOST_VER}" 2>/dev/null \
          | grep -q "PyObject_Init"; then
         die "동적 심볼이 없습니다 - C 확장 모듈을 import 할 수 없습니다"
     fi

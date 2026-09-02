@@ -28,6 +28,7 @@
 #define SYS_ioctl           29
 #define SYS_mkdirat         34
 #define SYS_unlinkat        35
+#define SYS_linkat          37
 #define SYS_symlinkat       36
 #define SYS_renameat        38
 #define SYS_umount2         39

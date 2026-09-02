@@ -49,142 +49,8 @@
 #define INDEX     "/data/pkg/index"
 #define TMP_FILE  "/data/pkg/.download"
 
-/* ═══════════════════════════════════════════════════════════════════
- * SHA-256
- *
- * Written out here rather than pulled in from somewhere: it is a hundred
- * lines, it has no dependencies, and it is the one thing standing
- * between "the bytes arrived" and "the bytes are the ones we asked for".
- * ═══════════════════════════════════════════════════════════════════ */
-typedef struct {
-    u32 h[8];
-    u64 len;
-    u8  buf[64];
-    int used;
-} sha256_t;
-
-static const u32 K[64] = {
-    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,
-    0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,
-    0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,
-    0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
-    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,
-    0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,
-    0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,
-    0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
-    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,
-    0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,
-    0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
-};
-
-static u32 ror(u32 v, int n) { return (v >> n) | (v << (32 - n)); }
-
-static void sha256_block(sha256_t *s, const u8 *p)
-{
-    u32 w[64];
-    for (int i = 0; i < 16; i++)
-        w[i] = ((u32)p[i*4] << 24) | ((u32)p[i*4+1] << 16) |
-               ((u32)p[i*4+2] << 8) | (u32)p[i*4+3];
-    for (int i = 16; i < 64; i++) {
-        u32 s0 = ror(w[i-15], 7) ^ ror(w[i-15], 18) ^ (w[i-15] >> 3);
-        u32 s1 = ror(w[i-2], 17) ^ ror(w[i-2], 19) ^ (w[i-2] >> 10);
-        w[i] = w[i-16] + s0 + w[i-7] + s1;
-    }
-
-    u32 a = s->h[0], b = s->h[1], c = s->h[2], d = s->h[3];
-    u32 e = s->h[4], f = s->h[5], g = s->h[6], h = s->h[7];
-
-    for (int i = 0; i < 64; i++) {
-        u32 S1 = ror(e, 6) ^ ror(e, 11) ^ ror(e, 25);
-        u32 ch = (e & f) ^ (~e & g);
-        u32 t1 = h + S1 + ch + K[i] + w[i];
-        u32 S0 = ror(a, 2) ^ ror(a, 13) ^ ror(a, 22);
-        u32 mj = (a & b) ^ (a & c) ^ (b & c);
-        u32 t2 = S0 + mj;
-        h = g; g = f; f = e; e = d + t1;
-        d = c; c = b; b = a; a = t1 + t2;
-    }
-
-    s->h[0] += a; s->h[1] += b; s->h[2] += c; s->h[3] += d;
-    s->h[4] += e; s->h[5] += f; s->h[6] += g; s->h[7] += h;
-}
-
-static void sha256_init(sha256_t *s)
-{
-    s->h[0] = 0x6a09e667; s->h[1] = 0xbb67ae85;
-    s->h[2] = 0x3c6ef372; s->h[3] = 0xa54ff53a;
-    s->h[4] = 0x510e527f; s->h[5] = 0x9b05688c;
-    s->h[6] = 0x1f83d9ab; s->h[7] = 0x5be0cd19;
-    s->len = 0;
-    s->used = 0;
-}
-
-static void sha256_update(sha256_t *s, const u8 *p, size_t n)
-{
-    s->len += n;
-    while (n) {
-        size_t take = 64 - (size_t)s->used;
-        if (take > n) take = n;
-        memcpy(s->buf + s->used, p, take);
-        s->used += (int)take;
-        p += take;
-        n -= take;
-        if (s->used == 64) {
-            sha256_block(s, s->buf);
-            s->used = 0;
-        }
-    }
-}
-
-static void sha256_final(sha256_t *s, char *hex)
-{
-    u64 bits = s->len * 8;
-
-    u8 pad = 0x80;
-    sha256_update(s, &pad, 1);
-    u8 zero = 0;
-    while (s->used != 56)
-        sha256_update(s, &zero, 1);
-
-    u8 lenb[8];
-    for (int i = 0; i < 8; i++)
-        lenb[i] = (u8)(bits >> (56 - i * 8));
-    /* Straight into the block: update would count these bytes again. */
-    memcpy(s->buf + 56, lenb, 8);
-    sha256_block(s, s->buf);
-
-    static const char digits[] = "0123456789abcdef";
-    for (int i = 0; i < 8; i++)
-        for (int b = 0; b < 4; b++) {
-            u8 byte = (u8)(s->h[i] >> (24 - b * 8));
-            *hex++ = digits[byte >> 4];
-            *hex++ = digits[byte & 15];
-        }
-    *hex = '\0';
-}
-
-/* The hash of a file, as 64 hex characters. false if it cannot be read. */
-static bool sha256_file(const char *path, char *hex)
-{
-    long fd = lp_open(path, O_RDONLY, 0);
-    if (fd < 0)
-        return false;
-
-    sha256_t s;
-    sha256_init(&s);
-
-    static u8 buf[8192];
-    for (;;) {
-        long n = lp_read((int)fd, buf, sizeof(buf));
-        if (n <= 0)
-            break;
-        sha256_update(&s, buf, (size_t)n);
-    }
-    lp_close((int)fd);
-
-    sha256_final(&s, hex);
-    return true;
-}
+/* SHA-256 is in the libc - sha256sum wants it too, and one copy of a
+ * hash function is the right number. See lp_sha256_file in unistd.h. */
 
 /* ═══════════════════════════════════════════════════════════════════
  * Reading a tar
@@ -390,141 +256,9 @@ static long tar_extract(const char *archive, int list_fd, bool dry_run)
     return count;
 }
 
-/* ═══════════════════════════════════════════════════════════════════
- * HTTP
- *
- * GET, one connection, no redirects, no chunked encoding. A repository
- * is a directory of static files on a web server; anything fancier than
- * that is the server's choice to make and not one we have to follow.
- * ═══════════════════════════════════════════════════════════════════ */
-
-/* Split "http://host[:port]/path" apart. false if it is not one. */
-static bool url_split(const char *url, char *host, size_t hsize,
-                      int *port, char *path, size_t psize)
-{
-    static const char scheme[] = "http://";
-    if (strncmp(url, scheme, sizeof(scheme) - 1) != 0)
-        return false;
-
-    const char *p = url + sizeof(scheme) - 1;
-    size_t i = 0;
-    *port = 80;
-
-    while (*p && *p != '/' && *p != ':' && i < hsize - 1)
-        host[i++] = *p++;
-    host[i] = '\0';
-    if (i == 0)
-        return false;
-
-    if (*p == ':') {
-        p++;
-        *port = atoi(p);
-        while (*p && *p != '/') p++;
-    }
-
-    strlcpy(path, *p ? p : "/", psize);
-    return true;
-}
-
-/* Fetch a URL into a file. Returns the bytes written, or -1. */
-static long http_get(const char *url, const char *dest)
-{
-    char host[128], path[512];
-    int  port;
-
-    if (!url_split(url, host, sizeof(host), &port, path, sizeof(path))) {
-        dprintf(STDERR_FILENO,
-                "pkg: %s: only http:// URLs work here\n"
-                "     (there is no TLS in this userland - see 'pkg -h')\n",
-                url);
-        return -1;
-    }
-
-    u32 addr = net_resolve(host);
-    if (addr == 0) {
-        dprintf(STDERR_FILENO, "pkg: cannot resolve %s\n", host);
-        return -1;
-    }
-
-    long fd = lp_socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
-        return -1;
-
-    s64 tv[2] = { 20, 0 };
-    lp_setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO_NEW, tv, sizeof(tv));
-
-    sockaddr_in_t sa = { 0 };
-    sa.sin_family = AF_INET;
-    sa.sin_port   = htons((u16)port);
-    sa.sin_addr   = addr;
-
-    if (lp_connect((int)fd, &sa, sizeof(sa)) < 0) {
-        dprintf(STDERR_FILENO, "pkg: cannot connect to %s:%d\n", host, port);
-        lp_close((int)fd);
-        return -1;
-    }
-
-    char req[768];
-    int  rn = snprintf(req, sizeof(req),
-                       "GET %s HTTP/1.0\r\n"
-                       "Host: %s\r\n"
-                       "User-Agent: lpzero-pkg\r\n"
-                       "Connection: close\r\n\r\n", path, host);
-    lp_write((int)fd, req, (size_t)rn);
-
-    long out = lp_open(dest, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (out < 0) {
-        dprintf(STDERR_FILENO, "pkg: cannot write %s\n", dest);
-        lp_close((int)fd);
-        return -1;
-    }
-
-    /* Read past the headers. The blank line between them and the body may
-     * land anywhere in a read, so we look for it as we go. */
-    static char buf[8192];
-    bool  in_body = false;
-    int   match   = 0;          /* how much of \r\n\r\n we have seen */
-    long  written = 0;
-    int   status  = 0;
-    bool  have_status = false;
-
-    for (;;) {
-        long n = lp_read((int)fd, buf, sizeof(buf));
-        if (n <= 0)
-            break;
-
-        long i = 0;
-        if (!in_body) {
-            if (!have_status && n > 12) {
-                /* "HTTP/1.1 200 OK" */
-                status = atoi(buf + 9);
-                have_status = true;
-            }
-            for (; i < n; i++) {
-                char c = buf[i];
-                if ((match == 0 || match == 2) && c == '\r')      match++;
-                else if ((match == 1 || match == 3) && c == '\n') match++;
-                else                                              match = (c == '\r');
-                if (match == 4) { i++; in_body = true; break; }
-            }
-        }
-
-        if (in_body && i < n) {
-            lp_write((int)out, buf + i, (size_t)(n - i));
-            written += n - i;
-        }
-    }
-
-    lp_close((int)out);
-    lp_close((int)fd);
-
-    if (have_status && status != 200) {
-        dprintf(STDERR_FILENO, "pkg: %s: the server said %d\n", url, status);
-        lp_unlink(dest);
-        return -1;
-    }
-    return written;
-}
+/* The HTTP client lives in the libc: pkg is not the only thing that
+ * needs to fetch a file, and one copy of "read past the headers" is
+ * enough. See net_http_get in net.h. */
 
 /* ═══════════════════════════════════════════════════════════════════
  * The package database
@@ -785,7 +519,7 @@ static int cmd_update(void)
     char url[640];
     snprintf(url, sizeof(url), "%s/index", base);
 
-    long n = http_get(url, INDEX);
+    long n = net_http_get(url, INDEX);
     if (n < 0)
         return 1;
 
@@ -901,7 +635,7 @@ static int cmd_install(const char *name)
     snprintf(url, sizeof(url), "%s/%s", base, e.file);
     printf("pkg: fetching %s %s\n", e.name, e.version);
 
-    long n = http_get(url, TMP_FILE);
+    long n = net_http_get(url, TMP_FILE);
     if (n < 0)
         return 1;
 
@@ -914,7 +648,7 @@ static int cmd_install(const char *name)
     }
 
     char hex[72];
-    if (!sha256_file(TMP_FILE, hex)) {
+    if (!lp_sha256_file(TMP_FILE, hex)) {
         lp_unlink(TMP_FILE);
         return 1;
     }
@@ -1003,7 +737,7 @@ int main(int argc, char **argv)
 
     if (strcmp(cmd, "sha256") == 0 && argc > 2) {
         char hex[72];
-        if (!sha256_file(argv[2], hex)) {
+        if (!lp_sha256_file(argv[2], hex)) {
             dprintf(STDERR_FILENO, "pkg: %s: cannot read\n", argv[2]);
             return 1;
         }

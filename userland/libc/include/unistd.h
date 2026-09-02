@@ -152,6 +152,9 @@ pid_t lp_wait(int *status);
 pid_t lp_waitpid(pid_t pid, int *status, int options);
 #define WNOHANG 1        /* return at once when the child is still running */
 pid_t lp_getpid(void);
+/* There is one user on this system and it is root, so this is a
+ * formality - but a script asking "am I root" deserves an answer. */
+int   lp_getuid(void);
 long  lp_setsid(void);
 long  lp_kill(pid_t pid, int sig);
 void  lp_exit(int code) __attribute__((noreturn));
@@ -162,6 +165,11 @@ long  lp_sleep_ms(long ms);
 s64   lp_time(void);
 /* Set the system clock. Root only. */
 long  lp_settime(s64 unix_seconds);
+
+/* Milliseconds since the machine started. Unlike lp_time this never
+ * jumps: ntp setting the clock does not move it, so it is the one to
+ * measure an interval with. */
+s64   lp_monotonic_ms(void);
 
 /* Broken-down time. Unlike struct tm this holds what a person reads:
  * year is not offset from 1900 and mon starts at 1, so nothing to confuse. */
@@ -193,6 +201,10 @@ long  proc_read(const char *path, char *buf, size_t size);
  * -1 if it is not there. */
 long  proc_find_kv(const char *text, const char *key);
 long  lp_sync(void);
+
+/* SHA-256 of a file, written to `hex` as 64 characters and a NUL.
+ * false when the file cannot be read. */
+bool  lp_sha256_file(const char *path, char *hex);
 
 /* Scheduling priority ("nice"): -20 gets the CPU first, 19 last, 0 is
  * the default. Lowering it needs root. */

@@ -160,6 +160,13 @@ static void format(sink_t *s, const char *fmt, va_list ap)
             emit_uint(s, longness ? va_arg(ap, u64) : (u64)va_arg(ap, u32),
                       10, false, width, left_align, zero_pad);
             break;
+        /* Octal, which exists for exactly one reason on this system:
+         * file permissions are read and written in it, and 0755 spelled
+         * out in decimal is 493. */
+        case 'o':
+            emit_uint(s, longness ? va_arg(ap, u64) : (u64)va_arg(ap, u32),
+                      8, false, width, left_align, zero_pad);
+            break;
         case 'x':
             emit_uint(s, longness ? va_arg(ap, u64) : (u64)va_arg(ap, u32),
                       16, false, width, left_align, zero_pad);

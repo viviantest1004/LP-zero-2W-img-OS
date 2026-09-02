@@ -8,6 +8,8 @@
 #include "syscall.h"
 #include "string.h"
 #include "unistd.h"
+#include "stdio.h"
+#include "stdlib.h"
 
 long lp_socket(int family, int type, int proto)
 {
@@ -422,4 +424,143 @@ qtype:
 
     lp_close((int)fd);
     return result;
+}
+
+/* ── Fetching a file over HTTP ────────────────────────────────────────
+ *
+ * GET, one connection, no redirects, no chunked encoding, no HTTPS.
+ *
+ * That last one is the real limit and worth being plain about: there is
+ * no TLS in this userland, so this cannot talk to an https:// URL at
+ * all. What it is for is a file on a server you already trust, checked
+ * afterwards against a hash you got some other way. For anything else,
+ * python3 has a full TLS stack and is on /data.
+ *
+ * HTTP/1.0 with Connection: close, because then the end of the body is
+ * the end of the connection and there is no chunked encoding to decode. */
+
+/* Split "http://host[:port]/path" apart. false if it is not one. */
+static bool url_split(const char *url, char *host, size_t hsize,
+                      int *port, char *path, size_t psize)
+{
+    static const char scheme[] = "http://";
+    if (strncmp(url, scheme, sizeof(scheme) - 1) != 0)
+        return false;
+
+    const char *p = url + sizeof(scheme) - 1;
+    size_t i = 0;
+    *port = 80;
+
+    while (*p && *p != '/' && *p != ':' && i < hsize - 1)
+        host[i++] = *p++;
+    host[i] = '\0';
+    if (i == 0)
+        return false;
+
+    if (*p == ':') {
+        p++;
+        *port = atoi(p);
+        while (*p && *p != '/') p++;
+    }
+
+    strlcpy(path, *p ? p : "/", psize);
+    return true;
+}
+
+long net_http_get(const char *url, const char *dest)
+{
+    char host[128], path[512];
+    int  port;
+
+    if (!url_split(url, host, sizeof(host), &port, path, sizeof(path))) {
+        dprintf(STDERR_FILENO,
+                "%s: only http:// URLs work here - there is no TLS in\n"
+                "this userland. python3 has one, and is on /data.\n", url);
+        return -1;
+    }
+
+    u32 addr = net_resolve(host);
+    if (addr == 0) {
+        dprintf(STDERR_FILENO, "cannot resolve %s\n", host);
+        return -1;
+    }
+
+    long fd = lp_socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+
+    s64 tv[2] = { 20, 0 };
+    lp_setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO_NEW, tv, sizeof(tv));
+
+    sockaddr_in_t sa = { 0 };
+    sa.sin_family = AF_INET;
+    sa.sin_port   = htons((u16)port);
+    sa.sin_addr   = addr;
+
+    if (lp_connect((int)fd, &sa, sizeof(sa)) < 0) {
+        dprintf(STDERR_FILENO, "cannot connect to %s:%d\n", host, port);
+        lp_close((int)fd);
+        return -1;
+    }
+
+    char req[768];
+    int  rn = snprintf(req, sizeof(req),
+                       "GET %s HTTP/1.0\r\n"
+                       "Host: %s\r\n"
+                       "User-Agent: lpzero\r\n"
+                       "Connection: close\r\n\r\n", path, host);
+    lp_write((int)fd, req, (size_t)rn);
+
+    long out = lp_open(dest, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out < 0) {
+        dprintf(STDERR_FILENO, "cannot write %s\n", dest);
+        lp_close((int)fd);
+        return -1;
+    }
+
+    /* Read past the headers. The blank line between them and the body may
+     * land anywhere in a read, so we look for it as we go. */
+    static char buf[8192];
+    bool  in_body = false;
+    int   match   = 0;          /* how much of \r\n\r\n we have seen */
+    long  written = 0;
+    int   status  = 0;
+    bool  have_status = false;
+
+    for (;;) {
+        long n = lp_read((int)fd, buf, sizeof(buf));
+        if (n <= 0)
+            break;
+
+        long i = 0;
+        if (!in_body) {
+            if (!have_status && n > 12) {
+                /* "HTTP/1.1 200 OK" */
+                status = atoi(buf + 9);
+                have_status = true;
+            }
+            for (; i < n; i++) {
+                char c = buf[i];
+                if ((match == 0 || match == 2) && c == '\r')      match++;
+                else if ((match == 1 || match == 3) && c == '\n') match++;
+                else                                              match = (c == '\r');
+                if (match == 4) { i++; in_body = true; break; }
+            }
+        }
+
+        if (in_body && i < n) {
+            lp_write((int)out, buf + i, (size_t)(n - i));
+            written += n - i;
+        }
+    }
+
+    lp_close((int)out);
+    lp_close((int)fd);
+
+    if (have_status && status != 200) {
+        dprintf(STDERR_FILENO, "%s: the server said %d\n", url, status);
+        lp_unlink(dest);
+        return -1;
+    }
+    return written;
 }

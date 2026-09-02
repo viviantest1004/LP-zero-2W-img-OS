@@ -86,6 +86,11 @@ long net_add_default_route(const char *ifname, u32 gw_be);
  * 0 means it could not be resolved - no nameserver, or no answer. */
 u32  net_resolve(const char *host);
 
+/* ── HTTP ── */
+/* Fetch an http:// URL into a file. Returns the bytes written, or -1
+ * with a message on stderr. No HTTPS: there is no TLS here. */
+long net_http_get(const char *url, const char *dest);
+
 /* "192.168.0.1" -> u32 in network order. false on failure. */
 bool ipv4_parse(const char *s, u32 *out_be);
 /* u32 in network order -> "192.168.0.1". buf must hold 16 bytes. */

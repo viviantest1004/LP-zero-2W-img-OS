@@ -403,6 +403,20 @@ s64 lp_timegm(const lp_tm_t *tm)
 }
 
 long lp_sync(void)            { return sys_call0(SYS_sync); }
+int  lp_getuid(void)          { return (int)sys_call0(SYS_getuid); }
+
+/* CLOCK_MONOTONIC. Counts from an arbitrary point - only differences
+ * between two readings mean anything, which is exactly what timing
+ * something needs. */
+#define CLOCK_MONOTONIC 1
+
+s64 lp_monotonic_ms(void)
+{
+    s64 ts[2] = { 0, 0 };           /* { tv_sec, tv_nsec } */
+    if (sys_call2(SYS_clock_gettime, CLOCK_MONOTONIC, (long)ts) < 0)
+        return 0;
+    return ts[0] * 1000 + ts[1] / 1000000;
+}
 
 /* ── Signals ──────────────────────────────────────────────────────────
  * The kernel's struct sigaction on arm64, which has no sa_restorer:
@@ -541,4 +555,139 @@ long lp_uname(void *buf)      { return sys_call1(SYS_uname, (long)buf); }
 long lp_getrandom(void *buf, size_t n, unsigned flags)
 {
     return sys_call3(SYS_getrandom, (long)buf, (long)n, (long)flags);
+}
+
+/* ── SHA-256 ──────────────────────────────────────────────────────────
+ *
+ * A hundred lines, no dependencies, and the one thing standing between
+ * "the bytes arrived" and "the bytes are the ones that were meant to".
+ * pkg checks every download with it and sha256sum exposes it. */
+typedef struct {
+    u32 h[8];
+    u64 len;
+    u8  buf[64];
+    int used;
+} sha256_t;
+
+static const u32 K[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,
+    0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,
+    0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,
+    0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,
+    0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,
+    0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,
+    0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,
+    0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,
+    0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+};
+
+static u32 ror(u32 v, int n) { return (v >> n) | (v << (32 - n)); }
+
+static void sha256_block(sha256_t *s, const u8 *p)
+{
+    u32 w[64];
+    for (int i = 0; i < 16; i++)
+        w[i] = ((u32)p[i*4] << 24) | ((u32)p[i*4+1] << 16) |
+               ((u32)p[i*4+2] << 8) | (u32)p[i*4+3];
+    for (int i = 16; i < 64; i++) {
+        u32 s0 = ror(w[i-15], 7) ^ ror(w[i-15], 18) ^ (w[i-15] >> 3);
+        u32 s1 = ror(w[i-2], 17) ^ ror(w[i-2], 19) ^ (w[i-2] >> 10);
+        w[i] = w[i-16] + s0 + w[i-7] + s1;
+    }
+
+    u32 a = s->h[0], b = s->h[1], c = s->h[2], d = s->h[3];
+    u32 e = s->h[4], f = s->h[5], g = s->h[6], h = s->h[7];
+
+    for (int i = 0; i < 64; i++) {
+        u32 S1 = ror(e, 6) ^ ror(e, 11) ^ ror(e, 25);
+        u32 ch = (e & f) ^ (~e & g);
+        u32 t1 = h + S1 + ch + K[i] + w[i];
+        u32 S0 = ror(a, 2) ^ ror(a, 13) ^ ror(a, 22);
+        u32 mj = (a & b) ^ (a & c) ^ (b & c);
+        u32 t2 = S0 + mj;
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+    }
+
+    s->h[0] += a; s->h[1] += b; s->h[2] += c; s->h[3] += d;
+    s->h[4] += e; s->h[5] += f; s->h[6] += g; s->h[7] += h;
+}
+
+static void sha256_init(sha256_t *s)
+{
+    s->h[0] = 0x6a09e667; s->h[1] = 0xbb67ae85;
+    s->h[2] = 0x3c6ef372; s->h[3] = 0xa54ff53a;
+    s->h[4] = 0x510e527f; s->h[5] = 0x9b05688c;
+    s->h[6] = 0x1f83d9ab; s->h[7] = 0x5be0cd19;
+    s->len = 0;
+    s->used = 0;
+}
+
+static void sha256_update(sha256_t *s, const u8 *p, size_t n)
+{
+    s->len += n;
+    while (n) {
+        size_t take = 64 - (size_t)s->used;
+        if (take > n) take = n;
+        memcpy(s->buf + s->used, p, take);
+        s->used += (int)take;
+        p += take;
+        n -= take;
+        if (s->used == 64) {
+            sha256_block(s, s->buf);
+            s->used = 0;
+        }
+    }
+}
+
+static void sha256_final(sha256_t *s, char *hex)
+{
+    u64 bits = s->len * 8;
+
+    u8 pad = 0x80;
+    sha256_update(s, &pad, 1);
+    u8 zero = 0;
+    while (s->used != 56)
+        sha256_update(s, &zero, 1);
+
+    u8 lenb[8];
+    for (int i = 0; i < 8; i++)
+        lenb[i] = (u8)(bits >> (56 - i * 8));
+    /* Straight into the block: update would count these bytes again. */
+    memcpy(s->buf + 56, lenb, 8);
+    sha256_block(s, s->buf);
+
+    static const char digits[] = "0123456789abcdef";
+    for (int i = 0; i < 8; i++)
+        for (int b = 0; b < 4; b++) {
+            u8 byte = (u8)(s->h[i] >> (24 - b * 8));
+            *hex++ = digits[byte >> 4];
+            *hex++ = digits[byte & 15];
+        }
+    *hex = '\0';
+}
+
+/* The hash of a file, as 64 hex characters. false if it cannot be read. */
+bool lp_sha256_file(const char *path, char *hex)
+{
+    long fd = lp_open(path, O_RDONLY, 0);
+    if (fd < 0)
+        return false;
+
+    sha256_t s;
+    sha256_init(&s);
+
+    static u8 buf[8192];
+    for (;;) {
+        long n = lp_read((int)fd, buf, sizeof(buf));
+        if (n <= 0)
+            break;
+        sha256_update(&s, buf, (size_t)n);
+    }
+    lp_close((int)fd);
+
+    sha256_final(&s, hex);
+    return true;
 }

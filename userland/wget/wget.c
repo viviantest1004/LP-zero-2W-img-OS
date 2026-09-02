@@ -1,0 +1,55 @@
+/* wget - download a file.
+ *
+ *   wget <url> [file]
+ *
+ * http:// only. There is no TLS in this userland, so an https:// URL
+ * cannot be fetched here at all - python3 on /data has a full TLS stack
+ * and is the answer when the URL is one:
+ *
+ *   python3 -c "import urllib.request,sys; urllib.request.urlretrieve(*sys.argv[1:])" <url> <file>
+ *
+ * With no file name given, the last part of the URL path is used.
+ */
+#include "types.h"
+#include "string.h"
+#include "stdio.h"
+#include "unistd.h"
+#include "net.h"
+
+int main(int argc, char **argv)
+{
+    if (argc < 2 || strcmp(argv[1], "-h") == 0) {
+        printf("usage: wget <url> [file]\n");
+        printf("  http:// only - see 'help wget' for why, and what to\n");
+        printf("  use instead for https://\n");
+        return argc < 2 ? 2 : 0;
+    }
+
+    const char *url  = argv[1];
+    const char *dest = (argc > 2) ? argv[2] : NULL;
+
+    char name[256];
+    if (!dest) {
+        /* The last path component, or index.html when there is none. */
+        const char *slash = strrchr(url, '/');
+        if (slash && slash[1])
+            strlcpy(name, slash + 1, sizeof(name));
+        else
+            strlcpy(name, "index.html", sizeof(name));
+        dest = name;
+    }
+
+    printf("wget: %s -> %s\n", url, dest);
+
+    long n = net_http_get(url, dest);
+    if (n < 0)
+        return 1;
+
+    if (n >= 1048576)
+        printf("wget: %lld MB\n", (long long)(n / 1048576));
+    else if (n >= 1024)
+        printf("wget: %lld KB\n", (long long)(n / 1024));
+    else
+        printf("wget: %lld bytes\n", (long long)n);
+    return 0;
+}
