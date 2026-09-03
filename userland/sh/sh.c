@@ -825,6 +825,28 @@ static int run_test(char **argv, int argc)
         if (strcmp(op, "-z") == 0) return arg[0] ? 1 : 0;
         if (strcmp(op, "-n") == 0) return arg[0] ? 0 : 1;
 
+        /* Device files, which a script watching for a USB stick needs:
+         * "test -b /dev/sda1" is how you ask whether one is plugged in
+         * without mounting it first. */
+        if (strcmp(op, "-b") == 0 || strcmp(op, "-c") == 0) {
+            lp_stat_t st;
+            if (lp_stat(arg, &st, true) < 0) return 1;
+            u32 want = (op[1] == 'b') ? LP_S_IFBLK : LP_S_IFCHR;
+            return (st.mode & LP_S_IFMT) == want ? 0 : 1;
+        }
+        if (strcmp(op, "-L") == 0 || strcmp(op, "-h") == 0) {
+            lp_stat_t st;
+            if (lp_stat(arg, &st, false) < 0) return 1;
+            return (st.mode & LP_S_IFMT) == LP_S_IFLNK ? 0 : 1;
+        }
+
+        /* -r -w -x ask what this process may do, which is not the same
+         * as what the mode bits say - root may write a file with no w
+         * anywhere in it. access() answers the question that was asked. */
+        if (strcmp(op, "-r") == 0) return lp_access(arg, 4) == 0 ? 0 : 1;
+        if (strcmp(op, "-w") == 0) return lp_access(arg, 2) == 0 ? 0 : 1;
+        if (strcmp(op, "-x") == 0) return lp_access(arg, 1) == 0 ? 0 : 1;
+
         dprintf(STDERR_FILENO, "test: %s: unknown test\n", op);
         return 2;
     }

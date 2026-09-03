@@ -1,6 +1,7 @@
 /* cut - take columns out of each line.
  *
  *   cut -f 1,3 [-d :] [file]     fields, split on a delimiter (tab by default)
+ *   cut -w -f 2 [file]           fields split on runs of whitespace
  *   cut -c 1-10 [file]           characters
  *
  * Field numbers start at 1, and a range is written 2-5. Missing fields
@@ -54,6 +55,37 @@ static bool parse_list(const char *spec)
     return nranges > 0;
 }
 
+/* -w: fields are runs of whitespace, and leading whitespace does not
+ * make an empty first field.
+ *
+ * This is not in POSIX cut, and it is here because almost everything
+ * that prints a table on this machine pads it into columns - /proc,
+ * free, df, ls. Cutting those on a single space picks up the padding
+ * and hands back an empty string, which then looks like the file was
+ * wrong rather than the command. */
+static void cut_fields_ws(const char *line)
+{
+    int  field = 1;
+    bool first = true;
+    const char *p = line;
+
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+
+        const char *start = p;
+        while (*p && *p != ' ' && *p != '\t') p++;
+
+        if (wanted(field)) {
+            if (!first) printf(" ");
+            lp_write(STDOUT_FILENO, start, (size_t)(p - start));
+            first = false;
+        }
+        field++;
+    }
+    printf("\n");
+}
+
 static void cut_fields(const char *line, char delim)
 {
     int  field = 1;
@@ -96,6 +128,7 @@ static void cut_chars(const char *line)
 int main(int argc, char **argv)
 {
     char delim = '\t';
+    bool by_space = false;
     bool by_char = false;
     bool have_list = false;
     const char *file = NULL;
@@ -106,13 +139,17 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
             by_char = true;
             have_list = parse_list(argv[++i]);
+        } else if (strcmp(argv[i], "-w") == 0) {
+            by_space = true;
         } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
             delim = argv[++i][0];
         } else if (strcmp(argv[i], "-h") == 0) {
-            printf("usage: cut -f <list> [-d char] [file]\n");
+            printf("usage: cut -f <list> [-d char | -w] [file]\n");
             printf("       cut -c <list> [file]\n");
             printf("  list: 1,3 or 2-5 or 3- (counting from 1)\n");
             printf("  -d  the field separator (a tab by default)\n");
+            printf("  -w  fields split on runs of whitespace, for the\n");
+            printf("      column-padded output of /proc, free, df and ls\n");
             return 0;
         } else if (!file) {
             file = argv[i];
@@ -137,7 +174,8 @@ int main(int argc, char **argv)
     char line[8192];
     while (readline(fd, line, sizeof(line)) >= 0) {
         if (by_char) cut_chars(line);
-        else         cut_fields(line, delim);
+        else if (by_space) cut_fields_ws(line);
+        else               cut_fields(line, delim);
     }
 
     if (fd != STDIN_FILENO)

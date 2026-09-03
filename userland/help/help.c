@@ -86,7 +86,7 @@ static const entry_t KNOWN[] = {
     { "wc",       "text",    "count lines, words, characters", "wc [-l] [-w] [-c] [file]..." },
     { "sort",     "text",    "put lines in order",          "sort [-r] [-n] [-u] [file]..." },
     { "uniq",     "text",    "collapse repeated lines",     "uniq [-c] [-d] [file]" },
-    { "cut",      "text",    "take columns out of lines",   "cut -f 1,3 [-d :] [file]" },
+    { "cut",      "text",    "take columns out of lines",   "cut -f 1,3 [-d :|-w] [file]" },
     { "tee",      "text",    "write to a file and pass on", "... | tee [-a] <file>..." },
 
     { "date",     "time",    "show or set the clock",       "date [-u|-e|-s TIME|-z ZONE]" },
