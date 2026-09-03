@@ -339,17 +339,23 @@ READMEEOF
 ────────────────────────────────────────────────────────────
 UEFIEOF
     fi
-    # e2fsck, for repairing the data partition from the machine itself.
-    # It goes here rather than into the system image because the image is
-    # unpacked into RAM and stays there: 1.4MB of memory for the life of
-    # the board, for a program that does nothing on a healthy boot. Here
-    # it costs none, and this partition is mounted read-only, so the tool
-    # cannot be damaged by the failure it exists to repair.
-    E2FSCK="${REPO_ROOT}/userland/prebuilt/e2fsck"
-    if [[ -f "$E2FSCK" ]]; then
-        mcopy -i "$PART_IMG" "$E2FSCK" ::e2fsck
-        log "복사: e2fsck                              ($(stat -c%s "$E2FSCK") bytes, /data 복구용)"
-    fi
+    # e2fsck repairs the data partition; mke2fs makes a new one on a disk
+    # you attach yourself ("datadisk --format"). Both go here rather than
+    # into the system image, because the image is unpacked into RAM and
+    # stays there: 2.6MB of memory for the life of the board, for two
+    # programs that do nothing at all on a healthy boot. Here they cost
+    # none, and this partition is mounted read-only, so neither can be
+    # damaged by the failure it exists to repair.
+    #
+    # Both are checked against /etc/boot-tools.sha256 - which is inside
+    # the kernel image - before anything runs them as root.
+    for tool in e2fsck mke2fs mke2fs.conf; do
+        SRC="${REPO_ROOT}/userland/prebuilt/${tool}"
+        if [[ -f "$SRC" ]]; then
+            mcopy -o -i "$PART_IMG" "$SRC" "::${tool}"
+            log "복사: $(printf '%-36s' "$tool")($(stat -c%s "$SRC") bytes)"
+        fi
+    done
 
     log "복사: README.txt                          (설정 안내)"
     mcopy -i "$PART_IMG" "$README" ::README.txt

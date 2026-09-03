@@ -141,10 +141,21 @@ echo "[rc] storage"
 # writes anything, which is the real defence, but the intent belongs in
 # this file too.
 #
+# `datadisk --boot` comes first, and is the only part of this that a
+# person can change without rebuilding the card. It mounts whatever
+# /boot/data.conf names - after checking that it is still ext4 and still
+# labelled ours, and running e2fsck over it - and fails quietly when
+# there is nothing recorded, which is when everything below happens
+# exactly as it did before that command existed.
+#
+# That file is on the FAT partition on purpose. Choosing the wrong disk
+# is the kind of mistake that stops the machine booting properly, and a
+# card reader is then the only way to take it back.
+#
 # These stay on one line each: our shell has no line continuation, and a
 # trailing backslash would be passed through as an argument.
 expandfs /dev/mmcblk0 /dev/mmcblk0p2 || expandfs /dev/vda /dev/vda2 || expandfs /dev/nvme0n1 /dev/nvme0n1p2 || expandfs -w /dev/sda /dev/sda2 || echo "[rc]   nothing to expand"
-mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/mmcblk0p2 /data || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/vda2 /data || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/nvme0n1p2 /data || mount -L LPZERODATA -w -o errors=remount-ro,nosuid,nodev /dev/sda2 /data || echo "[rc]   no data partition - continuing in RAM"
+datadisk --boot || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/mmcblk0p2 /data || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/vda2 /data || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/nvme0n1p2 /data || mount -L LPZERODATA -w -o errors=remount-ro,nosuid,nodev /dev/sda2 /data || echo "[rc]   no data partition - continuing in RAM"
 
 # Somewhere for logd to write. It starts from /etc/services right
 # after this script, so the directory has to exist by now.

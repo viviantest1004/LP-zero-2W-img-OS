@@ -1,11 +1,18 @@
 /* kill - stop a process.
  *
  *   kill <pid>...          ask it to stop (TERM)
- *   kill -9 <pid>...       force it (KILL)
+ *   kill <name>...         the same, by program name - every match
+ *   kill -9 <pid|name>...  force it (KILL)
  *   kill -l                list the signals we know
  *
  * TERM asks; a program can catch it, save its work and exit. KILL
  * cannot be caught, so anything unwritten is lost. Try TERM first.
+ *
+ * A name rather than a pid is what killall and pkill are for elsewhere.
+ * Here it is the same command, because the only difference is how the
+ * process was named, and two programs for that is one too many. A name
+ * signals every process running under it and says how many that was -
+ * silence would be the wrong answer when you expected one and got four.
  *
  * top can do this interactively - this is the same thing for scripts.
  */
@@ -14,6 +21,11 @@
 #include "stdio.h"
 #include "stdlib.h"
 #include "unistd.h"
+#include "syscall.h"
+
+/* dirent, as getdents64 lays it out */
+#define DIRENT_RECLEN 16
+#define DIRENT_NAME   19
 
 typedef struct { int num; const char *name; const char *what; } sig_t;
 
@@ -37,6 +49,59 @@ static int signal_by_name(const char *s)
         if (strcmp(SIGNALS[i].name, s) == 0)
             return SIGNALS[i].num;
     return -1;
+}
+
+/* Signal every process running under this name.
+ *
+ * The name comes from /proc/<pid>/comm, which is the first fifteen
+ * characters of the program name and nothing else - no path, no
+ * arguments. That is what makes it safe to compare: a match cannot be
+ * something that merely mentions the name on its command line.
+ *
+ * Returns how many were signalled, or -1 when none matched. Our own pid
+ * and pid 1 are skipped - killing yourself halfway through the list
+ * leaves the rest of it undone, and pid 1 takes the machine with it. */
+static int kill_by_name(const char *name, int sig)
+{
+    long fd = lp_open("/proc", O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0)
+        return -1;
+
+    pid_t me = lp_getpid();
+    char  buf[4096];
+    int   hits = 0;
+
+    for (;;) {
+        long n = sys_getdents((int)fd, buf, sizeof buf);
+        if (n <= 0)
+            break;
+        for (long off = 0; off < n; ) {
+            char *rec  = buf + off;
+            u16   len  = *(u16 *)(rec + DIRENT_RECLEN);
+            char *ent  = rec + DIRENT_NAME;
+            if (len == 0)
+                break;
+            off += len;
+
+            int pid = atoi(ent);
+            if (pid <= 1 || pid == (int)me)
+                continue;
+
+            char path[64], comm[64];
+            snprintf(path, sizeof path, "/proc/%d/comm", pid);
+            if (proc_read(path, comm, sizeof comm) <= 0)
+                continue;
+            for (int j = 0; comm[j]; j++)
+                if (comm[j] == '\n') { comm[j] = '\0'; break; }
+
+            if (strcmp(comm, name) != 0)
+                continue;
+            if (lp_kill(pid, sig) >= 0)
+                hits++;
+        }
+    }
+    lp_close((int)fd);
+    return hits ? hits : -1;
 }
 
 int main(int argc, char **argv)
@@ -65,7 +130,7 @@ int main(int argc, char **argv)
 
     if (first >= argc) {
         dprintf(STDERR_FILENO,
-                "usage: kill [-signal] <pid>...\n"
+                "usage: kill [-signal] <pid|name>...\n"
                 "       kill -l          list signals\n");
         return 2;
     }
@@ -74,8 +139,16 @@ int main(int argc, char **argv)
     for (int i = first; i < argc; i++) {
         int pid = atoi(argv[i]);
         if (pid <= 0) {
-            dprintf(STDERR_FILENO, "kill: not a pid: %s\n", argv[i]);
-            rc = 1;
+            /* Not a number, so treat it as a program name. */
+            int hit = kill_by_name(argv[i], sig);
+            if (hit < 0) {
+                dprintf(STDERR_FILENO,
+                        "kill: nothing called \"%s\" is running\n", argv[i]);
+                rc = 1;
+            } else {
+                printf("kill: %s - %d process%s\n",
+                       argv[i], hit, hit == 1 ? "" : "es");
+            }
             continue;
         }
         /* Signalling pid 1 takes the machine down. reboot and poweroff

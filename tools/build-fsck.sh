@@ -15,7 +15,7 @@
 #   우리 initramfs 에는 동적 로더가 없다. 정적 바이너리는 로더가 필요
 #   없으므로 glibc 로 정적 링크해도 그대로 돈다.
 #
-# e2fsck 하나만 남기고 나머지(mke2fs, resize2fs, dumpe2fs ...)는 버린다.
+# e2fsck 와 mke2fs 만 남기고 나머지(resize2fs, dumpe2fs ...)는 버린다.
 # 파티션을 만들거나 늘리는 일은 이미 mksdcard.sh 와 expandfs 가 한다.
 #
 # 환경변수:
@@ -88,16 +88,43 @@ if ! make -j"$JOBS" > /tmp/e2fs-make.log 2>&1; then
 fi
 echo "  완료"
 
-BIN="${E2FS_SRC}/e2fsck/e2fsck"
-[[ -f "$BIN" ]] || die "e2fsck 가 만들어지지 않았습니다"
-
+# 두 개를 가져간다.
+#
+#   e2fsck   망가진 /data 를 부팅할 때 고친다
+#   mke2fs   새 디스크를 /data 로 만든다 (datadisk --format)
+#
+# 둘 다 부트 파티션(FAT)에 실린다. 시스템 이미지에 넣으면 initramfs 가
+# 램에 상주하므로 3MB 를 영구히 먹는데, 둘 다 평소에는 아무 일도 하지
+# 않는 프로그램이다. 부트 파티션에 두면 램을 쓰지 않고, 읽기 전용으로
+# 마운트되므로 자기가 고칠 파일시스템의 고장에 휩쓸리지도 않는다.
 step "결과"
 mkdir -p "$OUT"
-cp "$BIN" "${OUT}/e2fsck"
-"${CROSS}strip" "${OUT}/e2fsck"
 
-# 동적 링크로 나오면 우리 initramfs 에서 실행되지 않는다. 여기서 잡는다.
-INTERP=$("${CROSS}readelf" -l "${OUT}/e2fsck" 2>/dev/null | grep -c "interpreter" || true)
-[[ "$INTERP" == "0" ]] || die "정적이 아닙니다 - initramfs 에는 로더가 없습니다"
+for tool in e2fsck mke2fs; do
+    case "$tool" in
+        e2fsck) BIN="${E2FS_SRC}/e2fsck/e2fsck" ;;
+        mke2fs) BIN="${E2FS_SRC}/misc/mke2fs" ;;
+    esac
+    [[ -f "$BIN" ]] || die "${tool} 이 만들어지지 않았습니다"
 
-printf '  %s  (%s bytes, 정적)\n' "${OUT}/e2fsck" "$(stat -c%s "${OUT}/e2fsck")"
+    cp "$BIN" "${OUT}/${tool}"
+    "${CROSS}strip" "${OUT}/${tool}"
+
+    # 동적 링크로 나오면 우리 시스템에서 실행되지 않는다. 여기서 잡는다.
+    INTERP=$("${CROSS}readelf" -l "${OUT}/${tool}" 2>/dev/null \
+             | grep -c "interpreter" || true)
+    [[ "$INTERP" == "0" ]] \
+        || die "${tool} 이 정적이 아닙니다 - 이 시스템에는 로더가 없습니다"
+
+    printf '  %s  (%s bytes, 정적)\n' \
+        "${OUT}/${tool}" "$(stat -c%s "${OUT}/${tool}")"
+done
+
+# mke2fs 는 /etc/mke2fs.conf 를 읽는다. 없으면 컴파일 시 박힌 기본값으로
+# 돌긴 하지만, 어떤 기능을 켤지가 그 파일에 있으므로 함께 실어둔다.
+if [[ -f "${E2FS_SRC}/misc/mke2fs.conf.in" ]]; then
+    sed -e 's/@[A-Z_]*@//g' "${E2FS_SRC}/misc/mke2fs.conf.in" \
+        > "${OUT}/mke2fs.conf"
+    printf '  %s  (%s bytes)\n' \
+        "${OUT}/mke2fs.conf" "$(stat -c%s "${OUT}/mke2fs.conf")"
+fi

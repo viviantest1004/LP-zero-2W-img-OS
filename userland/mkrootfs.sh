@@ -172,25 +172,31 @@ MOTD
 
 # ── /boot 에서 실행할 바이너리의 해시 ────────────────────────────
 #
-# fsck 는 /boot/e2fsck 를 root 로 실행한다. /boot 는 FAT 파티션이고,
+# fsck 는 /boot/e2fsck 를, datadisk --format 은 /boot/mke2fs 를 root 로 실행한다. /boot 는 FAT 파티션이고,
 # FAT 파티션은 카드를 뽑아 아무 PC 에나 꽂으면 쓸 수 있다. 그러니
 # "부트 파티션에 있는 e2fsck" 는 그 자체로는 신뢰할 근거가 없다.
 #
 # 기대되는 해시를 시스템 이미지 안에 넣는다. 이 파일은 initramfs 안,
 # 즉 커널 이미지 안에 있고 부팅 때 램으로 풀린다 - 어떤 파일시스템에서도
 # 손댈 수 없다. 해시가 다르면 fsck 는 실행하지 않는다.
-E2FSCK_SRC="${HERE}/prebuilt/e2fsck"
-if [[ -f "$E2FSCK_SRC" ]]; then
-    sha256sum "$E2FSCK_SRC" | cut -d' ' -f1 > "${ROOT_DIR}/etc/e2fsck.sha256"
-    log "etc/e2fsck.sha256  $(cut -c1-16 < "${ROOT_DIR}/etc/e2fsck.sha256")..."
-else
-    # 없으면 파일도 만들지 않는다. fsck 는 기대 해시가 없으면
-    # 실행을 거부하는 쪽을 택한다 - 자동 복구를 잃을 뿐이다.
-    log "경고: prebuilt/e2fsck 가 없습니다 - 자동 파일시스템 복구가 꺼집니다"
-fi
+# 형식은 sha256sum 이 쓰는 것 그대로: "<해시>  <이름>".
+: > "${ROOT_DIR}/etc/boot-tools.sha256"
+for tool in e2fsck mke2fs; do
+    src="${HERE}/prebuilt/${tool}"
+    if [[ -f "$src" ]]; then
+        printf '%s  %s\n' \
+            "$(sha256sum "$src" | cut -d' ' -f1)" "$tool" \
+            >> "${ROOT_DIR}/etc/boot-tools.sha256"
+        log "etc/boot-tools.sha256  ${tool} $(sha256sum "$src" | cut -c1-16)..."
+    else
+        # 없으면 줄도 쓰지 않는다. 기대 해시가 없으면 실행을 거부하는
+        # 쪽을 택한다 - 자동 복구나 --format 을 잃을 뿐이다.
+        log "경고: prebuilt/${tool} 이 없습니다"
+    fi
+done
 
 echo ""
-log "etc/: rc, wpa_supplicant.conf, authorized_keys, passwd, group, motd, e2fsck.sha256"
+log "etc/: rc, wpa_supplicant.conf, authorized_keys, passwd, group, motd, boot-tools.sha256"
 
 # ── 장치 노드 ────────────────────────────────────────────────────
 # 커널은 init 실행 전 /dev/console 을 열어 fd 0,1,2 로 준다.

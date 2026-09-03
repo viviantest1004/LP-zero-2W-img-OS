@@ -40,12 +40,13 @@
  * partition became /boot - and then this ran their e2fsck as root.
  * mount -L closed that, and this is the second lock on the same door.
  *
- * The expected hash is in /etc/e2fsck.sha256, which is inside the
- * initramfs - part of the kernel image, unpacked into RAM at boot, and
- * reachable from no filesystem at all. If the hash does not match, this
- * does not run it. The cost of being wrong is losing automatic repair,
- * which the code already handles; the cost of the other choice is
- * running somebody else's program as root.
+ * boot_tool() in the libc does that check - the expected hash is in
+ * /etc/boot-tools.sha256, which is inside the initramfs: part of the
+ * kernel image, unpacked into RAM at boot, and reachable from no
+ * filesystem at all. If it does not match, this does not run it. The
+ * cost of being wrong that way is losing automatic repair, which the
+ * code already handles; the cost of the other choice is running
+ * somebody else's program as root.
  *
  * ── Preen mode ──
  * -p: fix what can be fixed without asking, and do nothing at all when
@@ -58,10 +59,7 @@
 #include "string.h"
 #include "stdio.h"
 #include "unistd.h"
-
-#define E2FSCK "/boot/e2fsck"
-#define E2FSCK_HASH "/etc/e2fsck.sha256"
-#define OUR_LABEL   "LPZERODATA"
+#include "disk.h"
 
 /* ── Checking that the partition is ours ──
  *
@@ -80,92 +78,24 @@
  * The label is in the ext4 superblock, 1024 bytes into the partition
  * and 120 bytes into that, NUL padded to 16. An unlabelled filesystem
  * is accepted, as elsewhere, so that older cards still work. */
-#define EXT_SB_OFFSET  1024
-#define EXT_MAGIC_OFF    56
-#define EXT_LABEL_OFF   120
-#define EXT_LABEL_LEN    16
-#define EXT_MAGIC    0xEF53
+#define OUR_LABEL "LPZERODATA"
+
+/* Which e2fsck we ended up running. boot_tool fills this in. */
+static char E2FSCK[64] = "/boot/e2fsck";
 
 /* 1 = ours, 0 = somebody else's, 2 = ext4 with no label at all. */
 static int check_label(const char *dev)
 {
-    long fd = lp_open(dev, O_RDONLY, 0);
-    if (fd < 0)
+    char fs[8], label[24];
+    if (!disk_identify(dev, fs, sizeof fs, label, sizeof label))
         return 0;
-
-    u8 sb[512];
-    memset(sb, 0, sizeof(sb));
-    if (lp_lseek((int)fd, EXT_SB_OFFSET, 0) < 0) {
-        lp_close((int)fd);
-        return 0;
-    }
-    long n = lp_read((int)fd, sb, sizeof(sb));
-    lp_close((int)fd);
-    if (n < (long)sizeof(sb))
-        return 0;
-
-    u16 magic = (u16)(sb[EXT_MAGIC_OFF] | (sb[EXT_MAGIC_OFF + 1] << 8));
-    if (magic != EXT_MAGIC)
+    if (strcmp(fs, "ext4") != 0)
         return 0;                      /* not ext4: not ours to repair */
-
-    char label[EXT_LABEL_LEN + 1];
-    memcpy(label, sb + EXT_LABEL_OFF, EXT_LABEL_LEN);
-    label[EXT_LABEL_LEN] = '\0';
-
-    if (label[0] == '\0')
+    if (!label[0])
         return 2;
     return strcmp(label, OUR_LABEL) == 0 ? 1 : 0;
 }
 
-/* true when /boot/e2fsck is the one this image was built with. */
-static bool e2fsck_is_ours(void)
-{
-    char want[80];
-    long fd = lp_open(E2FSCK_HASH, O_RDONLY, 0);
-    if (fd < 0) {
-        dprintf(STDERR_FILENO,
-                "fsck: this image does not say what %s should be, so\n"
-                "fsck:   there is no way to tell it from somebody else's.\n"
-                "fsck:   Not running it. (No %s in the system image.)\n",
-                E2FSCK, E2FSCK_HASH);
-        return false;
-    }
-    long n = lp_read((int)fd, want, sizeof(want) - 1);
-    lp_close((int)fd);
-    if (n <= 0)
-        return false;
-    want[n] = '\0';
-    for (int i = 0; want[i]; i++)
-        if (want[i] == '\n' || want[i] == '\r' || want[i] == ' ')
-            { want[i] = '\0'; break; }
-
-    char have[72];
-    if (!lp_sha256_file(E2FSCK, have)) {
-        dprintf(STDERR_FILENO, "fsck: cannot read %s\n", E2FSCK);
-        return false;
-    }
-
-    if (strcmp(want, have) != 0) {
-        dprintf(STDERR_FILENO,
-                "fsck: ** %s is not the one this image was built with.\n"
-                "fsck:    Not running it. It would run as root, and the\n"
-                "fsck:    boot partition is writable from any PC.\n"
-                "fsck:    expected %s\n"
-                "fsck:    found    %s\n",
-                E2FSCK, want, have);
-        return false;
-    }
-    return true;
-}
-
-/* e2fsck's exit codes are a bitmask:
- *   0  clean
- *   1  errors were corrected
- *   2  corrected, and the system should be rebooted
- *   4  errors are left uncorrected
- *   8  an operational error
- *  16  a usage error
- * Anything with 4 set means the filesystem is still broken. */
 #define FSCK_CORRECTED   1
 #define FSCK_REBOOT      2
 #define FSCK_UNCORRECTED 4
@@ -221,15 +151,12 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    if (!lp_exists(E2FSCK)) {
-        /* Not an error worth stopping the boot for: an image built
-         * without it still works, it just cannot repair itself. */
-        printf("fsck: %s is not there - skipping the check\n", E2FSCK);
+    /* boot_tool checks that /boot/e2fsck is the one this image was
+     * built with before we agree to run it as root. It prints why when
+     * it refuses; a boot that cannot repair the filesystem is not a
+     * boot worth stopping. */
+    if (!boot_tool("e2fsck", E2FSCK, sizeof E2FSCK))
         return 0;
-    }
-
-    if (!e2fsck_is_ours())
-        return 0;                      /* it said why. Carry on booting. */
 
     for (int i = first; i < argc; i++) {
         if (!lp_exists(argv[i]))
