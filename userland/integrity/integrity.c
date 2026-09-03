@@ -13,16 +13,22 @@
  *
  * Here the root filesystem is inside the kernel image and unpacked into
  * RAM at every boot, so nothing written to it survives. That leaves the
- * data partition, and on it exactly two files decide whether something
+ * data partition, and on it a handful of files decide whether something
  * runs again or someone gets back in:
  *
  *   /data/rc.local                  runs as root at every boot
  *   /root/.ssh/authorized_keys      who may log in
+ *   /data/users, /data/groups       who exists, and with which uid
  *
- * Two files. That is a list short enough to hash on every boot and
- * compare, which turns "we would never know" into "it says so at boot
- * and in sysinfo". Three directories are watched by their listing as
- * well, because a new file appearing in them matters too.
+ * A short list, short enough to hash on every boot and compare, which
+ * turns "we would never know" into "it says so at boot and in sysinfo".
+ * Three directories are watched by their listing as well, because a new
+ * file appearing in them matters too.
+ *
+ * The list is the whole value of this program: a persistence path that
+ * is not on it is a persistence path nobody is looking at. Anything new
+ * that /etc/rc reads off /data at boot belongs here on the same commit
+ * that creates it.
  *
  * This detects; it does not prevent. Whoever changed the file could
  * change the record beside it - so this is aimed at the ordinary case
@@ -54,6 +60,10 @@ static const watch_t WATCHED[] = {
       "runs as root at every boot" },
     { "/root/.ssh/authorized_keys", WATCH_FILE,
       "decides who can log in" },
+    { "/data/users", WATCH_FILE,
+      "appended to /etc/passwd at boot - a uid 0 line here is root" },
+    { "/data/groups", WATCH_FILE,
+      "appended to /etc/group at boot - membership of any group" },
     { "/data/bin", WATCH_DIR,
       "on PATH - anything here can be run by name" },
     { "/data/pkg/db", WATCH_DIR,
@@ -63,7 +73,7 @@ static const watch_t WATCHED[] = {
     { NULL, WATCH_FILE, NULL }
 };
 
-#define MAX_WATCH 8
+#define MAX_WATCH 12
 static char now_hash[MAX_WATCH][72];
 static char was_hash[MAX_WATCH][72];
 
@@ -199,11 +209,19 @@ int main(int argc, char **argv)
 
     if (list) {
         printf("watched:\n");
-        for (int i = 0; WATCHED[i].path; i++)
-            printf("  %-46s %s\n     %.16s...  %s\n",
+        for (int i = 0; WATCHED[i].path; i++) {
+            /* Sixteen characters of the hash is plenty to eyeball. Our
+             * printf has no %.Ns precision, so cut it here. */
+            char shown[20];
+            strlcpy(shown, now_hash[i], sizeof shown);
+
+            printf("  %-46s %s\n     %s%s  %s\n",
                    WATCHED[i].path,
                    strcmp(now_hash[i], "-") == 0 ? "(not there)" : "",
-                   now_hash[i], WATCHED[i].why);
+                   shown,
+                   strlen(now_hash[i]) > strlen(shown) ? "..." : "",
+                   WATCHED[i].why);
+        }
         return 0;
     }
 

@@ -186,8 +186,13 @@ echo "[rc] users"
 #
 # Delete /data/users and the machine is back to the users it was built
 # with, which is the way out if one of them stops something working.
-cat /data/users >> /etc/passwd || echo "[rc]   no extra users"
-cat /data/groups >> /etc/group
+#
+# This was `cat /data/users >> /etc/passwd` and is not any more. That
+# copies whatever the file holds, and a line with uid 0 in it is root
+# under another name, arriving at every boot off a partition that any
+# card reader can write. useradd refuses to create such a line; the
+# merge has to refuse to read one back, or the refusal means nothing.
+useradd --merge || echo "[rc]   some users were refused - see above"
 
 echo "[rc] other people's programs"
 # Making an ordinary Linux binary run here.

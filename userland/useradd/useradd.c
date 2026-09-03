@@ -26,6 +26,17 @@
  *
  * su from root needs no password and su from anyone else is refused by
  * the kernel, which is the real enforcement either way.
+ *
+ * -- Merging the file back in --
+ * /etc/rc used to do that with `cat /data/users >> /etc/passwd`, which
+ * copies whatever is in the file, including a line with uid 0 in it.
+ * That line is root under another name, arriving at every boot, off a
+ * filesystem a card reader can write.
+ *
+ * useradd refusing to write such a line is worth nothing if the thing
+ * that reads the file back does not, so `useradd --merge` is what rc
+ * calls now: the same rules on the way in as on the way out. Anything
+ * it refuses it says out loud, at boot, where it will be seen.
  */
 #include "types.h"
 #include "string.h"
@@ -150,11 +161,171 @@ static int remove_user_from(const char *path, const char *name)
     return 0;
 }
 
+/* Split a passwd/group line in place. Returns the field count. */
+static int split_fields(char *line, char **f, int max)
+{
+    int n = 0;
+    char *p = line;
+    while (n < max) {
+        f[n++] = p;
+        char *c = strchr(p, ':');
+        if (!c)
+            break;
+        *c = '\0';
+        p = c + 1;
+    }
+    return n;
+}
+
+static bool all_digits(const char *s)
+{
+    if (!*s)
+        return false;
+    for (const char *p = s; *p; p++)
+        if (*p < '0' || *p > '9')
+            return false;
+    return true;
+}
+
+/* Is this exact line already in `path`? Running the merge twice in one
+ * boot must not report the second run as tampering - the lines it finds
+ * are the ones it put there itself. A line with the same name but
+ * different contents is a different matter and is refused below. */
+static bool line_present(const char *path, const char *want)
+{
+    long fd = lp_open(path, O_RDONLY, 0);
+    if (fd < 0)
+        return false;
+    bool found = false;
+    char line[256];
+    while (readline((int)fd, line, sizeof line) >= 0) {
+        if (strcmp(line, want) == 0) {
+            found = true;
+            break;
+        }
+    }
+    lp_close((int)fd);
+    return found;
+}
+
+static int refused;
+
+static void refuse(const char *path, const char *name, const char *why)
+{
+    dprintf(STDERR_FILENO, "useradd: refusing a line in %s", path);
+    if (name && *name)
+        dprintf(STDERR_FILENO, " (\"%s\")", name);
+    dprintf(STDERR_FILENO, ": %s\n", why);
+    refused++;
+}
+
+/* Copy the lines of `src` that pass into `dst`, saying why about the
+ * ones that do not. `users` picks which set of rules to apply. */
+static void merge_file(const char *src, const char *dst, bool users)
+{
+    long in = lp_open(src, O_RDONLY, 0);
+    if (in < 0)
+        return;                     /* nothing added on this machine */
+
+    long out = lp_open(dst, O_WRONLY | O_APPEND, 0);
+    if (out < 0) {
+        dprintf(STDERR_FILENO, "useradd: cannot write %s (%ld)\n", dst, -out);
+        lp_close((int)in);
+        refused++;
+        return;
+    }
+
+    int taken = 0;
+    char line[256];
+    while (readline((int)in, line, sizeof line) >= 0) {
+        if (!line[0] || line[0] == '#')
+            continue;
+
+        char copy[256];
+        strlcpy(copy, line, sizeof copy);
+
+        char *f[8];
+        int n = split_fields(copy, f, 8);
+        if (n < (users ? 7 : 4)) {
+            refuse(src, NULL, "not a well formed line");
+            continue;
+        }
+        if (!name_is_sane(f[0])) {
+            refuse(src, f[0], "not a usable name");
+            continue;
+        }
+
+        /* Field 3 either way: the uid on a passwd line, the gid on a
+         * group line - the number that decides what the name can do. */
+        const char *idf = f[2];
+        if (!all_digits(idf)) {
+            refuse(src, f[0], "id is not a number");
+            continue;
+        }
+        if (strcmp(idf, "0") == 0) {
+            refuse(src, f[0], users
+                   ? "uid 0 - that is root under another name"
+                   : "gid 0 - that is the root group under another name");
+            continue;
+        }
+        if (users && (!all_digits(f[3]) || strcmp(f[3], "0") == 0)) {
+            refuse(src, f[0], "gid 0 or not a number");
+            continue;
+        }
+
+        if (line_present(dst, line))
+            continue;                   /* already merged this boot */
+
+        if (users) {
+            lp_user_t u;
+            if (lp_user_by_name(f[0], &u)) {
+                refuse(src, f[0], "there is already a user with that name");
+                continue;
+            }
+        } else {
+            gid_t g;
+            if (lp_group_by_name(f[0], &g)) {
+                refuse(src, f[0], "there is already a group with that name");
+                continue;
+            }
+        }
+
+        dprintf((int)out, "%s\n", line);
+        taken++;
+    }
+
+    lp_close((int)in);
+    lp_close((int)out);
+
+    if (taken)
+        printf("useradd: merged %d from %s\n", taken, src);
+}
+
+/* What /etc/rc runs at every boot. */
+static int merge_all(void)
+{
+    refused = 0;
+    merge_file(EXTRA_USERS, "/etc/passwd", true);
+    merge_file(EXTRA_GROUP, "/etc/group", false);
+    if (refused) {
+        dprintf(STDERR_FILENO,
+                "useradd: %d line(s) were not merged. Those users do not\n"
+                "useradd:   exist on this boot. If you did not put them\n"
+                "useradd:   there, something else did - the data partition\n"
+                "useradd:   is the only thing here that survives a reboot,\n"
+                "useradd:   and 'integrity' watches these two files.\n",
+                refused);
+        return 1;
+    }
+    return 0;
+}
+
 static void usage(const char *base)
 {
     printf("%s - make a user\n\n", base);
     printf("  useradd [-u uid] [-g gid] [-d home] [-s shell] <name>\n");
     printf("  useradd -l                what users there are\n");
+    printf("  useradd --merge           what /etc/rc runs at boot\n");
     printf("  userdel <name>\n\n");
     printf("The user is written to %s, which /etc/rc merges into\n", EXTRA_USERS);
     printf("/etc/passwd at every boot - /etc is in RAM and is rebuilt from\n");
@@ -184,6 +355,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) home  = argv[++i];
         else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) shell = argv[++i];
         else if (strcmp(argv[i], "-l") == 0)                 return list_users();
+        else if (strcmp(argv[i], "--merge") == 0)            return merge_all();
         else if (strcmp(argv[i], "-h") == 0)               { usage(base); return 0; }
         else name = argv[i];
     }
