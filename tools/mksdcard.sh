@@ -163,6 +163,9 @@ if [[ "$MODE" == "linux" ]]; then
     log "복사: firewall.conf                       (방화벽 정책)"
     mcopy -i "$PART_IMG" "${REPO_ROOT}/boot/rootfs-overlay/etc/firewall.conf" ::
 
+    log "복사: beacon.conf                         (상태 보고 주소)"
+    mcopy -i "$PART_IMG" "${REPO_ROOT}/boot/rootfs-overlay/etc/beacon.conf" ::
+
     # ── UEFI 로도 부팅되게 ──────────────────────────────────────
     # 같은 카드 하나로 셋 다 부팅시키기 위한 장치다.
     #
@@ -234,6 +237,12 @@ have to burn the card again.
                         is on by default and always keeps SSH open;
                         this file is where you open anything else, or
                         turn the whole thing off.
+
+  beacon.conf           Where the board reports how it is doing. Put a
+                        URL here and it says so every five minutes - if
+                        the reports stop, that is your alarm. Without a
+                        URL it still keeps the same numbers locally, in
+                        /data/log/status.json.
 
   config.txt            GPU boot settings, screen resolution and so on.
   cmdline.txt           The kernel command line.

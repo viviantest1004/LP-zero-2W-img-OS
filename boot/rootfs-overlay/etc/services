@@ -59,3 +59,17 @@ logd
 #   walk over and pull the power.
 #   (No watchdog hardware in a VM - it exits with a clear message there.)
 watchdog -t 15
+
+# The heartbeat.
+#   This board is meant to sit somewhere for months with nobody near it,
+#   and there was no way to check whether it was doing that. Finding out
+#   if it was alive meant logging in - and the machine you cannot log
+#   into is exactly the one you wanted to know about. Silence read the
+#   same as health right up until it mattered.
+#   Now it says how it is, on a schedule, to a URL in /boot/beacon.conf.
+#   If the reports stop, that is the signal - which is the only kind
+#   that still works when the failure is "it went away".
+#   With no URL set it still runs and still keeps /data/log/status.json,
+#   which is the record that makes a claim about months of uptime
+#   checkable afterwards rather than something to take on trust.
+beacon -d

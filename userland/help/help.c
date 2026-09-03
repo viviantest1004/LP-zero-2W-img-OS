@@ -115,6 +115,7 @@ static const entry_t KNOWN[] = {
     { "guard",    "system",  "the safety net (memory, heat, power, CPU)",
                                                              "guard [-d]" },
     { "bootcount","system",  "detect a reboot loop",        "bootcount" },
+    { "beacon",   "system",  "report how the board is doing", "beacon [-d] [-n]" },
     { "calc",     "system",  "integer calculator",          "calc \"1 + 2 * 3\"" },
     { "pkg",      "system",  "install and remove packages", "pkg list|add|remove|install" },
     { "splash",   "system",  "draw the boot screen",        "splash [device]" },

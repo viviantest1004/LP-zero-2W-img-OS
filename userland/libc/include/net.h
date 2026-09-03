@@ -104,6 +104,12 @@ u32  net_resolve(const char *host);
  * with a message on stderr. No HTTPS: there is no TLS here. */
 long net_http_get(const char *url, const char *dest);
 
+/* POST a body and throw the reply away, or keep it in `dest`.
+ * `dest` may be NULL when only "did it arrive" matters - a heartbeat,
+ * for instance. Returns the reply's size, or -1. https:// goes through
+ * python3 the same way net_http_get does. */
+long net_http_post(const char *url, const char *body, const char *dest);
+
 /* "192.168.0.1" -> u32 in network order. false on failure. */
 bool ipv4_parse(const char *s, u32 *out_be);
 /* u32 in network order -> "192.168.0.1". buf must hold 16 bytes. */

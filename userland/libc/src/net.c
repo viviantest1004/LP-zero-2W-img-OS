@@ -503,7 +503,8 @@ static const char *find_python(void)
     return 0;
 }
 
-static long net_https_get(const char *url, const char *dest)
+static long net_https(const char *method, const char *url,
+                      const char *body, const char *dest)
 {
     const char *py = find_python();
     if (!py) {
@@ -531,17 +532,21 @@ static long net_https_get(const char *url, const char *dest)
      * say so in a sentence. */
     static const char *prog =
         "import os,ssl,sys,urllib.request\n"
-        "url,ca,dest=sys.argv[1],sys.argv[2],sys.argv[3]\n"
+        "m,url,ca,dest,body=sys.argv[1:6]\n"
         "n=0\n"
         "try:\n"
         "    c=ssl.create_default_context(cafile=ca)\n"
-        "    r=urllib.request.urlopen(url,timeout=30,context=c)\n"
-        "    f=open(dest,'wb')\n"
+        "    d=body.encode() if body else None\n"
+        "    h={'Content-Type':'application/json'} if body else {}\n"
+        "    q=urllib.request.Request(url,data=d,headers=h,method=m)\n"
+        "    r=urllib.request.urlopen(q,timeout=30,context=c)\n"
+        "    f=open(dest,'wb') if dest!='-' else None\n"
         "    while True:\n"
         "        b=r.read(65536)\n"
         "        if not b: break\n"
-        "        f.write(b); n+=len(b)\n"
-        "    f.close()\n"
+        "        n+=len(b)\n"
+        "        if f: f.write(b)\n"
+        "    if f: f.close()\n"
         "except Exception as e:\n"
         "    m=str(e).replace('\\n',' ')\n"
         "    sys.stderr.write('https: '+m+'\\n')\n"
@@ -549,13 +554,16 @@ static long net_https_get(const char *url, const char *dest)
         "        sys.stderr.write('  checked against '+ca+'. A clock that"
         " is wrong makes every\\n  certificate look invalid, so try ntp"
         " before anything else.\\n')\n"
-        "    try: os.unlink(dest)\n"
+        "    try:\n"
+        "        if dest!='-': os.unlink(dest)\n"
         "    except OSError: pass\n"
         "    sys.exit(4)\n"
-        "sys.exit(0 if n else 3)\n";
+        "sys.exit(0)\n";
 
     char *argv[] = { (char *)py, (char *)"-c", (char *)prog,
-                     (char *)url, (char *)CA_BUNDLE, (char *)dest, 0 };
+                     (char *)method, (char *)url, (char *)CA_BUNDLE,
+                     (char *)(dest ? dest : "-"),
+                     (char *)(body ? body : ""), 0 };
 
     pid_t pid = lp_fork();
     if (pid < 0) {
@@ -581,19 +589,25 @@ static long net_https_get(const char *url, const char *dest)
         return -1;
     }
 
+    if (!dest)
+        return 0;                   /* asked for nothing, got nothing */
+
     lp_stat_t st;
     if (lp_stat(dest, &st, true) < 0)
         return -1;
     return (long)st.size;
 }
 
-long net_http_get(const char *url, const char *dest)
+/* One function behind both net_http_get and net_http_post: the two
+ * differ by a word in the request line and whether a body follows. */
+static long http_do(const char *method, const char *url,
+                    const char *body, const char *dest)
 {
     char host[128], path[512];
     int  port;
 
     if (strncmp(url, "https://", 8) == 0)
-        return net_https_get(url, dest);
+        return net_https(method, url, body, dest);
 
     if (!url_split(url, host, sizeof(host), &port, path, sizeof(path))) {
         dprintf(STDERR_FILENO,
@@ -632,16 +646,34 @@ long net_http_get(const char *url, const char *dest)
     }
 
     char req[768];
-    int  rn = snprintf(req, sizeof(req),
-                       "GET %s HTTP/1.0\r\n"
-                       "Host: %s\r\n"
-                       "User-Agent: lpzero\r\n"
-                       "Connection: close\r\n\r\n", path, host);
+    int  rn;
+    if (body) {
+        rn = snprintf(req, sizeof(req),
+                      "%s %s HTTP/1.0\r\n"
+                      "Host: %s\r\n"
+                      "User-Agent: lpzero\r\n"
+                      "Content-Type: application/json\r\n"
+                      "Content-Length: %lu\r\n"
+                      "Connection: close\r\n\r\n",
+                      method, path, host, (unsigned long)strlen(body));
+    } else {
+        rn = snprintf(req, sizeof(req),
+                      "%s %s HTTP/1.0\r\n"
+                      "Host: %s\r\n"
+                      "User-Agent: lpzero\r\n"
+                      "Connection: close\r\n\r\n", method, path, host);
+    }
     lp_write((int)fd, req, (size_t)rn);
+    if (body)
+        lp_write((int)fd, body, strlen(body));
 
-    long out = lp_open(dest, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    /* A caller that only wants to know the request arrived passes no
+     * destination - a heartbeat, for instance, where the reply is
+     * "200" and nothing else. */
+    long out = dest ? lp_open(dest, O_WRONLY | O_CREAT | O_TRUNC, 0644)
+                    : lp_open("/dev/null", O_WRONLY, 0);
     if (out < 0) {
-        dprintf(STDERR_FILENO, "cannot write %s\n", dest);
+        dprintf(STDERR_FILENO, "cannot write %s\n", dest ? dest : "/dev/null");
         lp_close((int)fd);
         return -1;
     }
@@ -687,8 +719,19 @@ long net_http_get(const char *url, const char *dest)
 
     if (have_status && status != 200) {
         dprintf(STDERR_FILENO, "%s: the server said %d\n", url, status);
-        lp_unlink(dest);
+        if (dest)
+            lp_unlink(dest);
         return -1;
     }
     return written;
+}
+
+long net_http_get(const char *url, const char *dest)
+{
+    return http_do("GET", url, NULL, dest);
+}
+
+long net_http_post(const char *url, const char *body, const char *dest)
+{
+    return http_do("POST", url, body ? body : "", dest);
 }
