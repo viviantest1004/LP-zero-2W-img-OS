@@ -53,7 +53,7 @@ static const entry_t KNOWN[] = {
     { "while",    "shell",   "repeat while a command works","while <cmd> ; do ... ; done" },
     { "for",      "shell",   "repeat over a list",          "for x in a b c ; do ... ; done" },
 
-    { "ls",       "files",   "list a directory",            "ls [-l] [-a] [path]" },
+    { "ls",       "files",   "list a directory",            "ls [-lahtSrRd1] [path]..." },
     { "cp",       "files",   "copy files",                  "cp [-r] [-n] [-q] <src>... <dst>" },
     { "mv",       "files",   "move or rename",              "mv <src>... <dst>" },
     { "rm",       "files",   "delete files",                "rm [-r] [-f] <path>..." },
@@ -80,7 +80,7 @@ static const entry_t KNOWN[] = {
     { "cat",      "text",    "print a file",                "cat [file]..." },
     { "edit",     "text",    "edit a file on screen",       "edit <file>" },
     { "more",     "text",    "read it a screen at a time",  "more [file]..." },
-    { "grep",     "text",    "print the lines that match",  "grep [-invclq] <pattern> [file]..." },
+    { "grep",     "text",    "print the lines that match",  "grep [-invclqr] <pattern> [file|dir]..." },
     { "head",     "text",    "the first lines",             "head [-n count] [file]..." },
     { "tail",     "text",    "the last lines",              "tail [-n count] [-f] [file]" },
     { "wc",       "text",    "count lines, words, characters", "wc [-l] [-w] [-c] [file]..." },

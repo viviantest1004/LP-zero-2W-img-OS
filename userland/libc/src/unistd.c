@@ -84,8 +84,15 @@ long lp_stat(const char *path, lp_stat_t *out, bool follow_symlink)
                        follow_symlink ? 0 : AT_SYMLINK_NOFOLLOW);
     if (r < 0)
         return r;
-    out->mode = *(u32 *)(buf + STAT_MODE_OFF);
-    out->size = *(u64 *)(buf + STAT_SIZE_OFF);
+    out->mode  = *(u32 *)(buf + STAT_MODE_OFF);
+    out->size  = *(u64 *)(buf + STAT_SIZE_OFF);
+    /* The rest of struct stat on arm64, by offset rather than by
+     * declaring the struct - nothing then depends on padding rules.
+     *   20 nlink   24 uid   28 gid   88 mtime */
+    out->nlink = *(u32 *)(buf + 20);
+    out->uid   = *(u32 *)(buf + 24);
+    out->gid   = *(u32 *)(buf + 28);
+    out->mtime = *(s64 *)(buf + 88);
     return 0;
 }
 

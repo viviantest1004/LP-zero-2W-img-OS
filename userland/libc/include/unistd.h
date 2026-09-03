@@ -136,12 +136,20 @@ long  lp_readlink(const char *path, char *buf, size_t n);
 typedef struct {
     u32 mode;        /* file type (S_IF*) plus permissions */
     u64 size;
+    u32 nlink;
+    uid_t uid;
+    gid_t gid;
+    s64 mtime;       /* seconds since 1970 */
 } lp_stat_t;
 
 #define LP_S_IFMT   0170000
 #define LP_S_IFDIR  0040000
 #define LP_S_IFREG  0100000
 #define LP_S_IFLNK  0120000
+#define LP_S_IFCHR  0020000
+#define LP_S_IFBLK  0060000
+#define LP_S_IFIFO  0010000
+#define LP_S_IFSOCK 0140000
 
 /* With follow_symlink=false this looks at the link itself (lstat). */
 long  lp_stat(const char *path, lp_stat_t *out, bool follow_symlink);
