@@ -69,6 +69,9 @@
 #define SYS_setpgid         154
 #define SYS_getpgid         155
 #define SYS_setsid          157
+/* prlimit64 rather than the older setrlimit: aarch64 never had the
+ * 32-bit setrlimit syscall, so this is the only one there is. */
+#define SYS_prlimit64       261
 #define SYS_uname           160
 #define SYS_getpid          172
 #define SYS_getppid         173

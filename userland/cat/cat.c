@@ -35,8 +35,20 @@ static int copy_fd(int fd, const char *label)
 
 int main(int argc, char **argv)
 {
-    if (argc < 2)
+    if (argc < 2) {
+        /* `cat` with no file reads what you type and prints it back.
+         * That is what it has always done and it is genuinely useful in
+         * a pipe - but typed at a prompt by accident it looks exactly
+         * like a machine that has stopped responding, with no clue on
+         * the screen about what to do. Only worth saying when the input
+         * is a terminal: in a pipe there is nobody reading it, and the
+         * line would end up in whatever is downstream. */
+        if (lp_isatty(STDIN_FILENO))
+            dprintf(STDERR_FILENO,
+                    "cat: reading what you type. Ctrl-D ends it,"
+                    " Ctrl-C cancels.\n");
         return copy_fd(STDIN_FILENO, "stdin");
+    }
 
     int rc = 0;
     for (int i = 1; i < argc; i++) {

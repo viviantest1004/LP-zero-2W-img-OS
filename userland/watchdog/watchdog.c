@@ -88,6 +88,19 @@ int main(int argc, char **argv)
 
     long fd = lp_open(DEV_WATCHDOG, O_WRONLY, 0);
     if (fd < 0) {
+        /* No device node at all means no watchdog hardware here - a
+         * virtual machine, or a board whose driver is not in the build.
+         * That is a fact about the machine, not a failure of this
+         * program, and it will not change while the machine is running.
+         * So say it once and exit in a way that tells init not to keep
+         * asking. Anything else (busy, permission) is worth retrying. */
+        if (-fd == 2) {                 /* ENOENT - no such file */
+            printf("watchdog: no watchdog hardware on this machine"
+                   " - nothing to arm\n");
+            printf("watchdog:   (a real Pi has one; a virtual machine"
+                   " does not)\n");
+            return LP_EXIT_NO_HARDWARE;
+        }
         dprintf(STDERR_FILENO,
                 "watchdog: cannot open %s (%ld)\n"
                 "          the kernel needs a watchdog driver for this board\n",

@@ -35,8 +35,38 @@
  *            writes at all. We warn early and drop the old rotated log
  *            when it gets critical.
  *
- * Protected: init, guard, watchdog, sh, dropbear, wpa_supplicant, logd.
- * These have to survive for anyone to see the state and act on it.
+ * ── What is protected, and how that is decided ──
+ * Protected means: never killed to reclaim memory, never demoted for
+ * holding a core, and marked oom_score_adj=-1000 so the kernel's own
+ * killer will not take it either. These have to survive for anyone to
+ * see the state and act on it.
+ *
+ * This used to be decided by the process NAME, read from
+ * /proc/<pid>/comm, against a fixed list that included "sh". A name is
+ * not an identity:
+ *
+ *   - "sh" was on the list, so EVERY process a shell started was
+ *     protected. A fork bomb written in shell was immune to the memory
+ *     killer, and four shell loops pinning all four cores were immune to
+ *     the CPU-hog demotion - the two attacks this daemon exists to stop
+ *     were the two it could not see.
+ *   - comm is whatever the process says it is. prctl(PR_SET_NAME), or
+ *     just a copied binary called "dropbear", bought immunity.
+ *
+ * So identity now comes from two sources that a process cannot write:
+ *
+ *   1) /var/service.pids, written by init - the pids of the services it
+ *      supervises. init is the only process that knows them, /var is on
+ *      the root filesystem which is RAM inside the kernel image, and it
+ *      is writable by root alone.
+ *   2) A shell is protected only when it is a SESSION LEADER with a
+ *      controlling terminal - pid == sid and tty_nr != 0. That is the
+ *      login shell on the console and the shell of each SSH session,
+ *      which are the ones you need to fix anything. A process forked off
+ *      by one of them is neither, so a runaway started from a shell is
+ *      fair game while the shell you are typing into is not.
+ *
+ * pid 1 and guard itself are protected by pid, as they always were.
  *
  * Two layers keep them out of the memory killer's way:
  *   1) We step in first, at 32MB free.
@@ -63,8 +93,29 @@
 #define WARN_MB       64      /* start warning here */
 #define POLL_MS      1000     /* how often we look, normally */
 #define POLL_BUSY_MS  200     /* how often we look under pressure */
-#define MAX_PROCS     256
+/* Room for a storm. This was 256, which a fork bomb of 1600 processes
+ * overran in a second: scan_processes stopped at 256 entries and guard
+ * spent its time choosing the largest of an arbitrary sixteenth of the
+ * problem. The table is static and one entry is 56 bytes, so 2048 costs
+ * 112KB of a 512MB board - the price of seeing the whole system. */
+#define MAX_PROCS    2048
 #define TERM_GRACE_MS 500     /* grace between SIGTERM and SIGKILL */
+
+/* ── Storm mode ────────────────────────────────────────────────────
+ * A fork bomb is an exponential attack. Answering it one process at a
+ * time, each with a SIGTERM, a 500ms wait and a SIGKILL, is a linear
+ * response: measured against 1600 processes it had not finished after
+ * forty seconds, and guard's whole loop was blocked in those waits, so
+ * nothing else was being watched either.
+ *
+ * Above this many processes guard stops being polite. It groups what it
+ * can see by process group and kills the largest group with a single
+ * kill(-pgid, SIGKILL) - one syscall for the whole tree, because that is
+ * what a fork bomb is: one tree. No SIGTERM, no grace; a process that
+ * has forked 1600 children is not going to clean up after itself. */
+#define STORM_PROCS    300    /* more than this and it is a storm */
+#define STORM_ROUNDS     8    /* group kills per pass before looking again */
+#define PGID_BUCKETS   256
 
 /* The slow pass. Everything except memory is checked on this cadence.
  * A temperature does not change in a second, and walking /proc every
@@ -86,7 +137,29 @@
  * own tick rate, so this figure is fixed. */
 #define TICKS_PER_SEC   100
 #define HOG_PERCENT      90
-#define HOG_SECONDS      60
+#define HOG_SECONDS      30   /* act after this long */
+#define HOG_NOTICE_SECONDS 10 /* but say so well before that */
+
+/* ── The whole machine being saturated ──
+ *
+ * Per-process accounting answers "who is spinning". It does not answer
+ * "is this board keeping up", and those are different questions: four
+ * processes at 70% each saturate a four-core board while not one of them
+ * crosses a 90% line. Load average is the number that describes it, and
+ * nothing here was reading it.
+ *
+ * Load is in runnable processes, so the interesting figure is per core.
+ * At 0.90 per core every core has something on it and the board has
+ * nothing left to give - which is the state to report. A higher figure
+ * would miss the case this exists for: a four-core board pinned by four
+ * processes sits at about 4.0, which is 1.0 per core, and each of those
+ * processes is only using one core.
+ *
+ * It is only ever a warning. A board asked to compute something is
+ * supposed to be busy, and the whole point of the CPU policy here is
+ * that nothing is killed for using the CPU it was given. */
+#define LOAD_WARN_PER_CORE   90   /* hundredths: 0.90 runnable per core */
+#define LOAD_QUIET_PASSES    12   /* slow passes between repeats (60s) */
 #define NICE_PROTECT    (-5)
 #define NICE_WATCHDOG  (-10)
 #define NICE_HOG         10
@@ -110,6 +183,13 @@
  * clear the count. Five minutes is past everything that starts at boot
  * and well past the watchdog's patience. */
 #define BOOT_OK_PASSES  60    /* slow passes before the boot counts (5min) */
+
+/* ── When there is nothing left to do ──
+ * Memory below the reserve, and every process that remains is one we
+ * must not kill. Nothing changes from here: the watchdog is healthy so
+ * it keeps petting the timer, and no amount of looking again will free a
+ * page. POLL_BUSY_MS apart, this is a minute of it before rebooting. */
+#define STUCK_PASSES   300
 #define UPDATE_TRIAL_FILE  "/data/.update-trial"
 #define BOOT_COUNT_FILE "/data/boot_count"
 
@@ -120,6 +200,9 @@
 
 typedef struct {
     pid_t pid;
+    pid_t pgid;         /* process group - what a fork bomb shares */
+    pid_t sid;          /* session - a login shell leads its own */
+    int   tty;          /* controlling terminal, 0 for none */
     long  rss_kb;
     u64   ticks;        /* CPU time used so far, in 100ths of a second */
     char  name[32];
@@ -136,33 +219,132 @@ typedef struct {
  * The watchdog sits highest of all: if it does not get a turn every few
  * seconds the board resets itself, and a machine that is merely busy
  * must never reset. */
+/* The nice value each supervised service should run at, looked up by
+ * name once its pid has been confirmed against /var/service.pids.
+ *
+ * "sh" is deliberately NOT here. It was, and it made every process
+ * started from a shell unkillable and undemotable - see the header. A
+ * shell is protected by being a session leader with a terminal, which is
+ * a fact about the process, not a string it chose. */
 static const protected_t PROTECTED[] = {
     { "init",           NICE_PROTECT  },
     { "guard",          NICE_PROTECT  },
     { "watchdog",       NICE_WATCHDOG },
-    { "sh",             NICE_PROTECT  },
     { "dropbear",       NICE_PROTECT  },
     { "wpa_supplicant", NICE_PROTECT  },
     { "logd",           NICE_PROTECT  },
+    { "dhcp",           NICE_PROTECT  },
     { NULL,             0             }
 };
 
+/* ── The pids init says it is supervising ──
+ *
+ * Re-read on every slow pass, because a service that died and was
+ * restarted has a new pid and the old one may since belong to something
+ * else entirely. A stale entry here is exactly the mistake that would
+ * make a stranger's process unkillable, so this is never cached across
+ * passes. */
+#define MAX_SVC_PIDS 32
+#define SERVICE_PIDS "/var/service.pids"
+
+typedef struct {
+    pid_t pid;
+    char  name[32];
+} svc_pid_t;
+
+static svc_pid_t svc_pids[MAX_SVC_PIDS];
+static int       nsvc_pids;
+static bool      svc_pids_read;      /* did the file exist at all */
+
+static void read_service_pids(void)
+{
+    nsvc_pids     = 0;
+    svc_pids_read = false;
+
+    char buf[2048];
+    if (proc_read(SERVICE_PIDS, buf, sizeof buf) <= 0)
+        return;
+    svc_pids_read = true;
+
+    char *p = buf;
+    while (*p && nsvc_pids < MAX_SVC_PIDS) {
+        char *eol = strchr(p, '\n');
+        if (eol) *eol = '\0';
+
+        char *sp = strchr(p, ' ');
+        if (sp) {
+            *sp = '\0';
+            pid_t pid = (pid_t)strtol(p, NULL, 10);
+            if (pid > 0) {
+                svc_pids[nsvc_pids].pid = pid;
+                strlcpy(svc_pids[nsvc_pids].name, sp + 1,
+                        sizeof svc_pids[nsvc_pids].name);
+                nsvc_pids++;
+            }
+        }
+
+        if (!eol) break;
+        p = eol + 1;
+    }
+}
+
+/* The name init supervises this pid under, or NULL. */
+static const char *service_name_of(pid_t pid)
+{
+    for (int i = 0; i < nsvc_pids; i++)
+        if (svc_pids[i].pid == pid)
+            return svc_pids[i].name;
+    return NULL;
+}
+
 #define NOT_PROTECTED  100    /* not a valid nice value, so unambiguous */
 
-/* The priority a process should run at, or NOT_PROTECTED. */
-static int protected_nice(const char *name, pid_t pid, pid_t self)
+/* The priority a process should run at, or NOT_PROTECTED.
+ *
+ * `p` carries the pid, the session id and the terminal, all read from
+ * /proc/<pid>/stat, because none of those can be set by the process to
+ * something it is not. The name is used only to look up which nice value
+ * a confirmed service wants, never to decide whether it is one. */
+static int protected_nice(const proc_t *p, pid_t self)
 {
-    if (pid == 1 || pid == self)
+    /* pid 1 is init and there is only one of it. Ourselves likewise. */
+    if (p->pid == 1 || p->pid == self)
         return NICE_PROTECT;
-    for (int i = 0; PROTECTED[i].name; i++)
-        if (strcmp(name, PROTECTED[i].name) == 0)
-            return PROTECTED[i].nice;
+
+    /* A service init says it is supervising, by pid. */
+    const char *svc = service_name_of(p->pid);
+    if (svc) {
+        for (int i = 0; PROTECTED[i].name; i++)
+            if (strcmp(svc, PROTECTED[i].name) == 0)
+                return PROTECTED[i].nice;
+        return NICE_PROTECT;        /* supervised, so worth keeping */
+    }
+
+    /* An interactive shell: session leader, with a terminal. The console
+     * login shell and each SSH session's shell are the two things a
+     * person needs in order to fix anything, and both are session
+     * leaders with a tty. A process forked off by one is not, which is
+     * the whole point - the runaway is not protected by the shell that
+     * started it. */
+    if (p->pid == p->sid && p->tty != 0)
+        return NICE_PROTECT;
+
+    /* Last resort: if init never wrote the pid file - an old kernel
+     * image, or /var unwritable - fall back to matching names, because
+     * an imperfect protection list beats none at all. It is announced
+     * once at startup so this is never a silent downgrade. */
+    if (!svc_pids_read) {
+        for (int i = 0; PROTECTED[i].name; i++)
+            if (strcmp(p->name, PROTECTED[i].name) == 0)
+                return PROTECTED[i].nice;
+    }
+
     return NOT_PROTECTED;
 }
 
-static bool is_protected(const char *name, pid_t pid, pid_t self)
+static bool is_protected(const proc_t *p, pid_t self)
 {
-    return protected_nice(name, pid, self) != NOT_PROTECTED;
+    return protected_nice(p, self) != NOT_PROTECTED;
 }
 
 /* Tell the kernel how this process should be ranked.
@@ -258,8 +440,31 @@ static u64 read_cpu_ticks(pid_t pid)
     while (*p == ' ') p++;
     u64 utime = (u64)strtol(p, &p, 10);
     while (*p == ' ') p++;
-    u64 stime = (u64)strtol(p, NULL, 10);
-    return utime + stime;
+    u64 stime = (u64)strtol(p, &p, 10);
+
+    /* And the time its finished children used: cutime and cstime, the
+     * next two fields.
+     *
+     * Without these, a loop that forks once per iteration is invisible.
+     * A shell running `while true; do something; done` spends its own
+     * time in fork and wait - well under the threshold - while all the
+     * work happens in children that live a few milliseconds each. guard
+     * samples every five seconds, so it never sees the same child
+     * twice: every one is a first sighting with nothing to compare
+     * against, and gets skipped. Measured on a board with two cores
+     * fully saturated this way, guard reported nothing for seventy
+     * seconds, because by its own accounting nobody was busy.
+     *
+     * The kernel already adds a reaped child's time to its parent's
+     * cutime/cstime. Counting them attributes the work to the process
+     * that is actually causing it, which is the one you would want to
+     * slow down. */
+    while (*p == ' ') p++;
+    u64 cutime = (u64)strtol(p, &p, 10);
+    while (*p == ' ') p++;
+    u64 cstime = (u64)strtol(p, NULL, 10);
+
+    return utime + stime + cutime + cstime;
 }
 
 /* ── Heat ─────────────────────────────────────────────────────────────
@@ -398,6 +603,15 @@ static int scan_processes(proc_t *list, int max, pid_t self)
             list[n].ticks  = read_cpu_ticks(pid);
             if (!read_comm(pid, list[n].name, sizeof(list[n].name)))
                 strlcpy(list[n].name, "?", sizeof(list[n].name));
+
+            /* The group, the session and the terminal - what protection
+             * is decided by now, and what a group kill needs. */
+            list[n].pgid = 0;
+            list[n].sid  = 0;
+            list[n].tty  = 0;
+            lp_proc_ids(pid, NULL, &list[n].pgid, &list[n].sid,
+                        &list[n].tty);
+
             (void)self;
             n++;
         }
@@ -421,7 +635,7 @@ static int scan_processes(proc_t *list, int max, pid_t self)
 static void apply_priorities(const proc_t *list, int n, pid_t self)
 {
     for (int i = 0; i < n; i++) {
-        int want = protected_nice(list[i].name, list[i].pid, self);
+        int want = protected_nice(&list[i], self);
         bool prot = (want != NOT_PROTECTED);
 
         set_oom_score(list[i].pid, prot ? OOM_PROTECT : OOM_SACRIFICE);
@@ -442,6 +656,8 @@ typedef struct {
     int   secs_calm;   /* how long a demoted one has behaved itself */
     int   orig_nice;   /* what it was running at before we touched it */
     bool  demoted;
+    bool  announced;   /* we have already said this one is spinning */
+    bool  unboosted;   /* protected, so not demoted - just not favoured */
     bool  seen;
 } cpu_state_t;
 
@@ -509,7 +725,15 @@ static void check_cpu_hogs(const proc_t *list, int n, pid_t self,
         long percent    = have_ticks > 0 ? used_ticks * 100 / have_ticks : 0;
 
         if (percent < HOG_PERCENT) {
-            st->secs_hot = 0;
+            st->secs_hot  = 0;
+            st->announced = false;
+
+            /* A protected process that has stopped spinning gets its
+             * boost back at once - it was never at fault, it was busy. */
+            if (st->unboosted) {
+                lp_setpriority(list[i].pid, st->orig_nice);
+                st->unboosted = false;
+            }
 
             /* It has stopped. Give it back what it was running at - the
              * demotion was for what it was doing, not for what it is.
@@ -531,13 +755,48 @@ static void check_cpu_hogs(const proc_t *list, int n, pid_t self,
         }
         st->secs_calm = 0;
 
-        /* A protected process pinning a core is worth saying out loud,
-         * but it does not get demoted - that is the whole point of it
-         * being protected. */
-        if (is_protected(list[i].name, list[i].pid, self))
-            continue;
-
         st->secs_hot += (int)(elapsed_ms / 1000);
+
+        /* Say something as soon as it is clear, not only once we act.
+         * The whole complaint about this check was that a board with all
+         * four cores pinned printed nothing at all for over a minute -
+         * so from the outside there was no way to tell guard from a
+         * guard that was not running. Silence is the one thing a watchdog
+         * must never do. */
+        if (!st->announced && st->secs_hot >= HOG_NOTICE_SECONDS) {
+            dprintf(STDERR_FILENO,
+                    "guard: %s (pid %d) has held a core for %ds"
+                    " (%ld%% of one core)\n",
+                    list[i].name, (int)list[i].pid, st->secs_hot, percent);
+            st->announced = true;
+        }
+
+        /* A protected process pinning a core does not get pushed to the
+         * back of the queue - being answerable is the point of it. But
+         * it does lose the boost we gave it: at nice -5 an SSH session
+         * spinning in a shell loop outruns everything else on the board,
+         * including the processes that would tell you about it. Back to
+         * 0 is not a punishment, it is the absence of a favour.
+         *
+         * This used to be a bare `continue` under a comment saying it
+         * was "worth saying out loud", which said nothing and did
+         * nothing - and because "sh" was on the protected list, that
+         * branch was where every shell CPU hog on the machine ended up. */
+        if (is_protected(&list[i], self)) {
+            if (st->secs_hot >= HOG_SECONDS && !st->unboosted) {
+                int cur = lp_getpriority(list[i].pid);
+                if (cur < 0 && lp_setpriority(list[i].pid, 0) == 0) {
+                    st->unboosted = true;
+                    st->orig_nice = cur;
+                    dprintf(STDERR_FILENO,
+                            "guard:   it is protected, so it is not"
+                            " demoted - but its priority boost is off"
+                            " while it spins\n");
+                }
+            }
+            continue;
+        }
+
         if (st->secs_hot < HOG_SECONDS || st->demoted)
             continue;
 
@@ -694,6 +953,271 @@ static void check_disk(void)
     }
 }
 
+/* ── Answering a storm ─────────────────────────────────────────────
+ *
+ * A fork bomb is one tree of processes, and a tree shares a process
+ * group. kill(-pgid, SIGKILL) ends the whole group in a single syscall,
+ * which is the only response that keeps up with something doubling.
+ *
+ * The care needed: the group of an SSH session includes the session's
+ * own shell, and a bomb started from that shell is in it. Killing the
+ * group would take the shell too. So when the group's leader is
+ * protected we kill the group's members individually instead - still
+ * with no SIGTERM and no waiting, just not the leader.
+ *
+ * Returns the number of processes signalled, or 0 when there was nothing
+ * left that may be killed. */
+static int kill_biggest_group(const proc_t *list, int n, pid_t self)
+{
+    /* Count unprotected members per group. A fixed histogram rather than
+     * a map: there is no memory to spare, and the group we want is the
+     * one with hundreds of members, which no amount of collision hides. */
+    static pid_t pg[PGID_BUCKETS];
+    static int   count[PGID_BUCKETS];
+    int ngroups = 0;
+
+    for (int i = 0; i < n; i++) {
+        if (list[i].pgid <= 0)
+            continue;
+        if (is_protected(&list[i], self))
+            continue;
+
+        int at = -1;
+        for (int g = 0; g < ngroups; g++)
+            if (pg[g] == list[i].pgid) { at = g; break; }
+        if (at < 0) {
+            if (ngroups >= PGID_BUCKETS)
+                continue;
+            at = ngroups++;
+            pg[at]    = list[i].pgid;
+            count[at] = 0;
+        }
+        count[at]++;
+    }
+
+    int best = -1;
+    for (int g = 0; g < ngroups; g++)
+        if (best < 0 || count[g] > count[best])
+            best = g;
+    if (best < 0)
+        return 0;
+
+    pid_t target = pg[best];
+
+    /* Never our own group, and never group 0 or 1 - those would take
+     * init, or us, or the whole session tree of the console. */
+    pid_t my_pgid = 0;
+    lp_proc_ids(self, NULL, &my_pgid, NULL, NULL);
+    if (target <= 1 || target == my_pgid) {
+        dprintf(STDERR_FILENO,
+                "guard:   the biggest group is our own (%d) - skipping it\n",
+                (int)target);
+        return 0;
+    }
+
+    /* Is the group leader something we must not kill? If the leader is
+     * not in the list at all it has already gone, and the group is
+     * orphaned children - safe to take whole. */
+    bool leader_protected = false;
+    for (int i = 0; i < n; i++)
+        if (list[i].pid == target && is_protected(&list[i], self)) {
+            leader_protected = true;
+            break;
+        }
+
+    if (!leader_protected) {
+        dprintf(STDERR_FILENO,
+                "guard:   killing process group %d (%d processes) at once\n",
+                (int)target, count[best]);
+        if (lp_kill(-target, SIGKILL) == 0)
+            return count[best];
+        /* The group went away between the scan and the signal, which is
+         * the normal race. Fall through and kill what is still listed. */
+    } else {
+        dprintf(STDERR_FILENO,
+                "guard:   group %d has a protected leader"
+                " - killing its %d children instead\n",
+                (int)target, count[best]);
+    }
+
+    int hit = 0;
+    for (int i = 0; i < n; i++) {
+        if (list[i].pgid != target)
+            continue;
+        if (is_protected(&list[i], self))
+            continue;
+        if (lp_kill(list[i].pid, SIGKILL) == 0)
+            hit++;
+    }
+    return hit;
+}
+
+/* How many cores this machine has, counted once from /proc/cpuinfo. */
+static int core_count(void)
+{
+    static int cached = 0;
+    if (cached)
+        return cached;
+
+    cached = 1;
+    char buf[4096];
+    if (proc_read("/proc/cpuinfo", buf, sizeof buf) > 0) {
+        int n = 0;
+        for (const char *p = buf; (p = strstr(p, "processor")); p++)
+            n++;
+        if (n > 0)
+            cached = n;
+    }
+    return cached;
+}
+
+/* The 1-minute load average, in hundredths (150 means 1.50).
+ * -1 when it cannot be read. */
+static long read_load_x100(void)
+{
+    char buf[64];
+    if (proc_read("/proc/loadavg", buf, sizeof buf) <= 0)
+        return -1;
+
+    /* "0.52 0.31 0.12 1/48 1234" - the first field, as hundredths,
+     * without floating point: read the integer part, then two digits
+     * after the dot. */
+    const char *p = buf;
+    long whole = strtol(p, (char **)&p, 10);
+    long frac  = 0;
+    if (*p == '.') {
+        p++;
+        for (int i = 0; i < 2; i++) {
+            frac *= 10;
+            if (*p >= '0' && *p <= '9')
+                frac += *p++ - '0';
+        }
+    }
+    return whole * 100 + frac;
+}
+
+/* Is the board keeping up at all? Says so when it is not, and names
+ * what is using the most CPU, which per-process thresholds miss when
+ * the load is spread across several processes.
+ *
+ * A warning only. Nothing is killed or demoted from here. */
+static void check_load(const proc_t *list, int n, pid_t self)
+{
+    static int quiet_for = 0;
+
+    if (quiet_for > 0) {
+        quiet_for--;
+        return;
+    }
+
+    long load  = read_load_x100();
+    int  cores = core_count();
+    if (load < 0)
+        return;
+
+    if (load < (long)LOAD_WARN_PER_CORE * cores)
+        return;
+
+    /* Name the three biggest CPU users so the message is actionable
+     * rather than just alarming. Sorting the whole list would cost more
+     * than picking three out of it. */
+    dprintf(STDERR_FILENO,
+            "guard: the board is saturated - load %ld.%02ld on %d core%s\n",
+            load / 100, load % 100, cores, cores == 1 ? "" : "s");
+
+    for (int shown = 0; shown < 3; shown++) {
+        int  best = -1;
+        u64  best_ticks = 0;
+        static pid_t already[3];
+
+        for (int i = 0; i < n; i++) {
+            bool seen = false;
+            for (int j = 0; j < shown; j++)
+                if (already[j] == list[i].pid) { seen = true; break; }
+            if (seen || list[i].pid == self)
+                continue;
+            if (list[i].ticks > best_ticks) {
+                best_ticks = list[i].ticks;
+                best = i;
+            }
+        }
+        if (best < 0)
+            break;
+
+        already[shown] = list[best].pid;
+        dprintf(STDERR_FILENO,
+                "guard:   %-16s pid %-6d %lus of CPU so far%s\n",
+                list[best].name, (int)list[best].pid,
+                (unsigned long)(best_ticks / TICKS_PER_SEC),
+                is_protected(&list[best], self) ? "  (protected)" : "");
+    }
+
+    dprintf(STDERR_FILENO,
+            "guard:   Nothing is killed for using the CPU - that may be"
+            " the job you asked for.\n"
+            "guard:   'top' shows the rest. 'kill <name>' if it is not.\n");
+
+    quiet_for = LOAD_QUIET_PASSES;
+}
+
+/* ── A storm is its own emergency ──
+ *
+ * The memory killer above only runs when free memory drops below the
+ * reserve. A fork bomb of shells costs almost no memory - a few hundred
+ * KB each, and they share their pages - so it can take every pid on the
+ * board, make every fork by anything else fail, and leave the machine
+ * unusable without the memory threshold ever being crossed. Nothing was
+ * watching the one number that describes it: how many processes there
+ * are.
+ *
+ * Returns true when it acted, so the caller can look again sooner. */
+static bool check_storm(proc_t *list, int n, pid_t self)
+{
+    static bool  in_storm = false;
+    bool truncated = (n >= MAX_PROCS);
+
+    if (n <= STORM_PROCS && !truncated) {
+        if (in_storm) {
+            dprintf(STDERR_FILENO,
+                    "guard: the storm is over - %d processes\n", n);
+            in_storm = false;
+        }
+        return false;
+    }
+
+    if (!in_storm) {
+        dprintf(STDERR_FILENO,
+                "\nguard: ** %d processes%s. A board this size runs about"
+                " twenty.\n"
+                "guard:    Something is forking without stopping. Killing"
+                " it by group.\n",
+                n, truncated ? " (more than we can list)" : "");
+        in_storm = true;
+    }
+
+    int killed = 0;
+    for (int round = 0; round < STORM_ROUNDS; round++) {
+        int hit = kill_biggest_group(list, n, self);
+        if (hit == 0)
+            break;
+        killed += hit;
+        n = scan_processes(list, MAX_PROCS, self);
+        if (n <= STORM_PROCS)
+            break;
+    }
+
+    if (killed == 0) {
+        dprintf(STDERR_FILENO,
+                "guard:   nothing in it may be killed - it is all"
+                " protected. Not touching it.\n");
+        return false;
+    }
+
+    dprintf(STDERR_FILENO,
+            "guard:   killed %d, %d processes left\n", killed, n);
+    return true;
+}
+
 /* Kill the largest unprotected process.
  * Returns true if we killed something. */
 static bool kill_largest(pid_t self, long need_kb)
@@ -701,11 +1225,50 @@ static bool kill_largest(pid_t self, long need_kb)
     static proc_t list[MAX_PROCS];
     int n = scan_processes(list, MAX_PROCS, self);
 
+    /* A storm is either more processes than a board this size ever has a
+     * reason to run, or a scan that filled the table - in which case
+     * there are more than we can even see, which is worse.
+     *
+     * Under a storm the polite path is the wrong path: one victim per
+     * pass, each with half a second of waiting, against something that
+     * doubles. Kill by group instead, several groups per pass, and do
+     * not wait for anything. */
+    bool truncated = (n >= MAX_PROCS);
+    if (n > STORM_PROCS || truncated) {
+        dprintf(STDERR_FILENO,
+                "guard: ** %d processes%s - this is a fork storm,"
+                " killing by group\n",
+                n, truncated ? " (and more than we can list)" : "");
+
+        int killed = 0;
+        for (int round = 0; round < STORM_ROUNDS; round++) {
+            int hit = kill_biggest_group(list, n, self);
+            if (hit == 0)
+                break;
+            killed += hit;
+            /* Re-scan: the groups we just ended are gone, and the ones
+             * still forking have grown. Cheap next to what it replaces. */
+            n = scan_processes(list, MAX_PROCS, self);
+            if (n <= STORM_PROCS)
+                break;
+        }
+
+        if (killed > 0) {
+            dprintf(STDERR_FILENO,
+                    "guard:   killed %d processes, %d left\n", killed, n);
+            return true;
+        }
+        dprintf(STDERR_FILENO,
+                "guard:   nothing in the storm may be killed."
+                " Everything left is protected.\n");
+        return false;
+    }
+
     int  best = -1;
     long best_rss = 0;
 
     for (int i = 0; i < n; i++) {
-        if (is_protected(list[i].name, list[i].pid, self))
+        if (is_protected(&list[i], self))
             continue;
         if (list[i].rss_kb > best_rss) {
             best_rss = list[i].rss_kb;
@@ -809,12 +1372,24 @@ int main(int argc, char **argv)
     /* Apply once immediately. This is what keeps SSH and the shell alive
      * if the kernel's OOM killer runs before guard gets a chance. */
     {
+        read_service_pids();
         static proc_t boot_list[MAX_PROCS];
         int n = scan_processes(boot_list, MAX_PROCS, self);
         apply_priorities(boot_list, n, self);
         printf("guard: priorities applied to %d processes\n", n);
-        printf("guard:   protected = init, guard, watchdog, sh, dropbear,"
-               " wpa_supplicant, logd\n");
+        if (svc_pids_read)
+            printf("guard:   protecting pid 1, myself, %d service(s) init"
+                   " named, and login shells\n", nsvc_pids);
+        else
+            /* Not a fault at this point, and it used to be reported as
+             * one. guard is the first line of /etc/services, so it is
+             * running before init has finished starting the rest and
+             * written their pids down. The file turns up within a few
+             * seconds and the list is re-read every pass; only if it is
+             * still missing well after boot is anything wrong, and that
+             * is said below instead of here. */
+            printf("guard:   protecting pid 1, myself and login shells"
+                   " - waiting for init's service list\n");
     }
 
     /* Time is counted in the sleeps we ourselves ask for, not from the
@@ -822,6 +1397,8 @@ int main(int argc, char **argv)
      * would turn one CPU sample into nonsense. */
     long ms_since_slow = 0;
     int  slow_passes   = 0;
+    int  storm_recent  = 0;     /* passes left of watching closely */
+    int  stuck         = 0;     /* passes with nothing left to reclaim */
 
     for (;;) {
         long avail = -1, swap_total = -1, swap_free = -1;
@@ -829,11 +1406,49 @@ int main(int argc, char **argv)
 
         /* ── the slow pass ── */
         if (ms_since_slow >= SLOW_MS) {
+            /* Fresh every pass. A service that died and came back has a
+             * new pid, and the old one may already belong to somebody
+             * else - protecting a stale pid is how a stranger's process
+             * would become unkillable. */
+            read_service_pids();
+
+            /* If init never wrote the list, protection falls back to
+             * matching process names - which a process can choose for
+             * itself. That is a real downgrade and has to be said, but
+             * only once, and only after boot has had time to finish. */
+            static int no_list_passes = 0;
+            if (!svc_pids_read) {
+                no_list_passes++;
+                if (no_list_passes == 6)
+                    dprintf(STDERR_FILENO,
+                            "guard: ** %s still is not there %ds after"
+                            " starting.\n"
+                            "guard: ** Protection has fallen back to"
+                            " matching process names, and a process can\n"
+                            "guard: ** choose its own name. Is /var"
+                            " writable?\n",
+                            SERVICE_PIDS, no_list_passes * SLOW_MS / 1000);
+            } else {
+                no_list_passes = 0;
+            }
+
             static proc_t all[MAX_PROCS];
             int n = scan_processes(all, MAX_PROCS, self);
 
             apply_priorities(all, n, self);
+
+            /* Before anything else: is the machine still made of the
+             * number of processes it is supposed to be? This does not
+             * wait for memory to run out, because a fork bomb of shells
+             * never makes it run out. */
+            if (check_storm(all, n, self)) {
+                n = scan_processes(all, MAX_PROCS, self);
+                apply_priorities(all, n, self);
+                storm_recent = 4;   /* look again quickly for a while */
+            }
+
             check_cpu_hogs(all, n, self, ms_since_slow);
+            check_load(all, n, self);
             check_heat_and_power();
 
             slow_passes++;
@@ -864,9 +1479,45 @@ int main(int argc, char **argv)
                     "%s\n", avail / 1024, reserve_kb / 1024,
                     swap_used > 0 ? ", swap in use" : "");
 
-            /* Reclaim one at a time and look again. Killing several at
-             * once would take more than necessary. */
-            kill_largest(self, reserve_kb - avail);
+            /* Reclaim and look again. Under normal pressure that is
+             * one process at a time - killing several at once would
+             * take more than necessary. Under a fork storm it is a
+             * whole process group per round; kill_largest decides. */
+            if (kill_largest(self, reserve_kb - avail)) {
+                stuck = 0;
+            } else {
+                /* Nothing may be killed and memory is still below the
+                 * reserve. This is the state the old code sat in
+                 * forever: printing the same line five times a second,
+                 * reclaiming nothing, on a board nobody could reach.
+                 *
+                 * The watchdog does not help here - it is running fine,
+                 * so it keeps petting the timer. Nothing else is going
+                 * to intervene. After a minute of it, a reboot is the
+                 * only move left, and a board that reboots is worth
+                 * more than one that is wedged and silent: bootcount
+                 * will put it into safe mode if it happens again.
+                 */
+                stuck++;
+                if (stuck == 1)
+                    dprintf(STDERR_FILENO,
+                            "guard: ** nothing left that may be killed."
+                            " Watching for a minute before rebooting.\n");
+                if (stuck >= STUCK_PASSES) {
+                    dprintf(STDERR_FILENO,
+                            "guard: ** out of memory for %d seconds with"
+                            " nothing to reclaim.\n"
+                            "guard: ** Rebooting. This is the last move"
+                            " left; a wedged board helps nobody.\n",
+                            (int)(STUCK_PASSES * POLL_BUSY_MS / 1000));
+                    lp_sync();
+                    lp_reboot(LINUX_REBOOT_CMD_RESTART);
+                    /* If that did not work there is nothing else. */
+                    dprintf(STDERR_FILENO,
+                            "guard: ** the reboot was refused\n");
+                    stuck = 0;
+                }
+            }
             warned = true;
             sleep_ms = POLL_BUSY_MS;
         } else if (avail < warn_kb) {
@@ -881,6 +1532,16 @@ int main(int argc, char **argv)
             dprintf(STDERR_FILENO,
                     "guard: recovered - %ldMB free\n", avail / 1024);
             warned = false;
+            stuck  = 0;
+        }
+
+        /* After a storm, look again in a second rather than five: the
+         * thing that forked 1600 times may still be forking. */
+        if (storm_recent > 0) {
+            storm_recent--;
+            if (sleep_ms > POLL_BUSY_MS)
+                sleep_ms = POLL_BUSY_MS;
+            ms_since_slow = SLOW_MS;    /* force a full pass next time */
         }
 
         lp_sleep_ms(sleep_ms);

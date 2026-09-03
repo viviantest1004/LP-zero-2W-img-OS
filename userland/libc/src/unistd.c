@@ -144,7 +144,19 @@ pid_t lp_wait(int *status)
 
 pid_t lp_getpid(void)      { return (pid_t)sys_call0(SYS_getpid); }
 long  lp_setsid(void)      { return sys_call0(SYS_setsid); }
+/* A negative pid is passed straight through, because that is how the
+ * kernel is told "the whole process group": kill(-pgid, sig). Against a
+ * fork bomb that is the difference between one syscall and one per
+ * process. */
 long  lp_kill(pid_t p, int s) { return sys_call2(SYS_kill, p, s); }
+
+long lp_setrlimit(int resource, u64 soft, u64 hard)
+{
+    /* struct rlimit64 { u64 rlim_cur; u64 rlim_max; } */
+    u64 lim[2] = { soft, hard };
+    /* prlimit64(pid=0 meaning ourselves, resource, new, old) */
+    return sys_call4(SYS_prlimit64, 0, resource, (long)lim, 0);
+}
 
 void lp_exit(int code)
 {
@@ -199,6 +211,7 @@ long lp_ioctl(int fd, unsigned long req, void *arg)
 #define T_CC     17
 #define VTIME    5
 #define VMIN     6
+#define VSUSP    10
 
 /* c_lflag */
 #define ISIG    0x0001
@@ -255,6 +268,12 @@ long lp_term_raw(int fd, lp_termios_t *saved)
  * each program to clean up after itself. This sets only the flags that
  * matter for a usable terminal and leaves the rest - baud rate, control
  * characters - as they were. */
+bool lp_isatty(int fd)
+{
+    lp_termios_t t;
+    return lp_ioctl(fd, TCGETS, t.raw) == 0;
+}
+
 long lp_term_sane(int fd)
 {
     lp_termios_t t;
@@ -265,6 +284,20 @@ long lp_term_sane(int fd)
     f[T_LFLAG] |= (u32)(ICANON | ECHO | ISIG | IEXTEN);
     f[T_IFLAG] |= (u32)(ICRNL | BRKINT | IXON | IUTF8);
     f[T_OFLAG] |= (u32)(OPOST | ONLCR);
+
+    /* ISIG above is what makes Ctrl-C a signal instead of a byte, and
+     * that is the point of this function. It also makes Ctrl-Z one, and
+     * Ctrl-Z is a trap here: SIGTSTP stops the foreground process, and
+     * nothing in this system can start a stopped process again. There is
+     * no job control - no `fg`, no `bg` - so a stopped command would sit
+     * there forever with the shell waiting on it, and the terminal would
+     * be dead with no key that fixes it.
+     *
+     * So the suspend key is disabled outright. Ctrl-Z does nothing,
+     * which is the honest behaviour for a shell that cannot resume
+     * anything, and it leaves Ctrl-C - the one that has to work - as the
+     * way out of a command that will not stop. */
+    t.raw[T_CC + VSUSP] = 0;
 
     return lp_ioctl(fd, TCSETS, t.raw);
 }
@@ -450,6 +483,17 @@ static long set_disposition(int sig, unsigned long handler)
     return sys_call4(SYS_rt_sigaction, (long)sig, (long)act, 0, SA_MASK_SIZE);
 }
 
+/* TIOCSCTTY: "make this terminal mine". The argument is 0 - 1 would
+ * mean "steal it from whoever has it", which needs CAP_SYS_ADMIN and is
+ * never what we want: if something else owns the console, taking it is
+ * how you end up with two shells reading the same keystrokes. */
+#define TIOCSCTTY 0x540E
+
+long lp_term_make_controlling(int fd)
+{
+    return lp_ioctl(fd, TIOCSCTTY, 0);
+}
+
 long lp_signal_ignore(int sig)  { return set_disposition(sig, 1); }
 long lp_signal_default(int sig) { return set_disposition(sig, 0); }
 
@@ -516,6 +560,59 @@ long lp_swapoff(const char *path)
 
 /* /proc files report a size of 0, so stat tells us nothing in advance.
  * Just read until the buffer is full. */
+/* The pgid, session, parent and tty of a process. See unistd.h for why
+ * this is not three lines of strtok at each call site. */
+bool lp_proc_ids(pid_t pid, pid_t *ppid, pid_t *pgid, pid_t *sid,
+                 int *tty_nr)
+{
+    char path[64];
+    snprintf(path, sizeof path, "/proc/%d/stat", (int)pid);
+
+    char buf[512];
+    if (proc_read(path, buf, sizeof buf) <= 0)
+        return false;
+
+    /* Field 2 is "(name)" and the name may contain ')' and spaces, so
+     * the only safe anchor is the last ')' in the whole line. */
+    char *p = NULL;
+    for (char *c = buf; *c; c++)
+        if (*c == ')')
+            p = c;
+    if (!p)
+        return false;
+    p++;
+
+    /* After the ')': state, ppid, pgrp, session, tty_nr, ... */
+    long v[5] = { 0, 0, 0, 0, 0 };
+    int got = 0;
+    while (got < 5 && *p) {
+        while (*p == ' ')
+            p++;
+        if (!*p)
+            break;
+        if (got == 0) {                 /* state is a letter, not a number */
+            while (*p && *p != ' ')
+                p++;
+            got++;
+            continue;
+        }
+        char *end = p;
+        long n = strtol(p, &end, 10);
+        if (end == p)
+            return false;               /* not a number where one must be */
+        v[got++] = n;
+        p = end;
+    }
+    if (got < 5)
+        return false;
+
+    if (ppid)   *ppid   = (pid_t)v[1];
+    if (pgid)   *pgid   = (pid_t)v[2];
+    if (sid)    *sid    = (pid_t)v[3];
+    if (tty_nr) *tty_nr = (int)v[4];
+    return true;
+}
+
 long proc_read(const char *path, char *buf, size_t size)
 {
     long fd = lp_open(path, O_RDONLY, 0);

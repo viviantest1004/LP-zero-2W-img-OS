@@ -13,6 +13,44 @@
 # Something that dies instantly gets a growing delay between restarts,
 # and after 20 failures init gives up on it. That stops a busy loop.
 
+# The safety net. THIS LINE IS THE MOST IMPORTANT ONE IN THE FILE.
+#
+#   guard is what kills a runaway before it takes the board down, what
+#   notices /data filling up, and what pushes a CPU hog to the back of
+#   the queue so SSH still answers. Every one of those defences is this
+#   one process.
+#
+#   It used to be started from /etc/rc, which runs once and finishes.
+#   Nothing revived it. Killing guard therefore disabled the entire
+#   self-defence of the machine permanently, and left no trace: the board
+#   kept running, looked healthy, and was defenceless against the next
+#   thing that went wrong. It was a worse fault than any of the things
+#   guard protects against, because it was silent.
+#
+#   No -d here. init supervises a child that stays in the foreground;
+#   a process that forks and lets the parent exit looks like an instant
+#   death, and init would spend its life restarting it.
+#
+#   init never gives up on this one, however often it fails.
+guard -r 32 -w 64
+
+# WiFi.
+#   Same story as guard: this was started from /etc/rc with -B, which
+#   backgrounds it, so nothing restarted it. On a board with no Ethernet
+#   port, wpa_supplicant dying means the machine is off the network with
+#   no way to reach it and nothing to notice - it has not crashed, so the
+#   watchdog is content, and dhcp cannot get an address on an interface
+#   that is not associated.
+#
+#   Without -B it stays in the foreground, which is what init needs.
+#   -i wlan0 is the only WiFi interface this board has.
+#
+#   The '?' asks whether there is a wlan0 at all before starting it. In
+#   a virtual machine there is not, and without the condition init spent
+#   its first minute restarting a program that printed a driver error
+#   and exited, twelve times over, about hardware that does not exist.
+?/sys/class/net/wlan0 wpa_supplicant -i wlan0 -c /etc/wpa.conf
+
 # The SSH server.
 #   -F  stay in the foreground. init can only supervise a child that
 #       stays alive; going to the background looks like an instant death.

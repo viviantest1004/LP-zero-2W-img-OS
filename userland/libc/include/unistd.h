@@ -49,6 +49,11 @@
 long  lp_signal_ignore(int sig);
 long  lp_signal_default(int sig);
 #define SIGCHLD 17
+#define SIGCONT 18
+#define SIGSTOP 19
+#define SIGTSTP 20      /* Ctrl-Z */
+#define SIGTTIN 21
+#define SIGTTOU 22
 
 /* mount flags */
 #define MS_NOSUID   2
@@ -118,8 +123,29 @@ long  lp_term_sane(int fd);
 /* Restore from saved. This must run before the program exits, or the
  * shell is left unable to read input. */
 long  lp_term_restore(int fd, const lp_termios_t *saved);
+
+/* ── Making a terminal the controlling terminal ──
+ *
+ * setsid() alone leaves a process with NO controlling terminal, and a
+ * terminal with no foreground process group generates no signals at
+ * all: the line discipline has nobody to send them to, so Ctrl-C is
+ * silently nothing. Reopening the device is not enough either -
+ * /dev/console specifically can never become a controlling terminal,
+ * because the kernel forces O_NOCTTY for major 5 minor 1. So it has to
+ * be asked for, explicitly, on the real device.
+ *
+ * Call this in the child, after setsid() and after the device is open.
+ * Returns the kernel's -errno; -EPERM means somebody else already owns
+ * this terminal. */
+long  lp_term_make_controlling(int fd);
 /* Terminal size. Falls back to 80x24 and returns -1 if unknown. */
 long  lp_term_size(int fd, int *rows, int *cols);
+
+/* Is this file descriptor a terminal? Asking the kernel for the
+ * terminal settings is the test: it succeeds on a terminal and fails
+ * with ENOTTY on anything else. Used to tell "somebody is typing at me"
+ * from "I am in a pipe", which changes what a program should say. */
+bool  lp_isatty(int fd);
 
 /* Tell the kernel's line editor that input is UTF-8 (IUTF8), so
  * backspace erases a whole Hangul character rather than one byte. */
@@ -255,11 +281,56 @@ long  lp_setpriority(pid_t pid, int nice_value);
 /* The nice value of a process, or 0 when it cannot be read. */
 int   lp_getpriority(pid_t pid);
 
+/* A per-process resource ceiling. `resource` is one of LP_RLIMIT_*.
+ * Returns the kernel's -errno.
+ *
+ * Worth knowing before relying on this: root is exempt from
+ * RLIMIT_NPROC. A process with CAP_SYS_ADMIN or CAP_SYS_RESOURCE - which
+ * every root process here has - passes the fork check regardless of the
+ * limit. So this bounds what a user can do, not what root can do. The
+ * bound on root is kernel.pid_max, which /etc/rc sets. */
+long  lp_setrlimit(int resource, u64 soft, u64 hard);
+#define LP_RLIMIT_CPU     0
+#define LP_RLIMIT_FSIZE   1
+#define LP_RLIMIT_DATA    2
+#define LP_RLIMIT_STACK   3
+#define LP_RLIMIT_NPROC   6
+#define LP_RLIMIT_NOFILE  7
+
+/* The pgid, session id, parent and controlling terminal of a process,
+ * read from /proc/<pid>/stat. Any out pointer may be NULL.
+ *
+ * The reason this is a libc function and not three lines at each call
+ * site: field 2 of that file is the process name in parentheses, and the
+ * name may itself contain spaces and parentheses - a process can call
+ * itself ") 1 (" if it wants to. Splitting on spaces gets the wrong
+ * fields for such a process, which is exactly the process you are
+ * looking at when you need this. Parsing starts after the LAST ')'.
+ *
+ * false when the process is gone or the file cannot be parsed. */
+bool  lp_proc_ids(pid_t pid, pid_t *ppid, pid_t *pgid, pid_t *sid,
+                  int *tty_nr);
+
 /* Free and total bytes of the filesystem holding `path`.
  * "free" is what an unprivileged process may still use. */
 long  lp_fs_space(const char *path, u64 *free_bytes, u64 *total_bytes);
 long  lp_uname(void *buf);
 long  lp_getrandom(void *buf, size_t n, unsigned flags);           /* struct utsname is 390 bytes */
+
+/* ── "there is nothing for me to do here" ──
+ *
+ * A supervised service exits with this when the hardware or the setting
+ * it exists to work with is absent on this machine - as opposed to
+ * failing at something it should have managed. init does not restart it
+ * and does not treat it as a fault.
+ *
+ * The case that made this necessary: the watchdog service on a virtual
+ * machine, where there is no watchdog device at all. Exiting 1 made init
+ * restart it, back off, restart it again and print the same complaint a
+ * dozen times before giving up - a fault report, repeated, about
+ * something that is not a fault and will never change while the machine
+ * is running. */
+#define LP_EXIT_NO_HARDWARE  78
 
 /* Decoding a wait status */
 #define LP_WIFEXITED(s)    (((s) & 0x7F) == 0)

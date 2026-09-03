@@ -265,10 +265,61 @@ static int do_restart(const char *name)
     return 0;
 }
 
-static int do_stop(const char *name)
+/* ── Stopping the things that keep the machine alive ──
+ *
+ * `service stop x` writes x to /data/services.disabled, which is on the
+ * data partition and therefore survives a reboot. For these three that
+ * is not "stop it", it is "disable it permanently, on a board that may
+ * be somewhere else by the time it matters":
+ *
+ *   guard     every defence the machine has - the memory killer, the
+ *             fork-storm response, the disk-full check. Without it the
+ *             board looks healthy right up to the moment it is gone.
+ *   dropbear  the only way in.
+ *   watchdog  the only way back from a wedge.
+ *
+ * --force still does it, because somebody debugging guard needs to be
+ * able to stop guard. It just cannot happen by typing four words. */
+static bool is_critical_service(const char *name)
+{
+    return strcmp(name, "guard") == 0
+        || strcmp(name, "dropbear") == 0
+        || strcmp(name, "watchdog") == 0;
+}
+
+static int do_stop(const char *name, bool force)
 {
     if (index_of(name) < 0) {
         dprintf(STDERR_FILENO, "service: %s is not in %s\n", name, SERVICES);
+        return 1;
+    }
+
+    if (is_critical_service(name) && !force) {
+        dprintf(STDERR_FILENO,
+                "service: %s is not something to stop.\n", name);
+        if (strcmp(name, "guard") == 0)
+            dprintf(STDERR_FILENO,
+                    "service:   It is the whole self-defence of this"
+                    " machine: what kills a runaway\n"
+                    "service:   before it takes the board down, what"
+                    " notices /data filling up, what\n"
+                    "service:   keeps SSH answering under load. Stopping"
+                    " it leaves a board that\n"
+                    "service:   looks fine and is defenceless, and"
+                    " nothing to say so afterwards.\n");
+        else if (strcmp(name, "dropbear") == 0)
+            dprintf(STDERR_FILENO,
+                    "service:   It is the only way into this machine.\n");
+        else
+            dprintf(STDERR_FILENO,
+                    "service:   It is the only thing that can reboot a"
+                    " board that has wedged.\n");
+        dprintf(STDERR_FILENO,
+                "service:\n"
+                "service:   This would also outlast a reboot - the"
+                " disabled list is on /data.\n"
+                "service:   'service stop %s --force' if you mean it.\n",
+                name);
         return 1;
     }
 
@@ -350,9 +401,14 @@ int main(int argc, char **argv)
     }
     const char *name = argv[2];
 
+    bool force = false;
+    for (int i = 3; i < argc; i++)
+        if (strcmp(argv[i], "--force") == 0 || strcmp(argv[i], "-f") == 0)
+            force = true;
+
     if (strcmp(cmd, "status") == 0)  return status_of(name);
     if (strcmp(cmd, "restart") == 0) return do_restart(name);
-    if (strcmp(cmd, "stop") == 0)    return do_stop(name);
+    if (strcmp(cmd, "stop") == 0)    return do_stop(name, force);
     if (strcmp(cmd, "start") == 0)   return do_start(name);
 
     dprintf(STDERR_FILENO, "service: no idea what \"%s\" means\n", cmd);

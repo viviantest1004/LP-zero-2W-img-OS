@@ -245,6 +245,49 @@ static size_t expand_command(const char *cmd, char *buf, size_t n, size_t size)
     return n;
 }
 
+/* `command` - the older spelling of $(command).
+ *
+ * $(...) was added and this was not, which meant the form most people
+ * actually type went through as literal text: `kill -9 `pidof guard``
+ * passed the backticks and the word "pidof" to kill as arguments, and
+ * kill said it could not find a process called "`pidof". Nothing about
+ * that error points at the real problem, which is the worst kind.
+ *
+ * No nesting: backticks cannot nest without escaping, which is the
+ * reason $(...) exists. The closing backtick is the next one that is
+ * not preceded by a backslash. */
+static size_t expand_backtick(char **sp, char *buf, size_t n, size_t size)
+{
+    char *s = *sp + 1;              /* step over the opening ` */
+
+    const char *close = NULL;
+    for (const char *c = s; *c; c++) {
+        if (*c == '\\' && c[1]) { c++; continue; }
+        if (*c == '`') { close = c; break; }
+    }
+
+    if (!close) {
+        dprintf(STDERR_FILENO, "sh: ` with no closing `\n");
+        *sp = s;
+        return n;
+    }
+
+    char cmd[MAX_LINE];
+    size_t len = (size_t)(close - s);
+    if (len >= sizeof cmd) len = sizeof cmd - 1;
+    memcpy(cmd, s, len);
+    cmd[len] = '\0';
+
+    size_t before = n;
+    n = expand_command(cmd, buf, n, size);
+
+    for (size_t i = before; i < n; i++)
+        if (buf[i] == ' ') { tok_from_cmd = true; break; }
+
+    *sp = (char *)close + 1;
+    return n;
+}
+
 static size_t expand_dollar(char **sp, char *buf, size_t n, size_t size)
 {
     char *s = *sp + 1;              /* step over the $ */
@@ -401,6 +444,9 @@ static tok_type_t next_token(char **p, char **word_out)
                 if (*s == '$') {
                     n = expand_dollar(&s, buf, n, sizeof(buf));
                     tok_from_cmd = false;   /* "$(...)" is one word */
+                } else if (*s == '`') {
+                    n = expand_backtick(&s, buf, n, sizeof(buf));
+                    tok_from_cmd = false;   /* "`...`" likewise */
                 } else {
                     if (n < sizeof(buf)) buf[n++] = *s;
                     s++;
@@ -409,6 +455,8 @@ static tok_type_t next_token(char **p, char **word_out)
             if (*s == '"') s++;
         } else if (*s == '$') {
             n = expand_dollar(&s, buf, n, sizeof(buf));
+        } else if (*s == '`') {
+            n = expand_backtick(&s, buf, n, sizeof(buf));
         } else {
             if (*s == '*' || *s == '?')
                 tok_has_glob = true;
@@ -744,7 +792,7 @@ static const char *BUILTINS[] = {
      * so it can scan PATH and list what is actually installed - a
      * builtin would only ever know what was hardcoded into the shell. */
     "exit", "cd", "pwd", "echo", "env", "reboot", "poweroff",
-    "test", "[", "true", "false", NULL
+    "test", "[", "true", "false", ":", NULL
 };
 
 /* ── test ─────────────────────────────────────────────────────────────
@@ -896,7 +944,11 @@ static bool run_builtin(cmd_t *c)
         return true;
     }
 
-    if (strcmp(cmd, "true") == 0)  { last_status = 0; return true; }
+    /* ":" is "true" spelled the way scripts spell it - `while :` and
+     * `if : ; then` are both idiomatic, and both were a
+     * "command not found" here. */
+    if (strcmp(cmd, "true") == 0 ||
+        strcmp(cmd, ":") == 0)     { last_status = 0; return true; }
     if (strcmp(cmd, "false") == 0) { last_status = 1; return true; }
 
     if (strcmp(cmd, "exit") == 0) {
@@ -1153,6 +1205,13 @@ static void run_pipeline(cmd_t *cmds, int n, bool background)
                 lp_signal_default(SIGINT);
                 lp_signal_default(SIGQUIT);
             }
+
+            /* Never the stop signals, foreground or background. A
+             * stopped child would leave the shell waiting on it with no
+             * way to continue it - there is no `fg` on this machine. */
+            lp_signal_ignore(SIGTSTP);
+            lp_signal_ignore(SIGTTIN);
+            lp_signal_ignore(SIGTTOU);
 
             if (prev_read >= 0) {
                 lp_dup2(prev_read, STDIN_FILENO);
@@ -1941,16 +2000,60 @@ static bool closes_block(const char *w)
 /* Split a line on ';' into logical lines, but only where a keyword is
  * involved - otherwise "a ; b" would stop being one thing the existing
  * parser handles, and it handles it correctly already. */
+/* The next ';' that is not inside quotes, or NULL.
+ *
+ * strchr(p, ';') was used here, and it does not know about quoting: it
+ * found the semicolons inside `sh -c 'while true; do :; done'` and cut
+ * the line into four pieces, three of which were fragments of a quoted
+ * string. The error that came out - "while without do or done" - was
+ * about a statement the user never wrote.
+ *
+ * The same bug hit anything with a semicolon in a quoted argument:
+ * grep 'a;b', echo "one; two", a sed script. */
+static const char *unquoted_semicolon(const char *p)
+{
+    char quote = 0;
+    for (; *p; p++) {
+        if (*p == '\\' && p[1]) { p++; continue; }
+        if (quote) {
+            if (*p == quote)
+                quote = 0;
+            continue;
+        }
+        if (*p == '\'' || *p == '"') { quote = *p; continue; }
+        if (*p == ';')
+            return p;
+    }
+    return NULL;
+}
+
+/* Does this line contain "; <keyword>" outside of quotes? */
+static bool has_semi_keyword(const char *line)
+{
+    static const char *KW[] = { "then", "do", "fi", "done", "else",
+                                "elif", NULL };
+    for (const char *semi = unquoted_semicolon(line); semi;
+         semi = unquoted_semicolon(semi + 1)) {
+        const char *q = semi + 1;
+        while (*q == ' ' || *q == '\t') q++;
+        for (int i = 0; KW[i]; i++) {
+            size_t l = strlen(KW[i]);
+            if (strncmp(q, KW[i], l) == 0 &&
+                (q[l] == '\0' || q[l] == ' ' || q[l] == '\t' ||
+                 q[l] == ';'))
+                return true;
+        }
+    }
+    return false;
+}
+
 static int split_statements(const char *line, block_line_t *out, int max)
 {
     char w[32];
     first_word(line, w, sizeof(w));
 
     /* No keyword anywhere: leave it exactly as typed. */
-    if (!is_keyword(w) && !strstr(line, "; then") && !strstr(line, "; do") &&
-        !strstr(line, "; fi") && !strstr(line, "; done") &&
-        !strstr(line, ";then") && !strstr(line, ";do") &&
-        !strstr(line, ";fi") && !strstr(line, ";done")) {
+    if (!is_keyword(w) && !has_semi_keyword(line)) {
         strlcpy(out[0], line, MAX_LINE);
         return 1;
     }
@@ -1962,7 +2065,7 @@ static int split_statements(const char *line, block_line_t *out, int max)
         while (*p == ' ' || *p == '\t') p++;
         if (!*p) break;
 
-        const char *semi = strchr(p, ';');
+        const char *semi = unquoted_semicolon(p);
         size_t len = semi ? (size_t)(semi - p) : strlen(p);
         if (len >= MAX_LINE) len = MAX_LINE - 1;
 
@@ -2133,10 +2236,32 @@ static int exec_while(block_line_t *lines, int n, int start)
 
         if (last_status >= 128)      /* killed by a signal */
             break;
-        if (rounds > 1000000) {
-            dprintf(STDERR_FILENO, "sh: while: a million rounds - stopping\n");
-            break;
-        }
+
+        /* ── Why this warns and no longer stops ──
+         *
+         * This used to break out of the loop after a million rounds. It
+         * was there to stop somebody typing `while : ; do : ; done` at
+         * the prompt and wedging the console, back when Ctrl-C did
+         * nothing on this machine - the shell had no controlling
+         * terminal, so no key could interrupt anything, and a runaway
+         * loop really was unrecoverable.
+         *
+         * That is fixed: Ctrl-C reaches the foreground process now, and
+         * guard reports a saturated board. So the cap protects against
+         * nothing and breaks the case it cannot tell apart - a loop that
+         * is supposed to run forever. A supervision loop in
+         * /data/rc.local, watching something and sleeping a second
+         * between looks, reaches a million rounds in eleven days and
+         * then silently stops on a board meant to run for months.
+         *
+         * So: say it once, loudly, and keep going. Visible if it is an
+         * accident, correct if it is not. */
+        if (rounds == 1000000)
+            dprintf(STDERR_FILENO,
+                    "sh: while: a million rounds - still going.\n"
+                    "sh:   If that is not what you meant, Ctrl-C stops it.\n");
+        if (rounds > 1000000)
+            rounds = 1000001;       /* stop counting; do not overflow */
     }
 
     last_status = 0;
@@ -2364,6 +2489,57 @@ int main(int argc, char **argv)
     bool quiet = false;
     if (argc > 1 && strcmp(argv[1], "-q") == 0) { quiet = true; first = 2; }
 
+    /* ── sh -c '<commands>' ──
+     *
+     * This was missing, and it is not a nicety. `/bin/sh -c` is how a
+     * shell gets invoked by everything that is not a person:
+     * glibc's system() and popen(), python's os.system and
+     * subprocess(shell=True), and every program that shells out to run
+     * one command. Without it they all got "sh: -c: cannot open" - the
+     * shell had taken "-c" for a filename - and the failure appeared
+     * inside whatever library was calling, a long way from the cause.
+     *
+     * Everything after the command string is $0, $1, ... which is what
+     * makes `sh -c 'echo $1' x y` behave the way it does everywhere
+     * else. Signals stay at their defaults: this is not an interactive
+     * shell, and a caller that sends SIGINT to what it started means it
+     * for the command. */
+    if (argc > first && strcmp(argv[first], "-c") == 0) {
+        if (argc <= first + 1) {
+            dprintf(STDERR_FILENO, "sh: -c needs something to run\n");
+            return 2;
+        }
+
+        strlcpy(script_name, "sh", sizeof script_name);
+        for (int i = first + 2; i < argc && pos_count < MAX_POSITIONAL; i++)
+            strlcpy(pos_args[pos_count++], argv[i], 256);
+
+        /* The string may hold newlines AND semicolons, and both are
+         * statement separators: `sh -c 'while true; do :; done'` is one
+         * line with four statements in it. split_statements is what the
+         * prompt and script paths use for exactly this, so using it here
+         * too is what makes `sh -c` behave identically to both. */
+        static block_line_t cblock[MAX_BLOCK];
+        int  cn = 0;
+
+        char work[MAX_LINE];
+        strlcpy(work, argv[first + 1], sizeof work);
+
+        char *p = work;
+        while (p && *p && cn < MAX_BLOCK) {
+            char *eol = strchr(p, '\n');
+            if (eol) *eol = '\0';
+
+            if (*p && *p != '#')
+                cn += split_statements(p, cblock + cn, MAX_BLOCK - cn);
+
+            p = eol ? eol + 1 : NULL;
+        }
+
+        exec_block(cblock, cn);
+        return last_status;
+    }
+
     if (argc > first) {
         long fd = lp_open(argv[first], O_RDONLY, 0);
         if (fd < 0) {
@@ -2401,6 +2577,16 @@ int main(int argc, char **argv)
          * cannot be interrupted is worse than one that can. */
         lp_signal_ignore(SIGINT);
         lp_signal_ignore(SIGQUIT);
+
+        /* And the suspend signals, in case something re-enabled Ctrl-Z
+         * on the terminal. A stopped shell on a board with no job
+         * control is a board you cannot type at, and no key gets it
+         * back. SIGTTIN and SIGTTOU are the same hazard arriving from
+         * the other direction - a background process touching the
+         * terminal - and there is nothing here that would resume us. */
+        lp_signal_ignore(SIGTSTP);
+        lp_signal_ignore(SIGTTIN);
+        lp_signal_ignore(SIGTTOU);
 
         read_hostname();
         hist_load();

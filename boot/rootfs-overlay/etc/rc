@@ -34,6 +34,28 @@ echo 16384 > /proc/sys/vm/min_free_kbytes || echo "[rc]   failed"
 echo "[rc] safety net"
 # Compressed swap inside RAM. Nothing is written to the card.
 zram on 256 || echo "[rc]   carrying on without zram"
+
+echo "[rc] a ceiling on the number of processes"
+# guard kills a fork bomb, but cleaning one up is the second line of
+# defence. This is the first: a hard ceiling on how many processes can
+# exist at all, so the bomb stops growing on its own.
+#
+# Why a sysctl and not a per-user limit: RLIMIT_NPROC is what you would
+# normally reach for, and root is exempt from it - a process with
+# CAP_SYS_RESOURCE passes the fork check whatever the limit says, and
+# every process here starts as root. pid_max applies to everybody.
+#
+# 4096 is high enough that nothing legitimate on a 512MB board ever
+# comes near it (a busy boot runs about twenty processes, and python
+# with threads a few dozen), and low enough that the whole table can be
+# walked in the time guard has to answer. At 4096, fork() starts
+# returning EAGAIN, which is an error every program is written to
+# handle - the same trick /tmp uses with "no space left on device".
+echo 4096 > /proc/sys/kernel/pid_max || echo "[rc]   could not set pid_max"
+# Threads count against the same ceiling from the other side. Leaving
+# headroom below pid_max means a thread-happy program hits its own limit
+# first and fails cleanly, rather than taking the last pid on the board.
+echo 3000 > /proc/sys/kernel/threads-max || echo "[rc]   could not set threads-max"
 # One daemon watching the five things that take this board down:
 #   memory   kills the largest process before the kernel has to guess,
 #            and marks init/sh/dropbear/wpa_supplicant/watchdog/logd/guard
@@ -44,7 +66,11 @@ zram on 256 || echo "[rc]   carrying on without zram"
 #   CPU      a process holding a core for a minute goes to the back of
 #            the queue, so SSH still answers
 #   disk     warns before /data fills, drops the old log if it does
-guard -d -r 32 -w 64 || echo "[rc]   guard did not start"
+#
+# guard is NOT started here any more. It is in /etc/services, so that
+# init restarts it when it dies. Started from this file it was started
+# once and never revived, which made "kill guard" a permanent, silent
+# disabling of every defence above - the worst fault the board had.
 
 # /tmp with a ceiling on it.
 #
@@ -293,8 +319,10 @@ echo "[rc] checking the SSH host key"
 # warning to get: it did.
 dropbearkey -y -f /data/dropbear_ed25519_host_key > /dev/null || rm -f /data/dropbear_ed25519_host_key
 
-echo "[rc] starting WiFi"
-wpa_supplicant -B -i wlan0 -c /etc/wpa.conf || echo "[rc]   carrying on without WiFi"
+# WiFi is started by init from /etc/services, not here - for the same
+# reason as guard. Started here with -B it backgrounded itself and
+# nothing restarted it, so a board that lost its association was off the
+# network for good with nothing watching. init has it now.
 
 echo "[rc] name resolution"
 # A fallback nameserver, written before DHCP runs and overwritten by it
