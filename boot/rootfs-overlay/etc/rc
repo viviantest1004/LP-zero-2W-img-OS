@@ -67,8 +67,26 @@ echo "[rc] the boot partition"
 # partition cannot be on the data partition, and putting it in the
 # system image would cost 1.4MB of RAM for the life of the machine, for
 # a program that usually does nothing.
+#
+# -L LPZERO: only mount a boot partition that says it is ours, for the
+# same reason /data is checked - and with more at stake. Boot from USB
+# with an unrelated SD card still in the slot and both exist; the card
+# is tried first. Without the label check, that stranger's FAT
+# partition becomes /boot, and /boot is where this system reads:
+#
+#   authorized_keys      who may log in over SSH
+#   firewall.conf        which ports are open
+#   wpa_supplicant.conf  the WiFi network and its password
+#   e2fsck               a binary that fsck runs as root
+#
+# That is not a filesystem mix-up. It is handing somebody the machine.
+#
+# -w on the USB attempt: the bus takes about a second to enumerate, and
+# this runs long before that. Without it, a board booted from a USB
+# stick came up with no /boot at all - and so with no authorized key,
+# which on a machine reached only over SSH is the same as gone.
 mkdir -p /boot
-mount -o ro /dev/mmcblk0p1 /boot || mount -o ro /dev/vda1 /boot || mount -o ro /dev/nvme0n1p1 /boot || mount -o ro /dev/sda1 /boot || echo "[rc]   could not read the boot partition"
+mount -L LPZERO -o ro /dev/mmcblk0p1 /boot || mount -L LPZERO -o ro /dev/vda1 /boot || mount -L LPZERO -o ro /dev/nvme0n1p1 /boot || mount -L LPZERO -w -o ro /dev/sda1 /boot || echo "[rc]   could not read the boot partition"
 
 echo "[rc] checking the data partition"
 # Before mounting it, and before expandfs, which mounts it to resize.
@@ -110,6 +128,12 @@ echo "[rc] storage"
 # system stays up and reachable - the root filesystem is in RAM - so
 # there is a chance to look at it.
 #
+# nosuid,nodev: a data partition has no business carrying a setuid
+# binary or a device node, and both are how a file written to a card
+# somewhere else turns into root on this machine. It does not stop
+# programs on /data running - Python and /data/bin need that - but it
+# does mean that dropping a setuid-root binary there achieves nothing.
+#
 # Every device is named explicitly, including the first. It used to be
 # called with no arguments, which meant "the SD card" - and that is the
 # wrong disk when the board booted from USB with somebody else's card
@@ -120,7 +144,7 @@ echo "[rc] storage"
 # These stay on one line each: our shell has no line continuation, and a
 # trailing backslash would be passed through as an argument.
 expandfs /dev/mmcblk0 /dev/mmcblk0p2 || expandfs /dev/vda /dev/vda2 || expandfs /dev/nvme0n1 /dev/nvme0n1p2 || expandfs -w /dev/sda /dev/sda2 || echo "[rc]   nothing to expand"
-mount -L LPZERODATA -o errors=remount-ro /dev/mmcblk0p2 /data || mount -L LPZERODATA -o errors=remount-ro /dev/vda2 /data || mount -L LPZERODATA -o errors=remount-ro /dev/nvme0n1p2 /data || mount -L LPZERODATA -o errors=remount-ro /dev/sda2 /data || echo "[rc]   no data partition - continuing in RAM"
+mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/mmcblk0p2 /data || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/vda2 /data || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/nvme0n1p2 /data || mount -L LPZERODATA -w -o errors=remount-ro,nosuid,nodev /dev/sda2 /data || echo "[rc]   no data partition - continuing in RAM"
 
 # Somewhere for logd to write. It starts from /etc/services right
 # after this script, so the directory has to exist by now.
@@ -170,7 +194,15 @@ echo "[rc] home directory on storage"
 mkdir -p /data/root/.ssh && mount -o bind /data/root /root || echo "[rc]   home is in RAM (lost on reboot)"
 
 echo "[rc] reading settings from the boot partition"
-cp -q /boot/wpa_supplicant.conf /data/wpa_supplicant.conf && echo "[rc]   took the WiFi settings"
+# A copy on /data, so that WiFi still comes up on a boot where /boot
+# cannot be read.
+#
+# This overwrites the copy on /data every time, which is the same rule
+# authorized_keys follows and is written on the boot partition's README:
+# while the file exists on /boot, /boot is the source of truth, and
+# editing the copy on the machine achieves nothing. To manage the
+# setting from the machine instead, delete the file from /boot.
+cp -q /boot/wpa_supplicant.conf /data/wpa_supplicant.conf && echo "[rc]   took the WiFi settings (delete it from /boot to manage them here)"
 
 echo "[rc] SSH keys"
 # Losing the data partition must not lock the owner out of their own
@@ -201,8 +233,10 @@ echo "[rc] WiFi configuration"
 # gone for good. /boot is writable only from a PC with the card in hand,
 # which is as close to "the owner asked for this" as this board gets.
 #
-# The copy on /data is still read when /boot has none, so the settings
-# can be changed from the machine itself.
+# The copy on /data is read when /boot has none - which is both the
+# fallback for an unreadable boot partition and the way to manage the
+# setting from the machine: delete the file from /boot and this one
+# wins from then on.
 cat /boot/wpa_supplicant.conf > /etc/wpa.conf || cat /data/wpa_supplicant.conf > /etc/wpa.conf || cat /etc/wpa_supplicant.conf > /etc/wpa.conf
 
 echo "[rc] checking the SSH host key"

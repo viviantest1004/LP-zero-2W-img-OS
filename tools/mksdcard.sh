@@ -224,6 +224,12 @@ have to burn the card again.
 
   wpa_supplicant.conf   Your WiFi network name and password.
 
+                        Like authorized_keys, this file is the source of
+                        truth while it exists here: it is copied to the
+                        machine on every boot, so editing the copy there
+                        does nothing. To manage WiFi from the machine
+                        instead, delete this file.
+
   firewall.conf         Which ports this machine accepts. The firewall
                         is on by default and always keeps SSH open;
                         this file is where you open anything else, or
@@ -242,6 +248,14 @@ How to connect
 Password authentication was left out of the build entirely. On a machine
 open to a network a password is just a target for brute force. With no
 public key, nobody gets in - including you.
+
+This partition is labelled LPZERO, and the machine will not mount one
+that is not. That matters when booting from USB with some other SD card
+still in the slot: without the check, that card's FAT partition would
+become the boot partition, and everything above - the SSH key, the
+firewall policy, the WiFi password, and a program run as root - would
+come from it. Renaming this drive in Windows is harmless; the label the
+check reads is the one written when the card was made.
 
 Using it
   help              every command there is, a screen at a time

@@ -26,6 +26,11 @@ off if it is in the way.
 | `/tmp` runs away | bounded at 64MB, so the program gets ENOSPC | `/etc/rc` |
 | ext4 corruption | the filesystem goes read-only rather than writing more | `errors=remount-ro` |
 | Power cut while writing `/boot` | mounted read-only; FAT has no journal | `mount -o ro` |
+| ext4 damage that read-only did not stop | repaired at boot, without a person | `fsck`, `/boot/e2fsck` |
+| Somebody else's card in the slot | every partition is checked for our label first | `mount -L`, `expandfs`, `fsck` |
+| A replaced `e2fsck` on the boot partition | its hash is checked against the system image before it runs as root | `fsck`, `/etc/e2fsck.sha256` |
+| A setuid binary written to `/data` from elsewhere | `/data` is mounted so setuid and device nodes do nothing | `nosuid,nodev` |
+| `/data` destroyed or encrypted | the SSH key is recovered from `/boot` or the image | `authkey` |
 
 ## guard
 
@@ -106,6 +111,46 @@ bootcount -c        # clear it by hand, after fixing rc.local
 sysinfo             # [health] shows the count when it is above 1
 ```
 
+## The card in the other slot
+
+Boot from a USB stick with an unrelated SD card still in the slot and
+both disks are present. `/etc/rc` tries four device names for the disk -
+`mmcblk0`, `vda`, `nvme0n1`, `sda` - because it has no way to ask which
+one the machine booted from, and the SD card is tried before the USB
+stick. So the stranger's partitions are found first.
+
+That is not a filesystem mix-up. The boot partition is where this system
+reads:
+
+| From `/boot` | What it decides |
+|---|---|
+| `authorized_keys` | who may log in over SSH |
+| `firewall.conf` | which ports are open |
+| `wpa_supplicant.conf` | the WiFi network and its password |
+| `e2fsck` | a binary that `fsck` runs as **root** |
+
+Every one of those is now behind a label check. `mkfs` writes `LPZERO`
+on the boot partition and `LPZERODATA` on the data partition, and
+`mount -L`, `expandfs` and `fsck` all refuse a partition that does not
+carry the right one. Verified by booting from USB with a card labelled
+`SOMEONEELSE` in the slot: their boot partition was refused, their key
+never reached the machine, their `e2fsck` never ran, and `fsck` checked
+ours rather than theirs.
+
+`e2fsck` has a second lock, because the boot partition is FAT and any PC
+can write to it - that is how the WiFi password gets on there in the
+first place. The SHA-256 the image was built with is in
+`/etc/e2fsck.sha256`, which lives inside the initramfs: part of the
+kernel image, unpacked into RAM at boot, reachable from no filesystem at
+all. If the binary does not match, it is not run. The cost of being
+wrong that way is losing automatic repair; the cost of the other way is
+running somebody else's program as root.
+
+An unlabelled partition is still accepted everywhere, with a warning.
+Cards written before the labels existed are still in use, and refusing
+them would break an upgrade for a check that is about not touching what
+is definitely somebody else's.
+
 ## Turning it off
 
 Nothing here is mandatory. `/etc/rc` and `/etc/services` are plain text
@@ -128,8 +173,21 @@ Verified under QEMU, booting the real image from USB, VirtIO and NVMe:
 the watchdog resetting the board when petting stops, the early arm during
 boot handing over to the daemon, `guard` demoting a Python process pinning
 a core after exactly 60s, `nice -5` landing on `init`, `/tmp` capped at
-64MB, `/data` mounted `errors=remount-ro`, `/boot` read-only, the boot
-counter surviving power cycles and tripping on the fifth failed boot.
+64MB, `/data` mounted `errors=remount-ro,nosuid,nodev`, `/boot` read-only,
+the boot counter surviving power cycles and tripping on the fifth failed
+boot, `/data` overwritten with random data and the SSH key recovered from
+`/boot`, a second card labelled `SOMEONEELSE` refused at every step, and a
+replaced `/boot/e2fsck` refused by its hash.
+
+One thing worth being plain about rather than counting as a layer: this
+board will now run an ordinary Linux binary, because glibc is on `/data`
+for CPython's sake and `/etc/rc` links it into place. Before that, a
+prebuilt binary dropped here - including prebuilt malware - simply failed
+at `execve`, and that was a real defence obtained by accident. It is
+gone, deliberately, in exchange for every package on PyPI working. What
+is left in its place: none of it is in the system image, so `rm -rf
+/data/glibc` closes the door again, and `firewall strict` stops whatever
+did get in from choosing its own way out.
 
 Not verified, because it needs the real board: the temperature sensor, the
 firmware's undervoltage word, and the frequency governor actually moving.

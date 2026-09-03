@@ -6,6 +6,7 @@
  *   mount -o ro,nosuid ...       flags, and filesystem options such as
  *                                size=64M or errors=remount-ro
  *   mount -L <label> ...         only if the filesystem carries it
+ *   mount -w ...                 wait for the device (USB takes a second)
  *   umount <dir>                 (when argv[0] is umount)
  *
  * With no type given we try the list below in order. The kernel returns
@@ -32,13 +33,32 @@ static const char *AUTO_TYPES[] = { "ext4", "vfat", "ext2", NULL };
  * be written onto somebody else's card.
  *
  * So the partition can be required to carry a label. mksdcard.sh writes
- * LPZERODATA on the one it makes, and -L makes mount check for it. The
- * label lives in the ext4 superblock, 1024 bytes into the partition and
- * 120 bytes into that.
+ * LPZERODATA on the data partition and LPZERO on the boot partition,
+ * and -L makes mount check for it.
  *
- * An unlabelled ext4 is allowed through: images made before the label
- * existed are still in use, and refusing them would break upgrades for
- * a check that is about not touching what is definitely not ours.
+ * This matters at least as much for the boot partition as for the data
+ * one, and for a while it was only done on the data one. /boot is where
+ * authorized_keys, firewall.conf, wpa_supplicant.conf and e2fsck come
+ * from - an SSH key, a firewall policy, the WiFi credentials, and a
+ * binary this system runs as root. Mounting a stranger's FAT partition
+ * there is not a filesystem mix-up; it is handing them the machine.
+ *
+ * Where the label lives depends on the filesystem:
+ *
+ *   ext2/3/4   in the superblock, 1024 bytes into the partition and
+ *              120 bytes into that, NUL padded to 16
+ *   FAT32      in the boot sector at offset 71, space padded to 11
+ *   FAT12/16   the same, at offset 43
+ *
+ * The FAT label is also kept in a root directory entry, and a tool that
+ * renames the volume may write only that one and leave the boot sector
+ * as it was. That suits us: this asks "did we make this", and renaming
+ * the drive in Windows should not stop the board booting from it.
+ *
+ * An unlabelled filesystem is allowed through: images made before the
+ * label existed are still in use, and refusing them would break an
+ * upgrade for a check that is about not touching what is definitely
+ * somebody else's.
  */
 #define EXT_SB_OFFSET  1024
 #define EXT_MAGIC_OFF    56
@@ -46,32 +66,53 @@ static const char *AUTO_TYPES[] = { "ext4", "vfat", "ext2", NULL };
 #define EXT_LABEL_LEN    16
 #define EXT_MAGIC    0xEF53
 
+#define FAT32_LABEL_OFF  71
+#define FAT16_LABEL_OFF  43
+#define FAT_LABEL_LEN    11
+
+/* Copy a fixed-width label out and trim the padding. FAT pads with
+ * spaces, ext with NULs, so both are trimmed from the right. */
+static void read_fixed_label(const u8 *src, size_t len, char *out)
+{
+    memcpy(out, src, len);
+    out[len] = '\0';
+    while (len > 0 && (out[len - 1] == ' ' || out[len - 1] == '\0'))
+        out[--len] = '\0';
+}
+
 static bool label_matches(const char *dev, const char *want)
 {
     long fd = lp_open(dev, O_RDONLY, 0);
     if (fd < 0)
         return false;
 
-    u8 sb[512];
-    memset(sb, 0, sizeof(sb));
-
-    if (lp_lseek((int)fd, EXT_SB_OFFSET, 0) < 0) {
-        lp_close((int)fd);
-        return false;
-    }
-    long n = lp_read((int)fd, sb, sizeof(sb));
+    /* One read covers both: the FAT boot sector at 0 and the ext
+     * superblock at 1024. */
+    u8 head[2048];
+    memset(head, 0, sizeof(head));
+    long n = lp_read((int)fd, head, sizeof(head));
     lp_close((int)fd);
 
-    if (n < (long)sizeof(sb))
+    if (n < (long)sizeof(head))
         return false;
 
-    u16 magic = (u16)(sb[EXT_MAGIC_OFF] | (sb[EXT_MAGIC_OFF + 1] << 8));
-    if (magic != EXT_MAGIC)
-        return false;
+    char label[FAT_LABEL_LEN > EXT_LABEL_LEN
+               ? FAT_LABEL_LEN + 1 : EXT_LABEL_LEN + 1];
 
-    char label[EXT_LABEL_LEN + 1];
-    memcpy(label, sb + EXT_LABEL_OFF, EXT_LABEL_LEN);
-    label[EXT_LABEL_LEN] = '\0';
+    u16 magic = (u16)(head[EXT_SB_OFFSET + EXT_MAGIC_OFF] |
+                      (head[EXT_SB_OFFSET + EXT_MAGIC_OFF + 1] << 8));
+    if (magic == EXT_MAGIC) {
+        read_fixed_label(head + EXT_SB_OFFSET + EXT_LABEL_OFF,
+                         EXT_LABEL_LEN, label);
+    } else if (head[510] == 0x55 && head[511] == 0xAA &&
+               (memcmp(head + 0x52, "FAT", 3) == 0 ||
+                memcmp(head + 0x36, "FAT", 3) == 0)) {
+        int off = (memcmp(head + 0x52, "FAT", 3) == 0)
+                  ? FAT32_LABEL_OFF : FAT16_LABEL_OFF;
+        read_fixed_label(head + off, FAT_LABEL_LEN, label);
+    } else {
+        return false;               /* not a filesystem we can identify */
+    }
 
     if (label[0] == '\0')
         return true;                 /* unlabelled: from an older image */
@@ -217,6 +258,7 @@ int main(int argc, char **argv)
 
     const char *type   = NULL;
     const char *want_label = NULL;
+    bool  wait_for_it  = false;
     unsigned long flags = 0;
     char  data_buf[256];
     const char *data   = NULL;
@@ -233,6 +275,8 @@ int main(int argc, char **argv)
             data = data_buf[0] ? data_buf : NULL;
         } else if (strcmp(argv[i], "-L") == 0 && i + 1 < argc) {
             want_label = argv[++i];
+        } else if (strcmp(argv[i], "-w") == 0) {
+            wait_for_it = true;
         } else if (nargs < 2) {
             args[nargs++] = argv[i];
         }
@@ -240,7 +284,7 @@ int main(int argc, char **argv)
 
     if (nargs < 2) {
         dprintf(STDERR_FILENO,
-                "usage: mount [-t type] [-o options] [-L label]"
+                "usage: mount [-t type] [-o options] [-L label] [-w]"
                 " <source> <dir>\n");
         return 2;
     }
@@ -267,6 +311,23 @@ int main(int argc, char **argv)
             return 1;
         }
         return 0;
+    }
+
+    /* -w: wait for the device to turn up.
+     *
+     * USB takes about a second to enumerate, and /etc/rc runs long
+     * before that. Without this, booting from a USB stick left /boot
+     * unmounted - and /boot is where authorized_keys, firewall.conf and
+     * e2fsck come from, so the machine came up with no way to log into
+     * it. expandfs has had the same flag for the same reason; mounting
+     * needed it too and did not have it.
+     *
+     * Only worth passing on the USB attempt. The others are either
+     * there immediately or not at all, and four seconds of waiting for
+     * each would be four seconds added to every boot. */
+    if (strncmp(src, "/dev/", 5) == 0 && wait_for_it) {
+        for (long waited = 0; !lp_exists(src) && waited < 4000; waited += 50)
+            lp_sleep_ms(50);
     }
 
     /* A device that is not there is not an error worth a kernel log
