@@ -50,7 +50,7 @@ scp examples/temperature-log.sh root@<보드>:/data/rc.local
 이미 만들어진 이미지를 쓰려면 `dist/` 의 것을 구우면 된다.
 
 ```bash
-xz -d < dist/LPzero2W-universal.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
+xz -d < dist/test_a_123_LPzero2W_linux.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 구운 카드의 FAT 파티션(어느 PC 에서나 열린다)에서 두 파일을 고친다:

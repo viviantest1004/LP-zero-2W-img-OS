@@ -2,9 +2,9 @@
 #
 # mkdist.sh - 남에게 건네줄 두 개를 만든다.
 #
-#   dist/LPzero2W-universal.img.xz   실기 Pi 와 가상머신 양쪽에서 부팅되는
+#   dist/test_a_123_LPzero2W_linux.img.xz   실기 Pi 와 가상머신 양쪽에서 부팅되는
 #                                    SD 카드 이미지. xz 로 압축했다.
-#   dist/LPzero2W-utm.zip            UTM/QEMU 전용. GPU 펌웨어와 압축되지
+#   dist/test_a_123_LPzero2W_linux-utm.zip            UTM/QEMU 전용. GPU 펌웨어와 압축되지
 #                                    않은 커널을 빼서 훨씬 작다.
 #
 # 왜 둘인가: universal 이미지는 라즈베리파이 GPU 펌웨어가 읽을 수 있도록
@@ -44,9 +44,11 @@ if [[ "$WHAT" == "all" || "$WHAT" == "utm" ]]; then
     # zip 은 sparse 를 모른다. 이미지를 그대로 넣으면 256MB 를 통째로
     # 압축하게 되지만, 빈 곳은 0 이라 실제로는 잘 줄어든다.
     ( cd "${REPO_ROOT}/sdcard" \
-      && rm -f "${DIST}/LPzero2W-utm.zip" \
-      && zip -q -9 "${DIST}/LPzero2W-utm.zip" lp-zero.img )
-    log "LPzero2W-utm.zip  $(stat -c%s "${DIST}/LPzero2W-utm.zip") bytes"
+      && rm -f "${DIST}/test_a_123_LPzero2W_linux-utm.zip" \
+      && cp lp-zero.img test_a_123_LPzero2W_linux.img \
+      && zip -q -9 "${DIST}/test_a_123_LPzero2W_linux-utm.zip" test_a_123_LPzero2W_linux.img \
+      && rm -f test_a_123_LPzero2W_linux.img )
+    log "test_a_123_LPzero2W_linux-utm.zip  $(stat -c%s "${DIST}/test_a_123_LPzero2W_linux-utm.zip") bytes"
 fi
 
 # ── SD 카드용 ────────────────────────────────────────────────────
@@ -55,10 +57,10 @@ if [[ "$WHAT" == "all" || "$WHAT" == "sd" ]]; then
     "${REPO_ROOT}/tools/mksdcard.sh" --linux > /dev/null
     [[ -f "$IMG" ]] || die "이미지가 만들어지지 않았습니다"
 
-    rm -f "${DIST}/LPzero2W-universal.img.xz"
+    rm -f "${DIST}/test_a_123_LPzero2W_linux.img.xz"
     # -T0: 코어 수만큼 스레드. 256MB 를 한 스레드로 짜면 오래 걸린다.
-    xz -9 -T0 -c "$IMG" > "${DIST}/LPzero2W-universal.img.xz"
-    log "LPzero2W-universal.img.xz  $(stat -c%s "${DIST}/LPzero2W-universal.img.xz") bytes"
+    xz -9 -T0 -c "$IMG" > "${DIST}/test_a_123_LPzero2W_linux.img.xz"
+    log "test_a_123_LPzero2W_linux.img.xz  $(stat -c%s "${DIST}/test_a_123_LPzero2W_linux.img.xz") bytes"
 fi
 
 step "결과"
@@ -68,6 +70,6 @@ for f in "${DIST}"/*; do
 done
 echo ""
 echo "  SD 카드에 굽기:"
-echo "    xz -d < dist/LPzero2W-universal.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress"
+echo "    xz -d < dist/test_a_123_LPzero2W_linux.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress"
 echo "  UTM/QEMU:"
-echo "    unzip dist/LPzero2W-utm.zip   그리고 lp-zero.img 를 디스크로 붙인다"
+echo "    unzip dist/test_a_123_LPzero2W_linux-utm.zip   그리고 test_a_123_LPzero2W_linux.img 를 디스크로 붙인다"
