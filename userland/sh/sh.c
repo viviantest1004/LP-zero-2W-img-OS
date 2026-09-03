@@ -97,18 +97,213 @@ static char *arena_push(const char *src, size_t len)
 }
 
 /* Set by next_token, read by parse_line: a quoted word is never expanded
- * into file names, and a word with no * or ? never needs looking at. */
+ * into file names, and a word with no * or ? never needs looking at.
+ * tok_from_cmd marks a word that came out of $(...) unquoted, which is
+ * the one case where a word has to be split on its own whitespace. */
 static bool tok_quoted   = false;
 static bool tok_has_glob = false;
+static bool tok_from_cmd = false;
+
+static void run_logical_line(char *line);
+
+/* ── Positional parameters ────────────────────────────────────────────
+ *
+ * $1 to $9, $# and $@, set two ways: by the arguments to a script, and
+ * by calling a shell function. A function saves and restores them, so a
+ * function called from a script does not lose the script's own.
+ *
+ * They are not environment variables. Exporting them would hand $1 to
+ * every program the script runs, which is not what a positional
+ * parameter is - it belongs to this shell and this call. */
+#define MAX_POSITIONAL 32
+static char pos_args[MAX_POSITIONAL][256];
+static int  pos_count = 0;
+static char script_name[128] = "sh";
+
+/* ── Shell functions ──────────────────────────────────────────────────
+ *
+ *   name() {
+ *       echo "$1"
+ *   }
+ *
+ * The body is kept as the lines it was written on, and running the
+ * function feeds them back through the same block executor that runs
+ * everything else - so a function can contain if, while, for, pipelines
+ * and other functions without any of that being written twice.
+ *
+ * A function runs in this shell, not a child. That is the whole point of
+ * having them: cd, variable assignments and exit codes are meant to be
+ * visible to the caller.
+ *
+ * The size limits are deliberate rather than dynamic. This shell has a
+ * fixed arena for words and fixed tables for jobs and pipelines, and a
+ * script that needs more than sixteen functions of forty lines is one
+ * that wants Python, which is on the data partition. */
+#define MAX_FUNCS       16
+#define MAX_FUNC_LINES  40
+
+typedef struct {
+    char name[64];
+    char lines[MAX_FUNC_LINES][MAX_LINE];
+    int  nlines;
+} func_t;
+
+static func_t funcs[MAX_FUNCS];
+static int    nfuncs = 0;
+
+static void call_func(func_t *f, char **argv, int argc);
+
+static func_t *func_find(const char *name)
+{
+    for (int i = 0; i < nfuncs; i++)
+        if (strcmp(funcs[i].name, name) == 0)
+            return &funcs[i];
+    return NULL;
+}
 
 /* Replace $NAME, ${NAME} or $? starting at *sp. Returns the new length.
  *
  * An undefined variable becomes nothing at all, which is what every other
  * shell does and what makes "cd $SOMEWHERE" fail loudly rather than
  * quietly doing something else. */
+/* The ')' that closes a '$(' - counting nesting, and not being fooled
+ * by a bracket inside quotes. */
+static const char *matching_paren(const char *s)
+{
+    int  depth = 1;
+    bool in_single = false, in_double = false;
+
+    for (; *s; s++) {
+        if (in_single) { if (*s == '\'') in_single = false; continue; }
+        if (in_double) { if (*s == '"')  in_double = false; continue; }
+        if (*s == '\'') { in_single = true;  continue; }
+        if (*s == '"')  { in_double = true;  continue; }
+        if (*s == '(')  depth++;
+        else if (*s == ')' && --depth == 0) return s;
+    }
+    return NULL;
+}
+
+/* Run a command and put what it printed into the word being built.
+ *
+ * The command runs in a forked copy of this shell with its output on a
+ * pipe, which is why $(...) can hold anything a line can hold -
+ * pipelines, redirections, another $(...) - without a second parser.
+ *
+ * Trailing newlines are dropped and the rest turn into spaces, which is
+ * what every shell does: "for f in $(ls)" is meant to loop over names,
+ * not over one string with newlines in it. */
+static size_t expand_command(const char *cmd, char *buf, size_t n, size_t size)
+{
+    int fds[2];
+    if (lp_pipe(fds) < 0)
+        return n;
+
+    pid_t pid = lp_fork();
+    if (pid < 0) {
+        lp_close(fds[0]);
+        lp_close(fds[1]);
+        return n;
+    }
+
+    if (pid == 0) {
+        lp_close(fds[0]);
+        lp_dup2(fds[1], STDOUT_FILENO);
+        lp_close(fds[1]);
+        /* Ctrl-C has to reach what is inside the brackets. The
+         * interactive shell ignores it; this child must not. */
+        lp_signal_default(SIGINT);
+        lp_signal_default(SIGQUIT);
+
+        char copy[MAX_LINE];
+        strlcpy(copy, cmd, sizeof copy);
+        run_logical_line(copy);
+        lp_exit(last_status);
+    }
+
+    lp_close(fds[1]);
+
+    static char out[8192];
+    size_t got = 0;
+    for (;;) {
+        long r = lp_read(fds[0], out + got, sizeof out - got);
+        if (r <= 0) break;
+        got += (size_t)r;
+        if (got >= sizeof out) break;
+    }
+    lp_close(fds[0]);
+
+    int status = 0;
+    lp_waitpid(pid, &status, 0);
+
+    while (got > 0 && (out[got - 1] == '\n' || out[got - 1] == '\r'))
+        got--;
+
+    for (size_t i = 0; i < got && n < size; i++)
+        buf[n++] = (out[i] == '\n' || out[i] == '\r' || out[i] == '\t')
+                   ? ' ' : out[i];
+    return n;
+}
+
 static size_t expand_dollar(char **sp, char *buf, size_t n, size_t size)
 {
     char *s = *sp + 1;              /* step over the $ */
+
+    if (*s == '(') {                /* $(command) */
+        const char *close = matching_paren(s + 1);
+        if (close) {
+            char cmd[MAX_LINE];
+            size_t len = (size_t)(close - (s + 1));
+            if (len >= sizeof cmd) len = sizeof cmd - 1;
+            memcpy(cmd, s + 1, len);
+            cmd[len] = '\0';
+
+            size_t before = n;
+            n = expand_command(cmd, buf, n, size);
+
+            /* Only mark it splittable if it actually produced a gap to
+             * split on - otherwise every substitution would go through
+             * the splitter for nothing. */
+            for (size_t i = before; i < n; i++)
+                if (buf[i] == ' ') { tok_from_cmd = true; break; }
+
+            *sp = (char *)close + 1;
+            return n;
+        }
+        dprintf(STDERR_FILENO, "sh: $( without )\n");
+        *sp = s + 1;
+        return n;
+    }
+
+    if (*s >= '0' && *s <= '9') {   /* $0 .. $9 */
+        int idx = *s - '0';
+        const char *val = "";
+        if (idx == 0)                    val = script_name;
+        else if (idx <= pos_count)       val = pos_args[idx - 1];
+        while (*val && n < size) buf[n++] = *val++;
+        *sp = s + 1;
+        return n;
+    }
+
+    if (*s == '#') {                /* how many there are */
+        char num[16];
+        snprintf(num, sizeof num, "%d", pos_count);
+        for (char *q = num; *q && n < size; q++) buf[n++] = *q;
+        *sp = s + 1;
+        return n;
+    }
+
+    if (*s == '@' || *s == '*') {   /* all of them */
+        for (int i = 0; i < pos_count; i++) {
+            if (i && n < size) buf[n++] = ' ';
+            for (const char *v = pos_args[i]; *v && n < size; v++)
+                buf[n++] = *v;
+        }
+        if (pos_count > 1)
+            tok_from_cmd = true;     /* several words, not one */
+        *sp = s + 1;
+        return n;
+    }
 
     if (*s == '?') {                /* the last exit code */
         char num[16];
@@ -180,6 +375,7 @@ static tok_type_t next_token(char **p, char **word_out)
 
     tok_quoted = false;
     tok_has_glob = false;
+    tok_from_cmd = false;
 
     /* ~ or ~/... at the start of a word. Not ~user: there is one user. */
     if (*s == '~' && (s[1] == '\0' || s[1] == '/' || is_space(s[1]))) {
@@ -202,8 +398,13 @@ static tok_type_t next_token(char **p, char **word_out)
             tok_quoted = true;
             s++;
             while (*s && *s != '"') {
-                if (*s == '$') n = expand_dollar(&s, buf, n, sizeof(buf));
-                else { if (n < sizeof(buf)) buf[n++] = *s; s++; }
+                if (*s == '$') {
+                    n = expand_dollar(&s, buf, n, sizeof(buf));
+                    tok_from_cmd = false;   /* "$(...)" is one word */
+                } else {
+                    if (n < sizeof(buf)) buf[n++] = *s;
+                    s++;
+                }
             }
             if (*s == '"') s++;
         } else if (*s == '$') {
@@ -427,6 +628,25 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
                 continue;
             }
 
+            /* An unquoted $(...) that produced spaces becomes several
+             * words. Without this, "for f in $(ls)" would loop once,
+             * over one string with every name in it. */
+            if (tok_from_cmd && !tok_quoted && strchr(word, ' ')) {
+                char *w = word;
+                while (*w && c->argc < MAX_ARGS) {
+                    while (*w == ' ') w++;
+                    if (!*w) break;
+                    char *end = w;
+                    while (*end && *end != ' ') end++;
+                    bool last = (*end == '\0');
+                    *end = '\0';
+                    c->argv[c->argc++] = w;
+                    if (last) break;
+                    w = end + 1;
+                }
+                continue;
+            }
+
             /* A pattern turns into the names it matched, or stays as it
              * was written when it matched nothing. */
             if (tok_has_glob && !tok_quoted && glob_expand(word, c) > 0)
@@ -455,9 +675,20 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
             if (t == TOK_AMP)
                 pl->background = true;
 
-            if (c->argc == 0) {
+            /* "X=1 ; echo $X" is two statements and the first one is an
+             * assignment, which is a whole command even though it puts
+             * nothing in argv. Only a genuinely empty one - a line that
+             * starts with ; or && - is a mistake worth naming. */
+            if (c->argc == 0 && !assigned) {
                 dprintf(STDERR_FILENO, "sh: no command before the operator\n");
                 return -1;
+            }
+            if (c->argc == 0) {
+                assigned = false;      /* consumed by this statement */
+                last_status = 0;
+                if (t == TOK_AMP)
+                    pl->background = false;
+                continue;              /* keep filling the same slot */
             }
             if (np >= max_pipes) {
                 dprintf(STDERR_FILENO,
@@ -1577,7 +1808,15 @@ static void run_logical_line(char *line)
         cmd_t *cmds = pipes[i].cmds;
         int    n    = pipes[i].ncmds;
 
-        if (n == 1 && cmds[0].argc > 0 && is_builtin(cmds[0].argv[0]))
+        /* A function is looked up before anything on disk, and runs in
+         * this shell rather than a child - cd and variable assignments
+         * inside one are meant to be visible to the caller. */
+        func_t *f = (n == 1 && cmds[0].argc > 0)
+                    ? func_find(cmds[0].argv[0]) : NULL;
+
+        if (f)
+            call_func(f, cmds[0].argv, cmds[0].argc);
+        else if (n == 1 && cmds[0].argc > 0 && is_builtin(cmds[0].argv[0]))
             run_builtin_redirected(&cmds[0]);
         else
             run_pipeline(cmds, n, pipes[i].background);
@@ -1638,7 +1877,34 @@ static bool is_keyword(const char *w)
     return false;
 }
 
-/* Does this line open a block that needs a matching fi or done? */
+/* "name() {" or "name () {" - the line that starts a function.
+ * Writes the name into `out` when it is one. */
+static bool is_func_def(const char *line, char *out, size_t size)
+{
+    while (*line == ' ' || *line == '\t') line++;
+
+    size_t n = 0;
+    while (is_name_char(*line) && n < size - 1)
+        out[n++] = *line++;
+    out[n] = '\0';
+    if (n == 0)
+        return false;
+
+    while (*line == ' ' || *line == '\t') line++;
+    if (line[0] != '(' ) return false;
+    line++;
+    while (*line == ' ' || *line == '\t') line++;
+    if (line[0] != ')') return false;
+    line++;
+    while (*line == ' ' || *line == '\t') line++;
+
+    /* The brace has to be there. Without it we cannot tell where the
+     * function ends, and a shell that guesses at that is worse than one
+     * that says so. */
+    return line[0] == '{';
+}
+
+/* Does this line open a block that needs a matching fi, done or }? */
 static bool opens_block(const char *w)
 {
     return strcmp(w, "if") == 0 || strcmp(w, "while") == 0 ||
@@ -1900,6 +2166,96 @@ static int exec_for(block_line_t *lines, int n, int start)
     return end + 1;
 }
 
+/* name() { BODY } - remember the body, run nothing.
+ * Returns the index just past the closing brace. */
+static int define_func(block_line_t *lines, int n, int start,
+                       const char *name)
+{
+    /* Find the '}' that closes it, at this nesting level. A brace on a
+     * line of its own is the only form accepted, which is what makes
+     * finding it a matter of looking rather than parsing. */
+    int depth = 1;
+    int end = -1;
+    for (int i = start + 1; i < n; i++) {
+        char w[32];
+        first_word(lines[i], w, sizeof w);
+        char inner[64];
+        if (is_func_def(lines[i], inner, sizeof inner)) depth++;
+        else if (strcmp(w, "}") == 0 && --depth == 0) { end = i; break; }
+    }
+    if (end < 0) {
+        dprintf(STDERR_FILENO, "sh: %s() without a closing }\n", name);
+        return n;
+    }
+
+    func_t *f = func_find(name);
+    if (!f) {
+        if (nfuncs >= MAX_FUNCS) {
+            dprintf(STDERR_FILENO,
+                    "sh: no room for more than %d functions\n", MAX_FUNCS);
+            return end + 1;
+        }
+        f = &funcs[nfuncs++];
+    }
+    strlcpy(f->name, name, sizeof f->name);
+    f->nlines = 0;
+
+    for (int i = start + 1; i < end && f->nlines < MAX_FUNC_LINES; i++)
+        strlcpy(f->lines[f->nlines++], lines[i], MAX_LINE);
+
+    if (end - start - 1 > MAX_FUNC_LINES)
+        dprintf(STDERR_FILENO,
+                "sh: %s() is longer than %d lines - the rest was dropped\n",
+                name, MAX_FUNC_LINES);
+
+    last_status = 0;
+    return end + 1;
+}
+
+/* Call one. The positional parameters are saved and put back, so a
+ * function called from a script does not eat the script's own $1. */
+static void call_func(func_t *f, char **argv, int argc)
+{
+    static int depth = 0;
+
+    /* A function that calls itself with no way out would otherwise run
+     * until the machine is out of memory, and this shell is pid 1's
+     * child - taking it down takes the console with it. */
+    if (depth >= 16) {
+        dprintf(STDERR_FILENO,
+                "sh: %s() is %d calls deep. Stopping - this is what a\n"
+                "sh:   function that calls itself forever looks like.\n",
+                f->name, depth);
+        last_status = 1;
+        return;
+    }
+
+    char saved[MAX_POSITIONAL][256];
+    int  saved_count = pos_count;
+    for (int i = 0; i < pos_count; i++)
+        strlcpy(saved[i], pos_args[i], 256);
+
+    pos_count = 0;
+    for (int i = 1; i < argc && pos_count < MAX_POSITIONAL; i++)
+        strlcpy(pos_args[pos_count++], argv[i], 256);
+
+    /* The body is copied out: exec_block writes into the lines it is
+     * given when it splits statements, and the function has to survive
+     * being called twice. */
+    static block_line_t body[MAX_FUNC_LINES];
+    int nb = f->nlines;
+    for (int i = 0; i < nb; i++)
+        strlcpy(body[i], f->lines[i], MAX_LINE);
+
+    depth++;
+    exec_block(body, nb);
+    depth--;
+
+    pos_count = saved_count;
+    for (int i = 0; i < saved_count; i++)
+        strlcpy(pos_args[i], saved[i], 256);
+}
+
 /* Run a run of logical lines, handling any control structures in them. */
 static int exec_block(block_line_t *lines, int n)
 {
@@ -1908,7 +2264,10 @@ static int exec_block(block_line_t *lines, int n)
         char w[32];
         first_word(lines[i], w, sizeof(w));
 
-        if      (strcmp(w, "if") == 0)    i = exec_if(lines, n, i);
+        char fname[64];
+        if (is_func_def(lines[i], fname, sizeof fname))
+            i = define_func(lines, n, i, fname);
+        else if (strcmp(w, "if") == 0)    i = exec_if(lines, n, i);
         else if (strcmp(w, "while") == 0) i = exec_while(lines, n, i);
         else if (strcmp(w, "for") == 0)   i = exec_for(lines, n, i);
         else {
@@ -1994,6 +2353,13 @@ int main(int argc, char **argv)
         }
         input_fd    = (int)fd;
         interactive = false;
+
+        /* Anything after the script name is $1, $2, ... and the script
+         * itself is $0, which is what every shell does and what makes a
+         * script something you can pass arguments to. */
+        strlcpy(script_name, argv[first], sizeof script_name);
+        for (int i = first + 1; i < argc && pos_count < MAX_POSITIONAL; i++)
+            strlcpy(pos_args[pos_count++], argv[i], 256);
     }
 
     /* An interactive shell is somebody sitting at a terminal: start where
@@ -2060,10 +2426,16 @@ int main(int argc, char **argv)
          * continuation prompt; in a script it just reads on. */
         int depth = 0;
         for (int i = 0; i < nblock; i++) {
-            char w[32];
+            char w[32], fname[64];
             first_word(block[i], w, sizeof(w));
             if (opens_block(w))  depth++;
             if (closes_block(w)) depth--;
+            /* A function body is a block too, opened by "name() {" and
+             * closed by a brace on its own line. Without counting it,
+             * typing a function at the prompt would try to run the
+             * first line of it as soon as Enter was pressed. */
+            if (is_func_def(block[i], fname, sizeof fname)) depth++;
+            if (strcmp(w, "}") == 0) depth--;
         }
 
         while (depth > 0 && nblock < MAX_BLOCK - 8 && shell_running) {
@@ -2092,10 +2464,13 @@ int main(int argc, char **argv)
             int added = split_statements(line, block + nblock,
                                          MAX_BLOCK - nblock);
             for (int i = 0; i < added; i++) {
-                char w[32];
+                char w[32], fname[64];
                 first_word(block[nblock + i], w, sizeof(w));
                 if (opens_block(w))  depth++;
                 if (closes_block(w)) depth--;
+                if (is_func_def(block[nblock + i], fname, sizeof fname))
+                    depth++;
+                if (strcmp(w, "}") == 0) depth--;
             }
             nblock += added;
         }
