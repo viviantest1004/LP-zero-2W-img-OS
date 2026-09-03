@@ -177,6 +177,18 @@ echo "[rc] the system update"
 # one on the boot partition so that a card reader is a way back.
 update --confirm || echo "[rc]   could not check the update state"
 
+echo "[rc] users"
+# /etc is in RAM and is rebuilt from the kernel image at every boot, so a
+# user added with useradd would be gone by morning. useradd writes to
+# /data/users instead and this merges it back in - the same trick the
+# SSH keys use, and for the same reason: the data partition is the only
+# writeable thing that survives.
+#
+# Delete /data/users and the machine is back to the users it was built
+# with, which is the way out if one of them stops something working.
+cat /data/users >> /etc/passwd || echo "[rc]   no extra users"
+cat /data/groups >> /etc/group
+
 echo "[rc] other people's programs"
 # Making an ordinary Linux binary run here.
 #

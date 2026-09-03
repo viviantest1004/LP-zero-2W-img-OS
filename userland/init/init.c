@@ -183,6 +183,8 @@ typedef struct {
     s64    retry_at;                /* monotonic ms to start it again, 0 = none */
     s64    started_at;              /* monotonic ms, to tell a crash loop from
                                        a service that ran for a week */
+    bool   given_up;                /* failed too often; not tried again */
+    bool   was_off;                 /* it was in the disabled list last look */
 } service_t;
 
 static service_t services[MAX_SERVICES];
@@ -321,6 +323,41 @@ static void load_services(void)
     }
 }
 
+#define DISABLED_FILE  "/data/services.disabled"
+
+/* ── Turning a service off ────────────────────────────────────────────
+ *
+ * /data/services.disabled is a list of names, one per line, that init
+ * will not start. `service stop x` writes the name there and kills the
+ * process; init sees it die, finds it in the list, and leaves it alone.
+ * `service start x` takes the line out, and init starts it again on its
+ * next look.
+ *
+ * A file rather than a signal, because there is no way to send init a
+ * message here - no handler support in the libc, and pid 1 catching
+ * signals is its own set of problems. A file is also the thing you can
+ * read to find out why something is not running, which a signal is not.
+ *
+ * It is on /data, so a service turned off stays off across a reboot.
+ * Delete the file and everything comes back. */
+static bool service_disabled(const char *name)
+{
+    long fd = lp_open(DISABLED_FILE, O_RDONLY, 0);
+    if (fd < 0)
+        return false;
+
+    char line[128];
+    bool found = false;
+    while (readline((int)fd, line, sizeof line) >= 0) {
+        char *end = line + strlen(line);
+        while (end > line && (end[-1] == ' ' || end[-1] == '\r'))
+            *--end = '\0';
+        if (line[0] && strcmp(line, name) == 0) { found = true; break; }
+    }
+    lp_close((int)fd);
+    return found;
+}
+
 /* Note that a supervised service died, and when to try it again.
  * true if it was one of ours.
  *
@@ -341,6 +378,15 @@ static bool respawn_service(pid_t dead, int status)
             continue;
 
         services[i].pid = -1;
+
+        if (service_disabled(services[i].argv[0])) {
+            printf("init: service %s stopped (it is in %s)\n",
+                   services[i].argv[0], DISABLED_FILE);
+            services[i].retry_at = 0;
+            services[i].fails    = 0;
+            return true;
+        }
+
         /* A service that stayed up for a minute was not failing to
          * start - it died of something else. Do not make it serve a
          * backoff earned months ago. */
@@ -350,9 +396,11 @@ static bool respawn_service(pid_t dead, int status)
 
         if (services[i].fails > 12) {
             dprintf(STDERR_FILENO,
-                    "init:   %s keeps failing. Giving up on it\n",
-                    services[i].argv[0]);
+                    "init:   %s keeps failing. Giving up on it.\n"
+                    "init:   'service start %s' tries again.\n",
+                    services[i].argv[0], services[i].argv[0]);
             services[i].retry_at = 0;
+            services[i].given_up = true;
             return true;
         }
 
@@ -377,13 +425,35 @@ static void restart_due_services(void)
 {
     s64 now = lp_monotonic_ms();
     for (int i = 0; i < nservices; i++) {
-        if (services[i].pid > 0 || services[i].retry_at == 0)
+        service_t *s = &services[i];
+
+        if (service_disabled(s->argv[0])) {
+            s->was_off = true;
+            continue;                   /* somebody turned it off */
+        }
+
+        /* Coming back from being turned off clears the failure history.
+         * Whoever re-enabled it is asking for a fresh try, not for the
+         * backoff it had earned before. */
+        if (s->was_off) {
+            s->was_off  = false;
+            s->fails    = 0;
+            s->given_up = false;
+            s->retry_at = 0;
+        }
+
+        if (s->pid > 0)
             continue;
-        if (now < services[i].retry_at)
-            continue;
-        services[i].retry_at = 0;
-        start_service(&services[i]);
-        services[i].started_at = lp_monotonic_ms();
+        if (s->given_up)
+            continue;                   /* it said so already */
+        if (s->retry_at != 0 && now < s->retry_at)
+            continue;                   /* still serving its backoff */
+
+        s->retry_at = 0;
+        start_service(s);
+        s->started_at = lp_monotonic_ms();
+        printf("init: started service %s (pid %d)\n",
+               s->argv[0], (int)s->pid);
     }
 }
 
@@ -391,9 +461,23 @@ static void restart_due_services(void)
  * to poll instead of blocking in wait(). */
 static bool services_pending(void)
 {
-    for (int i = 0; i < nservices; i++)
-        if (services[i].pid <= 0 && services[i].retry_at != 0)
+    /* A service waiting out a backoff needs looking at again, and so
+     * does one that somebody may be about to re-enable - blocking in
+     * wait() would mean `service start` did nothing until the next time
+     * some other process happened to exit.
+     *
+     * One that init has given up on does not: it will not be started
+     * again until somebody says so, and that somebody takes it out of
+     * the disabled list, which is the was_off path. Polling for it
+     * forever would be a wakeup a second for the life of the machine. */
+    for (int i = 0; i < nservices; i++) {
+        if (services[i].pid > 0)
+            continue;
+        if (services[i].retry_at != 0)
             return true;
+        if (services[i].was_off)
+            return true;
+    }
     return false;
 }
 
@@ -612,9 +696,11 @@ int main(int argc, char **argv)
                             : lp_wait(&status);
 
         if (pid == 0) {
-            /* Children, but none of them finished, and something is
-             * waiting on the clock. Look again shortly. */
-            lp_sleep_ms(200);
+            /* Children, but none of them finished, and something is not
+             * running. Look again shortly - a second is soon enough for
+             * `service start` to feel immediate and rare enough to cost
+             * nothing. */
+            lp_sleep_ms(1000);
             continue;
         }
 

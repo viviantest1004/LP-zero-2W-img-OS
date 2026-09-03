@@ -2,6 +2,8 @@
 #include "unistd.h"
 #include "syscall.h"
 #include "string.h"
+#include "stdlib.h"
+#include "stdio.h"
 
 char **environ = NULL;
 
@@ -690,4 +692,140 @@ bool lp_sha256_file(const char *path, char *hex)
 
     sha256_final(&s, hex);
     return true;
+}
+
+/* ── Users and groups ─────────────────────────────────────────────────
+ *
+ * /etc/passwd is "name:x:uid:gid:comment:home:shell" and /etc/group is
+ * "name:x:gid:members". Both are read line by line every time. There is
+ * no cache because there is nothing to cache: the files have a handful
+ * of lines and live in RAM already. */
+
+int lp_getgid(void)
+{
+    /* There is no getgid in the asm-generic table under a different
+     * name; 176 is getgid on arm64. */
+    return (int)sys_call0(176);
+}
+
+long lp_setuid(uid_t uid)  { return sys_call1(SYS_setuid, (long)uid); }
+long lp_setgid(gid_t gid)  { return sys_call1(SYS_setgid, (long)gid); }
+
+long lp_setgroups(int n, const gid_t *list)
+{
+    return sys_call2(SYS_setgroups, (long)n, (long)list);
+}
+
+long lp_chown(const char *path, uid_t uid, gid_t gid)
+{
+    return sys_call5(SYS_fchownat, AT_FDCWD, (long)path,
+                     (long)uid, (long)gid, 0);
+}
+
+/* Split "a:b:c" in place, returning how many fields were found. */
+static int split_colons(char *line, char **fields, int max)
+{
+    int n = 0;
+    char *p = line;
+    while (n < max) {
+        fields[n++] = p;
+        char *colon = strchr(p, ':');
+        if (!colon)
+            break;
+        *colon = '\0';
+        p = colon + 1;
+    }
+    return n;
+}
+
+static bool passwd_scan(const char *want_name, int want_uid, lp_user_t *out)
+{
+    long fd = lp_open("/etc/passwd", O_RDONLY, 0);
+    if (fd < 0)
+        return false;
+
+    char line[256];
+    bool found = false;
+
+    while (readline((int)fd, line, sizeof(line)) >= 0) {
+        if (line[0] == '#' || line[0] == '\0')
+            continue;
+
+        char *f[8];
+        int n = split_colons(line, f, 8);
+        if (n < 7)
+            continue;
+
+        int uid = atoi(f[2]);
+        if (want_name ? (strcmp(f[0], want_name) != 0) : (uid != want_uid))
+            continue;
+
+        strlcpy(out->name,  f[0], sizeof(out->name));
+        out->uid = (uid_t)uid;
+        out->gid = (gid_t)atoi(f[3]);
+        strlcpy(out->home,  f[5], sizeof(out->home));
+        strlcpy(out->shell, f[6], sizeof(out->shell));
+        found = true;
+        break;
+    }
+
+    lp_close((int)fd);
+    return found;
+}
+
+bool lp_user_by_name(const char *name, lp_user_t *out)
+{
+    return passwd_scan(name, 0, out);
+}
+
+bool lp_user_by_uid(uid_t uid, lp_user_t *out)
+{
+    return passwd_scan(NULL, (int)uid, out);
+}
+
+void lp_group_name(gid_t gid, char *out, size_t n)
+{
+    snprintf(out, n, "%d", (int)gid);      /* the fallback is the number */
+
+    long fd = lp_open("/etc/group", O_RDONLY, 0);
+    if (fd < 0)
+        return;
+
+    char line[256];
+    while (readline((int)fd, line, sizeof(line)) >= 0) {
+        if (line[0] == '#' || line[0] == '\0')
+            continue;
+        char *f[6];
+        if (split_colons(line, f, 6) < 3)
+            continue;
+        if ((gid_t)atoi(f[2]) == gid) {
+            strlcpy(out, f[0], n);
+            break;
+        }
+    }
+    lp_close((int)fd);
+}
+
+bool lp_group_by_name(const char *name, gid_t *out)
+{
+    long fd = lp_open("/etc/group", O_RDONLY, 0);
+    if (fd < 0)
+        return false;
+
+    char line[256];
+    bool found = false;
+    while (readline((int)fd, line, sizeof(line)) >= 0) {
+        if (line[0] == '#' || line[0] == '\0')
+            continue;
+        char *f[6];
+        if (split_colons(line, f, 6) < 3)
+            continue;
+        if (strcmp(f[0], name) == 0) {
+            *out = (gid_t)atoi(f[2]);
+            found = true;
+            break;
+        }
+    }
+    lp_close((int)fd);
+    return found;
 }

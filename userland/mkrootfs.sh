@@ -57,7 +57,13 @@ done
 ln -sf mount "${ROOT_DIR}/bin/umount"
 # chattr 도 argv[0] 로 갈린다. lsattr 은 같은 파일이다.
 ln -sf chattr "${ROOT_DIR}/bin/lsattr"
-log "bin/: ${PROGRAMS[*]} umount lsattr"
+# 나머지 argv[0] 쌍들. 하는 일이 같고 기본값만 다른 것들이라
+# 파일을 두 개 만들 이유가 없다.
+ln -sf chown   "${ROOT_DIR}/bin/chgrp"
+ln -sf id      "${ROOT_DIR}/bin/groups"
+ln -sf useradd "${ROOT_DIR}/bin/userdel"
+ln -sf su      "${ROOT_DIR}/bin/sudo"
+log "bin/: ${PROGRAMS[*]} umount lsattr chgrp groups userdel sudo"
 
 # 커널은 initramfs 의 /init 을 PID 1 로 실행한다
 ln -sf bin/init "${ROOT_DIR}/init"

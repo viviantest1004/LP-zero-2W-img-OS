@@ -156,6 +156,40 @@ pid_t lp_getpid(void);
 /* There is one user on this system and it is root, so this is a
  * formality - but a script asking "am I root" deserves an answer. */
 int   lp_getuid(void);
+int   lp_getgid(void);
+long  lp_setuid(uid_t uid);
+long  lp_setgid(gid_t gid);
+long  lp_setgroups(int n, const gid_t *list);
+/* Owner and group of a file. -1 for either leaves it alone, which is
+ * how chgrp is chown with the user left out. */
+long  lp_chown(const char *path, uid_t uid, gid_t gid);
+
+/* ── Users ──
+ *
+ * /etc/passwd and /etc/group, read straight off the disk each time.
+ * There is no name service, no cache and no getpwnam: one file, a few
+ * lines, and the cost of reading it is a page.
+ *
+ * /etc is in RAM and is rebuilt from the kernel image at every boot, so
+ * a user added on the machine lives in /data/users and is merged back
+ * in by /etc/rc. That is the same trick the SSH keys use, and for the
+ * same reason. */
+typedef struct {
+    char name[32];
+    uid_t uid;
+    gid_t gid;
+    char home[64];
+    char shell[48];
+} lp_user_t;
+
+/* Look one up by name or by number. false when there is no such user. */
+bool lp_user_by_name(const char *name, lp_user_t *out);
+bool lp_user_by_uid(uid_t uid, lp_user_t *out);
+/* The name for a group id, or the number as text when it has none.
+ * `out` needs 32 bytes. */
+void lp_group_name(gid_t gid, char *out, size_t n);
+/* A group id by name. false when there is no such group. */
+bool lp_group_by_name(const char *name, gid_t *out);
 long  lp_setsid(void);
 long  lp_kill(pid_t pid, int sig);
 void  lp_exit(int code) __attribute__((noreturn));
