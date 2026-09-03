@@ -1,59 +1,101 @@
 # LP-zero
 
-라즈베리파이 제로 2 W (BCM2710A1 / Cortex-A53) 용 **자작 펌웨어 · OS**.
+라즈베리파이 제로 2 W (BCM2710A1 / Cortex-A53) 용 **자작 리눅스 배포판**.
 
-GPU 부트ROM 이 요구하는 Broadcom 클로즈드 블롭 3개를 제외하면
-부팅 코드부터 드라이버, 부트로더, 유저랜드까지 전부 직접 작성한다.
+GPU 부트ROM 이 요구하는 Broadcom 클로즈드 블롭과, 암호 구현 두 개
+(dropbear, wpa_supplicant) 를 빼면 전부 직접 작성했다 — 커널 설정,
+libc, init, 셸, 그리고 90개 가까운 명령어.
 
-현재 상태: **리눅스 부팅까지 동작.** 자체 커널이 자체 유저랜드를 띄운다. 베어메탈 펌웨어가 부팅해서
-HDMI 화면에 스플래시를 띄우고, 시리얼과 화면 양쪽으로 보드 정보를 덤프한 뒤
-대화형 모니터를 띄운다. 이미지 크기 20KB. QEMU 로 검증 완료.
+시스템 전체가 파일 하나다. 루트 파일시스템은 커널 이미지 안의 cpio 이고
+부팅할 때 램으로 풀린다. 디스크 위의 어떤 것도 돌아가는 시스템의 일부가
+아니다 — 그래서 전원을 갑자기 뽑아도 시스템이 깨질 데가 없고,
+업데이트가 파일 교체 하나로 끝난다.
 
-아직 리눅스 커널도 OS 도 없다 — 펌웨어 단계다. [로드맵](docs/00-roadmap.md) 참조.
+| | |
+|---|---|
+| 커널 + 유저랜드 | 22MB (파일 하나) |
+| 부팅 후 남는 램 | 480MB / 512MB |
+| SSH | 공개키 전용 (비밀번호 인증은 아예 컴파일 안 됨) |
+| 파이썬 | CPython 3.12 + pip. manylinux 휠도 설치됨 (numpy 확인) |
+| 방화벽 | 기본 켜짐. nftables 를 netlink 로 직접 |
+
+## 이걸로 뭘 하나
+
+`examples/` 에 바로 쓰는 `/data/rc.local` 스크립트 네 개가 있다.
+
+```bash
+scp examples/temperature-log.sh root@<보드>:/data/rc.local
+```
+
+| | 하는 일 |
+|---|---|
+| `temperature-log.sh` | 온도·메모리·부하를 CSV 로 계속 기록 |
+| `webhook-notify.sh` | 주소가 바뀌면 URL 로 알림 |
+| `http-server.sh` | 디렉터리를 HTTP 로 서비스 |
+| `usb-backup.sh` | USB 를 꽂으면 자동 백업 |
+
+## 몇 달 방치하는 기계라는 것
+
+- **워치독** — 커널이 멎으면 보드가 스스로 리셋
+- **guard** — 메모리·발열·전압·CPU·디스크를 한 데몬이 감시. SSH 는 마지막까지 살린다
+- **beacon** — 5분마다 상태를 URL 로 보고. *보고가 끊기는 게 신호*다
+- **update** — 시스템 교체가 원자적이고, 세 번 짧게 부팅하면 스스로 되돌아간다
+- **bootcount** — 부팅 루프면 `rc.local` 을 건너뛴다
+- **authkey** — `/data` 가 통째로 날아가도 SSH 키를 부트 파티션에서 복구
+
+자세히: [docs/06-safety.md](docs/06-safety.md)
 
 ## 빠른 시작
 
+이미 만들어진 이미지를 쓰려면 `dist/` 의 것을 구우면 된다.
+
 ```bash
-# 1. Broadcom GPU 펌웨어 받기 (최초 1회)
-make blobs
-
-# 2. 펌웨어 빌드
-make firmware
-
-# 3. 부팅 가능한 SD 이미지 만들기
-make sdcard
-
-# 또는 한 번에
-make all-in-one
+xz -d < dist/LPzero2W-universal.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
-SD카드에 굽기:
+구운 카드의 FAT 파티션(어느 PC 에서나 열린다)에서 두 파일을 고친다:
+
+- `authorized_keys` — **여기에 공개키를 넣지 않으면 아무도 못 들어간다**
+- `wpa_supplicant.conf` — WiFi 이름과 비밀번호
+
+넣고 전원을 넣으면 `ssh -i ~/.ssh/lpzero root@<주소>` 로 들어간다.
+
+### 직접 빌드하기
+
 ```bash
-sudo dd if=sdcard/lp-zero.img of=/dev/sdX bs=4M conv=fsync status=progress
+./tools/fetch-kernel.sh       # 커널 소스 (고정된 커밋)
+./tools/build-sysroot.sh      # CPython 이 링크할 라이브러리들
+./tools/build-thirdparty.sh   # dropbear, wpa_supplicant
+./tools/build-python.sh       # CPython 3.12 + pip + glibc
+./tools/build-fsck.sh         # e2fsck, mke2fs
+
+make image                    # 유저랜드 -> 커널 -> SD 이미지
 ```
 
-시리얼 콘솔 연결 후 (115200 8N1) 전원을 넣으면:
+앞의 다섯은 한 번만 돌리면 되고, 매일 도는 것은 `make image` 다.
+빌드 산출물은 저장소 옆 `.build/` 에 들어간다 (`LPZERO_WORK` 로 옮길 수 있다).
 
-> ⚠️ USB-TTL 어댑터는 **반드시 3.3V**. 5V 를 GPIO15 에 물리면 보드가 죽는다.
-> 구분법과 배선은 [하드웨어 문서](docs/02-hardware.md#시리얼-콘솔-배선-필수) 참조.
+전체 툴체인은 `Dockerfile` 에 고정되어 있다:
 
-```
- LP-zero firmware 0.1.0-phase1
- test_a_123_LPzero2W_img
- Raspberry Pi Zero 2 W / BCM2710A1 / Cortex-A53
-================================================
-
-[cpu]
-  Exception level  : EL1
-  MIDR_EL1         : 0x410fd034  (part 0xd03, rev 4)
-  ...
-[board]
-  model            : Raspberry Pi Zero 2 W (rev 1.0)
-  processor        : BCM2837
-  ...
+```bash
+docker build -t lpzero .
+docker run --rm -it -v "$PWD":/src -w /src lpzero
 ```
 
-`h` 를 누르면 명령 목록이 나온다.
+자세히: [docs/07-building.md](docs/07-building.md)
+
+### 이 시스템용 프로그램 만들기
+
+여기 바이너리는 전부 정적이고 libc 도 자체 구현이라, 보통의 aarch64
+크로스 컴파일러로 지은 것은 실행되지 않는다.
+
+```bash
+./tools/build-sdk.sh
+sdk/bin/lp-gcc -o myprog myprog.c
+
+mkdir -p stage/bin && cp myprog stage/bin/
+./tools/mkpkg.sh myprog 1.0 stage      # 패키지로
+```
 
 ## 부팅 화면 문구 바꾸기
 
