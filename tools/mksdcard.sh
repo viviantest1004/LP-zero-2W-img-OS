@@ -43,15 +43,20 @@ PART_IMG="${OUT_DIR}/.boot-part.img"
 #
 #   섹터 0                 MBR
 #   섹터 8192   (4MiB)     파티션 1: FAT32 부트 (GPU 블롭, 커널, config.txt)
-#   섹터 139264 (68MiB)    파티션 2: ext4 데이터 (WiFi 설정, SSH 키, 파일)
+#   섹터 270336 (132MiB)   파티션 2: ext4 데이터 (WiFi 설정, SSH 키, 파일)
 #
 # 루트는 커널에 내장된 initramfs(RAM)이고 데이터만 여기에 남는다.
 # 루트에 쓰기가 없으므로 전원을 갑자기 뽑아도 시스템이 깨지지 않는다.
+#
+# 부트 파티션이 128MiB 인 이유: 이 시스템 전체 - 커널과 유저랜드 - 가
+# 파일 하나(22MB)다. 업데이트를 원자적으로 하려면 그 파일이 두 개 있어야
+# 한다. 새 것을 다 쓰고 검증한 다음에야 이름을 바꾸고, 실패하면 예전
+# 것으로 돌아간다(update). 64MiB 로는 두 개가 안 들어간다.
 IMAGE_MB=256
 SECTOR_SIZE=512
 BOOT_START_SECTOR=8192          # 4MiB
-BOOT_SIZE_MB=64
-DATA_START_SECTOR=139264        # 4 + 64 = 68MiB
+BOOT_SIZE_MB=128
+DATA_START_SECTOR=270336        # 4 + 128 = 132MiB
 VOLUME_LABEL="LPZERO"
 DATA_LABEL="LPZERODATA"
 

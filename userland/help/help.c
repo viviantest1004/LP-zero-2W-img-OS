@@ -118,6 +118,7 @@ static const entry_t KNOWN[] = {
     { "beacon",   "system",  "report how the board is doing", "beacon [-d] [-n]" },
     { "calc",     "system",  "integer calculator",          "calc \"1 + 2 * 3\"" },
     { "pkg",      "system",  "install and remove packages", "pkg list|add|remove|install" },
+    { "update",   "system",  "replace the system, reversibly", "update [<file|url>|--rollback]" },
     { "splash",   "system",  "draw the boot screen",        "splash [device]" },
 
     { "dhcp",     "network", "get an address, and keep it", "dhcp [-d] <interface>" },

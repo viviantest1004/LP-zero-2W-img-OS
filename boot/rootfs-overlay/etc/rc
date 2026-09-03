@@ -161,6 +161,22 @@ datadisk --boot || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/mm
 # after this script, so the directory has to exist by now.
 mkdir -p /data/log
 
+echo "[rc] the system update"
+# Nothing happens here unless a new system was installed and has not yet
+# proved itself. When one has, this counts the attempt: three starts
+# without staying up for five minutes and the previous image goes back
+# and the board reboots into it.
+#
+# guard is the other half - it deletes the trial marker once the board
+# has been up five minutes with memory, temperature and services all
+# fine, which is the definition of the new system being all right.
+#
+# This cannot help with a system that does not start at all: nothing on
+# this board runs before the kernel does. `update` checks the image
+# before switching to it for exactly that reason, and keeps the previous
+# one on the boot partition so that a card reader is a way back.
+update --confirm || echo "[rc]   could not check the update state"
+
 echo "[rc] other people's programs"
 # Making an ordinary Linux binary run here.
 #

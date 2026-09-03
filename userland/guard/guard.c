@@ -110,6 +110,7 @@
  * clear the count. Five minutes is past everything that starts at boot
  * and well past the watchdog's patience. */
 #define BOOT_OK_PASSES  60    /* slow passes before the boot counts (5min) */
+#define UPDATE_TRIAL_FILE  "/data/.update-trial"
 #define BOOT_COUNT_FILE "/data/boot_count"
 
 /* /proc/<pid>/oom_score_adj values.
@@ -626,6 +627,19 @@ static void clear_boot_count(void)
         return;                     /* no data partition - nothing counted */
     lp_write((int)fd, "0\n", 2);
     lp_close((int)fd);
+
+    /* The same moment settles a system update.
+     *
+     * `update` leaves this file behind when it installs a new system,
+     * and puts the old one back if the board starts three times without
+     * reaching here. Reaching here is the definition of the new system
+     * being all right: five minutes up, memory and temperature fine,
+     * nothing restarting. So this is where it stops being on trial.
+     *
+     * Deleting the file rather than running `update --commit`: guard is
+     * the process that must not die, and forking from it to say one
+     * thing is a risk taken for nothing. */
+    lp_unlink(UPDATE_TRIAL_FILE);
 }
 
 /* ── Disk ─────────────────────────────────────────────────────────────
