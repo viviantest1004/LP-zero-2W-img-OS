@@ -11,14 +11,17 @@
 # initramfs 파일이 필요 없다 - 커널 하나만 SD 에 넣으면 부팅된다.
 #
 # 환경변수:
-#   LINUX_SRC   커널 소스 경로 (기본 /home/user/kernel-work/linux)
+#   LINUX_SRC   커널 소스 경로 (기본 .build/linux — tools/fetch-kernel.sh 가 받는다)
 #   JOBS        병렬 빌드 수 (기본 nproc)
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LINUX_SRC="${LINUX_SRC:-/home/user/kernel-work/linux}"
-BUILD_DIR="${BUILD_DIR:-/home/user/kernel-work/build}"
+# shellcheck source=tools/common.sh
+source "${REPO_ROOT}/tools/common.sh"
+
+LINUX_SRC="${LINUX_SRC:-${LPZERO_WORK}/linux}"
+BUILD_DIR="${BUILD_DIR:-${LPZERO_WORK}/build}"
 ROOTFS="${REPO_ROOT}/userland/rootfs"
 FRAGMENT="${REPO_ROOT}/kernel/lp-zero.config"
 OUT_DIR="${REPO_ROOT}/kernel/out"

@@ -26,7 +26,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="${WORK:-/home/user/kernel-work/thirdparty}"
+# shellcheck source=tools/common.sh
+source "${REPO_ROOT}/tools/common.sh"
+
+WORK="${WORK:-${LPZERO_WORK}/thirdparty}"
 SYSROOT="${SYSROOT:-${WORK}/sysroot}"
 SUMS_FILE="${REPO_ROOT}/tools/thirdparty.sha256"
 CONF_DIR="${REPO_ROOT}/thirdparty"

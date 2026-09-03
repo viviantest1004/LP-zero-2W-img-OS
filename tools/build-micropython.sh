@@ -18,7 +18,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="${WORK:-/home/user/kernel-work/thirdparty}"
+# shellcheck source=tools/common.sh
+source "${REPO_ROOT}/tools/common.sh"
+
+WORK="${WORK:-${LPZERO_WORK}/thirdparty}"
 MPY_DIR="${MPY_DIR:-${WORK}/micropython}"
 MPY_REF="${MPY_REF:-v1.24.1}"
 JOBS="${JOBS:-$(nproc)}"

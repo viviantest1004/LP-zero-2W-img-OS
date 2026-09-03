@@ -411,7 +411,7 @@ if command -v debugfs >/dev/null 2>&1; then
     # 파이썬을 시스템(initramfs)이 아니라 여기에 두는 이유는 크기다.
     # initramfs 는 커널에 박혀 있어서 늘리면 부팅 이미지가 그대로 커지지만,
     # /data 는 첫 부팅에 카드 전체로 늘어나므로 크기가 문제되지 않는다.
-    MPY="${MICROPYTHON_BIN:-/home/user/kernel-work/thirdparty/micropython/ports/unix/build-lpzero/micropython}"
+    MPY="${MICROPYTHON_BIN:-${WORK}/micropython/ports/unix/build-lpzero/micropython}"
     HAVE_MPY=0
     if $WITH_MPY && [[ -f "$MPY" ]]; then
         d_put "$MPY" bin/micropython 0100755
@@ -420,7 +420,7 @@ if command -v debugfs >/dev/null 2>&1; then
     fi
 
     # CPython 을 빌드해두었으면 트리째 넣는다 (tools/build-python.sh).
-    PYSTAGE="${PYSTAGE:-/home/user/kernel-work/python-stage/data/python}"
+    PYSTAGE="${PYSTAGE:-${PYSTAGE_ROOT}/data/python}"
     if [[ -d "$PYSTAGE" ]]; then
         log "데이터: CPython 트리 준비 중..."
         # 디렉터리가 먼저, 그 다음 파일. find 는 부모를 먼저 내므로 순서가 맞다.
@@ -446,7 +446,7 @@ if command -v debugfs >/dev/null 2>&1; then
     #
     # It lives on the data partition, so the system image is exactly the
     # size it was.
-    GLIBCSTAGE="${GLIBCSTAGE:-/home/user/kernel-work/python-stage/data/glibc}"
+    GLIBCSTAGE="${GLIBCSTAGE:-${PYSTAGE_ROOT}/data/glibc}"
     if [[ -d "$GLIBCSTAGE" ]]; then
         GPARENT="$(cd "$(dirname "$GLIBCSTAGE")" && pwd)"
         ( cd "$GPARENT"
@@ -459,7 +459,7 @@ if command -v debugfs >/dev/null 2>&1; then
     # 루트 인증서. OpenSSL 을 --openssldir=/data/ssl 로 지었으므로
     # 파이썬과 다른 프로그램이 여기를 본다. 없으면 HTTPS 접속이
     # CERTIFICATE_VERIFY_FAILED 로 죽는다.
-    CA_SRC="${CA_BUNDLE:-/home/user/kernel-work/thirdparty/ca/cert.pem}"
+    CA_SRC="${CA_BUNDLE:-${WORK}/ca/cert.pem}"
     if [[ -f "$CA_SRC" ]]; then
         d_mkdir /ssl
         d_put "$CA_SRC" ssl/cert.pem

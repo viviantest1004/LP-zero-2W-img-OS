@@ -29,3 +29,6 @@ sdk/
 
 # tools/mkpkg.sh 가 만든 로컬 패키지 저장소
 repo/
+
+# tools/common.sh 가 정하는 빌드 작업 디렉터리 (커널 소스, sysroot 등)
+.build/

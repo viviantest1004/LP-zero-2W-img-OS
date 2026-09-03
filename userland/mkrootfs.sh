@@ -20,13 +20,16 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${HERE}/.." && pwd)"
+# shellcheck source=tools/common.sh
+source "${REPO_ROOT}/tools/common.sh"
+
 
 BIN_DIR="${HERE}/bin"
 ROOT_DIR="${HERE}/rootfs"
 CPIO_OUT="${HERE}/initramfs.cpio.gz"
 OVERLAY="${REPO_ROOT}/boot/rootfs-overlay"
 FW_DIR="${REPO_ROOT}/blobs/brcm"
-THIRD="${THIRDPARTY_DIR:-/home/user/kernel-work/thirdparty}"
+THIRD="${THIRDPARTY_DIR:-${LPZERO_WORK}/thirdparty}"
 
 # 프로그램 목록은 Makefile 의 PROGS 에서 읽는다.
 # 두 곳에 나눠 적으면 새 도구를 추가할 때 한쪽을 빠뜨린다

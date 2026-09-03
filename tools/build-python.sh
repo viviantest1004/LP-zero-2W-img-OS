@@ -15,17 +15,20 @@
 #                        크로스 환경에서는 불가능하다. 답을 미리 준다.
 #
 # 환경변수:
-#   PY_SRC     소스 경로 (기본 /home/user/kernel-work/thirdparty/Python-3.12.3)
+#   PY_SRC     소스 경로 (기본 .build/thirdparty/Python-3.12.3)
 #   BUILD_PY   호스트 파이썬 (기본 /usr/bin/python3.12)
 #   JOBS       병렬 빌드 수
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY_SRC="${PY_SRC:-/home/user/kernel-work/thirdparty/Python-3.12.3}"
+# shellcheck source=tools/common.sh
+source "${REPO_ROOT}/tools/common.sh"
+
+PY_SRC="${PY_SRC:-${WORK}/Python-3.12.3}"
 BUILD_PY="${BUILD_PY:-/usr/bin/python3.12}"
-STAGE="${STAGE:-/home/user/kernel-work/python-stage}"
-SYSROOT="${SYSROOT:-/home/user/kernel-work/thirdparty/sysroot}"
+STAGE="${STAGE:-${PYSTAGE_ROOT}}"
+SYSROOT="${SYSROOT:-${WORK}/sysroot}"
 JOBS="${JOBS:-$(nproc)}"
 CROSS=aarch64-linux-gnu-
 

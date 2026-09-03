@@ -25,7 +25,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-THIRDPARTY="${THIRDPARTY:-/home/user/kernel-work/thirdparty}"
+# shellcheck source=tools/common.sh
+source "${REPO_ROOT}/tools/common.sh"
+
+THIRDPARTY="${THIRDPARTY:-${WORK}}"
 E2FS_SRC="${E2FS_SRC:-${THIRDPARTY}/e2fsprogs-1.47.0}"
 E2FS_TAR="${THIRDPARTY}/e2fsprogs.tar.gz"
 OUT="${REPO_ROOT}/userland/prebuilt"
