@@ -85,15 +85,6 @@ service stop guard > /tmp/t5 2>&1
 if grep -q force /tmp/t5 ; then echo "PASS  service stop guard is refused" ; else echo "FAIL  service stop guard was allowed" ; fi
 if firewall status > /tmp/t6 2>&1 ; then echo "PASS  firewall reports its state" ; else echo "FAIL  firewall status failed" ; fi
 
-echo "=== IT DOES NOT DIE ==="
-sh -c 'while : ; do : ; done' &
-sleep 33
-if pidof sh | grep -q . ; then echo "PASS  the hog is alive to be judged" ; else echo "FAIL  test hog died on its own" ; fi
-if dmesg | grep -q "held a core" ; then echo "PASS  guard noticed the CPU hog" ; else echo "FAIL  a core was held 40s with no notice" ; fi
-kill -9 `pidof sh`
-if definitely-not-a-command > /tmp/t7 2>&1 ; then echo "FAIL  a missing command reported success" ; else echo "PASS  a missing command fails" ; fi
-if grep -q "not found" /tmp/t7 ; then echo "PASS  and says so" ; else echo "FAIL  and said: `head -1 /tmp/t7`" ; fi
-
 echo "=== ERROR PATHS ==="
 if cat /nope/nope > /tmp/t8 2>&1 ; then echo "FAIL  cat on a missing file succeeded" ; else echo "PASS  cat on a missing file fails" ; fi
 if cd /nope/nope ; then echo "FAIL  cd to nowhere succeeded" ; else echo "PASS  cd to a missing directory fails" ; fi
@@ -121,5 +112,34 @@ if grep -q first /tmp/r3 ; then echo "PASS  2>> appends rather than truncating" 
 echo "=== LOGGING ==="
 if test -f /data/log/messages ; then echo "PASS  the log exists: `wc -l < /data/log/messages` lines" ; else echo "FAIL  no log file" ; fi
 if grep -q "init:" /data/log/messages ; then echo "PASS  our own programs reach the log" ; else echo "FAIL  the log has kernel messages only" ; fi
+
+echo "=== TIME AND SLEEP ==="
+# sleep 1 through sleep 9 were right and everything longer was not:
+# the parser scaled by a thousand once per digit, so "sleep 33" waited
+# 3003 seconds. Nothing in the boot path sleeps that long, so the only
+# way to see it is to time a two-digit sleep against the clock.
+T0=`date -e`
+sleep 12
+T1=`date -e`
+ELAPSED=`calc $T1 - $T0 | head -1`
+if test $ELAPSED -ge 11 ; then echo "PASS  sleep 12 waited at least 11s" ; else echo "FAIL  sleep 12 returned after ${ELAPSED}s" ; fi
+if test $ELAPSED -le 20 ; then echo "PASS  and not much more (${ELAPSED}s)" ; else echo "FAIL  sleep 12 waited ${ELAPSED}s - the parser is scaling wrongly" ; fi
+if test 12 -gt 9 ; then echo "PASS  test compares two-digit numbers" ; else echo "FAIL  test -gt is wrong above nine" ; fi
+
+# The slow one goes last on purpose.
+#
+# It has to let a process hold a core for thirty seconds before guard is
+# entitled to have noticed, and a serial session that gets cut short
+# would otherwise take every check after it down too. Put at the end,
+# a truncated run still reports everything else.
+echo "=== IT DOES NOT DIE ==="
+sh -c 'while : ; do : ; done' &
+HOG=$!
+sleep 33
+if test -d /proc/$HOG ; then echo "PASS  the hog is alive to be judged" ; else echo "FAIL  test hog died on its own" ; fi
+if dmesg | grep -q "held a core" ; then echo "PASS  guard noticed the CPU hog" ; else echo "FAIL  a core was held 40s with no notice" ; fi
+kill -9 $HOG
+if definitely-not-a-command > /tmp/t7 2>&1 ; then echo "FAIL  a missing command reported success" ; else echo "PASS  a missing command fails" ; fi
+if grep -q "not found" /tmp/t7 ; then echo "PASS  and says so" ; else echo "FAIL  and said: `head -1 /tmp/t7`" ; fi
 
 echo "=== SELFTEST COMPLETE ==="

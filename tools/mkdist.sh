@@ -37,7 +37,7 @@ step() { printf '\n==> %s\n' "$*"; }
 log()  { printf '  %s\n' "$*"; }
 
 WHAT="${1:-all}"
-case "$WHAT" in all|utm|sd) ;; *) die "알 수 없는 인자: $WHAT" ;; esac
+case "$WHAT" in all|utm|sd|amd64) ;; *) die "알 수 없는 인자: $WHAT" ;; esac
 
 command -v xz  >/dev/null || die "xz 가 없습니다 (apt install xz-utils)"
 command -v zip >/dev/null || die "zip 이 없습니다 (apt install zip)"

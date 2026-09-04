@@ -1040,13 +1040,28 @@ void lp_log(const char *tag, const char *msg)
     int  n = snprintf(line, sizeof line, "%s: %s", tag, msg);
     if (n <= 0)
         return;
-    if (n >= (int)sizeof line)
-        n = (int)sizeof line - 1;
+    if (n >= (int)sizeof line - 1)
+        n = (int)sizeof line - 2;   /* keep a byte for the newline */
 
-    /* One write per record: /dev/kmsg splits on write boundaries, not
-     * on newlines, and a trailing newline would be printed literally. */
+    /* One write per record - /dev/kmsg splits on write boundaries - and
+     * the record has to end in a newline.
+     *
+     * This is not cosmetic. A printk whose text does not end in '\n' is
+     * a *continuation*: the kernel commits it unfinalised, so that a
+     * later write can append to it, and nothing - not dmesg, not a
+     * reader of /dev/kmsg, not the console - shows it until something
+     * else finalises it. Written without the newline, every message
+     * here appeared only once the *next* one was logged, and the last
+     * message before a quiet spell was never seen at all. That is how
+     * guard's "held a core for 30s" line went missing from dmesg while
+     * the same text, printed to the console, was right there on screen.
+     *
+     * The kernel strips the newline again before storing the text, so
+     * it is a terminator, not part of the message. */
     while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
         n--;
-    if (n > 0)
-        lp_write(kfd, line, (size_t)n);
+    if (n <= 0)
+        return;
+    line[n++] = '\n';
+    lp_write(kfd, line, (size_t)n);
 }

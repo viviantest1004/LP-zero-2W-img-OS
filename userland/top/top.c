@@ -2,7 +2,8 @@
  *
  *   top              interactive, refreshing
  *   top -1           print once and exit (for scripts, or a slow link)
- *   top -n <count>   show only the top <count> processes
+ *   top -n <count>   refresh <count> times, then exit (-n 1 = once)
+ *   top -r 10        only the busiest ten
  *
  * Keys while running:
  *   q          quit                    r   refresh now
@@ -515,11 +516,25 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "-1") == 0) {
             once = true;
         } else if (strcmp(argv[i], "-n") == 0 && i + 1 < argc) {
+            /* -n is the number of REFRESHES, the way it is everywhere
+             * else. It used to be the number of processes to show, so
+             * `top -n 1` - which every other top on earth reads as
+             * "print once and quit" - opened the full-screen display
+             * and sat there waiting for a keypress. In a script that is
+             * a hang with no output and no clue, and it is exactly what
+             * somebody will type first.
+             *
+             * The row limit moved to -r. */
+            int reps = atoi(argv[++i]);
+            if (reps <= 1)
+                once = true;
+        } else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
             limit = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-h") == 0) {
-            printf("usage: top [-1] [-n count]\n");
+            printf("usage: top [-1] [-n count] [-r rows]\n");
             printf("  -1        print once and exit\n");
-            printf("  -n <n>    show only the top n processes\n");
+            printf("  -n <n>    refresh n times, then exit (-n 1 = once)\n");
+            printf("  -r <n>    show only the top n processes\n");
             printf("\nkeys: q quit  c/m/p sort  k kill  h help\n");
             return 0;
         } else {

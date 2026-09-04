@@ -22,14 +22,25 @@ int main(int argc, char **argv)
     /* Parse seconds with up to three decimals, without floating point -
      * our printf has none and this does not need it. */
     const char *p = argv[1];
-    long ms = 0;
+    long secs = 0;
+    long ms;
 
     if (*p < '0' || *p > '9') {
         dprintf(STDERR_FILENO, "sleep: not a number: %s\n", argv[1]);
         return 2;
     }
-    while (*p >= '0' && *p <= '9')
-        ms = ms * 1000 + (*p++ - '0') * 1000;
+    /* Count the seconds in ordinary base ten and convert once at the
+     * end. Scaling inside the loop multiplies every earlier digit by a
+     * thousand a second time - "sleep 33" then waits 3003 seconds, and
+     * since one to nine come out right nothing shorter ever shows it. */
+    while (*p >= '0' && *p <= '9') {
+        if (secs > 100000000L) {        /* longer than three years: say so */
+            dprintf(STDERR_FILENO, "sleep: %s is too long\n", argv[1]);
+            return 2;
+        }
+        secs = secs * 10 + (*p++ - '0');
+    }
+    ms = secs * 1000;
 
     if (*p == '.') {
         p++;

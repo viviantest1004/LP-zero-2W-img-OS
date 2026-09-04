@@ -296,6 +296,11 @@ static size_t expand_backtick(char **sp, char *buf, size_t n, size_t size)
     return n;
 }
 
+/* The pid of the most recent background job, which is what $! is.
+ * Declared up here because expand_dollar reads it and job_add - which
+ * sets it - comes much further down. */
+static pid_t last_bg_pid = 0;
+
 static size_t expand_dollar(char **sp, char *buf, size_t n, size_t size)
 {
     char *s = *sp + 1;              /* step over the $ */
@@ -332,6 +337,19 @@ static size_t expand_dollar(char **sp, char *buf, size_t n, size_t size)
         if (idx == 0)                    val = script_name;
         else if (idx <= pos_count)       val = pos_args[idx - 1];
         while (*val && n < size) buf[n++] = *val++;
+        *sp = s + 1;
+        return n;
+    }
+
+    if (*s == '!') {                /* the last background job's pid */
+        /* Without this there is no way to name a job you just started.
+         * The obvious workaround - `kill \`pidof sh\`` - kills every
+         * shell on the machine including the script doing the killing,
+         * which is how the self-test kept ending halfway through with
+         * no error. */
+        char num[16];
+        snprintf(num, sizeof num, "%d", (int)last_bg_pid);
+        for (char *q = num; *q && n < size; q++) buf[n++] = *q;
         *sp = s + 1;
         return n;
     }
@@ -871,14 +889,25 @@ static const char *BUILTINS[] = {
  *   test -s /data/rc.local && sh /data/rc.local
  *   test -f /data/x || echo "not there"
  */
+/* Surrounding blanks are allowed, because an operand almost always
+ * arrives through backticks and the command that produced it is free to
+ * line its output up: `calc 5 - 3` says "  2", and refusing that reads
+ * as the comparison being unknown rather than the number being spaced. */
 static bool str_is_num(const char *s)
 {
+    while (*s == ' ' || *s == '\t' || *s == '\n') s++;
     if (*s == '-' || *s == '+') s++;
-    if (!*s) return false;
-    for (; *s; s++)
-        if (*s < '0' || *s > '9')
-            return false;
-    return true;
+    if (*s < '0' || *s > '9') return false;
+    while (*s >= '0' && *s <= '9') s++;
+    while (*s == ' ' || *s == '\t' || *s == '\n') s++;
+    return *s == '\0';
+}
+
+/* strtol already skips leading blanks, so this only has to agree with
+ * str_is_num about what counts as a number. */
+static long str_to_num(const char *s)
+{
+    return strtol(s, NULL, 10);
 }
 
 /* Returns the exit code: 0 is true, the way the shell counts. */
@@ -958,9 +987,21 @@ static int run_test(char **argv, int argc)
         if (strcmp(op, "=")  == 0) return strcmp(a, b) == 0 ? 0 : 1;
         if (strcmp(op, "!=") == 0) return strcmp(a, b) != 0 ? 0 : 1;
 
-        if (op[0] == '-' && str_is_num(a) && str_is_num(b)) {
-            long x = strtol(a, NULL, 10);
-            long y = strtol(b, NULL, 10);
+        bool numeric = strcmp(op, "-eq") == 0 || strcmp(op, "-ne") == 0 ||
+                       strcmp(op, "-lt") == 0 || strcmp(op, "-le") == 0 ||
+                       strcmp(op, "-gt") == 0 || strcmp(op, "-ge") == 0;
+        if (numeric) {
+            /* Name the operand that is not a number. Reporting this as
+             * an unknown comparison sends the reader off to check
+             * whether the shell has -gt at all, which is the wrong
+             * question and costs an hour. */
+            if (!str_is_num(a) || !str_is_num(b)) {
+                dprintf(STDERR_FILENO, "test: %s: not a number\n",
+                        str_is_num(a) ? b : a);
+                return 2;
+            }
+            long x = str_to_num(a);
+            long y = str_to_num(b);
             if (strcmp(op, "-eq") == 0) return x == y ? 0 : 1;
             if (strcmp(op, "-ne") == 0) return x != y ? 0 : 1;
             if (strcmp(op, "-lt") == 0) return x <  y ? 0 : 1;
@@ -1196,6 +1237,8 @@ static int   next_job_id = 1;
 
 static void job_add(pid_t pid, const char *cmd)
 {
+    last_bg_pid = pid;
+
     if (njobs >= MAX_JOBS) {
         printf("[&] %d %s\n", (int)pid, cmd);
         return;                     /* still running, just not tracked */
