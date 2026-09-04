@@ -10,6 +10,7 @@
  * listed under "other" so they are at least visible.
  */
 #include "types.h"
+#include "osname.h"
 #include "string.h"
 #include "stdio.h"
 #include "stdlib.h"
@@ -244,7 +245,7 @@ static void print_all(void)
 {
     page_begin();
 
-    if (!page_line("LP-zero OS commands")) goto done;
+    if (!page_line(LP_OS_NAME " OS commands")) goto done;
 
     for (int g = 0; GROUPS[g]; g++) {
         bool header = false;

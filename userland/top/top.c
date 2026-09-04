@@ -21,6 +21,7 @@
  * against and shows 0.0 for everything; the second is real.
  */
 #include "types.h"
+#include "osname.h"
 #include "string.h"
 #include "stdio.h"
 #include "stdlib.h"
@@ -329,7 +330,7 @@ static void print_header(void)
     lp_tm_t tm;
     lp_gmtime(lp_time(), &tm);
 
-    printf("\x1b[7m LP-zero  %d processes   %d cpu   "
+    printf("\x1b[7m " LP_OS_NAME "  %d processes   %d cpu   "
            "up %ldd %ldh %ldm   %02d:%02d:%02d UTC \x1b[0m\n",
            nprocs, count_cpus(),
            up / 86400, (up % 86400) / 3600, (up % 3600) / 60,

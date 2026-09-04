@@ -21,13 +21,37 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${REPO_ROOT}/tools/common.sh"
 
 LINUX_SRC="${LINUX_SRC:-${LPZERO_WORK}/linux}"
-BUILD_DIR="${BUILD_DIR:-${LPZERO_WORK}/build}"
-ROOTFS="${REPO_ROOT}/userland/rootfs"
-FRAGMENT="${REPO_ROOT}/kernel/lp-zero.config"
-OUT_DIR="${REPO_ROOT}/kernel/out"
+# (set below, once LP_ARCH is known - one tree per architecture,
+#  because arm64 and x86 object files in one directory is a
+#  link error at best and a wrong kernel at worst)
+ROOTFS="${REPO_ROOT}/userland/${LP_ROOTFS_DIR:-rootfs}"
+# LP_ARCH picks the machine: arm64 (the Pi and arm64 VMs) or amd64 (an
+# ordinary PC). The two differ in the config file, the cross compiler,
+# and what the kernel image is called when it comes out - nothing else
+# in this script.
+LP_ARCH="${LP_ARCH:-arm64}"
+# Unconditional, not ${BUILD_DIR:-...}: tools/common.sh has already set
+# BUILD_DIR to the shared default, so a ":-" here would silently keep it
+# and both architectures would compile into one directory - which is a
+# link error if you are lucky and a kernel built from a mixture if you
+# are not. LP_BUILD_DIR overrides it if somebody really means to.
+BUILD_DIR="${LP_BUILD_DIR:-${LPZERO_WORK}/build-${LP_ARCH}}"
 
-ARCH=arm64
-CROSS=aarch64-linux-gnu-
+if [[ "$LP_ARCH" == "amd64" ]]; then
+    ARCH=x86_64
+    CROSS=
+    KCONFIG_NAME=lp-zero-amd64.config
+    OUT_SUBDIR=out-amd64
+else
+    ARCH=arm64
+    CROSS=aarch64-linux-gnu-
+    KCONFIG_NAME=lp-zero.config
+    OUT_SUBDIR=out
+fi
+
+FRAGMENT="${REPO_ROOT}/kernel/${KCONFIG_NAME}"
+OUT_DIR="${REPO_ROOT}/kernel/${OUT_SUBDIR}"
+
 JOBS="${JOBS:-$(nproc)}"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -35,7 +59,7 @@ step() { printf '\n==> %s\n' "$*"; }
 
 [[ -d "$LINUX_SRC" ]]  || die "커널 소스가 없습니다: $LINUX_SRC"
 [[ -f "$FRAGMENT" ]]   || die "설정 조각이 없습니다: $FRAGMENT"
-command -v "${CROSS}gcc" >/dev/null || die "${CROSS}gcc 가 없습니다 (apt install gcc-aarch64-linux-gnu)"
+command -v "${CROSS:-}gcc" >/dev/null || die "${CROSS:-}gcc 가 없습니다"
 # EFI_ZBOOT 가 vmlinuz.efi 를 만들 때 커널 Makefile 이 hexdump 로 이미지
 # 크기를 읽는다. 없으면 "truncate: Invalid number" 라는, 원인이 전혀
 # 드러나지 않는 오류로 7분짜리 빌드가 끝난다.
@@ -63,15 +87,22 @@ fi
 mkdir -p "$BUILD_DIR" "$OUT_DIR"
 
 # ── 1. 공식 defconfig ────────────────────────────────────────────
-step "bcm2711_defconfig 적용 (Pi 3 / Zero 2 W / Pi 4 공용 arm64 설정)"
-make "${MAKE_ARGS[@]}" bcm2711_defconfig >/dev/null
+if [[ "$LP_ARCH" == "amd64" ]]; then
+    # There is no vendor defconfig for "a PC", so start from the
+    # kernel's own x86_64_defconfig and cut it down with the fragment.
+    step "x86_64_defconfig 적용"
+    make "${MAKE_ARGS[@]}" x86_64_defconfig >/dev/null
+else
+    step "bcm2711_defconfig 적용 (Pi 3 / Zero 2 W / Pi 4 공용 arm64 설정)"
+    make "${MAKE_ARGS[@]}" bcm2711_defconfig >/dev/null
+fi
 
 BEFORE_M=$(grep -c '=m$' "${BUILD_DIR}/.config" || true)
 BEFORE_Y=$(grep -c '=y$' "${BUILD_DIR}/.config" || true)
 echo "    기준: =y ${BEFORE_Y}개, =m ${BEFORE_M}개"
 
 # ── 2. 우리 조각 병합 ────────────────────────────────────────────
-step "lp-zero.config 병합"
+step "${KCONFIG_NAME} 병합"
 
 # initramfs 경로는 환경마다 다르므로 여기서 만들어 붙인다.
 GEN="${BUILD_DIR}/lp-zero-generated.config"
@@ -141,6 +172,20 @@ step "빌드 시작 (-j${JOBS}) — 몇 분 걸립니다"
 # 감싼 것으로, UEFI 부팅 경로(QEMU/UTM)에서 FAT 파티션 공간을 절반 넘게
 # 아낀다. 실기 Pi 는 GPU 펌웨어가 압축을 풀 줄 모르므로 Image 를 그대로
 # 쓴다 - 그래서 둘 다 만든다.
+if [[ "$LP_ARCH" == "amd64" ]]; then
+    # bzImage carries the EFI stub itself on x86, so there is one image
+    # rather than the Image + vmlinuz.efi pair arm64 needs, and there
+    # are no device trees - a PC describes itself through ACPI.
+    time make "${MAKE_ARGS[@]}" -j"$JOBS" bzImage
+
+    step "결과"
+    cp "${BUILD_DIR}/arch/x86/boot/bzImage" "${OUT_DIR}/bzImage"
+    echo "  bzImage  $(stat -c%s "${OUT_DIR}/bzImage") bytes"
+    echo
+    echo "완료: ${OUT_DIR}"
+    exit 0
+fi
+
 time make "${MAKE_ARGS[@]}" -j"$JOBS" Image vmlinuz.efi dtbs
 
 # ── 4. 결과 수집 ─────────────────────────────────────────────────

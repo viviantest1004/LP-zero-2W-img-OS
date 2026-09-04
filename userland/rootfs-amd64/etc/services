@@ -1,0 +1,113 @@
+# /etc/services - the programs init supervises.
+#
+# One per line. init starts each at boot and restarts it when it dies.
+# Comments (#) and blank lines are ignored.
+#
+# How this differs from /etc/rc:
+#   rc        runs once and finishes. Nothing revives what it started.
+#   services  init keeps watching. If it dies, it comes back.
+#
+# The reason the SSH server belongs here is plain: if it died to a bug or
+# to memory pressure, there would be no way left to reach the machine.
+#
+# Something that dies instantly gets a growing delay between restarts,
+# and after 20 failures init gives up on it. That stops a busy loop.
+
+# The safety net. THIS LINE IS THE MOST IMPORTANT ONE IN THE FILE.
+#
+#   guard is what kills a runaway before it takes the board down, what
+#   notices /data filling up, and what pushes a CPU hog to the back of
+#   the queue so SSH still answers. Every one of those defences is this
+#   one process.
+#
+#   It used to be started from /etc/rc, which runs once and finishes.
+#   Nothing revived it. Killing guard therefore disabled the entire
+#   self-defence of the machine permanently, and left no trace: the board
+#   kept running, looked healthy, and was defenceless against the next
+#   thing that went wrong. It was a worse fault than any of the things
+#   guard protects against, because it was silent.
+#
+#   No -d here. init supervises a child that stays in the foreground;
+#   a process that forks and lets the parent exit looks like an instant
+#   death, and init would spend its life restarting it.
+#
+#   init never gives up on this one, however often it fails.
+guard -r 32 -w 64
+
+# WiFi.
+#   Same story as guard: this was started from /etc/rc with -B, which
+#   backgrounds it, so nothing restarted it. On a board with no Ethernet
+#   port, wpa_supplicant dying means the machine is off the network with
+#   no way to reach it and nothing to notice - it has not crashed, so the
+#   watchdog is content, and dhcp cannot get an address on an interface
+#   that is not associated.
+#
+#   Without -B it stays in the foreground, which is what init needs.
+#   -i wlan0 is the only WiFi interface this board has.
+#
+#   The '?' asks whether there is a wlan0 at all before starting it. In
+#   a virtual machine there is not, and without the condition init spent
+#   its first minute restarting a program that printed a driver error
+#   and exited, twelve times over, about hardware that does not exist.
+?/sys/class/net/wlan0 wpa_supplicant -i wlan0 -c /etc/wpa.conf
+
+# The SSH server.
+#   -F  stay in the foreground. init can only supervise a child that
+#       stays alive; going to the background looks like an instant death.
+#   -R  generate a host key if there is none
+#   -E  log to the console
+#   -r  where the host key lives. On the data partition, so it survives
+#       a reboot and clients do not see the key change.
+dropbear -F -R -E -p 22 -r /data/dropbear_ed25519_host_key
+
+# The clock keeper.
+#   This board has no battery-backed clock. Pull the power and time
+#   stops; power it up again and it starts at 1970. That makes file
+#   timestamps nonsense and breaks every HTTPS certificate check.
+#   -d  writes the time to /data/.clock every 30s and resyncs from the
+#       network hourly. /etc/rc restores that value at boot.
+# The DHCP lease has to be renewed or the router takes the address back,
+# and a board that loses its address is off the network with nothing to
+# notice: it has not crashed, so the watchdog is content, and memory and
+# temperature are fine, so guard is content. It was the one failure with
+# no automatic recovery at all - on a system whose whole purpose is
+# being left alone for months.
+#
+# With no interface named it finds the one that answers: wlan0, then a
+# USB Ethernet adapter, then the gadget port.
+dhcp -d
+
+ntp -d
+
+
+# Log collector.
+#   Without this, everything printed goes to the console and is gone as
+#   soon as it scrolls. If the board wedges overnight there is no record
+#   of what happened - which is when you most want one.
+#   Collects the kernel ring buffer and /dev/log into /data/log/messages,
+#   rotating at 512KB so it can never fill the card.
+logd
+
+# Watchdog.
+#   The BCM2835 has a hardware countdown that reboots the board when it
+#   reaches zero. The kernel driver was always in the build; nothing was
+#   resetting the timer, so it was never armed and never fired.
+#   Now: if the system wedges hard enough that this stops running, the
+#   board reboots itself in 15 seconds instead of waiting for someone to
+#   walk over and pull the power.
+#   (No watchdog hardware in a VM - it exits with a clear message there.)
+watchdog -t 15
+
+# The heartbeat.
+#   This board is meant to sit somewhere for months with nobody near it,
+#   and there was no way to check whether it was doing that. Finding out
+#   if it was alive meant logging in - and the machine you cannot log
+#   into is exactly the one you wanted to know about. Silence read the
+#   same as health right up until it mattered.
+#   Now it says how it is, on a schedule, to a URL in /boot/beacon.conf.
+#   If the reports stop, that is the signal - which is the only kind
+#   that still works when the failure is "it went away".
+#   With no URL set it still runs and still keeps /data/log/status.json,
+#   which is the record that makes a claim about months of uptime
+#   checkable afterwards rather than something to take on trust.
+beacon -d

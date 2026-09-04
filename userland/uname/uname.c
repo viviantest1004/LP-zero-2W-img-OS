@@ -10,6 +10,7 @@
  * domainname.
  */
 #include "types.h"
+#include "osname.h"
 #include "string.h"
 #include "stdio.h"
 #include "unistd.h"
@@ -81,7 +82,7 @@ int main(int argc, char **argv)
     if (mach) { printf("%s%s", first ? "" : " ", uts + MACHINE);  first = false; }
     /* There is no field for this in the kernel's struct; it is what the
      * userland is, and this one is not GNU. */
-    if (osname) { printf("%s%s", first ? "" : " ", "LP-zero"); first = false; }
+    if (osname) { printf("%s%s", first ? "" : " ", LP_OS_NAME); first = false; }
     printf("\n");
     return 0;
 }

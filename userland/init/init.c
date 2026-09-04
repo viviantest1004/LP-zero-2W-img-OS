@@ -10,6 +10,7 @@
  *   - It has to do the early setup itself: mount filesystems, open the
  *     console. What systemd would have done, we do. */
 #include "types.h"
+#include "osname.h"
 #include "string.h"
 #include "stdio.h"
 #include "stdlib.h"
@@ -161,7 +162,7 @@ static void screen_greeting(int fd)
 static void banner(void)
 {
     printf("\n");
-    printf("  LP-zero OS\n");
+    printf("  " LP_OS_NAME " OS\n");
     printf("  init (pid %d)\n", lp_getpid());
     printf("\n");
 }

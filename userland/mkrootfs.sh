@@ -24,9 +24,9 @@ REPO_ROOT="$(cd "${HERE}/.." && pwd)"
 source "${REPO_ROOT}/tools/common.sh"
 
 
-BIN_DIR="${HERE}/bin"
-ROOT_DIR="${HERE}/rootfs"
-CPIO_OUT="${HERE}/initramfs.cpio.gz"
+BIN_DIR="${HERE}/${LP_BINDIR:-bin}"
+ROOT_DIR="${HERE}/${LP_ROOTFS_DIR:-rootfs}"
+CPIO_OUT="${HERE}/${LP_CPIO_NAME:-initramfs.cpio.gz}"
 OVERLAY="${REPO_ROOT}/boot/rootfs-overlay"
 FW_DIR="${REPO_ROOT}/blobs/brcm"
 THIRD="${THIRDPARTY_DIR:-${LPZERO_WORK}/thirdparty}"
@@ -120,6 +120,16 @@ fi
 # ── 설정 파일 ────────────────────────────────────────────────────
 if [[ -d "$OVERLAY" ]]; then
     cp -r "${OVERLAY}/." "${ROOT_DIR}/"
+
+    # The hostname is in /etc/rc, and /etc/rc is shared between the two
+    # builds, so it is substituted here rather than kept in two copies
+    # that would drift. LP_HOSTNAME comes from the Makefile: lpzero on
+    # arm64, linux-lp on amd64.
+    if [[ -n "${LP_HOSTNAME:-}" && -f "${ROOT_DIR}/etc/rc" ]]; then
+        sed -i "s/^echo lpzero > /echo ${LP_HOSTNAME} > /" "${ROOT_DIR}/etc/rc"
+        echo "  hostname:   ${LP_HOSTNAME}"
+    fi
+    printf '%s\n' "${LP_OS_NAME:-LP-zero}" > "${ROOT_DIR}/etc/osname"
 fi
 
 # dropbear 는 사용자의 홈 디렉터리를 /etc/passwd 에서 찾는다.

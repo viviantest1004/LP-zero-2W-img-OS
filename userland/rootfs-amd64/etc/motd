@@ -1,0 +1,22 @@
+LP-zero OS
+
+  bare-metal firmware -> Linux kernel -> own libc -> own init -> own shell
+
+Where files live
+
+  /data     the SD card. Survives a reboot.
+  /root     home. Bound to /data, so it survives too.
+  anywhere else   RAM. Gone on reboot, including /tmp and /etc.
+
+  To keep a file, put it under /data or in your home directory.
+
+  help        list the built-in commands
+  edit FILE   text editor        touch FILE   create an empty file
+  calc 2+3*4  decimal, hex and binary at once
+  date        the time. This board has no clock battery, and a wrong
+              clock makes every HTTPS certificate check fail.
+              'ntp' sets it from the network, 'date -z list' picks a zone.
+  python      on /data
+  sysinfo     how the machine is doing
+
+  Commands in /data/rc.local run at every boot.

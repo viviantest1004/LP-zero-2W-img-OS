@@ -26,11 +26,17 @@ ifeq ($(ARCH),amd64)
   CPUFLAGS := -march=x86-64
   OBJDIR   := build-amd64
   BINDIR   := bin-amd64
+  # The same system on an ordinary desktop, and it says so rather than
+  # claiming to be a Raspberry Pi.
+  OSNAME   ?= linux-LP
+  HOSTNAME ?= linux-lp
 else ifeq ($(ARCH),arm64)
   TARGET   := aarch64-linux-gnu
   CPUFLAGS := -mcpu=cortex-a53
   OBJDIR   := build
   BINDIR   := bin
+  OSNAME   ?= LP-zero
+  HOSTNAME ?= lpzero
 else
   $(error ARCH must be arm64 or amd64, not "$(ARCH)")
 endif
@@ -47,6 +53,7 @@ CFLAGS := --target=$(TARGET) $(CPUFLAGS) \
           -ffunction-sections -fdata-sections \
           -std=c11 -Os \
           -Wall -Wextra -Werror \
+          -DLP_OS_NAME='"$(OSNAME)"' \
           -I$(LIBC_DIR)/include
 
 ASFLAGS := --target=$(TARGET) $(CPUFLAGS) -ffreestanding -nostdlibinc

@@ -4,6 +4,7 @@
  * is gather the scattered numbers and lay them out readably.
  */
 #include "types.h"
+#include "osname.h"
 #include "string.h"
 #include "stdio.h"
 #include "stdlib.h"
@@ -351,7 +352,7 @@ int main(int argc, char **argv)
 
     printf("\n");
     hr();
-    printf("  LP-zero OS  system information\n");
+    printf("  " LP_OS_NAME " OS  system information\n");
     hr();
 
     show_system();
