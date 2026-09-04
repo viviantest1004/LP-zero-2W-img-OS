@@ -15,4 +15,14 @@
 #  define LP_OS_NAME "LP-zero"
 #endif
 
+/* The line under the name at boot and on the splash: what this is
+ * running on. The arm64 build says the board it was written for; the
+ * amd64 build must not, because it is not one. */
+#ifndef LP_OS_MACHINE
+#  define LP_OS_MACHINE "Raspberry Pi Zero 2 W  -  built from scratch"
+#endif
+#ifndef LP_OS_TITLE
+#  define LP_OS_TITLE "test_a_123_LPzero2W_img"
+#endif
+
 #endif

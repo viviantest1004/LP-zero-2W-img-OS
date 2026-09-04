@@ -150,8 +150,8 @@ static void wait_for_splash(void)
 static void screen_greeting(int fd)
 {
     dprintf(fd, "\x1b[H\x1b[2J");        /* clear, and go to the top */
-    dprintf(fd, "  test_a_123_LPzero2W_img\n");
-    dprintf(fd, "  Raspberry Pi Zero 2 W  -  built from scratch\n\n");
+    dprintf(fd, "  " LP_OS_TITLE "\n");
+    dprintf(fd, "  " LP_OS_MACHINE "\n\n");
     dprintf(fd, "  help     every command there is\n");
     dprintf(fd, "  sysinfo  what this machine is and how it is doing\n");
     dprintf(fd, "  top      what is running\n\n");

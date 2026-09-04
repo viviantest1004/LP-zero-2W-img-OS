@@ -30,6 +30,8 @@ ifeq ($(ARCH),amd64)
   # claiming to be a Raspberry Pi.
   OSNAME   ?= linux-LP
   HOSTNAME ?= linux-lp
+  OSTITLE  ?= linux-LP
+  OSMACHINE ?= amd64 PC or virtual machine  -  built from scratch
 else ifeq ($(ARCH),arm64)
   TARGET   := aarch64-linux-gnu
   CPUFLAGS := -mcpu=cortex-a53
@@ -37,6 +39,8 @@ else ifeq ($(ARCH),arm64)
   BINDIR   := bin
   OSNAME   ?= LP-zero
   HOSTNAME ?= lpzero
+  OSTITLE  ?= test_a_123_LPzero2W_img
+  OSMACHINE ?= Raspberry Pi Zero 2 W  -  built from scratch
 else
   $(error ARCH must be arm64 or amd64, not "$(ARCH)")
 endif
@@ -54,6 +58,8 @@ CFLAGS := --target=$(TARGET) $(CPUFLAGS) \
           -std=c11 -Os \
           -Wall -Wextra -Werror \
           -DLP_OS_NAME='"$(OSNAME)"' \
+          -DLP_OS_TITLE='"$(OSTITLE)"' \
+          -DLP_OS_MACHINE='"$(OSMACHINE)"' \
           -I$(LIBC_DIR)/include
 
 ASFLAGS := --target=$(TARGET) $(CPUFLAGS) -ffreestanding -nostdlibinc

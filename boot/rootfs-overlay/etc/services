@@ -58,7 +58,11 @@ guard -r 32 -w 64
 #   -E  log to the console
 #   -r  where the host key lives. On the data partition, so it survives
 #       a reboot and clients do not see the key change.
-dropbear -F -R -E -p 22 -r /data/dropbear_ed25519_host_key
+# The "?" is not decoration. An image built for a machine we have no
+# dropbear binary for should come up without SSH and say so once, rather
+# than have init try to exec a file that is not there every five seconds
+# for the life of the board.
+?/bin/dropbear dropbear -F -R -E -p 22 -r /data/dropbear_ed25519_host_key
 
 # The clock keeper.
 #   This board has no battery-backed clock. Pull the power and time

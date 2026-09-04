@@ -18,6 +18,7 @@
  * the wrong moment. One row is 8KB.
  */
 #include "types.h"
+#include "osname.h"
 #include "string.h"
 #include "stdio.h"
 #include "unistd.h"
@@ -289,9 +290,9 @@ int main(int argc, char **argv)
     u32 small = scale > 1 ? scale - 1 : 1;
 
     label_t labels[3] = {
-        { "test_a_123_LPzero2W_img", 0, 0, scale,
+        { LP_OS_TITLE, 0, 0, scale,
           pack(&fb, 0xE8, 0xE8, 0xF0) },
-        { "Raspberry Pi Zero 2 W  /  BCM2710A1", 0, 0, small,
+        { LP_OS_MACHINE, 0, 0, small,
           pack(&fb, 0x9A, 0xA4, 0xB8) },
         { "Linux, built from scratch", 0, 0, small,
           pack(&fb, 0x9A, 0xA4, 0xB8) },

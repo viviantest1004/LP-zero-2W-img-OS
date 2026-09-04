@@ -100,8 +100,18 @@ copy_third() {
 
 echo ""
 echo "외부 프로그램:"
-copy_third "${THIRD}/dropbear-2024.86/dropbear"    dropbear    || true
-copy_third "${THIRD}/dropbear-2024.86/dropbearkey" dropbearkey || true
+# dropbear, built for the machine this image is for. A binary for the
+# wrong architecture does not fail to copy and does not fail to install:
+# it fails at exec, with 127, once every five seconds for ever, because
+# dropbear is on init's critical list and init never gives up on those.
+# On the first amd64 image that filled the screen and nothing else was
+# readable.
+DROPBEAR_SRC="${THIRD}/dropbear-2024.86"
+if [[ "${LP_ARCH:-arm64}" == "amd64" ]]; then
+    DROPBEAR_SRC="${THIRD}/dropbear-amd64"
+fi
+copy_third "${DROPBEAR_SRC}/dropbear"    dropbear    || true
+copy_third "${DROPBEAR_SRC}/dropbearkey" dropbearkey || true
 copy_third "${THIRD}/wpa_supplicant-2.11/wpa_supplicant/wpa_supplicant" wpa_supplicant || true
 copy_third "${THIRD}/wpa_supplicant-2.11/wpa_supplicant/wpa_cli"        wpa_cli        || true
 
@@ -182,8 +192,8 @@ if [[ -f "${ROOT_DIR}/etc/authorized_keys" ]]; then
 fi
 chmod 700 "${ROOT_DIR}/root/.ssh" "${ROOT_DIR}/root"
 
-cat > "${ROOT_DIR}/etc/motd" <<'MOTD'
-LP-zero OS
+cat > "${ROOT_DIR}/etc/motd" <<MOTD
+${LP_OS_NAME:-LP-zero} OS
 
   bare-metal firmware -> Linux kernel -> own libc -> own init -> own shell
 

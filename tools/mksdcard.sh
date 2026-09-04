@@ -57,6 +57,22 @@ SECTOR_SIZE=512
 BOOT_START_SECTOR=8192          # 4MiB
 BOOT_SIZE_MB=128
 DATA_START_SECTOR=270336        # 4 + 128 = 132MiB
+
+# LP_ARCH picks which build goes on the card.
+#
+#   arm64  the Pi Zero 2 W and arm64 VMs: an uncompressed Image the GPU
+#          firmware can load, plus EFI/BOOT/BOOTAA64.EFI for UEFI.
+#   amd64  a PC or a desktop VM: one bzImage, which carries the EFI stub
+#          itself, as EFI/BOOT/BOOTX64.EFI. No GPU firmware, no device
+#          tree - a PC describes itself through ACPI.
+LP_ARCH="${LP_ARCH:-arm64}"
+if [[ "$LP_ARCH" == "amd64" ]]; then
+    EFI_BOOT_NAME="BOOTX64.EFI"
+    KERNEL_OUT_DIR="${REPO_ROOT}/kernel/out-amd64"
+else
+    EFI_BOOT_NAME="BOOTAA64.EFI"
+    KERNEL_OUT_DIR="${REPO_ROOT}/kernel/out"
+fi
 VOLUME_LABEL="LPZERO"
 DATA_LABEL="LPZERODATA"
 
@@ -68,11 +84,19 @@ for t in mkfs.vfat mcopy python3 dd; do
 done
 
 # ── 입력 확인 ────────────────────────────────────────────────────
-if [[ "$MODE" == "linux" ]]; then
-    KERNEL="${REPO_ROOT}/kernel/out/Image"
+if [[ "$MODE" == "linux" && "$LP_ARCH" == "amd64" ]]; then
+    # A PC boots one way: UEFI finds EFI/BOOT/BOOTX64.EFI. There is no
+    # second copy for a GPU to load, no config.txt and no device tree.
+    KERNEL="${KERNEL_OUT_DIR}/bzImage"
+    KERNEL_NAME=""
+    CONFIG_SRC=""
+    DTB=""
+    [[ -f "$KERNEL" ]] || die "kernel/out-amd64/bzImage 가 없습니다. 'make kernel-amd64' 를 먼저 실행하세요."
+elif [[ "$MODE" == "linux" ]]; then
+    KERNEL="${KERNEL_OUT_DIR}/Image"
     KERNEL_NAME="$LINUX_IMAGE"
     CONFIG_SRC="${REPO_ROOT}/boot/config-linux.txt"
-    DTB="${REPO_ROOT}/kernel/out/bcm2710-rpi-zero-2-w.dtb"
+    DTB="${KERNEL_OUT_DIR}/bcm2710-rpi-zero-2-w.dtb"
     [[ -f "$KERNEL" ]] || die "kernel/out/Image 가 없습니다. 'make kernel' 을 먼저 실행하세요."
     [[ -f "$DTB" ]]    || die "kernel/out 에 Zero 2 W DTB 가 없습니다."
 else
@@ -86,17 +110,26 @@ fi
 # config.txt 의 kernel= 과 실제 파일명이 다르면 GPU 가 커널을 못 찾는다.
 # 그 경우 화면도 시리얼도 아무 것도 안 나와서 원인 찾기가 매우 어렵다.
 # 이미지를 굽기 전에 여기서 잡는다.
+if [[ -n "$CONFIG_SRC" ]]; then
 CFG_KERNEL="$(sed -n 's/^[[:space:]]*kernel=\(.*\)$/\1/p' "$CONFIG_SRC" \
               | tail -1 | tr -d '"'"'[:space:]'"'"')"
+else
+CFG_KERNEL="$KERNEL_NAME"
+fi
 if [[ "$CFG_KERNEL" != "$KERNEL_NAME" ]]; then
     die "이름 불일치: config.mk 는 '${KERNEL_NAME}', $(basename "$CONFIG_SRC") 는 '${CFG_KERNEL}'.
        둘을 같게 맞추세요. 다르면 부팅 시 아무 출력 없이 멈춥니다."
 fi
 
-BLOBS=(bootcode.bin start.elf fixup.dat)
-for b in "${BLOBS[@]}"; do
-    [[ -f "${BLOB_DIR}/${b}" ]] || die "blobs/${b} 가 없습니다. './tools/fetch-blobs.sh' 를 먼저 실행하세요."
-done
+# Broadcom GPU firmware, and only a Pi has one.
+if [[ "$LP_ARCH" == "amd64" ]]; then
+    BLOBS=()
+else
+    BLOBS=(bootcode.bin start.elf fixup.dat)
+    for b in "${BLOBS[@]}"; do
+        [[ -f "${BLOB_DIR}/${b}" ]] || die "blobs/${b} 가 없습니다. './tools/fetch-blobs.sh' 를 먼저 실행하세요."
+    done
+fi
 
 mkdir -p "$OUT_DIR"
 rm -f "$IMAGE" "$PART_IMG"
@@ -115,22 +148,28 @@ mkfs.vfat -F 32 -n "$VOLUME_LABEL" "$PART_IMG" >/dev/null
 # mtools 는 이미지 파일을 드라이브처럼 다룬다. 설정 파일 검사는 건너뛴다.
 export MTOOLS_SKIP_CHECK=1
 
-log "복사: bootcode.bin, start.elf, fixup.dat  (Broadcom GPU 펌웨어)"
-for b in "${BLOBS[@]}"; do
-    mcopy -i "$PART_IMG" "${BLOB_DIR}/${b}" ::
-done
+if (( ${#BLOBS[@]} )); then
+    log "복사: bootcode.bin, start.elf, fixup.dat  (Broadcom GPU 펌웨어)"
+    for b in "${BLOBS[@]}"; do
+        mcopy -i "$PART_IMG" "${BLOB_DIR}/${b}" ::
+    done
+fi
 
-log "복사: config.txt                          (GPU 부팅 설정)"
-mcopy -i "$PART_IMG" "$CONFIG_SRC" ::config.txt
+if [[ -n "$CONFIG_SRC" ]]; then
+    log "복사: config.txt                          (GPU 부팅 설정)"
+    mcopy -i "$PART_IMG" "$CONFIG_SRC" ::config.txt
+fi
 
-if $UEFI_ONLY; then
+if [[ -z "$KERNEL_NAME" ]]; then
+    :   # amd64: the only copy is the EFI one, written below
+elif $UEFI_ONLY; then
     log "건너뜀: ${KERNEL_NAME}                (--uefi-only: 가상머신 전용)"
 else
     log "복사: ${KERNEL_NAME}"
     mcopy -i "$PART_IMG" "$KERNEL" "::${KERNEL_NAME}"
 fi
 
-if [[ "$MODE" == "linux" ]]; then
+if [[ "$MODE" == "linux" && -n "$DTB" ]]; then
     log "복사: $(basename "$DTB")            (디바이스 트리)"
     mcopy -i "$PART_IMG" "$DTB" ::
 
@@ -190,11 +229,18 @@ if [[ "$MODE" == "linux" ]]; then
     # 주체가 EFI 부트 서비스이므로 실기 Pi 에서는 쓸 수 없고, 그쪽은
     # config.txt 의 kernel= 이 가리키는 압축되지 않은 Image 를 그대로
     # 쓴다. 두 파일이 같은 커널이라는 점이 중요하다.
-    EFI_KERNEL="${REPO_ROOT}/kernel/out/vmlinuz.efi"
-    EFI_LABEL="vmlinuz.efi - 압축"
-    if [[ ! -f "$EFI_KERNEL" ]]; then
+    if [[ "$LP_ARCH" == "amd64" ]]; then
+        # bzImage already carries the EFI stub and its own decompressor,
+        # so there is nothing to pair it with.
         EFI_KERNEL="$KERNEL"
-        EFI_LABEL="Image - 비압축"
+        EFI_LABEL="bzImage"
+    else
+        EFI_KERNEL="${KERNEL_OUT_DIR}/vmlinuz.efi"
+        EFI_LABEL="vmlinuz.efi - 압축"
+        if [[ ! -f "$EFI_KERNEL" ]]; then
+            EFI_KERNEL="$KERNEL"
+            EFI_LABEL="Image - 비압축"
+        fi
     fi
     if python3 -c "
 import struct, sys
@@ -203,8 +249,8 @@ sys.exit(0 if d[:2] == b'MZ' and d[struct.unpack_from('<I', d, 0x3c)[0]:][:4] ==
 " 2>/dev/null; then
         mmd -i "$PART_IMG" ::EFI 2>/dev/null || true
         mmd -i "$PART_IMG" ::EFI/BOOT 2>/dev/null || true
-        mcopy -o -i "$PART_IMG" "$EFI_KERNEL" ::EFI/BOOT/BOOTAA64.EFI
-        log "복사: EFI/BOOT/BOOTAA64.EFI            (UEFI 부팅용, ${EFI_LABEL})"
+        mcopy -o -i "$PART_IMG" "$EFI_KERNEL" "::EFI/BOOT/${EFI_BOOT_NAME}"
+        log "복사: EFI/BOOT/${EFI_BOOT_NAME}            (UEFI 부팅용, ${EFI_LABEL})"
     else
         echo "  경고: 커널에 EFI 스텁이 없습니다 (CONFIG_EFI_STUB)."
         echo "        QEMU/UTM 에서 UEFI 로 부팅되지 않습니다."
