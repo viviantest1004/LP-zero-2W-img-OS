@@ -13,7 +13,7 @@
 WHAT THIS IS
 ------------
 A small Linux distribution written from scratch. The kernel
-configuration, the C library, init, the shell and all 103 commands
+configuration, the C library, init, the shell and all 107 commands
 are original code. The kernel image is the whole system: the
 userland is packed inside it and unpacks into RAM when the machine
 boots.
@@ -21,7 +21,7 @@ boots.
   Whole system            one file, 11-23 MB
   RAM left after boot     480 MB free on a 512 MB board
   Boot time               about 10 seconds to a prompt
-  Commands                103, every one written here
+  Commands                107, every one written here
   SSH                     built in, public key only
   Python                  CPython 3.12 + pip, manylinux wheels work
   Firewall                on by default
@@ -37,7 +37,7 @@ WHO WROTE IT
 ------------
 All of it was written by Claude Code, Anthropic's coding agent,
 working from the repository owner's direction. That covers the
-kernel configuration, the C library, init, the shell, the 103
+kernel configuration, the C library, init, the shell, the 105
 commands, the build system, the self-test and the documentation.
 
 Two things follow from that, and both are worth knowing. The
@@ -69,7 +69,7 @@ reason not to be surprised.
     of it has been reviewed by anybody else.
 
   * The C library is ours and it is not complete. It covers what
-    the 103 commands need; anything else you compile against it
+    the 107 commands need; anything else you compile against it
     may reach for a function that is not there. Ordinary Linux
     binaries run through the `run` command instead, against the
     glibc that ships with Python.
@@ -183,12 +183,44 @@ If it will not connect:
   cat /data/log/auth        login records
 
 
+PLUGGING A DRIVE IN
+------------------
+A USB stick or an external disk mounts itself. automount listens
+to the kernel's uevent messages, so a drive appears under
+/media/<name> within a moment of being plugged in, and is released
+when it is pulled. It also scans once at startup for drives that
+were already attached.
+
+  automount -l            what is mounted right now
+  automount -u <name>     release one
+
+It never touches the disk the system booted from, and it mounts
+nosuid,nodev - that filesystem was written by another machine.
+
+/media is a temporary place. For a drive that should be at the
+same path after every reboot, adopt it:
+
+  storage                          what survives a reboot, and how
+                                   full each place is
+  storage adopt /dev/sdb photos    keep it at /mnt/photos
+  storage format /dev/sdb backup   erase it, make ext4, then keep it
+  storage forget photos            stop keeping it
+
+An adopted drive is matched by its filesystem label, not its
+device name, so it works in any port - sdb1 becomes sdc1 the
+moment somebody plugs in a second drive first.
+
+poweroff releases these before it unmounts /data, detaching
+anything busy: a drive nobody can unmount must not become a
+machine nobody can switch off.
+
+
 WHERE THE SOURCE IS
 -------------------
 All of it is on the main branch. There are no per-architecture
 source trees - arm64 and amd64 build from the same code.
 
-  userland/     our C library, init, the shell, all 103 commands
+  userland/     our C library, init, the shell, all 107 commands
     libc/         the C library, straight on top of the syscalls
     sh/           the shell
     init/         pid 1
@@ -275,14 +307,14 @@ the watchdog notices a process pinning a core.
 이게 뭔가
 ---------
 처음부터 직접 만든 작은 리눅스 배포판입니다. 커널 설정, C 라이브러리,
-init, 셸, 103개 명령어가 전부 자체 코드입니다. 커널 이미지 하나가
+init, 셸, 107개 명령어가 전부 자체 코드입니다. 커널 이미지 하나가
 곧 시스템 전체이고, 유저랜드는 그 안에 들어 있다가 부팅할 때 램으로
 풀립니다.
 
   시스템 전체        파일 하나, 11~23MB
   부팅 후 남는 램    512MB 보드에서 480MB
   부팅 시간          프롬프트까지 10초 남짓
-  명령어             103개, 전부 자체 구현
+  명령어             107개, 전부 자체 구현
   SSH                기본 내장, 공개키 전용
   파이썬             CPython 3.12 + pip, manylinux 휠 설치됨
   방화벽             기본 켜짐
@@ -298,7 +330,7 @@ OpenSSL)입니다. 암호는 직접 만들면 안 되는 물건이라 일부러 
 -------------
 전부 Anthropic 의 코딩 에이전트인 Claude Code 가 썼습니다. 저장소
 주인의 지시를 받아 작업했고, 커널 설정부터 C 라이브러리, init, 셸,
-103개 명령어, 빌드 시스템, 셀프테스트, 문서까지 전부 해당됩니다.
+107개 명령어, 빌드 시스템, 셀프테스트, 문서까지 전부 해당됩니다.
 
 여기서 따라오는 것이 두 가지 있고, 둘 다 알아두실 만합니다. 하나는
 근거가 유난히 잘 남아 있다는 점입니다. 커밋 로그가 각 변경을 왜 했는지
@@ -326,7 +358,7 @@ OpenSSL)입니다. 암호는 직접 만들면 안 되는 물건이라 일부러 
     방화벽, DNS·NTP 위조 방지가 전부 구현돼 있고 주석에 근거도 적혀
     있지만, 다른 사람이 검토한 적은 없습니다.
 
-  * C 라이브러리가 자체 구현이고 완전하지 않습니다. 103개 명령어에
+  * C 라이브러리가 자체 구현이고 완전하지 않습니다. 107개 명령어에
     필요한 만큼만 들어 있어서, 그 밖의 것을 이 libc 로 컴파일하면
     없는 함수를 만날 수 있습니다. 일반 리눅스 바이너리는 `run`
     명령으로, 파이썬과 함께 들어 있는 glibc 위에서 돕니다.
@@ -437,12 +469,41 @@ SSH 는 비밀번호가 없습니다. 비밀번호 인증은 아예 컴파일하
   cat /data/log/auth        로그인 기록
 
 
+드라이브를 꽂으면
+-----------------
+USB 메모리든 외장 하드든 꽂으면 알아서 붙습니다. automount 가 커널의
+uevent 를 듣고 있다가 잠깐 사이에 /media/<이름> 에 마운트하고, 빼면
+정리합니다. 부팅할 때 이미 꽂혀 있던 것도 한 번 훑습니다.
+
+  automount -l            지금 뭐가 붙어 있나
+  automount -u <이름>     하나 떼어내기
+
+시스템이 부팅한 디스크는 절대 건드리지 않고, nosuid,nodev 로
+마운트합니다 - 남의 기계에서 쓴 파일시스템이니까요.
+
+/media 는 임시 자리입니다. 재부팅을 넘겨 계속 같은 자리에 있어야
+한다면 입양시키세요.
+
+  storage                          재부팅을 넘겨 남는 곳과 남은 용량
+  storage adopt /dev/sdb photos    /mnt/photos 에 고정
+  storage format /dev/sdb backup   지우고 ext4 로 만든 뒤 고정
+  storage forget photos            그만두기
+
+입양한 드라이브는 장치 이름이 아니라 파일시스템 레이블로 찾습니다.
+그래서 다른 포트에 꽂아도 같은 자리에 붙습니다 - sdb1 은 다른
+드라이브를 먼저 꽂는 순간 sdc1 이 되기 때문입니다.
+
+poweroff 는 /data 를 언마운트하기 전에 이 드라이브들을 먼저
+정리합니다. 쓰는 사람이 있으면 떼어내서라도 - 드라이브 하나 때문에
+기기를 끌 수 없게 되면 안 되니까요.
+
+
 소스는 어디에 있나
 ------------------
 전부 main 브랜치에 있습니다. 아키텍처별로 소스를 나누지 않았습니다.
 arm64 와 amd64 가 같은 코드로 빌드됩니다.
 
-  userland/     자체 C 라이브러리, init, 셸, 103개 명령어
+  userland/     자체 C 라이브러리, init, 셸, 107개 명령어
     libc/         C 라이브러리. 시스템 콜 위에 바로 올렸습니다
     sh/           셸
     init/         pid 1

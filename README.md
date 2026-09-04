@@ -9,7 +9,7 @@
 `sha256sum -c dist/SHA256SUMS.txt` 로 확인하면 됩니다.
 
 **직접 만든 초경량 리눅스 배포판.** 커널 설정부터 libc, init, 셸,
-103개 명령어까지 전부 새로 썼습니다. 커널 이미지 하나가 곧 시스템
+107개 명령어까지 전부 새로 썼습니다. 커널 이미지 하나가 곧 시스템
 전체이고, 부팅하면 램으로 풀립니다.
 
 원래는 **라즈베리파이 제로 2 W** 한 대에 올리려고 만들었습니다. 512MB
@@ -22,7 +22,7 @@
 | 시스템 전체 | 커널 + 유저랜드 파일 **하나**, 11~23MB |
 | 부팅 후 남는 램 | 512MB 보드에서 **480MB** |
 | 부팅 시간 | 전원 인가 후 프롬프트까지 10초 남짓 |
-| 명령어 | 103개, 전부 자체 구현 |
+| 명령어 | 107개, 전부 자체 구현 |
 | SSH | **기본 내장**, 공개키 전용 (비밀번호 인증은 컴파일 자체가 안 됨) |
 | 파이썬 | CPython 3.12 + pip. manylinux 휠 설치됨 (numpy 확인) |
 | 방화벽 | 기본 켜짐. nftables 를 netlink 로 직접 |
@@ -38,7 +38,7 @@ OpenSSL). **암호는 직접 만들면 안 되는 물건**이라 일부러 가�
 
 **전부 [Claude Code](https://claude.com/claude-code) 가 썼습니다.**
 Anthropic 의 코딩 에이전트이고, 저장소 주인의 지시를 받아 작업했습니다.
-커널 설정, C 라이브러리, init, 셸, 103개 명령어, 빌드 시스템,
+커널 설정, C 라이브러리, init, 셸, 107개 명령어, 빌드 시스템,
 셀프테스트, 그리고 지금 읽고 계신 이 문서까지 전부 해당됩니다.
 
 이게 무슨 뜻인지는 분명히 해두는 편이 낫겠습니다. 설계와 디버깅과 수정이
@@ -80,7 +80,7 @@ Anthropic 의 코딩 에이전트이고, 저장소 주인의 지시를 받아 �
   방화벽, DNS·NTP 위조 방지는 전부 구현돼 있고 주석에 근거도 적혀
   있지만, 다른 사람이 검토한 적은 없습니다. 아래 보안 절만 믿고 적대적인
   망에 바로 올리지는 마세요.
-- **C 라이브러리가 자체 구현이고, 완전하지 않습니다.** 103개 명령어에
+- **C 라이브러리가 자체 구현이고, 완전하지 않습니다.** 107개 명령어에
   필요한 만큼만 들어 있습니다. 그 밖의 것을 이 libc 로 컴파일하면 없는
   함수를 만날 수 있습니다. 일반 리눅스 바이너리는 `run` 으로, 파이썬과
   함께 들어 있는 glibc 위에서 돕니다.
@@ -295,6 +295,72 @@ guard 자체도 init이 감시합니다. 죽이면 **1초 안에 되살아납니
 
 ---
 
+## 드라이브를 꽂으면
+
+USB 메모리든 외장 하드든 꽂으면 알아서 붙습니다. 커널이 보내는 uevent
+를 듣고 있다가 잠깐 사이에 `/media/<이름>` 에 마운트하고, 빼면
+정리합니다. 부팅할 때 이미 꽂혀 있던 것도 훑어서 붙입니다.
+
+```
+automount -l                   지금 뭐가 붙어 있나
+automount -u <이름>            하나 떼어내기
+```
+
+시스템이 부팅한 디스크는 절대 건드리지 않습니다. 마운트 옵션은 /data 와
+같은 `nosuid,nodev` 입니다 — 남의 기계에서 쓴 파일시스템이니까요.
+
+### 계속 쓸 드라이브라면
+
+`/media` 는 임시 자리입니다. 재부팅을 넘겨 계속 같은 자리에 있어야
+한다면 입양시키세요.
+
+```
+storage                        재부팅을 넘겨 남는 곳과 남은 용량
+storage adopt /dev/sdb 사진    /mnt/사진 에 고정
+storage format /dev/sdb 백업   지우고 ext4 로 만든 뒤 고정
+storage forget 사진            그만두기
+```
+
+입양한 드라이브는 **파일시스템 레이블로 찾습니다.** 장치 이름이 아니라
+레이블이라, 다른 포트에 꽂아도 같은 자리에 붙습니다. sdb1 은 다른
+드라이브를 먼저 꽂는 순간 sdc1 이 되기 때문입니다.
+
+```
+storage
+  what survives a reboot
+    boot       /boot            110M free of 126M     12% used   /dev/sda1
+    data       /data             63M free of 112M     43% used   /dev/sda2
+    사진        /mnt/사진        51M free of 55M        8% used   /dev/sdb
+```
+
+`poweroff` 는 /data 를 언마운트하기 전에 이 드라이브들을 먼저
+정리합니다. 쓰던 사람이 있으면 떼어내서라도 — 드라이브 하나 때문에
+기기를 끌 수 없게 되면 안 되니까요.
+
+---
+
+## 부팅 사슬은 어디까지 우리 것인가
+
+```
+부트ROM → bootcode.bin → start.elf → 우리 펌웨어 → 리눅스
+             (Broadcom 블롭)          (firmware/)   (kernel/)
+```
+
+`firmware/` 의 베어메탈 펌웨어가 SD 카드를 직접 읽어 리눅스를 올립니다.
+자체 EMMC 드라이버(Arasan SDHCI), MBR 파싱, FAT32 읽기(긴 이름 포함),
+디바이스 트리 재작성, arm64 부팅 규약에 따른 인계까지 전부 자체
+코드입니다.
+
+start.elf 도 커널을 직접 올릴 수 있으므로, 이 단계는 없던 기능을
+만드는 것이 아니라 사슬의 한 칸을 우리 것으로 바꾼 것입니다. 잘못되면
+예외 벡터가 잡아서 무엇이 어디서 터졌는지 말합니다 — 예외 종류, 건드린
+주소, 읽다가인지 쓰다가인지, 그리고 호출 경로까지.
+
+Broadcom 블롭 두 개(bootcode.bin, start.elf)는 GPU 부트롬이 요구하는
+것이라 대체할 수 없습니다.
+
+---
+
 ## 보안
 
 - **비밀번호 인증 없음.** dropbear를 그 기능 없이 컴파일했습니다.
@@ -350,7 +416,7 @@ guard 자체도 init이 감시합니다. 죽이면 **1초 안에 되살아납니
 `help` 를 치면 기기에서도 볼 수 있습니다. `help <명령>` 은 그 명령만
 설명합니다.
 
-### 셸 (14개)
+### 셸 (16개)
 
 | 명령 | 하는 일 |
 |---|---|
@@ -368,8 +434,10 @@ guard 자체도 init이 감시합니다. 죽이면 **1초 안에 되살아납니
 | `if` | branch on a command's result |
 | `while` | repeat while a command works |
 | `for` | repeat over a list |
+| `break` | leave a loop |
+| `continue` | go to the next round of a loop |
 
-### 파일과 저장장치 (23개)
+### 파일과 저장장치 (25개)
 
 | 명령 | 하는 일 |
 |---|---|
@@ -385,6 +453,8 @@ guard 자체도 init이 감시합니다. 죽이면 **1초 안에 되살아납니
 | `disk` | what storage is attached |
 | `part` | change the partition table |
 | `datadisk` | choose which partition is /data |
+| `storage` | what survives a reboot, and adding to it |
+| `automount` | mount drives as they are plugged in |
 | `fsck` | check and repair /data |
 | `tar` | make and open archives |
 | `find` | walk a directory tree |
@@ -556,7 +626,7 @@ make                                  # 공개키가 이미지에 들어감
 | `userland/libc/src/crt0.S` | 진입점 (`#if` 로 갈림) |
 | `kernel/lp-zero.config` / `lp-zero-amd64.fragment` | 커널 설정 |
 
-103개 명령어와 libc 본체는 **한 글자도 다르지 않습니다.** 폴더를 나눠
+107개 명령어와 libc 본체는 **한 글자도 다르지 않습니다.** 폴더를 나눠
 복사해두면 한쪽만 고치는 사고가 나고, 그건 실제로 겪었습니다 — amd64
 이미지에 arm64 바이너리가 43MB 섞여 나간 적이 있습니다. 지금은
 `check_tree_arch` 가 빌드할 때 모든 ELF의 아키텍처를 대조하고 다르면
@@ -565,7 +635,7 @@ make                                  # 공개키가 이미지에 들어감
 ```
 userland/          한 벌의 소스. make ARCH=amd64 로 갈림
   libc/            자체 libc (시스템 콜 위에 직접)
-  init/ sh/ ...    103개 명령어, 하나에 디렉터리 하나
+  init/ sh/ ...    107개 명령어, 하나에 디렉터리 하나
 kernel/            커널 설정과 빌드 스크립트
 boot/              부트 파티션에 들어가는 것들 (config.txt, /etc/rc)
 tools/             이미지 생성, 서명, 배포
@@ -637,7 +707,11 @@ service stop beacon
 문서 맨 앞의 [믿고 쓰기 전에](#믿고-쓰기-전에) 에 전부 적어두었습니다.
 짧게만 다시 적으면, 실기기 검증이 아직이고, 보안 부분이 감사를 받지
 않았고, GUI 와 컨테이너가 없고, 패키지가 `pkg` 와 pip 범위이며,
-사람이 아니라 Claude Code 가 쓴 코드라 실적이 없습니다.
+사람이 아니라 Claude Code 가 쓴 코드라 실적이 없습니다. 자체
+부트로더는 디바이스 트리 오버레이를 적용하지 않습니다 - 실기에서는
+start.elf 가 적용한 트리를 받아 쓰므로 문제가 없지만, 그것이 없는
+환경에서는 config.txt 의 dtoverlay 가 무시되고 로더가 그 사실을
+말해줍니다.
 
 ---
 

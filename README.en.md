@@ -3,7 +3,7 @@
 **한국어 문서: [README.md](README.md)** · Start here: **[`GUIDE/`](GUIDE/)**
 
 **A Linux distribution written from scratch.** The kernel configuration,
-the C library, init, the shell and all 103 commands are original code.
+the C library, init, the shell and all 107 commands are original code.
 One kernel image is the entire system: the userland is packed inside it
 and unpacks into RAM at boot.
 
@@ -18,7 +18,7 @@ machines and amd64 PCs**.
 | Whole system | kernel + userland in **one file**, 11-23MB |
 | RAM left after boot | **480MB** free on a 512MB board |
 | Boot time | about 10 seconds from power to a prompt |
-| Commands | 103, every one of them written here |
+| Commands | 107, every one of them written here |
 | SSH | **built in**, public key only (password auth is not compiled in) |
 | Python | CPython 3.12 + pip, manylinux wheels install (numpy confirmed) |
 | Firewall | on by default, nftables driven straight over netlink |
@@ -36,7 +36,7 @@ write yourself**, so it was deliberately borrowed.
 **Every line of it was written by [Claude Code](https://claude.com/claude-code),
 Anthropic's coding agent**, working from the repository owner's
 direction. That includes the kernel configuration, the C library, init,
-the shell, all 103 commands, the build system, the self-test, and this
+the shell, all 107 commands, the build system, the self-test, and this
 document.
 
 It is worth being plain about what that means. The code was designed,
@@ -82,7 +82,7 @@ is a reason not to be surprised.
   reviewed by anybody else. Do not put this straight onto a hostile
   network on the strength of that section alone.
 - **The C library is ours, and it is not complete.** It covers what the
-  103 commands need. Anything else you compile against it may hit a
+  107 commands need. Anything else you compile against it may hit a
   function that is not there. Ordinary Linux binaries run through
   `run`, against the glibc that ships alongside Python.
 - **`/data` is the only place that survives a reboot,** and it is one
@@ -94,6 +94,10 @@ is a reason not to be surprised.
   in the kernel, but X11 or Wayland is yours to install; packages are
   what `pkg` and pip can reach; cgroups and namespaces are not
   configured for container runtimes.
+- **The bootloader does not apply device tree overlays.** On real
+  hardware this is invisible: start.elf hands us a tree with them
+  already applied and we prefer that one. Where there is no start.elf,
+  `config.txt` overlays are skipped and the loader says which.
 - **Things will be rough in places.** A recent example: every message
   logged through our own logger was invisible to `dmesg` for months,
   because a kmsg record without a trailing newline is a continuation
@@ -322,6 +326,76 @@ init watches guard in turn. Kill it and it is **back within a second.**
 
 ---
 
+## Plugging a drive in
+
+A USB stick or an external disk mounts itself. automount listens to the
+kernel's uevent messages, so a drive appears under `/media/<name>`
+within a moment of being plugged in and is released when it is pulled.
+It also scans once at startup for drives that were already there.
+
+```
+automount -l            what is mounted right now
+automount -u <name>     release one
+```
+
+It never touches the disk this system booted from, and it mounts
+nosuid,nodev for the same reason /data does: that filesystem was written
+by somebody else's machine.
+
+### Drives you want to keep
+
+`/media` is a temporary place. For a drive that should be at the same
+path after every reboot, adopt it:
+
+```
+storage                        what survives a reboot, and how full
+storage adopt /dev/sdb photos  keep it at /mnt/photos
+storage format /dev/sdb backup erase it, make ext4, then keep it
+storage forget photos          stop keeping it
+```
+
+An adopted drive is matched by **filesystem label, not device name**, so
+it works in any port. sdb1 becomes sdc1 the moment somebody plugs in a
+second drive first, and a system that loses its storage over the order
+things were plugged in is not one you can leave alone for months.
+
+```
+storage
+  what survives a reboot
+    boot       /boot            110M free of 126M     12% used   /dev/sda1
+    data       /data             63M free of 112M     43% used   /dev/sda2
+    photos     /mnt/photos       51M free of 55M       8% used   /dev/sdb
+```
+
+`poweroff` releases these before it unmounts /data, detaching anything
+busy - a drive nobody can unmount must not become a machine nobody can
+switch off.
+
+---
+
+## How much of the boot chain is ours
+
+```
+boot ROM -> bootcode.bin -> start.elf -> our firmware -> Linux
+              (Broadcom blobs)           (firmware/)     (kernel/)
+```
+
+The bare-metal firmware in `firmware/` reads the SD card itself and
+loads Linux: our own EMMC driver (Arasan SDHCI), MBR parsing, FAT32
+with long filenames, device tree rewriting, and the handover per the
+arm64 boot protocol.
+
+start.elf can load a kernel by itself, so this step does not add a
+capability - it replaces a link in the chain with our own. When
+something goes wrong, the exception vectors catch it and say what and
+where: the exception class, the address being touched, whether it was
+being read or written, and the call path that led there.
+
+The two Broadcom blobs cannot be replaced: the GPU boot ROM demands
+them before any ARM core runs at all.
+
+---
+
 ## Security
 
 - **No password authentication.** dropbear is compiled without it.
@@ -380,7 +454,7 @@ None of this has been independently audited. See
 
 `help` prints this list on the machine. `help <command>` explains one.
 
-### Shell (14)
+### Shell (16)
 
 | | |
 |---|---|
@@ -398,8 +472,10 @@ None of this has been independently audited. See
 | `if` | branch on a command's result |
 | `while` | repeat while a command works |
 | `for` | repeat over a list |
+| `break` | leave a loop |
+| `continue` | go to the next round of a loop |
 
-### Files and storage (23)
+### Files and storage (25)
 
 | | |
 |---|---|
@@ -415,6 +491,8 @@ None of this has been independently audited. See
 | `disk` | what storage is attached |
 | `part` | change the partition table |
 | `datadisk` | choose which partition is /data |
+| `storage` | what survives a reboot, and adding to it |
+| `automount` | mount drives as they are plugged in |
 | `fsck` | check and repair /data |
 | `tar` | make and open archives |
 | `find` | walk a directory tree |
@@ -595,7 +673,7 @@ build from **the same source**. What actually differs:
 | `userland/libc/src/crt0.S` | the entry point, split by `#if` |
 | `kernel/lp-zero.config` / `lp-zero-amd64.config` | kernel configuration |
 
-The 103 commands and the body of libc are **identical, character for
+The 107 commands and the body of libc are **identical, character for
 character.** Split them into copied folders and sooner or later only one
 copy gets fixed — which is not hypothetical: an amd64 image once shipped
 with 43MB of arm64 binaries in it. `check_tree_arch` now compares the
@@ -605,7 +683,7 @@ mismatch.
 ```
 userland/          one set of sources; make ARCH=amd64 picks the target
   libc/            our own libc, straight on top of the syscalls
-  init/ sh/ ...    103 commands, one directory each
+  init/ sh/ ...    107 commands, one directory each
 kernel/            kernel configuration and build script
 boot/              what goes on the boot partition (config.txt, /etc/rc)
 tools/             image building, signing, distribution

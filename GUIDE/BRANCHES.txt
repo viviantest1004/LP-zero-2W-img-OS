@@ -22,7 +22,7 @@ main
 The branch you want.
 
   Full source            kernel configuration, the C library,
-                         init, the shell, all 103 commands, the
+                         init, the shell, all 107 commands, the
                          image tools and the self-test
   README.md              the long description, in Korean
   README.en.md           the same document in English
@@ -52,6 +52,19 @@ here.
 
 The most recent work, newest first:
 
+  * The shell had loops and no way out of one - break and continue
+    exist now. Alongside them: guard's CPU-hog notice reaches the
+    log and not only the console, and the self-test's signature
+    check tests the signature rather than the file-format check in
+    front of it.
+
+  * Drives that get plugged in, and drives the system keeps -
+    automount and storage.
+
+  * Phase 3: our own firmware boots Linux off the card.
+
+  * Phase 2: the board can now say where it died.
+
   * Every lp_log message was a continuation record, so no reader
     ever saw it. A kmsg write that does not end in a newline is a
     continuation: the kernel leaves the record unfinalised and
@@ -75,7 +88,7 @@ WHO WROTE ALL OF IT
 -------------------
 Claude Code, Anthropic's coding agent, working from the repository
 owner's direction - the kernel configuration, the C library, init,
-the shell, the 103 commands, the build system, the self-test and
+the shell, the 107 commands, the build system, the self-test and
 the documentation. GUIDE/USAGE.txt and README.en.md both say what
 that means for how much you should trust it; the short version is
 that the reasoning is unusually well recorded, and that nobody
@@ -112,16 +125,20 @@ repository. GUIDE/USAGE.txt has the full list under BEFORE YOU
 RELY ON THIS, and it is worth reading before you deploy this
 anywhere real.
 
-Open, and deliberately so: two items from the original plan
-remain, both from the bare-metal firmware phase that predates the
-decision to boot a real Linux kernel.
+The original plan is now finished. The last two items - the
+bare-metal firmware phases that had been left open - are done:
 
-  Phase 2   exception vectors and a panic handler
-  Phase 3   SD/eMMC driver, FAT32, bootloader
+  Phase 2   exception vectors, the interrupt controllers and a
+            panic handler that decodes ESR/FAR/ELR and walks the
+            call path
+  Phase 3   an Arasan SDHCI driver, MBR and FAT32 reading, device
+            tree rewriting, and the handover to Linux
 
-The system boots through UEFI with our own kernel now, so neither
-is on the path anything currently takes. They are open questions,
-not missing pieces.
+So the whole chain below Linux is ours except the two Broadcom
+blobs the GPU boot ROM demands. One gap is stated rather than
+hidden: the loader does not apply device tree overlays, which is
+invisible on real hardware (start.elf hands us a tree that already
+has them) and named out loud where it is not.
 
 
 ================================================================
@@ -140,7 +157,7 @@ main
 받으실 브랜치입니다.
 
   전체 소스              커널 설정, C 라이브러리, init, 셸,
-                         103개 명령어, 이미지 도구, 셀프테스트
+                         107개 명령어, 이미지 도구, 셀프테스트
   README.md              긴 설명 (한국어)
   README.en.md           같은 문서의 영어판
   GUIDE/USAGE.txt        실행, 로그인, 빌드 방법
@@ -167,6 +184,18 @@ squash 로 합치면 사라지는 부분입니다. 무언가가 왜 그렇게 �
 
 가장 최근 작업부터:
 
+  * 셸에 루프는 있는데 빠져나갈 방법이 없었다 - break 와 continue
+    를 넣었다. 함께: guard 의 CPU 점유 경고가 콘솔뿐 아니라 로그에도
+    남고, 셀프테스트의 서명 검사가 그 앞의 형식 검사가 아니라
+    실제로 서명을 검사하게 되었다.
+
+  * 꽂으면 붙는 드라이브와, 시스템이 계속 데리고 있는 드라이브 -
+    automount 와 storage.
+
+  * Phase 3: 우리 펌웨어가 카드에서 리눅스를 띄운다.
+
+  * Phase 2: 보드가 어디서 죽었는지 말할 수 있게 되다.
+
   * lp_log 로 남긴 모든 메시지가 continuation 레코드였고, 그래서
     아무도 볼 수 없었다. 개행으로 끝나지 않는 kmsg 쓰기는
     continuation 이라, 커널이 레코드를 미확정 상태로 두고 어떤
@@ -187,7 +216,7 @@ squash 로 합치면 사라지는 부분입니다. 무언가가 왜 그렇게 �
 전부 누가 만들었나
 ------------------
 Anthropic 의 코딩 에이전트인 Claude Code 가 저장소 주인의 지시를
-받아 썼습니다. 커널 설정, C 라이브러리, init, 셸, 103개 명령어,
+받아 썼습니다. 커널 설정, C 라이브러리, init, 셸, 107개 명령어,
 빌드 시스템, 셀프테스트, 문서까지 전부입니다. 그게 신뢰도에 어떤
 뜻인지는 GUIDE/USAGE.txt 와 README.md 에 적어두었습니다. 짧게
 말하면, 판단 근거가 유난히 잘 남아 있고, 독립적인 검토를 받은 적은
@@ -222,11 +251,16 @@ dist/ 도 원래는 이 목록에 있어야 합니다. 그래도 이미지 세 �
 감사를 받지 않았습니다. 전체 목록은 GUIDE/USAGE.txt 의 "믿고 쓰기
 전에"에 있고, 실제 어딘가에 올리기 전에 읽어보실 만합니다.
 
-일부러 열어둔 것: 원래 계획에서 두 항목이 남아 있습니다. 둘 다
-진짜 리눅스 커널을 띄우기로 정하기 전의 베어메탈 펌웨어 단계입니다.
+원래 계획은 이제 끝났습니다. 열어두었던 베어메탈 펌웨어 단계 둘이
+완료되었습니다.
 
-  Phase 2   예외 벡터와 패닉 핸들러
-  Phase 3   SD/eMMC 드라이버, FAT32, 부트로더
+  Phase 2   예외 벡터, 인터럽트 컨트롤러, 그리고 ESR/FAR/ELR 를
+            풀어 읽고 호출 경로까지 보여주는 패닉 핸들러
+  Phase 3   Arasan SDHCI 드라이버, MBR 과 FAT32 읽기, 디바이스
+            트리 재작성, 리눅스 인계
 
-지금은 UEFI 로 자체 커널을 띄우기 때문에 둘 다 실제 부팅 경로에
-없습니다. 빠진 조각이 아니라 열려 있는 선택지입니다.
+그래서 리눅스 아래의 사슬은 GPU 부트롬이 요구하는 Broadcom 블롭
+둘을 빼면 전부 우리 것입니다. 한 가지는 감추지 않고 적어둡니다 -
+로더가 디바이스 트리 오버레이를 적용하지 않습니다. 실기에서는
+start.elf 가 이미 적용한 트리를 받으므로 드러나지 않고, 그렇지
+않은 환경에서는 로더가 그 사실을 말합니다.
