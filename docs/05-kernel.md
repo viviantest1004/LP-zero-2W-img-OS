@@ -49,8 +49,9 @@ make kernel     # 유저랜드 빌드 -> rootfs 조립 -> 커널 빌드
 make kernel-test
 ```
 
-커널 소스 위치는 `LINUX_SRC` 환경변수로 바꾼다 (기본
-`/home/user/kernel-work/linux`).
+커널 소스 위치는 `LINUX_SRC` 환경변수로 바꾼다. 기본값은 저장소 옆의
+`.build/linux` 이고, 작업 디렉터리 전체를 옮기려면 `LPZERO_WORK` 를
+쓴다 (`LPZERO_WORK=/mnt/big/lpzero make kernel`).
 
 ## 유저랜드를 커널에 내장한다
 
