@@ -21,6 +21,9 @@
 #include "font.h"
 #include "exception.h"
 #include "irq.h"
+#include "loader.h"
+#include "emmc.h"
+#include "fat32.h"
 
 #define FW_NAME     "LP-zero"
 #define FW_VERSION  "0.1.0-phase1"
@@ -217,6 +220,8 @@ static void print_help(void)
     kprintf("  b  blink ACT LED 10 times\n");
     kprintf("  k  timer ticks (proves interrupts are running)\n");
     kprintf("  x  deliberate fault - shows the panic handler\n");
+    kprintf("  s  survey the SD card (what could be booted)\n");
+    kprintf("  l  boot Linux from the SD card\n");
     kprintf("  r  reboot (watchdog)\n\n");
 }
 
@@ -300,6 +305,22 @@ static void cmd_blink(void)
     kprintf("done\n");
 }
 
+/* 카드에 부팅할 커널이 있는가.
+ *
+ * 카드를 여는 것 자체가 실패할 수 있고 그것도 정상적인 답이다 -
+ * 카드가 없는 보드에서 이 펌웨어를 브링업 용도로 쓰는 것이 원래
+ * 용도였고, 그 경우를 실패로 취급하면 안 된다. */
+static bool autoboot_wanted(void)
+{
+    if (!emmc_init() || !fat32_mount())
+        return false;
+
+    fat_file_t f;
+    return fat32_find(LINUX_IMAGE_NAME, &f) ||
+           fat32_find("Image", &f) ||
+           fat32_find("vmlinuz", &f);
+}
+
 /* 대화형 모니터. 시리얼로 한 글자씩 받아서 처리한다. */
 static void monitor(void) __attribute__((noreturn));
 static void monitor(void)
@@ -332,6 +353,8 @@ static void monitor(void)
         case 'b':           cmd_blink();       break;
         case 'k':           cmd_ticks();       break;
         case 'x':           cmd_fault();       break;
+        case 's':           boot_survey();     break;
+        case 'l':           boot_linux();      break;
         case 'r':
             kprintf("rebooting...\n");
             uart_flush();
@@ -381,7 +404,38 @@ void kernel_main(void)
 
     print_banner();
     dump_system_info();
-    print_help();
 
+    /* 카드에 부팅할 것이 있으면 부팅한다.
+     *
+     * 없으면 모니터로 떨어진다. 그게 맞는 기본값이다 - 카드가 없는
+     * 보드에서 "부팅 실패" 를 반복하는 것보다, 손으로 찔러볼 수 있는
+     * 상태로 서 있는 편이 브링업에 쓸모가 있다.
+     *
+     * 부팅하기로 했을 때도 3초를 기다린다. 커널이 부팅 직후 죽는
+     * 상황에서 모니터로 들어갈 방법이 없으면, 카드를 빼서 다른
+     * 기계에서 고치는 것 말고는 손쓸 수가 없다. */
+    if (autoboot_wanted()) {
+        kprintf("\n부팅할 커널이 있습니다. 3초 안에 아무 키나 누르면"
+                " 모니터로 들어갑니다.\n");
+        uart_flush();
+
+        u64 deadline = timer_get_us() + 3000000;
+        bool interrupted = false;
+        while (timer_get_us() < deadline) {
+            if (uart_rx_ready()) {
+                (void)uart_getc();
+                interrupted = true;
+                break;
+            }
+        }
+
+        if (!interrupted) {
+            boot_linux();
+            /* 여기로 돌아왔다면 실패했다. 이유는 이미 찍혔다. */
+            kprintf("\n부팅에 실패했습니다. 모니터로 들어갑니다.\n");
+        }
+    }
+
+    print_help();
     monitor();
 }

@@ -36,6 +36,28 @@ STATIC_ASSERT(sizeof(exc_frame_t) <= FRAME_SIZE, "frame does not fit");
 STATIC_ASSERT(FRAME_SIZE % 16 == 0, "AArch64 SP must stay 16-byte aligned");
 
 extern char vector_table[];
+
+/* boot.S 가 적어둔, 우리가 실제로 도는 예외 레벨 (2 또는 1). */
+extern u32 boot_el;
+
+/* 예외의 사정은 도는 예외 레벨의 레지스터에 담긴다. EL2 에서 돌면서
+ * ESR_EL1 을 읽으면 남의 값을 - 대개 0 을 - 읽게 되고, 패닉 출력이
+ * 전부 거짓말이 된다. 그래서 벡터에서 어셈블리로 읽지 않고 여기서
+ * 갈라 읽는다. 분기 하나가 어셈블리 두 벌보다 낫다. */
+static void read_exception_state(exc_frame_t *f)
+{
+    if (boot_el == 2) {
+        __asm__ volatile("mrs %0, esr_el2"  : "=r"(f->esr));
+        __asm__ volatile("mrs %0, elr_el2"  : "=r"(f->elr));
+        __asm__ volatile("mrs %0, spsr_el2" : "=r"(f->spsr));
+        __asm__ volatile("mrs %0, far_el2"  : "=r"(f->far));
+    } else {
+        __asm__ volatile("mrs %0, esr_el1"  : "=r"(f->esr));
+        __asm__ volatile("mrs %0, elr_el1"  : "=r"(f->elr));
+        __asm__ volatile("mrs %0, spsr_el1" : "=r"(f->spsr));
+        __asm__ volatile("mrs %0, far_el1"  : "=r"(f->far));
+    }
+}
 extern char __image_start[];
 extern char __image_end[];
 
@@ -226,6 +248,7 @@ static void halt_forever(void)
 
 void exception_handler(exc_frame_t *f)
 {
+    read_exception_state(f);
     report(f);
     halt_forever();
 }
@@ -255,8 +278,13 @@ void panic(const exc_frame_t *f, const char *fmt, ...)
 
 void exception_init(void)
 {
-    __asm__ volatile("msr vbar_el1, %0" :: "r"(vector_table));
-    /* 벡터 테이블 주소가 보이기 전에 예외가 나면 안 되므로 장벽. */
+    /* boot.S 가 이미 걸어두었다. 여기서 한 번 더 거는 이유는, 이
+     * 함수를 부르는 쪽이 "이제 예외를 받을 준비가 됐다" 고 말할 수
+     * 있어야 하기 때문이다. 같은 값을 다시 써도 해가 없다. */
+    if (boot_el == 2)
+        __asm__ volatile("msr vbar_el2, %0" :: "r"(vector_table));
+    else
+        __asm__ volatile("msr vbar_el1, %0" :: "r"(vector_table));
     __asm__ volatile("isb");
 }
 

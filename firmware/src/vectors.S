@@ -68,24 +68,15 @@
     /* 예외 직전의 SP 는 칸에서 프레임을 밀기 전의 값이다. */
     add     x1,  sp,  #FRAME_SIZE
     stp     x30, x1,  [sp, #(8 * 30)]
-
-    mrs     x0,  elr_el1
-    mrs     x1,  spsr_el1
-    stp     x0,  x1,  [sp, #FRAME_ELR]
-
-    mrs     x0,  esr_el1
-    mrs     x1,  far_el1
-    stp     x0,  x1,  [sp, #FRAME_ESR]
 .endm
 
-/* IRQ 핸들러는 돌아온다. 그래서 복원이 필요하다.
- * ELR/SPSR 도 되돌린다 - 핸들러 안에서 또 예외가 나면 그 값들이
- * 덮여 있을 수 있기 때문이다. */
+/* IRQ 핸들러는 돌아온다. 그래서 범용 레지스터를 되돌린다.
+ *
+ * ELR/SPSR 은 건드리지 않는다. 핸들러가 그 값을 고치지 않고, 핸들러
+ * 안에서 다시 예외가 나면 어차피 패닉으로 끝나기 때문이다. 되돌리려면
+ * 우리가 EL1 에 있는지 EL2 에 있는지에 따라 다른 레지스터를 써야 하는데,
+ * 그 분기를 어셈블리에 넣느니 아예 필요를 없애는 편이 낫다. */
 .macro RESTORE_FRAME
-    ldp     x0,  x1,  [sp, #FRAME_ELR]
-    msr     elr_el1,  x0
-    msr     spsr_el1, x1
-
     ldp     x0,  x1,  [sp, #(8 * 0)]
     ldp     x2,  x3,  [sp, #(8 * 2)]
     ldp     x4,  x5,  [sp, #(8 * 4)]

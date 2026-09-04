@@ -33,6 +33,9 @@
 
 #define NUM_GPU_IRQS  64
 
+/* boot.S 가 적어둔, 우리가 도는 예외 레벨. */
+extern u32 boot_el;
+
 static irq_fn handlers[NUM_GPU_IRQS];
 static volatile u64 ticks;
 static u32 tick_reload;          /* 틱 하나에 몇 카운트인가 */
@@ -45,15 +48,41 @@ static inline u64 cntfrq(void)
     u64 v; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(v)); return v;
 }
 
+/* ── EL 마다 타이머가 다르다 ─────────────────────────────────────
+ *
+ * 코어마다 물리 타이머가 여러 벌 있고, 예외 레벨마다 자기 것을 쓴다.
+ *
+ *   CNTP_*   EL1 의 물리 타이머  -> 인터럽트 선 CNTPNSIRQ (비트 1)
+ *   CNTHP_*  EL2 의 물리 타이머  -> 인터럽트 선 CNTHPIRQ  (비트 2)
+ *
+ * 처음에는 EL 과 무관하게 CNTP_* 만 썼다. EL1 에서 돌 때는 맞았고,
+ * 펌웨어를 EL2 에 머물게 고친 순간 타이머가 조용히 멈췄다 - 레지스터
+ * 쓰기는 전부 성공하고, CNTP_CTL 을 되읽으면 켜져 있다고 나오는데,
+ * 인터럽트만 오지 않는다. 라즈베리파이의 로컬 인터럽트 컨트롤러에서
+ * 두 타이머가 서로 다른 선에 물려 있기 때문이다.
+ *
+ * 그래서 도는 예외 레벨에 맞는 타이머를 쓰고, 그에 맞는 선을 연다. */
 static inline void set_tval(u32 v)
 {
-    __asm__ volatile("msr cntp_tval_el0, %0" :: "r"((u64)v));
+    if (boot_el == 2)
+        __asm__ volatile("msr cnthp_tval_el2, %0" :: "r"((u64)v));
+    else
+        __asm__ volatile("msr cntp_tval_el0, %0" :: "r"((u64)v));
 }
 
 static inline void set_ctl(u64 v)
 {
-    __asm__ volatile("msr cntp_ctl_el0, %0" :: "r"(v));
+    if (boot_el == 2)
+        __asm__ volatile("msr cnthp_ctl_el2, %0" :: "r"(v));
+    else
+        __asm__ volatile("msr cntp_ctl_el0, %0" :: "r"(v));
     __asm__ volatile("isb");
+}
+
+/* 이 예외 레벨의 타이머가 물린 인터럽트 선. */
+static inline u32 timer_irq_bit(void)
+{
+    return (boot_el == 2) ? CORE_IRQ_CNTHP : CORE_IRQ_CNTPNS;
 }
 
 /* ── 컨트롤러 ────────────────────────────────────────────────────*/
@@ -128,7 +157,7 @@ void timer_tick_start(u32 hz)
     if (tick_reload == 0)
         tick_reload = 1;
 
-    mmio_write32(CORE_TIMER_IRQCNTL(0), CORE_IRQ_CNTPNS);
+    mmio_write32(CORE_TIMER_IRQCNTL(0), timer_irq_bit());
     set_tval(tick_reload);
     set_ctl(1);                     /* ENABLE=1, IMASK=0 */
     tick_running = true;
@@ -152,9 +181,15 @@ u64 timer_ticks(void)
 void timer_tick_debug(void)
 {
     u64 ctl, tval, cval, cnt;
-    __asm__ volatile("mrs %0, cntp_ctl_el0"  : "=r"(ctl));
-    __asm__ volatile("mrs %0, cntp_tval_el0" : "=r"(tval));
-    __asm__ volatile("mrs %0, cntp_cval_el0" : "=r"(cval));
+    if (boot_el == 2) {
+        __asm__ volatile("mrs %0, cnthp_ctl_el2"  : "=r"(ctl));
+        __asm__ volatile("mrs %0, cnthp_tval_el2" : "=r"(tval));
+        __asm__ volatile("mrs %0, cnthp_cval_el2" : "=r"(cval));
+    } else {
+        __asm__ volatile("mrs %0, cntp_ctl_el0"  : "=r"(ctl));
+        __asm__ volatile("mrs %0, cntp_tval_el0" : "=r"(tval));
+        __asm__ volatile("mrs %0, cntp_cval_el0" : "=r"(cval));
+    }
     __asm__ volatile("mrs %0, cntpct_el0"    : "=r"(cnt));
 
     kprintf("  CNTFRQ %llu Hz, reload %u (running=%d)\n",
@@ -162,6 +197,7 @@ void timer_tick_debug(void)
     kprintf("  CNTP_CTL %llx  next fire in %lld counts (%llu -> %llu)\n",
             (unsigned long long)ctl, (long long)(s64)(s32)tval,
             (unsigned long long)cnt, (unsigned long long)cval);
+    kprintf("  EL%u 타이머, 인터럽트 선 %08x\n", boot_el, timer_irq_bit());
     kprintf("  core 0 routing %08x, pending %08x\n",
             mmio_read32(CORE_TIMER_IRQCNTL(0)),
             mmio_read32(CORE_IRQ_SOURCE(0)));
@@ -198,15 +234,18 @@ static void handle_gpu_irqs(const exc_frame_t *f)
 
 void irq_handler(exc_frame_t *f)
 {
+    /* 프레임의 ESR/ELR 은 아직 비어 있다. 여기서 쓰지 않지만, 아래
+     * 패닉 경로가 프레임을 넘기므로 그때 필요하다. panic() 은 프레임의
+     * 범용 레지스터와 백트레이스만 쓰므로 이대로도 맞는다. */
     u32 src = mmio_read32(CORE_IRQ_SOURCE(0));
 
-    if (src & CORE_IRQ_CNTPNS) {
+    if (src & timer_irq_bit()) {
         ticks++;
         if (tick_running)
             set_tval(tick_reload);  /* 다음 틱 예약 */
         else
             set_ctl(0);
-        src &= ~CORE_IRQ_CNTPNS;
+        src &= ~timer_irq_bit();
     }
 
     if (src & CORE_IRQ_GPU) {

@@ -51,7 +51,8 @@ CFLAGS := --target=$(TARGET) -mcpu=$(CPU) \
           -std=c11 -O2 \
           -Wall -Wextra -Werror \
           -Wno-unused-command-line-argument \
-          -I$(INCDIR)
+          -I$(INCDIR) \
+          -DLINUX_IMAGE_NAME='"$(LINUX_IMAGE)"'
 
 ASFLAGS := --target=$(TARGET) -mcpu=$(CPU) -ffreestanding -nostdlibinc \
            -I$(INCDIR)
