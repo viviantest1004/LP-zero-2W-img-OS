@@ -1,22 +1,31 @@
 #!/usr/bin/env bash
 #
-# mkdist.sh - 남에게 건네줄 두 개를 만든다.
+# mkdist.sh - the three things somebody else gets.
 #
-#   dist/test_a_123_LPzero2W_linux.img.xz   실기 Pi 와 가상머신 양쪽에서 부팅되는
-#                                    SD 카드 이미지. xz 로 압축했다.
-#   dist/test_a_123_LPzero2W_linux-utm.zip            UTM/QEMU 전용. GPU 펌웨어와 압축되지
-#                                    않은 커널을 빼서 훨씬 작다.
+#   dist/test_a_123_LPzero2W_linux-utm.zip     arm64, virtual machines.
+#         QEMU, UTM and UTM SE. UEFI only, so it carries one compressed
+#         kernel (vmlinuz.efi, 11MB) and no GPU firmware.
 #
-# 왜 둘인가: universal 이미지는 라즈베리파이 GPU 펌웨어가 읽을 수 있도록
-# 압축되지 않은 커널(22MB)과 start.elf 를 넣어야 한다. 가상머신에는 둘 다
-# 쓸모가 없다 - UEFI 가 EFI/BOOT/BOOTAA64.EFI 하나만 보기 때문이다.
-# 그래서 가상머신용은 vmlinuz.efi(11MB) 하나만 넣는다.
+#   dist/test_a_123_LPzero2W_linux.img.xz      arm64, a real Pi Zero 2 W.
+#         Also boots in a VM. It has to carry the uncompressed 22MB
+#         kernel and start.elf, because the Broadcom GPU firmware loads
+#         the kernel itself and cannot decompress one.
 #
-# 사용법:
-#   ./tools/mkdist.sh          두 개 다
-#   ./tools/mkdist.sh utm      가상머신용만
-#   ./tools/mkdist.sh sd       SD 카드용만
-
+#   dist/linux-LP_amd64.img.xz                 amd64, a PC or a desktop VM.
+#         Called linux-LP inside, because it is not a Raspberry Pi.
+#         UEFI only - which is how a PC boots anyway - so one bzImage,
+#         no firmware blobs, no device tree, no config.txt.
+#
+# Why the arm64 pair and not one image: the universal one has to hold a
+# kernel the GPU can read, and a VM has no use for either that or
+# start.elf, since UEFI looks only at EFI/BOOT/BOOTAA64.EFI.
+#
+# Usage:
+#   ./tools/mkdist.sh          all three
+#   ./tools/mkdist.sh utm      arm64 VM only
+#   ./tools/mkdist.sh sd       arm64 Pi image only
+#   ./tools/mkdist.sh amd64    amd64 only
+#
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
@@ -61,6 +70,33 @@ if [[ "$WHAT" == "all" || "$WHAT" == "sd" ]]; then
     # -T0: 코어 수만큼 스레드. 256MB 를 한 스레드로 짜면 오래 걸린다.
     xz -9 -T0 -c "$IMG" > "${DIST}/test_a_123_LPzero2W_linux.img.xz"
     log "test_a_123_LPzero2W_linux.img.xz  $(stat -c%s "${DIST}/test_a_123_LPzero2W_linux.img.xz") bytes"
+fi
+
+# ── amd64 ────────────────────────────────────────────────────────
+if [[ "$WHAT" == "all" || "$WHAT" == "amd64" ]]; then
+    step "amd64 이미지 (PC / 데스크톱 가상머신)"
+
+    # Its own userland, rootfs and kernel: different instruction set,
+    # different name inside, different dropbear.
+    make -C "${REPO_ROOT}/userland" ARCH=amd64 >/dev/null
+    ( cd "${REPO_ROOT}/userland" \
+      && LP_ARCH=amd64 LP_BINDIR=bin-amd64 LP_ROOTFS_DIR=rootfs-amd64 \
+         LP_CPIO_NAME=initramfs-amd64.cpio.gz \
+         LP_HOSTNAME=linux-lp LP_OS_NAME=linux-LP ./mkrootfs.sh >/dev/null )
+    LP_ARCH=amd64 LP_ROOTFS_DIR=rootfs-amd64 "${REPO_ROOT}/kernel/build.sh" >/dev/null
+    LP_ARCH=amd64 LP_ROOTFS_DIR=rootfs-amd64 \
+        "${REPO_ROOT}/tools/mksdcard.sh" --linux --uefi-only >/dev/null
+    [[ -f "$IMG" ]] || die "amd64 이미지가 만들어지지 않았습니다"
+
+    rm -f "${DIST}/linux-LP_amd64.img.xz"
+    xz -9 -T0 -c "$IMG" > "${DIST}/linux-LP_amd64.img.xz"
+    log "linux-LP_amd64.img.xz  $(stat -c%s "${DIST}/linux-LP_amd64.img.xz") bytes"
+
+    # And rebuild the arm64 kernel, because the two share kernel/out
+    # only through this script's own ordering - leaving the tree holding
+    # an amd64 rootfs would make the next `make` quietly wrong.
+    make -C "${REPO_ROOT}/userland" >/dev/null
+    ( cd "${REPO_ROOT}/userland" && ./mkrootfs.sh >/dev/null )
 fi
 
 step "결과"
