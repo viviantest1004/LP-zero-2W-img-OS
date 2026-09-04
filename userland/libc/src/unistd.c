@@ -933,3 +933,47 @@ bool lp_group_by_name(const char *name, gid_t *out)
     lp_close((int)fd);
     return found;
 }
+
+/* ── Writing to the log ───────────────────────────────────────────────
+ *
+ * logd collects two sources: the kernel's ring buffer and a datagram
+ * socket at /dev/log. Nothing in this system ever wrote to either, so
+ * /data/log/messages held kernel lines and nothing else - every message
+ * from init, from rc and from guard went to the console and was gone
+ * the moment it scrolled. A board that had been broken into and one
+ * that had not produced identical logs, and guard's record of what it
+ * killed and why did not survive the reboot that followed.
+ *
+ * /dev/kmsg rather than the socket: it is one write with no connection
+ * to set up, it works before logd is running, and it puts the line in
+ * `dmesg` as well. The fd is kept open because the callers are daemons
+ * that will use it again.
+ *
+ * Failure is silent on purpose. This is called from the paths that
+ * handle a machine already in trouble, and a logger that complains
+ * about not being able to log would only make the console worse. */
+void lp_log(const char *tag, const char *msg)
+{
+    static int kfd = -2;              /* -2 = not tried yet, -1 = no good */
+
+    if (kfd == -2) {
+        long fd = lp_open("/dev/kmsg", O_WRONLY, 0);
+        kfd = (fd < 0) ? -1 : (int)fd;
+    }
+    if (kfd < 0)
+        return;
+
+    char line[512];
+    int  n = snprintf(line, sizeof line, "%s: %s", tag, msg);
+    if (n <= 0)
+        return;
+    if (n >= (int)sizeof line)
+        n = (int)sizeof line - 1;
+
+    /* One write per record: /dev/kmsg splits on write boundaries, not
+     * on newlines, and a trailing newline would be printed literally. */
+    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+        n--;
+    if (n > 0)
+        lp_write(kfd, line, (size_t)n);
+}

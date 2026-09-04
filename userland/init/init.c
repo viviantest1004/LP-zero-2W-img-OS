@@ -559,6 +559,12 @@ static bool respawn_service(pid_t dead, int status)
         dprintf(STDERR_FILENO,
                 "init: service %s exited (code %d) - again in %lds\n",
                 services[i].argv[0], code, wait_ms / 1000);
+        {
+            char m[160];
+            snprintf(m, sizeof m, "service %s exited (code %d), restarting",
+                     services[i].argv[0], code);
+            lp_log("init", m);
+        }
 
         services[i].retry_at = lp_monotonic_ms() + wait_ms;
         return true;

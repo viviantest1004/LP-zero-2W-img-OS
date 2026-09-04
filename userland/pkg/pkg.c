@@ -213,6 +213,30 @@ static long tar_extract(const char *archive, int list_fd, bool dry_run)
             char target[101];
             memcpy(target, hdr + TAR_LINKNAME, 100);
             target[100] = '\0';
+
+            /* The target has to pass the same test as the name.
+             *
+             * It did not, and that was the third way out of /data - the
+             * header above names absolute paths and ".." and says both
+             * are refused, and it is the link target that neither of
+             * them was ever applied to. Two entries were enough:
+             *
+             *     bin/x                  symlink -> /root/.ssh
+             *     bin/x/authorized_keys  regular file
+             *
+             * The second name is relative and has no "..", so it
+             * passes; make_parents stats bin/x, follows the link, finds
+             * a directory and creates nothing; and the file is then
+             * opened O_CREAT|O_TRUNC through the link, as root,
+             * anywhere on the machine. /root/.ssh/authorized_keys,
+             * /data/rc.local and /etc/passwd were all one archive
+             * away. */
+            if (!path_is_safe(target)) {
+                dprintf(STDERR_FILENO,
+                        "pkg: %s points at %s, which is outside %s -"
+                        " refusing the archive\n", name, target, ROOT);
+                return -1;
+            }
             if (!dry_run) {
                 make_parents(full);
                 lp_unlink(full);

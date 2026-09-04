@@ -82,7 +82,12 @@ int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "-c") == 0) {
         /* Clear it. This is what a boot that worked looks like. */
-        write_count(0);
+        if (!write_count(0)) {
+            dprintf(STDERR_FILENO,
+                    "bootcount: could not clear %s - the count still"
+                    " stands\n", STATE_FILE);
+            return 1;
+        }
         return 0;
     }
     if (argc > 1) {
@@ -104,12 +109,28 @@ int main(int argc, char **argv)
 
     int count = read_count() + 1;
 
-    /* If we cannot write it we cannot count, and a counter that never
-     * moves would eventually be wrong in the dangerous direction - it
-     * would keep saying "carry on". Say nothing and carry on anyway:
-     * without a data partition there is no rc.local to skip either. */
-    if (!write_count(count))
-        return 0;
+    /* If the count cannot be written, refuse rather than carry on.
+     *
+     * The old reasoning - "without a data partition there is no
+     * rc.local to skip either" - describes a case that is not the one
+     * that happens. /data is mounted errors=remount-ro, which is a
+     * state this system is designed to reach and has an fsck for, and a
+     * full /data does the same thing. In both, rc.local is still there
+     * and still readable, so it still runs; only the counter is gone.
+     * The counter then never reaches the limit, and the one guard
+     * against a board that reboots for ever fails open at exactly the
+     * moment it is needed.
+     *
+     * Refusing skips rc.local. That is the safe direction: a board that
+     * comes up plain and reachable can be fixed, and one stuck in a
+     * reboot loop cannot. */
+    if (!write_count(count)) {
+        dprintf(STDERR_FILENO,
+                "bootcount: cannot write %s - is /data full or read-only?\n"
+                "bootcount:   Skipping /data/rc.local, because a boot that"
+                " cannot be counted cannot be trusted to end.\n", STATE_FILE);
+        return 1;
+    }
 
     if (count < LIMIT)
         return 0;

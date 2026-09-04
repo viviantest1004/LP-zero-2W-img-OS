@@ -315,7 +315,12 @@ bool  lp_proc_ids(pid_t pid, pid_t *ppid, pid_t *pgid, pid_t *sid,
  * "free" is what an unprivileged process may still use. */
 long  lp_fs_space(const char *path, u64 *free_bytes, u64 *total_bytes);
 long  lp_uname(void *buf);
-long  lp_getrandom(void *buf, size_t n, unsigned flags);           /* struct utsname is 390 bytes */
+long  lp_getrandom(void *buf, size_t n, unsigned flags);
+
+/* Put one line in the system log, so it survives the reboot. Console
+ * output does not: it goes out the serial port and is gone. Silent on
+ * failure - see the note by the definition. */
+void  lp_log(const char *tag, const char *msg);           /* struct utsname is 390 bytes */
 
 /* ── "there is nothing for me to do here" ──
  *

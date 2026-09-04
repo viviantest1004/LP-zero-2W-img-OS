@@ -57,7 +57,12 @@ static void read_conf(const char *path)
         return;
 
     char line[600];
-    while (readline((int)fd, line, sizeof line) > 0) {
+    /* >= 0, not > 0. readline returns 0 for an empty line and -1 only
+     * at the end, so "> 0" stopped at the first blank line - and a
+     * blank line between sections is the obvious way to write beacon.conf.
+     * Everything after it was dropped in silence, with the rules that
+     * did apply reported as a success. */
+    while (readline((int)fd, line, sizeof line) >= 0) {
         char *hash = strchr(line, '#');
         if (hash) *hash = '\0';
 

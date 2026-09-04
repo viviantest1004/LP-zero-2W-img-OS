@@ -882,6 +882,13 @@ static void check_cpu_hogs(const proc_t *list, int n, pid_t self,
                     "guard: %s (pid %d) has held a core for %ds"
                     " - moved to the back of the queue\n",
                     list[i].name, (int)list[i].pid, st->secs_hot);
+            {
+                char m[160];
+                snprintf(m, sizeof m,
+                         "%s (pid %d) held a core for %ds - demoted",
+                         list[i].name, (int)list[i].pid, st->secs_hot);
+                lp_log("guard", m);
+            }
         }
     }
 
@@ -1341,6 +1348,12 @@ static bool check_storm(proc_t *list, int n, pid_t self)
 
     dprintf(STDERR_FILENO,
             "guard:   killed %d, %d processes left\n", killed, n);
+    {
+        char m[128];
+        snprintf(m, sizeof m,
+                 "process storm: killed %d, %d left", killed, n);
+        lp_log("guard", m);
+    }
     return true;
 }
 
@@ -1652,6 +1665,11 @@ int main(int argc, char **argv)
                             "guard: ** Rebooting. This is the last move"
                             " left; a wedged board helps nobody.\n",
                             (int)(STUCK_PASSES * POLL_BUSY_MS / 1000));
+                    /* Into the log before the reboot, or the only
+                     * record of why the board restarted goes out the
+                     * serial port and is gone. */
+                    lp_log("guard", "out of memory with nothing left to"
+                                    " reclaim - rebooting");
                     lp_sync();
                     lp_reboot(LINUX_REBOOT_CMD_RESTART);
                     /* If that did not work there is nothing else. */

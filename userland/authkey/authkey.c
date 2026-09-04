@@ -109,8 +109,12 @@ static int load(const char *path)
     while (readline((int)fd, line, sizeof(line)) >= 0) {
         if (!is_key_line(line))
             continue;
-        if (nkeys >= MAX_KEYS)
+        if (nkeys >= MAX_KEYS) {
+            dprintf(STDERR_FILENO,
+                    "authkey: more than %d keys - the rest of %s is"
+                    " ignored\n", MAX_KEYS, path);
             break;
+        }
         if (already_have(line))
             continue;
         strlcpy(keys[nkeys++], line, KEY_MAX);
@@ -161,11 +165,24 @@ int main(int argc, char **argv)
         }
     }
 
-    /* The live file first, so keys added on the machine keep their place
-     * and are not duplicated by the copies below. */
-    int live  = load(LIVE);
-    int boot  = load(BOOT);
+    /* ── Recovery keys first, live keys after ──
+     *
+     * This used to be live, boot, image - and the table stops at
+     * MAX_KEYS. The live file is on /data, which this program's own
+     * header says to treat as lost or hostile, so anyone who could
+     * write it could pad it to MAX_KEYS lines and the image key - the
+     * one described here as impossible to remove without writing a new
+     * card - was silently the first thing dropped. authkey then
+     * reported "32 keys" and exited 0, and the documented recovery
+     * route (put your key on the FAT partition and reboot) stopped
+     * working, permanently, on a board with no Ethernet and no
+     * passwords.
+     *
+     * The two keys that exist to get you back in are now loaded first
+     * and cannot be crowded out. */
     int image = load(IMAGE);
+    int boot  = load(BOOT);
+    int live  = load(LIVE);
 
     if (list_only) {
         if (nkeys == 0) {

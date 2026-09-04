@@ -121,10 +121,23 @@ static bool hash_dir(const char *path, char *hex)
 
     /* Write the listing to a temporary file and hash that - the hash
      * helper works on files, and this keeps one implementation. */
+    /* O_EXCL and a fresh unlink, because /tmp is 1777 and this runs as
+     * root. A fixed name opened O_CREAT|O_TRUNC with no O_EXCL is a
+     * standing invitation: anyone can pre-create that path as a symlink
+     * and have root truncate whatever it points at. Aim it at
+     * /root/.ssh/authorized_keys and the next boot locks everyone out
+     * of a board with no other way in. O_EXCL refuses to follow a
+     * symlink at all, so the unlink-then-create pair cannot be turned
+     * into a write somewhere else. */
     const char *tmpf = "/tmp/.integrity.list";
-    long out = lp_open(tmpf, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (out < 0)
+    lp_unlink(tmpf);
+    long out = lp_open(tmpf, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (out < 0) {
+        dprintf(STDERR_FILENO,
+                "integrity: cannot create %s (%ld) - not checking\n",
+                tmpf, -out);
         return false;
+    }
     for (int i = 0; i < n; i++) {
         lp_write((int)out, names[i], strlen(names[i]));
         lp_write((int)out, "\n", 1);

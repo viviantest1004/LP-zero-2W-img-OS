@@ -358,8 +358,21 @@ u32 net_resolve(const char *host)
     u8     query[512];
     size_t qlen = 0;
 
-    /* 12-byte header: ID, flags (recursion desired), one question. */
-    u16 id = (u16)(lp_getpid() & 0xFFFF);
+    /* 12-byte header: ID, flags (recursion desired), one question.
+     *
+     * The ID used to be the pid. That is the only thing distinguishing a
+     * real answer from a forged one here, and /etc/rc caps pid_max at
+     * 4096, so the search space was under twelve bits - and a daemon
+     * started at boot has a small, stable pid across reboots. Anything
+     * that could get a UDP packet to the port could answer first with
+     * whatever address it liked, for every name this machine looks up:
+     * ntp, beacon, pkg, and update, which has no signature check.
+     *
+     * getrandom, with the pid only as a fallback if that syscall is not
+     * there. */
+    u16 id;
+    if (lp_getrandom(&id, sizeof id, 0) != (long)sizeof id)
+        id = (u16)((lp_getpid() * 2654435761u) >> 13);
     query[qlen++] = (u8)(id >> 8);   query[qlen++] = (u8)id;
     query[qlen++] = 0x01;            query[qlen++] = 0x00;   /* RD */
     query[qlen++] = 0x00;            query[qlen++] = 0x01;   /* QDCOUNT=1 */
@@ -386,6 +399,14 @@ u32 net_resolve(const char *host)
     to.sin_port   = htons(53);
     to.sin_addr   = ns;
 
+    /* connect() the socket so the kernel drops datagrams from anyone
+     * but the nameserver we asked. Without it the reply was accepted
+     * from any source address at all. */
+    if (lp_connect((int)fd, &to, sizeof(to)) < 0) {
+        lp_close((int)fd);
+        return 0;
+    }
+
     u32 result = 0;
     if (lp_sendto((int)fd, query, qlen, 0, &to, sizeof(to)) > 0) {
         u8   resp[512];
@@ -393,7 +414,15 @@ u32 net_resolve(const char *host)
 
         /* Skip the header and the question, then walk the answers. A name
          * compression pointer (0xC0) is 2 bytes; otherwise skip the label. */
-        if (n > 12 && resp[0] == (u8)(id >> 8) && resp[1] == (u8)id) {
+        /* The ID must match, it must be a response (QR bit), and the
+         * question echoed back must be the one we asked - a reply that
+         * answers a different name is not an answer to this query. */
+        bool same_question =
+            n > 12 + (long)nlen + 4 &&
+            memcmp(resp + 12, query + 12, nlen + 4) == 0;
+
+        if (n > 12 && resp[0] == (u8)(id >> 8) && resp[1] == (u8)id &&
+            (resp[2] & 0x80) && same_question) {
             u16 ancount = (u16)((resp[6] << 8) | resp[7]);
             long off = 12;
 
@@ -600,6 +629,36 @@ static long net_https(const char *method, const char *url,
 
 /* One function behind both net_http_get and net_http_post: the two
  * differ by a word in the request line and whether a body follows. */
+static char lower_ch(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+}
+
+/* Find "Name:" in a set of HTTP headers and read the number after it.
+ * Case-insensitive on the name, because header names are. Returns -1
+ * when it is not there or is not a number. */
+static long header_value_long(const char *head, const char *name)
+{
+    size_t nlen = strlen(name);
+
+    for (const char *p = head; *p; ) {
+        size_t i = 0;
+        while (i < nlen && p[i] &&
+               lower_ch(p[i]) == lower_ch(name[i]))
+            i++;
+        if (i == nlen) {
+            const char *v = p + nlen;
+            while (*v == ' ' || *v == '\t') v++;
+            if (*v < '0' || *v > '9')
+                return -1;
+            return strtol(v, NULL, 10);
+        }
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+    }
+    return -1;
+}
+
 static long http_do(const char *method, const char *url,
                     const char *body, const char *dest)
 {
@@ -687,24 +746,45 @@ static long http_do(const char *method, const char *url,
     int   status  = 0;
     bool  have_status = false;
 
+    /* The header is collected before it is parsed. The status used to
+     * be read as atoi(buf + 9) from whatever the first read returned,
+     * which assumed the first read holds at least the status line - a
+     * server is free to send it in smaller pieces, and one that wants
+     * to can. Twelve bytes or fewer and have_status stayed false, which
+     * skipped the status check entirely and handed a 404 page back as a
+     * downloaded file; a later read and buf+9 pointed into the middle
+     * of a header and gave a nonsense number. */
+    char  head[512];
+    int   nhead = 0;
+    long  content_length = -1;
+    bool  bad_read = false;
+
     for (;;) {
         long n = lp_read((int)fd, buf, sizeof(buf));
-        if (n <= 0)
+        if (n < 0) { bad_read = true; break; }
+        if (n == 0)
             break;
 
         long i = 0;
         if (!in_body) {
-            if (!have_status && n > 12) {
-                /* "HTTP/1.1 200 OK" */
-                status = atoi(buf + 9);
-                have_status = true;
-            }
+            for (long k = 0; k < n && nhead < (int)sizeof head - 1; k++)
+                head[nhead++] = buf[k];
+            head[nhead] = '\0';
             for (; i < n; i++) {
                 char c = buf[i];
                 if ((match == 0 || match == 2) && c == '\r')      match++;
                 else if ((match == 1 || match == 3) && c == '\n') match++;
                 else                                              match = (c == '\r');
                 if (match == 4) { i++; in_body = true; break; }
+            }
+
+            if (in_body && !have_status) {
+                /* "HTTP/1.1 200 OK" - the digits start at byte 9. */
+                if (nhead > 12 && strncmp(head, "HTTP/", 5) == 0) {
+                    status      = atoi(head + 9);
+                    have_status = true;
+                }
+                content_length = header_value_long(head, "Content-Length:");
             }
         }
 
@@ -717,12 +797,50 @@ static long http_do(const char *method, const char *url,
     lp_close((int)out);
     lp_close((int)fd);
 
-    if (have_status && status != 200) {
+    if (!have_status) {
+        dprintf(STDERR_FILENO,
+                "%s: no HTTP status line in the reply\n", url);
+        if (dest) lp_unlink(dest);
+        return -1;
+    }
+    if (status != 200) {
         dprintf(STDERR_FILENO, "%s: the server said %d\n", url, status);
         if (dest)
             lp_unlink(dest);
         return -1;
     }
+
+    /* Did the whole body arrive?
+     *
+     * The loop above ends on any read that returns 0, and a connection
+     * that is reset or simply stops mid-body looks exactly like a
+     * finished one. Nothing checked, so nothing downstream COULD check:
+     * `update` accepted a kernel image cut off after 18% of the file,
+     * called it verified, and installed it as the thing the board
+     * boots. That is the one failure this machine cannot repair by
+     * itself - nothing runs before the GPU firmware, and it cannot be
+     * told to try a second file.
+     *
+     * A server that sends no Content-Length leaves nothing to compare
+     * against; that is not this code's fault, but it is worth saying so
+     * the caller knows the difference. */
+    if (bad_read) {
+        dprintf(STDERR_FILENO, "%s: the connection broke mid-transfer\n", url);
+        if (dest) lp_unlink(dest);
+        return -1;
+    }
+    if (content_length >= 0 && written != content_length) {
+        dprintf(STDERR_FILENO,
+                "%s: got %ld bytes, the server said %ld - discarding it\n",
+                url, written, content_length);
+        if (dest) lp_unlink(dest);
+        return -1;
+    }
+    if (content_length < 0 && dest)
+        dprintf(STDERR_FILENO,
+                "%s: the server sent no length, so a short download"
+                " cannot be detected here\n", url);
+
     return written;
 }
 

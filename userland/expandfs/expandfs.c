@@ -514,7 +514,13 @@ int main(int argc, char **argv)
     if (!lp_is_dir(MOUNT_POINT))
         lp_mkdir(MOUNT_POINT, 0755);
 
-    long rc = lp_mount(DEV_PART, MOUNT_POINT, "ext4", 0, NULL);
+    /* nosuid and nodev, the same as everywhere else this partition is
+     * mounted. This was the one place that passed 0: /etc/rc and
+     * datadisk both spell out why they matter - they are how a file
+     * written to the card on another machine turns into root on this
+     * one - and expandfs runs before either of them. */
+    long rc = lp_mount(DEV_PART, MOUNT_POINT, "ext4",
+                       MS_NOSUID | MS_NODEV, NULL);
     if (rc == 0) {
         mounted_here = true;
     } else if (rc != -16) {         /* -16 = EBUSY, already mounted */
@@ -532,9 +538,17 @@ int main(int argc, char **argv)
 
     watchdog_petter_stop(petter);
 
-    /* If we mounted it, we unmount it. The rc script mounts it again. */
-    if (mounted_here)
-        sys_call2(SYS_umount2, (long)MOUNT_POINT, 0);
+    /* If we mounted it, we unmount it. The rc script mounts it again.
+     *
+     * And it has to be said when that fails: /data stays mounted, rc's
+     * own mount then fails with EBUSY down every candidate device, and
+     * rc reports "no data partition - continuing in RAM" while /data is
+     * in fact mounted. */
+    if (mounted_here && sys_call2(SYS_umount2, (long)MOUNT_POINT, 0) < 0)
+        dprintf(STDERR_FILENO,
+                "expandfs: could not unmount %s - it stays mounted, and"
+                " the boot may report there is no data partition\n",
+                MOUNT_POINT);
 
     return ok ? 0 : 1;
 }

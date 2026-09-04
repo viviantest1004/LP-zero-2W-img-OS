@@ -31,6 +31,7 @@
 
 #define AF_UNIX       1
 #define SOCK_DGRAM_   2
+#define SOCK_NONBLOCK_ 04000   /* O_NONBLOCK, as socket() takes it */
 
 /* struct sockaddr_un { u16 family; char path[108]; } */
 typedef struct {
@@ -271,7 +272,22 @@ int main(int argc, char **argv)
     /* The socket other programs send to. Datagrams, so a sender never
      * blocks on us and never needs to connect. */
     lp_unlink(SOCK_PATH);
-    long sfd = lp_socket(AF_UNIX, SOCK_DGRAM_, 0);
+    /* SOCK_NONBLOCK, and it is not a refinement.
+     *
+     * Without it this socket blocks, and the poll loop below reads
+     * kernel records first and the socket second - so logd read the
+     * first 32 records of the boot, reached the socket, and waited
+     * there for a datagram that never came, because nothing in this
+     * system had ever been taught to send one. It stayed that way for
+     * the rest of the uptime: alive, holding an open log file, and
+     * collecting nothing. Measured on a running board: 33 lines in
+     * /data/log/messages, the last one from three seconds into the
+     * boot, while the kernel ring buffer went on filling.
+     *
+     * So the log was not merely missing our own programs' messages -
+     * it was missing everything after the first moment of the boot,
+     * including every kernel message about the disk. */
+    long sfd = lp_socket(AF_UNIX, SOCK_DGRAM_ | SOCK_NONBLOCK_, 0);
     if (sfd >= 0) {
         sockaddr_un_t addr;
         memset(&addr, 0, sizeof(addr));

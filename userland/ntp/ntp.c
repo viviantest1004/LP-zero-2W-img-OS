@@ -95,6 +95,27 @@ static s64 query_ntp(const char *server)
     memset(pkt, 0, sizeof(pkt));
     pkt[0] = 0x23;
 
+    /* A random transmit timestamp, which the server copies back into
+     * the originate field. It is the only thing that ties a reply to
+     * this request: the packet used to go out with that field all
+     * zeros, and the reply was accepted on the strength of being 48
+     * bytes long from anybody at all. Setting the clock is not a small
+     * thing to hand out - the reason this program exists is TLS
+     * certificate validity, and the value is written to /data/.clock so
+     * it survives the reboot. */
+    u8 nonce[8];
+    if (lp_getrandom(nonce, sizeof nonce, 0) != (long)sizeof nonce)
+        for (int i = 0; i < 8; i++)
+            nonce[i] = (u8)((lp_monotonic_ms() >> (i * 8)) ^ (i * 37 + 11));
+    memcpy(pkt + 40, nonce, 8);
+
+    /* And connect, so the kernel drops datagrams from anyone but the
+     * server we asked. */
+    if (lp_connect((int)fd, &to, sizeof(to)) < 0) {
+        lp_close((int)fd);
+        return 0;
+    }
+
     s64 result = 0;
     if (lp_sendto((int)fd, pkt, sizeof(pkt), 0, &to, sizeof(to)) > 0) {
         u8   resp[48];
@@ -105,11 +126,27 @@ static s64 query_ntp(const char *server)
             dprintf(STDERR_FILENO, "ntp: %s (%s): no reply\n", server, ip);
         }
         if (n == (long)sizeof(resp)) {
-            /* transmit timestamp at offset 40; the high 4 bytes are seconds */
-            u32 secs = ((u32)resp[40] << 24) | ((u32)resp[41] << 16) |
-                       ((u32)resp[42] << 8)  |  (u32)resp[43];
-            if (secs != 0)
-                result = (s64)secs - NTP_UNIX_DELTA;
+            int mode = resp[0] & 0x07;
+            int vn   = (resp[0] >> 3) & 0x07;
+
+            /* Mode 4 is "server", the version has to be one we spoke,
+             * stratum 0 is a kiss-of-death packet and carries no time,
+             * and the originate field must be the nonce we sent. */
+            bool sane = (mode == 4) && (vn >= 1 && vn <= 4) &&
+                        (resp[1] != 0) &&
+                        memcmp(resp + 24, nonce, 8) == 0;
+
+            if (sane) {
+                /* transmit timestamp at offset 40; high 4 bytes = seconds */
+                u32 secs = ((u32)resp[40] << 24) | ((u32)resp[41] << 16) |
+                           ((u32)resp[42] << 8)  |  (u32)resp[43];
+                if (secs != 0)
+                    result = (s64)secs - NTP_UNIX_DELTA;
+            } else if (!quiet_mode) {
+                dprintf(STDERR_FILENO,
+                        "ntp: %s: reply did not match the request -"
+                        " ignoring it\n", server);
+            }
         }
     }
 
