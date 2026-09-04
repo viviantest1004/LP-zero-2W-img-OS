@@ -71,11 +71,31 @@ if test -e /dev/fb0 ; then echo "PASS  /dev/fb0 exists" ; else echo "SKIP  no fb
 
 echo "=== SECURITY ==="
 if test -f /etc/update-key.pub ; then echo "PASS  update key is inside the system image" ; else echo "SKIP  no update key in this build" ; fi
-# /data/fake-kernel.img is put there by the test harness and carries a
-# real kernel's magic number, so update gets past "is this a kernel?"
-# and the signature check is the thing actually being measured.
-update /data/fake-kernel.img > /tmp/t4 2>&1
-if grep -q signed /tmp/t4 ; then echo "PASS  update refuses an unsigned image" ; else echo "FAIL  unsigned image was NOT refused: `head -1 /tmp/t4`" ; fi
+# An unsigned image must be refused.
+#
+# The image has to be convincing enough to reach the signature check.
+# update looks at the size and the magic first, and rejects anything
+# that fails those as "not a kernel" - which is correct, and means a
+# file full of nonsense never tests the signature at all. A first
+# attempt at this test used exactly such a file and reported the
+# signature check as broken when it had simply never run.
+#
+# So we hand it the kernel this machine is running, copied without its
+# signature. Genuine image, right size, right magic, no .sig beside it:
+# the one case the check exists for.
+KIMG=""
+if test -f /boot/EFI/BOOT/BOOTX64.EFI ; then KIMG=/boot/EFI/BOOT/BOOTX64.EFI ; fi
+if test -f /boot/EFI/BOOT/BOOTAA64.EFI ; then KIMG=/boot/EFI/BOOT/BOOTAA64.EFI ; fi
+
+if test -z "$KIMG" ; then
+  echo "SKIP  no kernel image on /boot to test the signature check with"
+else
+  rm -f /data/fake-kernel.img /data/fake-kernel.img.sig
+  cp $KIMG /data/fake-kernel.img
+  update /data/fake-kernel.img > /tmp/t4 2>&1
+  if grep -q signed /tmp/t4 ; then echo "PASS  update refuses an unsigned image" ; else echo "FAIL  unsigned image was NOT refused: `head -1 /tmp/t4`" ; fi
+  rm -f /data/fake-kernel.img
+fi
 rm -f /data/.update.sig
 echo guard > /data/services.disabled
 sleep 3
@@ -135,9 +155,24 @@ if test 12 -gt 9 ; then echo "PASS  test compares two-digit numbers" ; else echo
 echo "=== IT DOES NOT DIE ==="
 sh -c 'while : ; do : ; done' &
 HOG=$!
-sleep 33
+
+# Wait for guard rather than assuming how long it takes.
+#
+# guard counts seconds a process was actually hot, not seconds on the
+# clock, so on a busy machine thirty of them take longer than thirty
+# seconds to accumulate. A fixed `sleep 33` passed on an idle board and
+# failed on a fresh card that was still finishing its first boot - which
+# looks exactly like guard being broken.
+WAITED=0
+while test $WAITED -lt 60 ; do
+  if dmesg | grep -q "held a core" ; then break ; fi
+  sleep 5
+  WAITED=`calc $WAITED + 5 | head -1`
+done
+
 if test -d /proc/$HOG ; then echo "PASS  the hog is alive to be judged" ; else echo "FAIL  test hog died on its own" ; fi
-if dmesg | grep -q "held a core" ; then echo "PASS  guard noticed the CPU hog" ; else echo "FAIL  a core was held 40s with no notice" ; fi
+if dmesg | grep -q "held a core" ; then echo "PASS  guard noticed the CPU hog after ${WAITED}s" ; else echo "FAIL  a core was held ${WAITED}s with no notice" ; fi
+if test $WAITED -lt 60 ; then echo "PASS  break left the loop early" ; else echo "FAIL  the wait loop ran to its limit - break did not work" ; fi
 kill -9 $HOG
 if definitely-not-a-command > /tmp/t7 2>&1 ; then echo "FAIL  a missing command reported success" ; else echo "PASS  a missing command fails" ; fi
 if grep -q "not found" /tmp/t7 ; then echo "PASS  and says so" ; else echo "FAIL  and said: `head -1 /tmp/t7`" ; fi

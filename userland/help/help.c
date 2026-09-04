@@ -52,6 +52,8 @@ static const entry_t KNOWN[] = {
     { "false",    "shell",   "fail",                        "false" },
     { "if",       "shell",   "branch on a command's result", "if <cmd> ; then ... ; else ... ; fi" },
     { "while",    "shell",   "repeat while a command works","while <cmd> ; do ... ; done" },
+    { "break",    "shell",   "leave a loop",                "break [n]" },
+    { "continue", "shell",   "go to the next round of a loop", "continue [n]" },
     { "for",      "shell",   "repeat over a list",          "for x in a b c ; do ... ; done" },
 
     { "ls",       "files",   "list a directory",            "ls [-lahtSrRd1] [path]..." },

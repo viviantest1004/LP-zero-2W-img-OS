@@ -836,6 +836,27 @@ static void check_cpu_hogs(const proc_t *list, int n, pid_t self,
                     "guard: %s (pid %d) has held a core for %ds"
                     " (%ld%% of one core)\n",
                     list[i].name, (int)list[i].pid, st->secs_hot, percent);
+
+            /* The log, not just the console.
+             *
+             * This notice went to stderr alone, which means it was on
+             * screen for whoever happened to be looking and nowhere
+             * else. On a board left alone for months - which is the
+             * only kind this system is for - nobody is looking, and
+             * "something pinned a core at 3am" is exactly the sort of
+             * thing you want to find afterwards.
+             *
+             * The demotion below was already logged. Logging only the
+             * action and not the observation also left a gap: a
+             * protected process never gets demoted, so a spinning shell
+             * produced a console line and no record at all. */
+            {
+                char m[160];
+                snprintf(m, sizeof m,
+                         "%s (pid %d) held a core for %ds (%ld%% of one core)",
+                         list[i].name, (int)list[i].pid, st->secs_hot, percent);
+                lp_log("guard", m);
+            }
             st->announced = true;
         }
 

@@ -52,6 +52,23 @@ static const char *DEFAULT_PATH = "/bin:/data/bin:/sbin:/usr/bin:/usr/sbin";
  * there survives a reboot - unlike the rest of the root filesystem. */
 #define HOME_DIR "/root"
 static bool shell_running = true;
+
+/* ── break and continue ──────────────────────────────────────────
+ *
+ * The shell had `while` and `for` and no way out of either. Every loop
+ * ran to its natural end, which for `while` meant until its condition
+ * turned false and for `for` meant every word - so "look for something,
+ * stop when you find it" could not be written at all. The self-test hit
+ * this: a loop waiting for a message to appear in the log kept spinning
+ * after it had appeared, and reported the time it gave up rather than
+ * the time it found it.
+ *
+ * A counter rather than a flag, because `break 2` should leave two
+ * loops. Set by the builtin, cleared by the loop that consumes it, and
+ * checked after every statement in a block - which is what makes it
+ * stop the rest of the body too, not just the next round. */
+static int loop_break;        /* how many loops still to leave */
+static int loop_continue;     /* how many to skip to the next round of */
 static int  last_status   = 0;
 
 /* ── Tokenizer ────────────────────────────────────────────────────
@@ -857,6 +874,7 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
 
 
 static const char *BUILTINS[] = {
+    "break", "continue",
     /* "help" is deliberately not here. It is /bin/help, a real program,
      * so it can scan PATH and list what is actually installed - a
      * builtin would only ever know what was hardcoded into the shell. */
@@ -1042,6 +1060,22 @@ static bool run_builtin(cmd_t *c)
     if (strcmp(cmd, "true") == 0 ||
         strcmp(cmd, ":") == 0)     { last_status = 0; return true; }
     if (strcmp(cmd, "false") == 0) { last_status = 1; return true; }
+
+    /* break and continue take an optional count, the way every other
+     * shell does: `break 2` leaves two loops. A count larger than the
+     * number of loops we are actually in leaves all of them, which is
+     * what happens elsewhere and is less surprising than an error. */
+    if (strcmp(cmd, "break") == 0 || strcmp(cmd, "continue") == 0) {
+        int levels = (c->argc > 1) ? atoi(c->argv[1]) : 1;
+        if (levels < 1)
+            levels = 1;
+        if (strcmp(cmd, "break") == 0)
+            loop_break = levels;
+        else
+            loop_continue = levels;
+        last_status = 0;
+        return true;
+    }
 
     if (strcmp(cmd, "exit") == 0) {
         shell_running = false;
@@ -2238,6 +2272,7 @@ static int split_statements(const char *line, block_line_t *out, int max)
 static void run_logical_line(char *line);
 static int  exec_block(block_line_t *lines, int n);
 
+
 /* Find the line index of the next keyword at this nesting level.
  * Returns -1 when there is none. */
 static int find_at_depth(block_line_t *lines, int n, int from,
@@ -2355,6 +2390,17 @@ static int exec_while(block_line_t *lines, int n, int start)
 
         exec_block(lines + do_at + 1, end - do_at - 1);
 
+        if (loop_break) {
+            loop_break--;            /* this loop is one of them */
+            break;
+        }
+        if (loop_continue) {
+            loop_continue--;
+            if (loop_continue)       /* meant for a loop further out */
+                break;
+            continue;
+        }
+
         if (last_status >= 128)      /* killed by a signal */
             break;
 
@@ -2427,6 +2473,18 @@ static int exec_for(block_line_t *lines, int n, int start)
     for (int i = 0; i < nwords && shell_running; i++) {
         setenv(name, words[i], 1);
         exec_block(lines + do_at + 1, end - do_at - 1);
+
+        if (loop_break) {
+            loop_break--;
+            break;
+        }
+        if (loop_continue) {
+            loop_continue--;
+            if (loop_continue)
+                break;
+            continue;
+        }
+
         if (last_status >= 128)
             break;
     }
@@ -2542,6 +2600,13 @@ static int exec_block(block_line_t *lines, int n)
             run_logical_line(lines[i]);
             i++;
         }
+
+        /* A pending break or continue stops the rest of this block.
+         * Checking here rather than only at the end of the loop body is
+         * what makes `if ... ; then break ; fi` skip the lines after it
+         * instead of running them on the way out. */
+        if (loop_break || loop_continue)
+            break;
     }
     return last_status;
 }
