@@ -187,6 +187,23 @@ datadisk --boot || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/mm
 # after this script, so the directory has to exist by now.
 mkdir -p /data/log
 
+echo "[rc] keeping what gets installed"
+# The root filesystem is a copy in RAM of an archive inside the kernel
+# image, so anything written into it is gone at the next boot - which is
+# the wrong answer to `cp mytool /bin/`, or to a `make install` that
+# writes to /usr/local. The command succeeds, the file is there, and a
+# reboot silently undoes it.
+#
+# So /bin, /sbin, /lib, /usr, /opt and /srv get an overlay: the image's
+# copy underneath, a directory on the data partition on top. Reads see
+# both, writes land on the card. Nothing has to know - cp, tar and
+# make install all just work and the result is there tomorrow.
+#
+# This has to happen before anything else installs or writes programs,
+# and after /data is mounted, which is why it is here and not lower
+# down. `persist` on its own lists what is being kept.
+persist on || echo "[rc]   things installed into the system will NOT survive a reboot"
+
 echo "[rc] the system update"
 # Nothing happens here unless a new system was installed and has not yet
 # proved itself. When one has, this counts the attempt: three starts

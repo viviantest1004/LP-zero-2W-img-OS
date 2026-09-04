@@ -47,7 +47,7 @@ done
 
 echo "rootfs 조립 중..."
 rm -rf "$ROOT_DIR"
-mkdir -p "$ROOT_DIR"/{bin,dev/pts,proc,sys,tmp,etc,root/.ssh,data,var/run,lib/firmware/brcm}
+mkdir -p "$ROOT_DIR"/{bin,sbin,opt,srv,dev/pts,proc,sys,tmp,etc,root/.ssh,data,var/run,lib/firmware/brcm,usr/local/bin,usr/bin,usr/sbin,usr/lib}
 
 # ── 우리 프로그램 ────────────────────────────────────────────────
 for p in "${PROGRAMS[@]}"; do
