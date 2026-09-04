@@ -73,6 +73,50 @@
 #define MBOX_FULL           0x80000000u
 #define MBOX_EMPTY          0x40000000u
 
+/* --- 레거시 인터럽트 컨트롤러 (0x3F00B200) ---
+ *
+ * GPU 와 ARM 이 공유하는 구형 컨트롤러다. GIC 가 아니라서 우선순위도
+ * 없고 인터럽트마다 CPU 를 고를 수도 없다. 대기 중인 것을 비트맵에서
+ * 직접 읽어 처리한다. */
+#define IRQ_BASIC_PENDING   (IRQ_BASE + 0x00)
+#define IRQ_PENDING_1       (IRQ_BASE + 0x04)
+#define IRQ_PENDING_2       (IRQ_BASE + 0x08)
+#define FIQ_CONTROL         (IRQ_BASE + 0x0C)
+#define ENABLE_IRQS_1       (IRQ_BASE + 0x10)
+#define ENABLE_IRQS_2       (IRQ_BASE + 0x14)
+#define ENABLE_BASIC_IRQS   (IRQ_BASE + 0x18)
+#define DISABLE_IRQS_1      (IRQ_BASE + 0x1C)
+#define DISABLE_IRQS_2      (IRQ_BASE + 0x20)
+#define DISABLE_BASIC_IRQS  (IRQ_BASE + 0x24)
+
+/* 자주 쓰는 GPU IRQ 번호 (IRQ_PENDING_1/2 비트 위치) */
+#define IRQ_SYSTIMER_1      1
+#define IRQ_SYSTIMER_3      3
+#define IRQ_AUX             29
+#define IRQ_EMMC            62
+#define IRQ_UART0           57
+
+/* --- 코어별 로컬 페리페럴 (0x40000000) ---
+ *
+ * Pi 2 부터 생긴 블록이다. ARM generic timer 의 인터럽트가 여기를
+ * 거쳐야 코어에 도달한다 - 레거시 컨트롤러에는 그 선이 없다. */
+#define LOCAL_CONTROL       (ARM_LOCAL_BASE + 0x000)
+#define LOCAL_PRESCALER     (ARM_LOCAL_BASE + 0x008)
+#define LOCAL_GPU_ROUTING   (ARM_LOCAL_BASE + 0x00C)
+#define CORE_TIMER_IRQCNTL(c) (ARM_LOCAL_BASE + 0x040 + 4 * (c))
+#define CORE_MBOX_IRQCNTL(c)  (ARM_LOCAL_BASE + 0x050 + 4 * (c))
+#define CORE_IRQ_SOURCE(c)    (ARM_LOCAL_BASE + 0x060 + 4 * (c))
+#define CORE_FIQ_SOURCE(c)    (ARM_LOCAL_BASE + 0x070 + 4 * (c))
+
+/* CORE_TIMER_IRQCNTL / CORE_IRQ_SOURCE 의 비트.
+ * EL1 에서 쓰는 물리 타이머는 non-secure 쪽(비트 1)이다. */
+#define CORE_IRQ_CNTPS      (1u << 0)
+#define CORE_IRQ_CNTPNS     (1u << 1)
+#define CORE_IRQ_CNTHP      (1u << 2)
+#define CORE_IRQ_CNTV       (1u << 3)
+#define CORE_IRQ_MBOX0      (1u << 4)
+#define CORE_IRQ_GPU        (1u << 8)
+
 /* --- 워치독 / 리셋 --- */
 #define PM_RSTC             (PM_BASE + 0x1C)
 #define PM_WDOG             (PM_BASE + 0x24)

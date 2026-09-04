@@ -19,6 +19,8 @@
 #include "splash.h"
 #include "string.h"
 #include "font.h"
+#include "exception.h"
+#include "irq.h"
 
 #define FW_NAME     "LP-zero"
 #define FW_VERSION  "0.1.0-phase1"
@@ -213,6 +215,8 @@ static void print_help(void)
     kprintf("  c  clock status\n");
     kprintf("  u  uptime since boot\n");
     kprintf("  b  blink ACT LED 10 times\n");
+    kprintf("  k  timer ticks (proves interrupts are running)\n");
+    kprintf("  x  deliberate fault - shows the panic handler\n");
     kprintf("  r  reboot (watchdog)\n\n");
 }
 
@@ -238,6 +242,52 @@ static void cmd_uptime(void)
     u64 us = timer_get_us();
     kprintf("uptime: %u.%06u s\n",
             (u32)(us / 1000000ULL), (u32)(us % 1000000ULL));
+}
+
+/* 타이머 인터럽트가 실제로 도는지 본다.
+ *
+ * "인터럽트를 켰다" 와 "인터럽트가 온다" 는 다른 말이다. 컨트롤러
+ * 설정이 한 비트만 어긋나도 전자는 성공하고 후자는 영영 일어나지
+ * 않는데, 겉으로는 구별할 방법이 없다. 반 초 세어보는 것이 가장
+ * 확실한 증거다. */
+static void cmd_ticks(void)
+{
+    u64 us0 = timer_get_us();
+    u64 t0  = timer_ticks();
+    delay_ms(500);
+    u64 t1  = timer_ticks();
+    u64 us1 = timer_get_us();
+
+    kprintf("ticks: %llu total, +%llu in %llu ms\n",
+            (unsigned long long)t1,
+            (unsigned long long)(t1 - t0),
+            (unsigned long long)((us1 - us0) / 1000));
+
+    if (t1 == t0)
+        kprintf("  the timer is not firing - interrupts are not"
+                " reaching this core\n");
+    timer_tick_debug();
+}
+
+/* 패닉 핸들러를 실제로 부러뜨려 본다.
+ *
+ * 안 쓰는 장식이 아니다. 예외 핸들러는 정의상 평소에 실행되지 않는
+ * 코드이고, 그래서 조용히 망가진 채로 몇 달을 갈 수 있다 - 정작
+ * 필요한 순간에야 그 사실을 알게 되는데, 그 순간은 언제나 이미
+ * 곤란한 상황이다. 손으로 한 번 눌러 확인할 수 있게 해 둔다.
+ *
+ * 정렬 안 된 주소에서의 원자적 접근을 고른 이유: 확실히 예외가 나고,
+ * 무엇 하나 망가뜨리지 않으며, ESR 에 FAR 까지 채워지므로 출력이
+ * 제대로 나오는지 한 번에 볼 수 있다. */
+static void cmd_fault(void)
+{
+    kprintf("causing an alignment fault on purpose...\n");
+    uart_flush();
+
+    volatile u64 *bad = (volatile u64 *)0x1;
+    __asm__ volatile("ldar x0, [%0]" :: "r"(bad) : "x0", "memory");
+
+    kprintf("no fault happened - the vector table is not installed\n");
 }
 
 static void cmd_blink(void)
@@ -280,6 +330,8 @@ static void monitor(void)
         case 'c':           cmd_clocks();      break;
         case 'u':           cmd_uptime();      break;
         case 'b':           cmd_blink();       break;
+        case 'k':           cmd_ticks();       break;
+        case 'x':           cmd_fault();       break;
         case 'r':
             kprintf("rebooting...\n");
             uart_flush();
@@ -301,6 +353,14 @@ void kernel_main(void)
 
     /* ACT LED 를 출력으로. 시리얼이 안 잡혀도 LED 로 살아있는지 안다. */
     gpio_set_function(BOARD_ACT_LED_PIN, GPIO_FUNC_OUTPUT);
+
+    /* 벡터 테이블은 boot.S 가 이미 걸었다. 여기서는 컨트롤러를 알려진
+     * 상태로 만들고, 100Hz 틱을 켜고, 인터럽트를 연다. 순서가 중요하다 -
+     * 켜기 전에 막아두지 않으면 부트로더가 남긴 인터럽트가 먼저 들어온다. */
+    exception_init();
+    irq_init();
+    timer_tick_start(100);
+    irq_enable();
 
     /* 화면. 모니터가 없거나 gpu_mem 이 부족하면 실패하지만
      * 시리얼은 이미 살아 있으므로 부팅은 계속된다. */

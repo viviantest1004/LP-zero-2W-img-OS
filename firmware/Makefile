@@ -38,11 +38,16 @@ MAP     := $(OBJDIR)/$(basename $(IMAGE)).map
 #                        건드리면 컨텍스트 저장이 복잡해진다
 #  -fno-pic              0x80000 고정 링크. 위치 독립 코드 불필요
 #  -ffunction-sections   --gc-sections 로 안 쓰는 코드 제거 (이미지 축소)
+#  -fno-omit-frame-pointer  패닉 핸들러의 백트레이스가 x29 체인을 따라간다.
+#                        이게 없으면 -O2 가 프레임 포인터를 지워버려서
+#                        "어디서 죽었나" 한 줄만 나오고 "누가 불렀나" 는
+#                        영영 알 수 없다. 그 한 줄이 보통 진짜 답이다.
 CFLAGS := --target=$(TARGET) -mcpu=$(CPU) \
           -ffreestanding -nostdlibinc -fno-builtin \
           -mgeneral-regs-only \
           -fno-pic -fno-pie -fno-common -fno-stack-protector \
           -ffunction-sections -fdata-sections \
+          -fno-omit-frame-pointer \
           -std=c11 -O2 \
           -Wall -Wextra -Werror \
           -Wno-unused-command-line-argument \
