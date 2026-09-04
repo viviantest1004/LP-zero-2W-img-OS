@@ -334,7 +334,30 @@ echo "[rc] checking the SSH host key"
 #
 # Clients will warn that the host key changed. That is the correct
 # warning to get: it did.
-dropbearkey -y -f /data/dropbear_ed25519_host_key > /dev/null || rm -f /data/dropbear_ed25519_host_key
+# -y only READS a key and prints its public half. It never made one,
+# and nothing else did either: dropbear's -R generates into its own
+# compiled-in directory (/etc/dropbear) rather than the path -r names,
+# and that directory does not exist here. So on a fresh image there was
+# no host key anywhere, and every SSH connection was closed before
+# authentication with "Couldn't read or generate hostkey" - on a system
+# whose only remote access is SSH.
+#
+# It looked fine from the outside. dropbear was running, the port was
+# open, the firewall let it through, `service status dropbear` said
+# started. The failure only appeared to something that actually tried
+# to log in.
+#
+# So: check the key, and make one when the check fails.
+if dropbearkey -y -f /data/dropbear_ed25519_host_key > /dev/null ; then
+    echo "[rc]   SSH host key is in place"
+else
+    rm -f /data/dropbear_ed25519_host_key
+    if dropbearkey -t ed25519 -f /data/dropbear_ed25519_host_key > /dev/null ; then
+        echo "[rc]   made a new SSH host key"
+    else
+        echo "[rc]   ** could not make an SSH host key - SSH will refuse every connection"
+    fi
+fi
 
 # WiFi is started by init from /etc/services, not here - for the same
 # reason as guard. Started here with -B it backgrounded itself and

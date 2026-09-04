@@ -84,8 +84,32 @@ static void boot_ro(void)
 static bool active_image(char *out, size_t n)
 {
     long fd = lp_open(CONFIG, O_RDONLY, 0);
-    if (fd < 0)
+    if (fd < 0) {
+        /* No config.txt at all: this is not a Raspberry Pi.
+         *
+         * A PC has no GPU firmware to read one, so the amd64 image does
+         * not ship the file - and this function used to give up there,
+         * which made `update` refuse every image with "config.txt does
+         * not say which kernel it boots". The one machine that can
+         * always reach a download was the one that could not install
+         * one.
+         *
+         * On anything that boots through UEFI the answer is fixed:
+         * firmware runs EFI/BOOT/BOOT<arch>.EFI, so that is the file to
+         * replace. Look for it rather than for a line of text. */
+        static const char *EFI_NAMES[] = {
+            "/boot/EFI/BOOT/BOOTX64.EFI",     /* a PC */
+            "/boot/EFI/BOOT/BOOTAA64.EFI",    /* an arm64 machine */
+            NULL
+        };
+        for (int i = 0; EFI_NAMES[i]; i++) {
+            if (lp_exists(EFI_NAMES[i])) {
+                strlcpy(out, EFI_NAMES[i], n);
+                return true;
+            }
+        }
         return false;
+    }
 
     char line[256];
     bool found = false;
@@ -383,7 +407,9 @@ static int show(void)
     char active[128];
     if (!active_image(active, sizeof active)) {
         dprintf(STDERR_FILENO,
-                "update: %s does not say which kernel it boots.\n", CONFIG);
+                "update: cannot tell which kernel this machine boots.\n"
+                "update:   Neither %s nor an EFI/BOOT image is on /boot.\n"
+                "update:   Is the boot partition mounted?\n", CONFIG);
         return 1;
     }
 
@@ -438,8 +464,9 @@ static int install(const char *source, const char *want_hash)
     char active[128];
     if (!active_image(active, sizeof active)) {
         dprintf(STDERR_FILENO,
-                "update: %s does not say which kernel it boots, so there is\n"
-                "update:   nothing to replace.\n", CONFIG);
+                "update: cannot tell which kernel this machine boots, so\n"
+                "update:   there is nothing to replace. Neither %s nor an\n"
+                "update:   EFI/BOOT image is on /boot - is it mounted?\n", CONFIG);
         return 1;
     }
 

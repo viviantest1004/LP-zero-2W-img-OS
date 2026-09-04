@@ -41,6 +41,10 @@ if [[ "$LP_ARCH" == "amd64" ]]; then
     ARCH=x86_64
     CROSS=
     KCONFIG_NAME=lp-zero-amd64.config
+    # Regenerate it every time, from the arm64 config and the amd64
+    # fragment. Keeping the merged file in the tree by hand is what put
+    # a Pi's "no 8250 serial" answer after the PC's "yes 8250" one.
+    "${REPO_ROOT}/tools/mkamd64config.sh" >/dev/null
     OUT_SUBDIR=out-amd64
 else
     ARCH=arm64

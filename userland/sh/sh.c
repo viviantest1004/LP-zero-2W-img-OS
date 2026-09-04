@@ -26,6 +26,12 @@ typedef struct {
     char *redir_in;
     char *redir_out;
     bool  out_append;
+    /* Where the error output goes. NULL means "leave it alone"; the
+     * literal string "&1" means "wherever stdout ended up", which is
+     * the 2>&1 everybody types and which this shell used to answer with
+     * "no file after the redirection". */
+    char *redir_err;
+    bool  err_append;
 } cmd_t;
 
 /* How this pipeline joins onto the one before it */
@@ -70,6 +76,8 @@ typedef enum {
     TOK_REDIR_IN,
     TOK_REDIR_OUT,
     TOK_REDIR_APPEND,
+    TOK_REDIR_ERR,          /* 2>   */
+    TOK_REDIR_ERR_APPEND,   /* 2>>  */
 } tok_type_t;
 
 static bool is_space(char c) { return c == ' ' || c == '\t' || c == '\r'; }
@@ -396,6 +404,12 @@ static tok_type_t next_token(char **p, char **word_out)
     if (*s == '|' && s[1] == '|') { *p = s + 2; return TOK_OR;   }
     if (*s == '|')                { *p = s + 1; return TOK_PIPE; }
     if (*s == ';')                { *p = s + 1; return TOK_SEMI; }
+    /* 2> and 2>>, before the word scanner can take "2" for a word. */
+    if (*s == '2' && s[1] == '>') {
+        if (s[2] == '>') { *p = s + 3; return TOK_REDIR_ERR_APPEND; }
+        *p = s + 2;
+        return TOK_REDIR_ERR;
+    }
     if (*s == '<') { *p = s + 1; return TOK_REDIR_IN; }
     if (*s == '>') {
         if (s[1] == '>') { *p = s + 2; return TOK_REDIR_APPEND; }
@@ -754,14 +768,51 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
             continue;
         }
 
-        /* Redirection: a file name has to follow immediately. */
+        /* Redirection: a file name has to follow immediately.
+         *
+         * "&1" is the exception and the reason 2>&1 works: it is not a
+         * file, it is "send this to wherever the other one went". The
+         * word scanner hands it over as an ordinary word, so it is
+         * recognised here rather than in the lexer. */
         char *file = NULL;
+
+        /* "&1" has to be spotted before next_token runs, because the
+         * lexer sees '&' and says "background job" - which is right
+         * everywhere except immediately after a redirection. That is
+         * why 2>&1 came back as "2> needs a file after it". */
+        {
+            char *q = p;
+            while (*q == ' ' || *q == '\t') q++;
+            if (q[0] == '&' && q[1] >= '0' && q[1] <= '9') {
+                static char amp[3] = "&1";
+                amp[1] = q[1];
+                file = amp;
+                p = q + 2;
+                if (t == TOK_REDIR_ERR || t == TOK_REDIR_ERR_APPEND) {
+                    c->redir_err  = file;
+                    c->err_append = false;
+                } else {
+                    c->redir_out  = file;
+                    c->out_append = false;
+                }
+                continue;
+            }
+        }
+
         if (next_token(&p, &file) != TOK_WORD) {
-            dprintf(STDERR_FILENO, "sh: no file after the redirection\n");
+            dprintf(STDERR_FILENO,
+                    "sh: %s needs a file after it\n",
+                    (t == TOK_REDIR_IN)        ? "<"  :
+                    (t == TOK_REDIR_ERR)       ? "2>" :
+                    (t == TOK_REDIR_ERR_APPEND)? "2>>":
+                    (t == TOK_REDIR_APPEND)    ? ">>" : ">");
             return -1;
         }
         if (t == TOK_REDIR_IN) {
             c->redir_in = file;
+        } else if (t == TOK_REDIR_ERR || t == TOK_REDIR_ERR_APPEND) {
+            c->redir_err  = file;
+            c->err_append = (t == TOK_REDIR_ERR_APPEND);
         } else {
             c->redir_out  = file;
             c->out_append = (t == TOK_REDIR_APPEND);
@@ -1098,6 +1149,27 @@ static void apply_redirects(cmd_t *c)
         lp_dup2((int)fd, STDOUT_FILENO);
         lp_close((int)fd);
     }
+
+    /* Error output last, so that 2>&1 means what everybody expects:
+     * "wherever stdout is going, by the time you read this line". Doing
+     * it before the stdout redirection above would point stderr at the
+     * terminal and then move stdout to the file - which is the classic
+     * surprise, and the reason the order is worth a comment. */
+    if (c->redir_err) {
+        if (strcmp(c->redir_err, "&1") == 0) {
+            lp_dup2(STDOUT_FILENO, STDERR_FILENO);
+        } else {
+            int flags = O_WRONLY | O_CREAT |
+                        (c->err_append ? O_APPEND : O_TRUNC);
+            long fd = lp_open(c->redir_err, flags, 0644);
+            if (fd < 0) {
+                dprintf(STDERR_FILENO, "sh: %s: cannot create\n", c->redir_err);
+                lp_exit(1);
+            }
+            lp_dup2((int)fd, STDERR_FILENO);
+            lp_close((int)fd);
+        }
+    }
 }
 
 /* ── Background jobs ──────────────────────────────────────────────────
@@ -1266,6 +1338,7 @@ static void run_builtin_redirected(cmd_t *c)
 {
     int saved_in  = -1;
     int saved_out = -1;
+    int saved_err = -1;
 
     if (c->redir_in) {
         long fd = lp_open(c->redir_in, O_RDONLY, 0);
@@ -1298,8 +1371,28 @@ static void run_builtin_redirected(cmd_t *c)
         lp_close((int)fd);
     }
 
+    /* Same for the error output, and after stdout for the same reason:
+     * 2>&1 has to mean "where stdout goes now", not "where it went
+     * before the line was read". */
+    if (c->redir_err) {
+        if (strcmp(c->redir_err, "&1") == 0) {
+            saved_err = (int)lp_dup(STDERR_FILENO);
+            lp_dup2(STDOUT_FILENO, STDERR_FILENO);
+        } else {
+            int flags = O_WRONLY | O_CREAT |
+                        (c->err_append ? O_APPEND : O_TRUNC);
+            long fd = lp_open(c->redir_err, flags, 0644);
+            if (fd >= 0) {
+                saved_err = (int)lp_dup(STDERR_FILENO);
+                lp_dup2((int)fd, STDERR_FILENO);
+                lp_close((int)fd);
+            }
+        }
+    }
+
     run_builtin(c);
 
+    if (saved_err >= 0) { lp_dup2(saved_err, STDERR_FILENO); lp_close(saved_err); }
     if (saved_in >= 0)  { lp_dup2(saved_in,  STDIN_FILENO);  lp_close(saved_in); }
     if (saved_out >= 0) { lp_dup2(saved_out, STDOUT_FILENO); lp_close(saved_out); }
 }
