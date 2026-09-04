@@ -13,18 +13,35 @@ endif
 STRIP   ?= llvm-strip
 OBJDUMP ?= llvm-objdump
 
-TARGET := aarch64-linux-gnu
-CPU    := cortex-a53
+# ARCH picks the machine. clang is a cross compiler for everything it
+# supports, so this is a target triple and a CPU name and nothing else -
+# no second toolchain to install.
+#
+#   make            -> arm64, the Pi Zero 2 W and arm64 VMs
+#   make ARCH=amd64 -> x86-64, an ordinary desktop or VM
+ARCH ?= arm64
+
+ifeq ($(ARCH),amd64)
+  TARGET   := x86_64-linux-gnu
+  CPUFLAGS := -march=x86-64
+  OBJDIR   := build-amd64
+  BINDIR   := bin-amd64
+else ifeq ($(ARCH),arm64)
+  TARGET   := aarch64-linux-gnu
+  CPUFLAGS := -mcpu=cortex-a53
+  OBJDIR   := build
+  BINDIR   := bin
+else
+  $(error ARCH must be arm64 or amd64, not "$(ARCH)")
+endif
 
 LIBC_DIR := libc
-OBJDIR   := build
-BINDIR   := bin
 
 #  -ffreestanding   표준 라이브러리 가정 없음
 #  -nostdlibinc     시스템 헤더 배제 (stdarg.h 등 컴파일러 내장은 유지)
 #  -fno-builtin     우리 memset 이 memset 호출로 바뀌는 무한재귀 방지
 #  -static          동적 링커 없이 단독 실행
-CFLAGS := --target=$(TARGET) -mcpu=$(CPU) \
+CFLAGS := --target=$(TARGET) $(CPUFLAGS) \
           -ffreestanding -nostdlibinc -fno-builtin \
           -fno-stack-protector -fno-pic -fno-pie \
           -ffunction-sections -fdata-sections \
@@ -32,7 +49,7 @@ CFLAGS := --target=$(TARGET) -mcpu=$(CPU) \
           -Wall -Wextra -Werror \
           -I$(LIBC_DIR)/include
 
-ASFLAGS := --target=$(TARGET) -mcpu=$(CPU) -ffreestanding -nostdlibinc
+ASFLAGS := --target=$(TARGET) $(CPUFLAGS) -ffreestanding -nostdlibinc
 
 LDFLAGS := -static --gc-sections -e _start
 

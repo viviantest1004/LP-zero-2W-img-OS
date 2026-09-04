@@ -11,7 +11,16 @@
 #define AT_REMOVEDIR        0x200
 #define AT_SYMLINK_NOFOLLOW 0x100
 
-/* open flags (asm-generic) */
+/* ── open flags ──
+ *
+ * The low ones are the same everywhere. O_DIRECTORY is not, and that is
+ * a trap worth spelling out: arm and arm64 carry their own fcntl.h that
+ * renumbers the upper flags, so O_DIRECTORY is 040000 there and 0200000
+ * on x86-64 - where 040000 means O_DIRECT instead. Building the arm64
+ * value into an x86-64 program does not fail to compile and does not
+ * fail to open; it asks for unbuffered I/O on a directory, and `ls`
+ * quietly stops being able to list anything. O_NOFOLLOW and O_DIRECT
+ * move for the same reason. */
 #define O_RDONLY    0
 #define O_WRONLY    1
 #define O_RDWR      2
@@ -20,8 +29,19 @@
 #define O_TRUNC     01000
 #define O_APPEND    02000
 #define O_NONBLOCK  04000
-#define O_DIRECTORY 040000
 #define O_CLOEXEC   02000000
+
+#if defined(__x86_64__)
+#  define O_DIRECTORY 0200000
+#  define O_NOFOLLOW  0400000
+#  define O_DIRECT    040000
+#  define O_LARGEFILE 0100000
+#else   /* arm64 */
+#  define O_DIRECTORY 040000
+#  define O_NOFOLLOW  0100000
+#  define O_DIRECT    0200000
+#  define O_LARGEFILE 0400000
+#endif
 
 /* The standard file descriptors */
 #define STDIN_FILENO   0

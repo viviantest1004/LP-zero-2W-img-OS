@@ -13,6 +13,61 @@
  * 동적 링커가 없으므로(정적 링크) 우리가 직접 argc/argv/envp 를 꺼내
  * main 으로 넘긴다. */
 
+#if defined(__x86_64__)
+
+/* ── x86-64 ──
+ *
+ * Same stack layout - the kernel builds it the same way on both - and a
+ * different way to reach it. The System V ABI wants rdi/rsi/rdx for the
+ * first three arguments, and it wants rsp 16-byte aligned AT THE CALL,
+ * which means rsp+8 aligned on entry to the callee because the call
+ * pushed a return address. The kernel hands us rsp already 16-aligned
+ * with argc on top, so `and $-16` then a plain call gets it right.
+ */
+.section .text._start, "ax"
+.global _start
+.type _start, @function
+
+_start:
+    xorq    %rbp, %rbp              /* stop stack unwinding here      */
+
+    movq    (%rsp), %rdi            /* rdi = argc                     */
+    leaq    8(%rsp), %rsi           /* rsi = argv                     */
+
+    /* envp = argv + argc*8 + 8, just past argv's terminating NULL */
+    leaq    8(%rsi,%rdi,8), %rdx    /* rdx = envp                     */
+
+    movq    %rdx, environ(%rip)     /* so getenv() can find it        */
+
+    andq    $-16, %rsp              /* ABI alignment                  */
+
+    call    main
+
+    movl    %eax, %edi              /* main's return is the exit code */
+    movl    $231, %eax              /* SYS_exit_group                 */
+    syscall
+
+1:  jmp     1b                      /* not reached                    */
+
+.size _start, . - _start
+
+/* ── The signal trampoline ──
+ *
+ * On arm64 the kernel supplies the code that returns from a signal
+ * handler. On x86-64 it does not: rt_sigaction must carry SA_RESTORER
+ * and a pointer to something that calls rt_sigreturn, or the handler
+ * returns to nowhere and the process dies. This is that something, and
+ * it is why lp_signal has an #ifdef in it.
+ */
+.global lp_sigreturn_trampoline
+.type lp_sigreturn_trampoline, @function
+lp_sigreturn_trampoline:
+    movq    $15, %rax               /* SYS_rt_sigreturn               */
+    syscall
+.size lp_sigreturn_trampoline, . - lp_sigreturn_trampoline
+
+#else /* __aarch64__ */
+
 .section .text._start, "ax"
 .global _start
 .type _start, %function
@@ -51,3 +106,5 @@ _start:
 1:  b       1b
 
 .size _start, . - _start
+
+#endif

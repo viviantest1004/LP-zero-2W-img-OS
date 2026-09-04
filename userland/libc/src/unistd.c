@@ -38,11 +38,39 @@ long lp_getcwd(char *b, size_t n)        { return sys_call2(SYS_getcwd, (long)b,
 long lp_access(const char *p, int mode)  { return sys_call4(SYS_faccessat, AT_FDCWD, (long)p, mode, 0); }
 long sys_getdents(int fd, void *buf, size_t size) { return sys_call3(SYS_getdents64, fd, (long)buf, (long)size); }
 
-/* newfstatat's struct stat is 128 bytes on arm64. Rather than declaring
- * the whole thing we read the one field we need (st_mode) by offset.
- *   offset 16 : st_mode (u32) */
-#define STAT_BUF_SIZE   128
-#define STAT_MODE_OFF   16
+/* ── struct stat, by offset ──
+ *
+ * Rather than declaring the whole thing we read the handful of fields we
+ * use at fixed offsets, so nothing depends on how a compiler pads a
+ * struct. The offsets are not the same on both machines: arm64 uses the
+ * asm-generic layout, x86-64 carries its own older one where st_nlink
+ * is 64 bits and comes before st_mode instead of after it.
+ *
+ *              arm64   x86-64
+ *   st_mode      16      24
+ *   st_nlink     20      16   (32-bit on arm64, 64-bit on x86-64)
+ *   st_uid       24      28
+ *   st_gid       28      32
+ *   st_size      48      48
+ *   st_mtime     88      88
+ *
+ * st_size and st_mtime happen to land in the same place on both, which
+ * is luck rather than design - they are written out here anyway so that
+ * nobody has to rediscover it. */
+#if defined(__x86_64__)
+#  define STAT_BUF_SIZE  144
+#  define STAT_MODE_OFF   24
+#  define STAT_NLINK_OFF  16
+#  define STAT_UID_OFF    28
+#  define STAT_GID_OFF    32
+#else
+#  define STAT_BUF_SIZE  128
+#  define STAT_MODE_OFF   16
+#  define STAT_NLINK_OFF  20
+#  define STAT_UID_OFF    24
+#  define STAT_GID_OFF    28
+#endif
+#define STAT_MTIME_OFF    88
 #define S_IFMT          0170000
 #define S_IFDIR         0040000
 
@@ -86,13 +114,14 @@ long lp_stat(const char *path, lp_stat_t *out, bool follow_symlink)
         return r;
     out->mode  = *(u32 *)(buf + STAT_MODE_OFF);
     out->size  = *(u64 *)(buf + STAT_SIZE_OFF);
-    /* The rest of struct stat on arm64, by offset rather than by
-     * declaring the struct - nothing then depends on padding rules.
-     *   20 nlink   24 uid   28 gid   88 mtime */
-    out->nlink = *(u32 *)(buf + 20);
-    out->uid   = *(u32 *)(buf + 24);
-    out->gid   = *(u32 *)(buf + 28);
-    out->mtime = *(s64 *)(buf + 88);
+#if defined(__x86_64__)
+    out->nlink = (u32)*(u64 *)(buf + STAT_NLINK_OFF);
+#else
+    out->nlink = *(u32 *)(buf + STAT_NLINK_OFF);
+#endif
+    out->uid   = *(u32 *)(buf + STAT_UID_OFF);
+    out->gid   = *(u32 *)(buf + STAT_GID_OFF);
+    out->mtime = *(s64 *)(buf + STAT_MTIME_OFF);
     return 0;
 }
 
@@ -461,17 +490,40 @@ s64 lp_monotonic_ms(void)
 }
 
 /* ── Signals ──────────────────────────────────────────────────────────
- * The kernel's struct sigaction on arm64, which has no sa_restorer:
  *
- *    0  sa_handler   SIG_DFL is 0, SIG_IGN is 1
- *    8  sa_flags
- *   16  sa_mask      one 64-bit word, hence the size argument of 8
+ * The kernel's struct sigaction, which is not the same shape on the two
+ * machines:
  *
- * A real handler would need a restorer to return through. SIG_DFL and
- * SIG_IGN never run any of our code, so there is nothing to return
- * from and nothing else to fill in. */
-#define SA_SIZE      24
+ *   arm64                     x86-64
+ *    0  sa_handler             0  sa_handler
+ *    8  sa_flags               8  sa_flags
+ *   16  sa_mask               16  sa_restorer
+ *   (24 bytes)                24  sa_mask
+ *                             (32 bytes)
+ *
+ * arm64 does not define SA_RESTORER, so that field is simply absent and
+ * sa_mask moves up. Getting this wrong is not a compile error: the
+ * kernel would read sa_mask from eight bytes past the end of our
+ * buffer, and the mask a signal is delivered under would be whatever
+ * happened to be on the stack.
+ *
+ * SIG_DFL and SIG_IGN never run any of our code, so no restorer is
+ * needed to get back from them. It is filled in anyway on x86-64, where
+ * the kernel refuses to deliver a caught signal without one - so that
+ * the day somebody adds a real handler here, it works rather than
+ * killing the process in a way that takes an afternoon to explain. */
+#if defined(__x86_64__)
+#  define SA_SIZE       32
+#  define SA_MASK_OFF   24
+#  define SA_RESTORER_OFF 16
+#  define SA_RESTORER   0x04000000UL
+extern void lp_sigreturn_trampoline(void);
+#else
+#  define SA_SIZE       24
+#  define SA_MASK_OFF   16
+#endif
 #define SA_HANDLER    0
+#define SA_FLAGS      8
 #define SA_MASK_SIZE  8
 
 static long set_disposition(int sig, unsigned long handler)
@@ -479,6 +531,12 @@ static long set_disposition(int sig, unsigned long handler)
     u8 act[SA_SIZE];
     memset(act, 0, sizeof(act));
     *(unsigned long *)(act + SA_HANDLER) = handler;
+
+#if defined(__x86_64__)
+    *(unsigned long *)(act + SA_FLAGS)        = SA_RESTORER;
+    *(unsigned long *)(act + SA_RESTORER_OFF) =
+        (unsigned long)&lp_sigreturn_trampoline;
+#endif
 
     return sys_call4(SYS_rt_sigaction, (long)sig, (long)act, 0, SA_MASK_SIZE);
 }
