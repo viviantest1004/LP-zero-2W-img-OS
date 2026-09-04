@@ -33,7 +33,7 @@ echo 16384 > /proc/sys/vm/min_free_kbytes || echo "[rc]   failed"
 
 echo "[rc] safety net"
 # Compressed swap inside RAM. Nothing is written to the card.
-zram on 256 || echo "[rc]   carrying on without zram"
+zram on || echo "[rc]   carrying on without zram"
 
 echo "[rc] a ceiling on the number of processes"
 # guard kills a fork bomb, but cleaning one up is the second line of

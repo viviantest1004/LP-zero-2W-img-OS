@@ -28,9 +28,42 @@ source "${REPO_ROOT}/tools/common.sh"
 PY_SRC="${PY_SRC:-${WORK}/Python-3.12.3}"
 BUILD_PY="${BUILD_PY:-/usr/bin/python3.12}"
 STAGE="${STAGE:-${PYSTAGE_ROOT}}"
+# For a cross build this is the sysroot we built the libraries into.
+# For a native amd64 build there is no sysroot: the host's own /usr is
+# where openssl, readline, sqlite3 and libffi already live.
 SYSROOT="${SYSROOT:-${WORK}/sysroot}"
 JOBS="${JOBS:-$(nproc)}"
-CROSS=aarch64-linux-gnu-
+
+# LP_ARCH picks the machine. arm64 is a cross build against a sysroot we
+# built earlier; amd64 is native, because this build host is x86-64, so
+# there is no cross compiler and no sysroot - the system's own headers
+# and libraries are the right ones.
+LP_ARCH="${LP_ARCH:-arm64}"
+if [[ "$LP_ARCH" == "amd64" ]]; then
+    CROSS=
+    HOST_TRIPLE=x86_64-linux-gnu
+    SYSROOT=/usr        # unconditional: the default above already fired
+    # The dynamic loader has a different name on every architecture, and
+    # Debian puts the shared libraries under a multiarch directory.
+    LOADER=ld-linux-x86-64.so.2
+    GLIBC_SRC="${GLIBC_SRC:-/lib/x86_64-linux-gnu}"
+    # Deliberately a different spelling of the same machine.
+    #
+    # The link flags point the interpreter at /data/glibc, which does not
+    # exist on this build host, so a test program configure compiles
+    # cannot be run here. With --build and --host spelled identically
+    # autoconf calls it a native build, tries to run one, and stops with
+    # "cannot run C compiled programs". Spelled differently it treats
+    # this as a cross build and answers from the ac_cv_* values below
+    # instead - which is what the arm64 build has always done, and the
+    # only reason it never hit this.
+    BUILD_TRIPLE=x86_64-pc-linux-gnu
+else
+    CROSS=aarch64-linux-gnu-
+    HOST_TRIPLE=aarch64-linux-gnu
+    LOADER=ld-linux-aarch64.so.1
+    BUILD_TRIPLE=x86_64-linux-gnu
+fi
 
 # ── Static or dynamic ────────────────────────────────────────────────
 #
@@ -53,7 +86,7 @@ CROSS=aarch64-linux-gnu-
 # STATIC=1 builds the old way. Smaller, self-contained, and pure-Python
 # packages only.
 GLIBC_DIR="/data/glibc"
-GLIBC_SRC="${GLIBC_SRC:-/usr/aarch64-linux-gnu/lib}"
+GLIBC_SRC="${GLIBC_SRC:-/usr/${HOST_TRIPLE}/lib}"
 STATIC="${STATIC:-0}"
 
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -62,13 +95,19 @@ step() { printf '\n==> %s\n' "$*"; }
 [[ -d "$PY_SRC" ]] || die "소스가 없습니다: $PY_SRC"
 # _ctypes 는 libffi, zlib 모듈은 zlib 를 요구한다. 둘 다 aarch64 로
 # 미리 크로스 빌드해 sysroot 에 넣어두어야 한다.
-for need in include/ffi.h include/zlib.h include/openssl/ssl.h \
-            include/readline/readline.h include/sqlite3.h include/lzma.h \
-            include/bzlib.h lib/libssl.a lib/libreadline.a lib/libncurses.a \
-            lib/libsqlite3.a lib/liblzma.a lib/libbz2.a; do
-    [[ -e "${SYSROOT}/${need}" ]] \
-        || die "${need} 가 없습니다. './tools/build-sysroot.sh' 를 먼저 실행하세요."
-done
+# Only for the cross build. A native amd64 build takes these from the
+# host's own /usr, where the multiarch layout puts them under
+# lib/x86_64-linux-gnu rather than lib, so this list would not match
+# even when everything is present.
+if [[ "$LP_ARCH" != "amd64" ]]; then
+    for need in include/ffi.h include/zlib.h include/openssl/ssl.h \
+                include/readline/readline.h include/sqlite3.h include/lzma.h \
+                include/bzlib.h lib/libssl.a lib/libreadline.a lib/libncurses.a \
+                lib/libsqlite3.a lib/liblzma.a lib/libbz2.a; do
+        [[ -e "${SYSROOT}/${need}" ]] \
+            || die "${need} 가 없습니다. './tools/build-sysroot.sh' 를 먼저 실행하세요."
+    done
+fi
 command -v "$BUILD_PY" >/dev/null || die "$BUILD_PY 가 없습니다"
 command -v "${CROSS}gcc" >/dev/null || die "${CROSS}gcc 가 없습니다"
 
@@ -96,11 +135,11 @@ if [[ "$STATIC" == "1" ]]; then
     LINK_DESC="static (pure-Python packages only)"
 else
     LINK_FLAGS="-L${SYSROOT}/lib"
-    LINK_FLAGS+=" -Wl,--dynamic-linker=${GLIBC_DIR}/ld-linux-aarch64.so.1"
+    LINK_FLAGS+=" -Wl,--dynamic-linker=${GLIBC_DIR}/${LOADER}"
     LINK_FLAGS+=" -Wl,-rpath,${GLIBC_DIR} -Wl,--disable-new-dtags"
     LINK_DESC="dynamic against glibc in ${GLIBC_DIR}"
-    [[ -f "${GLIBC_SRC}/ld-linux-aarch64.so.1" ]] \
-        || die "aarch64 glibc 가 없습니다: ${GLIBC_SRC} (apt install libc6-arm64-cross)"
+    [[ -f "${GLIBC_SRC}/${LOADER}" ]] \
+        || die "${LP_ARCH} glibc 가 없습니다: ${GLIBC_SRC}/${LOADER}"
 fi
 
 step "설정 (소스 ${SRC_VER}, 호스트 파이썬 ${HOST_VER}, ${LINK_DESC})"
@@ -108,6 +147,32 @@ cd "$PY_SRC"
 
 # 설정을 바꿔 다시 빌드할 때는 이전 Makefile 을 지워야 한다
 [[ -f Makefile && "${RECONFIGURE:-0}" == "1" ]] && make distclean >/dev/null 2>&1 || true
+
+# And the same, unconditionally, when the last build was for a different
+# machine. This has to sit OUTSIDE the "if there is no Makefile" block
+# below - a tree configured for arm64 has a Makefile, so putting the
+# check inside meant it never ran, configure never re-ran, and `make`
+# happily relinked the old aarch64 objects into a binary the build then
+# reported as x86-64. It was: the ELF header said x86-64 and the
+# interpreter it asked for was ld-linux-aarch64.so.1.
+# If this tree was last configured for a different machine, start
+# over. CPython builds in its source directory, so without this the
+# objects and the linked binary from the previous architecture are
+# reused: the amd64 build produced an x86-64 python whose ELF
+# interpreter was still /data/glibc/ld-linux-aarch64.so.1, which
+# would have failed to start with no useful message at all.
+ARCH_STAMP=".lp-built-for"
+WAS=""
+[[ -f "$ARCH_STAMP" ]] && WAS="$(cat "$ARCH_STAMP")"
+# No stamp but an existing build means a tree from before this check
+# existed, and there is no way to tell what it was for. Clean it:
+# a wasted rebuild costs minutes, a silently mixed one costs an
+# image that cannot start its interpreter.
+if [[ "$WAS" != "$LP_ARCH" ]] && [[ -n "$WAS" || -f Makefile ]]; then
+    step "이전 빌드는 ${WAS:-알 수 없는 아키텍처} 용 - 트리를 비웁니다"
+    make distclean >/dev/null 2>&1 || true
+fi
+printf '%s\n' "$LP_ARCH" > "$ARCH_STAMP"
 
 if [[ ! -f Makefile ]]; then
     # sysroot 에 라이브러리가 없는 모듈만 끈다. 켜져 있는데 라이브러리가
@@ -132,7 +197,9 @@ if [[ ! -f Makefile ]]; then
 
     # 호스트의 .pc 를 보면 x86 라이브러리 경로가 섞여 들어온다.
     # pkg-config 가 sysroot 만 보게 가둔다.
-    export PKG_CONFIG_LIBDIR="${SYSROOT}/lib/pkgconfig"
+    if [[ "$LP_ARCH" != "amd64" ]]; then
+        export PKG_CONFIG_LIBDIR="${SYSROOT}/lib/pkgconfig"
+    fi
 
     # readline 과 sqlite3 는 링크 플래그를 직접 준다.
     #
@@ -158,9 +225,10 @@ if [[ ! -f Makefile ]]; then
     # 없다고 판단한다. LIBS 는 링크 줄 맨 뒤에 붙으므로 여기에 두면
     # 순서가 맞는다.
 
+
     ./configure \
-        --host=aarch64-linux-gnu \
-        --build=x86_64-linux-gnu \
+        --host=${HOST_TRIPLE} \
+        --build=${BUILD_TRIPLE} \
         --with-build-python="$BUILD_PY" \
         --prefix=/data/python \
         --disable-shared \
@@ -358,7 +426,7 @@ if [[ "$STATIC" != "1" ]]; then
     # glibc versions, and libm/libpthread stopped being separate files
     # in glibc 2.34 (they are inside libc.so.6 now, and the .so.6/.so.0
     # names survive only so older binaries still resolve).
-    for lib in ld-linux-aarch64.so.1 libc.so.6 libm.so.6 libdl.so.2 \
+    for lib in "${LOADER}" libc.so.6 libm.so.6 libdl.so.2 \
                libpthread.so.0 librt.so.1 libutil.so.1 libresolv.so.2 \
                libgcc_s.so.1 libstdc++.so.6 libnsl.so.1 libcrypt.so.1 \
                libatomic.so.1 libgomp.so.1 libmvec.so.1 libanl.so.1; do
@@ -377,15 +445,106 @@ if [[ "$STATIC" != "1" ]]; then
     # `import numpy` dies with a linker error four frames deep in
     # numpy's own troubleshooting text. It is the single most installed
     # compiled package on PyPI, so 140KB is not a hard trade.
-    for zlib in libz.so.1 libz.so.1.3.1; do
-        if [[ -e "${SYSROOT}/lib/${zlib}" ]]; then
-            cp -L "${SYSROOT}/lib/${zlib}" "${GDIR}/libz.so.1"
-            "${CROSS}strip" --strip-unneeded "${GDIR}/libz.so.1" 2>/dev/null || true
-            break
-        fi
+    # Two places to look, because they are different on the two builds:
+    # the cross build has it in the sysroot we made, and a native amd64
+    # build takes it from the host - where Debian's multiarch layout
+    # puts it under lib/x86_64-linux-gnu, not lib. Looking only in
+    # ${SYSROOT}/lib found nothing on amd64, and the warning below was
+    # printed and then scrolled past. Python did not start at all:
+    # "libz.so.1: cannot open shared object file".
+    for dir in "${SYSROOT}/lib" "$GLIBC_SRC"; do
+        for zlib in libz.so.1 libz.so.1.3 libz.so.1.3.1; do
+            if [[ -e "${dir}/${zlib}" ]]; then
+                cp -L "${dir}/${zlib}" "${GDIR}/libz.so.1"
+                "${CROSS}strip" --strip-unneeded "${GDIR}/libz.so.1" 2>/dev/null || true
+                break 2
+            fi
+        done
     done
+    # And die rather than warn. Python links against it, so without it
+    # the interpreter does not start - this is not a numpy nicety.
     [[ -e "${GDIR}/libz.so.1" ]] \
-        || echo "  경고: libz.so.1 이 없습니다. numpy import 가 실패합니다."
+        || die "libz.so.1 을 찾지 못했습니다 (${SYSROOT}/lib, ${GLIBC_SRC}).
+       파이썬이 아예 시작하지 못합니다."
+
+    # ── Whatever else it actually asks for ──
+    #
+    # The list above is the manylinux set plus the ones we knew about,
+    # and it was assembled for the cross build, where every optional
+    # library came from a sysroot we had built ourselves as a static
+    # archive. A native build links against whatever the host has as a
+    # shared object instead, so it ends up needing libraries nobody
+    # wrote down: libz first, then libbz2, and there is no reason to
+    # believe that is the end of the list.
+    #
+    # So stop guessing. Read DT_NEEDED out of the interpreter and every
+    # extension module, follow it transitively, and copy anything that
+    # is missing. Guessing produced two rounds of "Python does not
+    # start", each one found only by booting the image.
+    python3 - "$GDIR" "$PYDIR" "$GLIBC_SRC" /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu <<'NEEDED'
+import os, struct, sys, shutil
+
+gdir, pytree = sys.argv[1], sys.argv[2]
+search = [d for d in sys.argv[3:] if os.path.isdir(d)]
+
+def needed(path):
+    """DT_NEEDED names of an ELF, without a library to read ELF."""
+    try:
+        d = open(path, 'rb').read()
+    except OSError:
+        return []
+    if d[:4] != b'\x7fELF' or d[4] != 2:
+        return []
+    shoff, = struct.unpack_from('<Q', d, 0x28)
+    shent, shnum = struct.unpack_from('<HH', d, 0x3A)
+    out = []
+    for i in range(shnum):
+        off = shoff + i * shent
+        s_type, = struct.unpack_from('<I', d, off + 4)
+        if s_type != 6:                     # SHT_DYNAMIC
+            continue
+        s_off, s_size = struct.unpack_from('<QQ', d, off + 0x18)
+        s_link, = struct.unpack_from('<I', d, off + 0x28)
+        str_off, = struct.unpack_from('<Q', d, shoff + s_link * shent + 0x18)
+        for e in range(0, s_size, 16):
+            tag, val = struct.unpack_from('<qQ', d, s_off + e)
+            if tag == 0:
+                break
+            if tag == 1:                    # DT_NEEDED
+                end = d.index(b'\x00', str_off + val)
+                out.append(d[str_off + val:end].decode())
+    return out
+
+roots = []
+for base, _, files in os.walk(pytree):
+    for f in files:
+        if f.endswith('.so') or '/bin/' in os.path.join(base, f):
+            roots.append(os.path.join(base, f))
+
+seen, queue, added = set(), list(roots), 0
+while queue:
+    item = queue.pop()
+    for name in needed(item):
+        if name in seen:
+            continue
+        seen.add(name)
+        if os.path.exists(os.path.join(gdir, name)):
+            queue.append(os.path.join(gdir, name))
+            continue
+        for d in search:
+            cand = os.path.join(d, name)
+            if os.path.exists(cand):
+                shutil.copyfile(os.path.realpath(cand),
+                                os.path.join(gdir, name))
+                os.chmod(os.path.join(gdir, name), 0o755)
+                print(f"  + {name}")
+                added += 1
+                queue.append(os.path.join(gdir, name))
+                break
+        else:
+            print(f"  ! {name} 을 찾지 못했습니다", file=sys.stderr)
+print(f"  의존성 {added}개 추가")
+NEEDED
 
     echo "  $(ls "$GDIR" | wc -l)개 파일, $(du -sh "$GDIR" | cut -f1)"
 
@@ -395,7 +554,7 @@ if [[ "$STATIC" != "1" ]]; then
     # program.
     INTERP=$("${CROSS}readelf" -l "${PYDIR}/bin/python${HOST_VER}" 2>/dev/null \
              | sed -n 's/.*interpreter: \([^]]*\)\]/\1/p')
-    [[ "$INTERP" == "${GLIBC_DIR}/ld-linux-aarch64.so.1" ]] \
+    [[ "$INTERP" == "${GLIBC_DIR}/${LOADER}" ]] \
         || die "인터프리터 경로가 다릅니다: '${INTERP}'"
     echo "  인터프리터: $INTERP"
 

@@ -42,3 +42,70 @@ SYSROOT="${SYSROOT:-${WORK}/sysroot}"
 LINUX_SRC="${LINUX_SRC:-${LPZERO_WORK}/linux}"
 BUILD_DIR="${BUILD_DIR:-${LPZERO_WORK}/build}"
 PYSTAGE_ROOT="${PYSTAGE_ROOT:-${LPZERO_WORK}/python-stage}"
+
+# ── Is everything in this tree built for the machine we are building for?
+#
+# This exists because an amd64 image shipped with two aarch64 binaries in
+# its initramfs and a 43MB aarch64 /data partition - glibc, CPython and
+# micropython, all of them for the wrong instruction set. The image
+# booted perfectly, because the parts that boot were right; WiFi died
+# with "Exec format error" and Python did not run at all. Nothing in the
+# build said a word, because nothing was looking.
+#
+# The mistake was checking the code I had ported and not the binaries I
+# was copying in beside it. So this checks the tree, not the intention:
+# every ELF file, against the ELF header's own idea of what machine it
+# is for.
+#
+#   e_machine sits at byte 18 of any ELF, two bytes little-endian:
+#     0x3E  x86-64        0xB7  AArch64
+#
+# It dies rather than warns. A warning in a hundred lines of build output
+# is how this got shipped in the first place.
+elf_machine_of() {
+    python3 - "$1" <<'PY'
+import sys, struct
+try:
+    with open(sys.argv[1], 'rb') as f:
+        head = f.read(20)
+    if len(head) < 20 or head[:4] != b'\x7fELF':
+        print("")            # not an ELF: nothing to check
+    else:
+        print(hex(struct.unpack_from('<H', head, 18)[0]))
+except Exception:
+    print("")
+PY
+}
+
+# check_tree_arch <directory> <arm64|amd64> <label for the message>
+check_tree_arch() {
+    local dir="$1" arch="$2" label="$3"
+    local want name
+    case "$arch" in
+        amd64) want=0x3e; name="x86-64"  ;;
+        arm64) want=0xb7; name="aarch64" ;;
+        *) die "check_tree_arch: unknown architecture '${arch}'" ;;
+    esac
+
+    [[ -d "$dir" ]] || return 0
+
+    local bad=0 f m first=""
+    while IFS= read -r -d '' f; do
+        m="$(elf_machine_of "$f")"
+        [[ -z "$m" ]] && continue
+        if [[ "$m" != "$want" ]]; then
+            bad=$((bad + 1))
+            [[ -z "$first" ]] && first="$f"
+            (( bad <= 8 )) && printf '  %s  (e_machine %s)\n' \
+                "${f#"$dir"/}" "$m" >&2
+        fi
+    done < <(find "$dir" -type f -print0)
+
+    if (( bad > 0 )); then
+        (( bad > 8 )) && printf '  ... and %d more\n' $((bad - 8)) >&2
+        die "${label}: ${bad} file(s) are not ${name}.
+       This image would boot and then fail at exec, which is the hardest
+       kind of broken to notice. Build those parts for ${arch}, or leave
+       them out."
+    fi
+}

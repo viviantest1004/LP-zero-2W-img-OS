@@ -791,7 +791,7 @@ static const char *BUILTINS[] = {
     /* "help" is deliberately not here. It is /bin/help, a real program,
      * so it can scan PATH and list what is actually installed - a
      * builtin would only ever know what was hardcoded into the shell. */
-    "exit", "cd", "pwd", "echo", "env", "reboot", "poweroff",
+    "exit", "cd", "pwd", "echo", "env", "reboot", "poweroff", "halt",
     "test", "[", "true", "false", ":", NULL
 };
 
@@ -993,64 +993,49 @@ static bool run_builtin(cmd_t *c)
         return true;
     }
 
-    if (strcmp(cmd, "reboot") == 0 || strcmp(cmd, "poweroff") == 0) {
-        printf("%s...\n", cmd);
-
-        /* ── Shutting down properly ──
+    if (strcmp(cmd, "reboot") == 0 || strcmp(cmd, "poweroff") == 0 ||
+        strcmp(cmd, "halt") == 0) {
+        /* ── One shutdown path, and it goes through init ──
          *
-         * This used to ask the kernel to reset immediately, which makes
-         * every reboot indistinguishable from pulling the plug. ext4's
-         * journal protects the filesystem's own structure, but not the
-         * contents of files being written - and logd is writing all the
-         * time. The result was a machine with no clean shutdown path at
-         * all: the watchdog's reset, a power cut and a deliberate
-         * reboot were the same event.
+         * This used to do the whole thing here: SIGTERM everything,
+         * sync, remount /data read-only, then reboot(2). It worked, and
+         * it could not work well, because the shell is not the process
+         * that knows what is running. init restarts supervised services
+         * - that is its job - so every service the shell killed came
+         * straight back while the machine was going down. The console
+         * showed "service guard exited - again in 1s" underneath
+         * "stopping services".
          *
-         * So: ask everything to stop, give it a moment, flush, and put
-         * the data partition into a state where nothing is in flight.
+         * And nothing unmounted /data. The remount to read-only kept
+         * the filesystem consistent, which is why this was survivable,
+         * but the next boot still replays a journal and fsck still
+         * wants a look.
          *
-         * SIGTERM to everything except ourselves and init. Nothing here
-         * needs a graceful shutdown of its own; what matters is that
-         * they stop writing before the sync. */
-        printf("  stopping services\n");
-        /* Ourselves first: kill(-1) reaches every process this one may
-         * signal, and that includes this shell. Without this the shell
-         * dies here and the machine never actually reboots. init is
-         * excluded by the kernel, so it survives to see us go. */
-        lp_signal_ignore(SIGTERM);
-        lp_kill(-1, SIGTERM);
-        lp_sleep_ms(400);
+         * init can do both: it stops restarting first, and it knows
+         * about the overlays and the /root bind that have to come off
+         * before /data will unmount. So this now says what is wanted
+         * and lets init do it - the same as /bin/poweroff, which is the
+         * same signal, so there is one sequence to get right rather
+         * than two that drift. */
+        int sig = (strcmp(cmd, "reboot") == 0) ? SIGUSR2 : SIGUSR1;
 
-        printf("  flushing to disk\n");
-        lp_sync();
-
-        /* Read-only, so anything still holding a file cannot write
-         * during the reset. It fails harmlessly when /data is not
-         * mounted, which is the case on a board running from RAM. */
-        lp_mount(NULL, "/data", NULL, MS_REMOUNT | MS_RDONLY, NULL);
-        lp_sync();
-
-        /* Write the time down just before we go. This board has no
-         * battery-backed clock, so without this the next boot starts at 1970.
-         * The ntp daemon saves every 30s; this fills in that last window.
-         * Anything before 2020 means the clock was never set, and saving it
-         * would be worse than saving nothing. */
-        s64 now = lp_time();
-        if (now >= 1577836800LL) {
-            char buf[32];
-            int  n = snprintf(buf, sizeof(buf), "%lld\n", (long long)now);
-            long fd = lp_open("/data/.clock", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd >= 0) {
-                lp_write((int)fd, buf, (size_t)n);
-                lp_close((int)fd);
-            }
+        if (lp_kill(1, sig) != 0) {
+            dprintf(STDERR_FILENO,
+                    "%s: init did not take the signal - nothing has been"
+                    " stopped.\n", cmd);
+            last_status = 1;
+            return true;
         }
 
-        lp_sync();
-        int op = (strcmp(cmd, "reboot") == 0)
-                 ? LINUX_REBOOT_CMD_RESTART : LINUX_REBOOT_CMD_POWER_OFF;
-        long r = lp_reboot(op);
-        dprintf(STDERR_FILENO, "%s: failed (%ld) - do you have permission?\n", cmd, -r);
+        /* init prints the rest and takes the machine down. If it is
+         * still here after ten seconds, say so rather than leave the
+         * person looking at a prompt wondering. */
+        for (int i = 0; i < 100; i++)
+            lp_sleep_ms(100);
+
+        dprintf(STDERR_FILENO,
+                "%s: init took the signal but the machine is still"
+                " running.\n", cmd);
         last_status = 1;
         return true;
     }

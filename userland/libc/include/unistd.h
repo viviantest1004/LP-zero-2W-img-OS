@@ -54,6 +54,8 @@
 #define SIGKILL  9
 #define SIGSEGV 11
 #define SIGTERM 15
+#define SIGUSR1 10
+#define SIGUSR2 12
 #define SIGQUIT  3
 
 /* ── Signals ──
@@ -281,6 +283,18 @@ s64   lp_timegm(const lp_tm_t *tm);
 long  lp_mount(const char *src, const char *tgt, const char *fstype,
                unsigned long flags, const void *data);
 long  lp_reboot(int cmd);
+
+/* Run fn() when this signal arrives.
+ *
+ * The only other dispositions here are SIG_DFL and SIG_IGN, which need
+ * nothing from us because they never run our code. A real handler does:
+ * it has to return somewhere, and on x86-64 the kernel will not deliver
+ * one without a restorer to return through. See set_disposition.
+ *
+ * SA_RESTART is deliberately NOT set. init waits in wait() with no
+ * timeout, and the point of sending it a signal is to make that wait
+ * return so the main loop can look at what changed. */
+long  lp_signal_handler(int sig, void (*fn)(int));
 long  lp_swapon(const char *path, int flags);
 long  lp_swapoff(const char *path);
 

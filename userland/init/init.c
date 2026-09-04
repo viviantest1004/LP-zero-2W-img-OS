@@ -10,6 +10,7 @@
  *   - It has to do the early setup itself: mount filesystems, open the
  *     console. What systemd would have done, we do. */
 #include "types.h"
+#include "syscall.h"
 #include "osname.h"
 #include "string.h"
 #include "stdio.h"
@@ -574,8 +575,16 @@ static bool respawn_service(pid_t dead, int status)
 }
 
 /* Start whatever is due. Called every time round the main loop. */
+/* Set the moment a shutdown starts, so services stop being put back.
+ * Declared here rather than beside the shutdown code because
+ * restart_due_services - the thing it has to stop - comes first. */
+static bool shutting_down = false;
+
 static void restart_due_services(void)
 {
+    if (shutting_down)
+        return;                 /* the machine is going down; leave them dead */
+
     s64 now = lp_monotonic_ms();
     for (int i = 0; i < nservices; i++) {
         service_t *s = &services[i];
@@ -876,6 +885,217 @@ static bool screen_needs_its_own_shell(void)
     return strcmp(name, "tty1") != 0;
 }
 
+/* ── Turning the machine off ──────────────────────────────────────────
+ *
+ * `poweroff` and `reboot` send init a signal; init does the work. The
+ * work is not "call reboot(2)" - it is getting /data to a state where
+ * the next boot does not have to repair it.
+ *
+ * /data is ext4 with a journal, so pulling the power is survivable, but
+ * survivable is not the same as clean: the journal replays, fsck may
+ * decide it wants a full check, and anything a service had buffered is
+ * gone. On a board that is meant to run unattended for months, the
+ * shutdown people type is the one chance to write everything down.
+ *
+ * So: stop restarting things, ask every service to finish, wait, insist
+ * if they do not, sync, and unmount. Only then reboot.
+ *
+ * The signal handler does nothing but set a flag. Everything else -
+ * printing, killing, unmounting - happens in the main loop, where it is
+ * ordinary code that can take its time. A handler that did the work
+ * would be running in the middle of whatever init was doing, on init's
+ * stack, with no way to wait for anything. */
+static volatile int shutdown_wanted = 0;
+static pid_t shell_pid  = -1;    /* the console shell */
+static pid_t screen_pid = -1;    /* the one on tty1, if any */   /* 0 none, 1 poweroff, 2 reboot */
+
+static void on_poweroff(int sig) { (void)sig; shutdown_wanted = 1; }
+static void on_reboot(int sig)   { (void)sig; shutdown_wanted = 2; }
+
+/* Ask everything to stop, then make sure it did.
+ *
+ * SIGTERM first and a few seconds to act on it: dropbear closes its
+ * sessions, logd flushes, guard writes its last line. Then SIGKILL for
+ * whatever is left, because a shutdown that can be refused is not a
+ * shutdown. */
+static void stop_everything(void)
+{
+    printf("init: asking services to stop\n");
+    for (int i = 0; i < nservices; i++)
+        if (services[i].pid > 0)
+            lp_kill(services[i].pid, SIGTERM);
+    if (shell_pid > 0)  lp_kill(shell_pid, SIGTERM);
+    if (screen_pid > 0) lp_kill(screen_pid, SIGTERM);
+
+    /* Up to five seconds, but no longer than it takes. */
+    for (int waited = 0; waited < 5000; waited += 100) {
+        bool any = false;
+        for (int i = 0; i < nservices; i++) {
+            if (services[i].pid <= 0)
+                continue;
+            int st = 0;
+            if (lp_waitpid(services[i].pid, &st, WNOHANG) == services[i].pid)
+                services[i].pid = -1;
+            else
+                any = true;
+        }
+        if (!any)
+            break;
+        lp_sleep_ms(100);
+    }
+
+    /* Everything else on the machine, including anything a person left
+     * running from a shell. -1 is "every process we may signal", and
+     * the kernel does not deliver it to us or to pid 1. */
+    lp_kill(-1, SIGTERM);
+    lp_sleep_ms(300);
+    lp_kill(-1, SIGKILL);
+}
+
+/* Take off everything mounted on top of a filesystem, deepest first.
+ *
+ * /proc/mounts is in mount order, so walking it backwards unmounts the
+ * most recently added first - which is what a stack needs. Anything
+ * that will not come off is skipped and named; one stubborn mount is
+ * not a reason to leave the rest attached. */
+static void unmount_stack_above(const char *keep)
+{
+    char buf[8192];
+    if (proc_read("/proc/mounts", buf, sizeof buf) <= 0)
+        return;
+
+    /* Collect the mount points, in order. */
+    static char point[64][128];
+    static char fstype[64][32];
+    int n = 0;
+
+    for (char *p = buf; *p && n < 64; ) {
+        char *eol = strchr(p, '\n');
+        if (eol) *eol = '\0';
+
+        /* "<source> <point> <type> <options> 0 0" */
+        char *sp1 = strchr(p, ' ');
+        if (sp1) {
+            char *pt = sp1 + 1;
+            char *sp2 = strchr(pt, ' ');
+            if (sp2) {
+                *sp2 = '\0';
+                char *ty = sp2 + 1;
+                char *sp3 = strchr(ty, ' ');
+                if (sp3) *sp3 = '\0';
+                strlcpy(point[n], pt, sizeof point[0]);
+                strlcpy(fstype[n], ty, sizeof fstype[0]);
+                n++;
+            }
+        }
+        if (!eol) break;
+        p = eol + 1;
+    }
+
+    for (int i = n - 1; i >= 0; i--) {
+        /* Leave the filesystem itself, and the kernel's own. */
+        if (strcmp(point[i], keep) == 0)  continue;
+        if (strcmp(point[i], "/") == 0)   continue;
+        if (strcmp(point[i], "/proc") == 0 || strcmp(point[i], "/sys") == 0 ||
+            strcmp(point[i], "/dev") == 0)
+            continue;
+
+        /* An overlay whose upper is on /data, or a bind from it. Both
+         * hold /data open; a tmpfs does not, so leave it alone. */
+        bool holds_data = (strcmp(fstype[i], "overlay") == 0) ||
+                          (strcmp(point[i], "/root") == 0);
+        if (!holds_data)
+            continue;
+
+        if (sys_call2(SYS_umount2, (long)point[i], 0) < 0)
+            printf("init:   %s would not come off\n", point[i]);
+    }
+}
+
+static void do_shutdown(int what)
+{
+    const char *word = (what == 2) ? "restarting" : "powering off";
+
+    /* Before anything else: stop putting services back.
+     *
+     * Without this the console fills with "service guard exited - again
+     * in 1s" underneath "stopping services", because restarting them is
+     * exactly what init is for and nothing had told it to stop. Every
+     * service killed here came straight back, and some of them were
+     * writing to /data while it was being unmounted. */
+    shutting_down = true;
+
+    printf("\ninit: %s\n", word);
+
+    lp_log("init", (what == 2) ? "reboot requested" : "poweroff requested");
+
+    stop_everything();
+
+    /* Write the time down before the disk goes away. This board has no
+     * battery-backed clock, so without it the next boot starts in 1970
+     * and every certificate check fails. ntp saves every 30 seconds;
+     * this fills in that last window. Anything before 2020 means the
+     * clock was never set, and saving that is worse than saving
+     * nothing. (This used to live in the shell's poweroff, and was lost
+     * when anything else took the machine down.) */
+    s64 now = lp_time();
+    if (now >= 1577836800LL) {
+        char b[32];
+        int  n = snprintf(b, sizeof b, "%lld\n", (long long)now);
+        long fd = lp_open("/data/.clock", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) { lp_write((int)fd, b, (size_t)n); lp_close((int)fd); }
+    }
+
+    /* Write everything down, twice: sync() returns before the disk has
+     * necessarily finished, and the second call is cheap insurance. */
+    printf("init: writing everything to disk\n");
+    lp_sync();
+    lp_sleep_ms(200);
+    lp_sync();
+
+    /* Unmount, so the next boot finds a clean filesystem rather than a
+     * journal to replay. /data first - it is the one that matters and
+     * the one things were writing to. A failure here is worth saying
+     * out loud: it means something still had a file open, and the next
+     * boot will spend time on fsck. */
+    /* Everything stacked on top of /data has to come off first, or the
+     * unmount below fails with EBUSY every single time and the "clean
+     * shutdown" writes nothing.
+     *
+     * There are two kinds and both are easy to forget: /root is a bind
+     * mount from /data/root, and `persist` puts an overlay on /bin,
+     * /sbin, /lib, /usr, /opt and /srv whose upper layer is also on
+     * /data. Rather than keep a list here that would go stale the next
+     * time something is added, read /proc/mounts and take them off in
+     * reverse order - last mounted, first removed, which is the only
+     * order that works when they are stacked. */
+    unmount_stack_above("/data");
+
+    if (sys_call2(SYS_umount2, (long)"/data", 0) < 0) {
+        printf("init:   /data would not unmount - remounting it"
+               " read-only instead\n");
+        /* Second best, and much better than nothing: nothing can write
+         * during the reset, so the filesystem is at least consistent.
+         * The next boot replays the journal rather than starting clean. */
+        lp_mount(NULL, "/data", NULL, MS_REMOUNT | MS_RDONLY, NULL);
+    }
+    else
+        printf("init:   /data unmounted cleanly\n");
+    sys_call2(SYS_umount2, (long)"/boot", 0);
+    lp_sync();
+
+    printf("init: %s now\n\n", (what == 2) ? "restarting" : "off");
+    lp_reboot(what == 2 ? LINUX_REBOOT_CMD_RESTART
+                        : LINUX_REBOOT_CMD_POWER_OFF);
+
+    /* Only reached if the kernel refused, which on a machine with no
+     * power control means "there is no way to switch this off". */
+    printf("init: the kernel would not %s. It is safe to cut the"
+           " power now.\n", (what == 2) ? "restart" : "power off");
+    for (;;)
+        lp_sleep_ms(60000);
+}
+
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -904,7 +1124,7 @@ int main(int argc, char **argv)
         load_services();
     }
 
-    pid_t shell_pid = spawn_shell();
+    shell_pid = spawn_shell();
 
     /* A VM window, or an HDMI screen, is a console nobody is reading
      * unless we put a shell there too. */
@@ -926,7 +1146,7 @@ int main(int argc, char **argv)
             no_screen = (strstr(cmdline, "lpzero.noscreen") != NULL);
     }
 
-    pid_t screen_pid = -1;
+    screen_pid = -1;
     if (is_pid1 && no_screen) {
         printf("init: no shell on the screen (lpzero.noscreen)\n");
     } else if (is_pid1 && screen_needs_its_own_shell()) {
@@ -942,7 +1162,18 @@ int main(int argc, char **argv)
      * The wait does not block: a service waiting to be restarted has a
      * time to be restarted at, and nothing would notice it passing if
      * pid 1 were parked in wait(). */
+    /* SIGUSR1 is poweroff, SIGUSR2 is reboot. Dedicated signals rather
+     * than the traditional SIGINT/SIGTERM, because those arrive by
+     * accident - a stray kill, a Ctrl-Alt-Del the console maps - and
+     * turning the machine off by accident is worse than not being able
+     * to. `poweroff` and `reboot` send these. */
+    lp_signal_handler(SIGUSR1, on_poweroff);
+    lp_signal_handler(SIGUSR2, on_reboot);
+
     for (;;) {
+        if (shutdown_wanted)
+            do_shutdown(shutdown_wanted);
+
         restart_due_services();
 
         int status = 0;
@@ -959,9 +1190,13 @@ int main(int argc, char **argv)
             continue;
         }
 
+        if (shutdown_wanted)
+            do_shutdown(shutdown_wanted);
+
         if (pid < 0) {
-            /* No children to wait for (ECHILD = 10). PID 1 must not exit,
-             * so pause and look again. */
+            /* No children to wait for (ECHILD = 10), or a signal cut the
+             * wait short - which is exactly what poweroff does. PID 1
+             * must not exit, so pause and look again. */
             if (!is_pid1)
                 break;
             lp_sleep_ms(200);

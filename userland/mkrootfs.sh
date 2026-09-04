@@ -112,8 +112,16 @@ if [[ "${LP_ARCH:-arm64}" == "amd64" ]]; then
 fi
 copy_third "${DROPBEAR_SRC}/dropbear"    dropbear    || true
 copy_third "${DROPBEAR_SRC}/dropbearkey" dropbearkey || true
-copy_third "${THIRD}/wpa_supplicant-2.11/wpa_supplicant/wpa_supplicant" wpa_supplicant || true
-copy_third "${THIRD}/wpa_supplicant-2.11/wpa_supplicant/wpa_cli"        wpa_cli        || true
+# wpa_supplicant, for the machine this image is for. Same reason as
+# dropbear above: an aarch64 binary on an amd64 image does not fail to
+# copy, it fails at exec, and WiFi comes up as "Exec format error" on a
+# board that otherwise looks fine.
+WPA_SRC="${THIRD}/wpa_supplicant-2.11/wpa_supplicant"
+if [[ "${LP_ARCH:-arm64}" == "amd64" ]]; then
+    WPA_SRC="${THIRD}/wpa-amd64/wpa_supplicant"
+fi
+copy_third "${WPA_SRC}/wpa_supplicant" wpa_supplicant || true
+copy_third "${WPA_SRC}/wpa_cli"        wpa_cli        || true
 
 # ── 무선칩 펌웨어 ────────────────────────────────────────────────
 # brcmfmac 드라이버가 /lib/firmware/brcm/ 에서 찾는다.
@@ -257,6 +265,10 @@ if [[ "$(id -u)" == "0" ]]; then
 else
     log "경고: root 가 아니라 장치 노드를 만들지 못했습니다"
 fi
+
+# Everything in here has to be for the machine this image is for. See
+# check_tree_arch in tools/common.sh for the morning that produced this.
+check_tree_arch "$ROOT_DIR" "${LP_ARCH:-arm64}" "initramfs"
 
 TOTAL=$(du -sb "$ROOT_DIR" | cut -f1)
 echo ""

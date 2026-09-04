@@ -52,7 +52,15 @@ PART_IMG="${OUT_DIR}/.boot-part.img"
 # 파일 하나(22MB)다. 업데이트를 원자적으로 하려면 그 파일이 두 개 있어야
 # 한다. 새 것을 다 쓰고 검증한 다음에야 이름을 바꾸고, 실패하면 예전
 # 것으로 돌아간다(update). 64MiB 로는 두 개가 안 들어간다.
-IMAGE_MB=256
+# 256MB is the size a Pi Zero 2 W image wants to be: it has to fit any
+# card somebody has lying around, and expandfs grows /data into whatever
+# the card really is on the first boot.
+#
+# A virtual machine has no such constraint - the disk is a file - and
+# 124MB of /data is not much once CPython (29MB) and its glibc are on
+# it. LP_IMAGE_MB overrides it; the arm64 VM image is built at 16GB.
+# The file stays sparse, so a 16GB image is no bigger to download.
+IMAGE_MB="${LP_IMAGE_MB:-256}"
 SECTOR_SIZE=512
 BOOT_START_SECTOR=8192          # 4MiB
 BOOT_SIZE_MB=128
@@ -386,18 +394,37 @@ If it looks after itself
   A board that stops answering resets itself after 15 seconds.
 READMEEOF
     if $UEFI_ONLY; then
-        cat >> "$README" <<'UEFIEOF'
+        # ${EFI_BOOT_NAME}, not a fixed string: the amd64 image carries
+        # BOOTX64.EFI and this text said BOOTAA64.EFI on it, which is
+        # the sort of documentation that sends somebody looking for a
+        # file that is not there.
+        if [[ "$LP_ARCH" == "amd64" ]]; then
+            cat >> "$README" <<UEFIEOF
 
 ────────────────────────────────────────────────────────────
-이 이미지는 가상머신(UTM / QEMU) 전용입니다.
+이 이미지는 amd64 PC / 데스크톱 가상머신용입니다 (linux-LP).
+
+UEFI 가 EFI/BOOT/${EFI_BOOT_NAME} 를 찾아 부팅합니다. MBR 부트스트랩
+영역은 비어 있으므로 legacy BIOS 로는 부팅하지 않습니다 - EC2 등에
+올릴 때 부트 모드를 uefi 로 지정하세요.
+
+라즈베리파이용은 arm64 이미지를 받으세요.
+────────────────────────────────────────────────────────────
+UEFIEOF
+        else
+            cat >> "$README" <<UEFIEOF
+
+────────────────────────────────────────────────────────────
+이 이미지는 arm64 가상머신(UTM / QEMU / UTM SE) 전용입니다.
 
 라즈베리파이 보드에서는 부팅하지 않습니다. 크기를 줄이려고 GPU
-펌웨어가 읽는 커널 사본을 빼고, UEFI 가 읽는 EFI/BOOT/BOOTAA64.EFI
+펌웨어가 읽는 커널 사본을 빼고, UEFI 가 읽는 EFI/BOOT/${EFI_BOOT_NAME}
 한 벌만 넣었습니다.
 
 실기에 쓰시려면 범용 이미지(.xz)를 받으세요.
 ────────────────────────────────────────────────────────────
 UEFIEOF
+        fi
     fi
     # e2fsck repairs the data partition; mke2fs makes a new one on a disk
     # you attach yourself ("datadisk --format"). Both go here rather than
@@ -471,7 +498,10 @@ if command -v debugfs >/dev/null 2>&1; then
     # 파이썬을 시스템(initramfs)이 아니라 여기에 두는 이유는 크기다.
     # initramfs 는 커널에 박혀 있어서 늘리면 부팅 이미지가 그대로 커지지만,
     # /data 는 첫 부팅에 카드 전체로 늘어나므로 크기가 문제되지 않는다.
-    MPY="${MICROPYTHON_BIN:-${WORK}/micropython/ports/unix/build-lpzero/micropython}"
+    # Per architecture, like everything else that ships a binary.
+    MPY_BUILD="build-lpzero"
+    [[ "$LP_ARCH" == "amd64" ]] && MPY_BUILD="build-lpzero-amd64"
+    MPY="${MICROPYTHON_BIN:-${WORK}/micropython/ports/unix/${MPY_BUILD}/micropython}"
     HAVE_MPY=0
     if $WITH_MPY && [[ -f "$MPY" ]]; then
         d_put "$MPY" bin/micropython 0100755
@@ -480,7 +510,22 @@ if command -v debugfs >/dev/null 2>&1; then
     fi
 
     # CPython 을 빌드해두었으면 트리째 넣는다 (tools/build-python.sh).
-    PYSTAGE="${PYSTAGE:-${PYSTAGE_ROOT}/data/python}"
+    PY_ROOT="$PYSTAGE_ROOT"
+    [[ "$LP_ARCH" == "amd64" ]] && PY_ROOT="${PYSTAGE_ROOT}-amd64"
+
+    # Check what goes on the data partition, not only what goes in the
+    # initramfs. The first amd64 image had a clean initramfs and 43MB of
+    # aarch64 on /data - glibc, CPython and micropython - so it booted
+    # and then had no working interpreter at all. Two separate places
+    # ship binaries; both are checked now.
+    check_tree_arch "$PY_ROOT" "$LP_ARCH" "/data staging (${PY_ROOT})"
+    if $WITH_MPY && [[ -f "$MPY" ]]; then
+        m="$(elf_machine_of "$MPY")"
+        want=0xb7; [[ "$LP_ARCH" == "amd64" ]] && want=0x3e
+        [[ "$m" == "$want" ]] || die "micropython 이 ${LP_ARCH} 가 아닙니다 (e_machine ${m}): $MPY"
+    fi
+
+    PYSTAGE="${PYSTAGE:-${PY_ROOT}/data/python}"
     if [[ -d "$PYSTAGE" ]]; then
         log "데이터: CPython 트리 준비 중..."
         # 디렉터리가 먼저, 그 다음 파일. find 는 부모를 먼저 내므로 순서가 맞다.
@@ -506,7 +551,7 @@ if command -v debugfs >/dev/null 2>&1; then
     #
     # It lives on the data partition, so the system image is exactly the
     # size it was.
-    GLIBCSTAGE="${GLIBCSTAGE:-${PYSTAGE_ROOT}/data/glibc}"
+    GLIBCSTAGE="${GLIBCSTAGE:-${PY_ROOT}/data/glibc}"
     if [[ -d "$GLIBCSTAGE" ]]; then
         GPARENT="$(cd "$(dirname "$GLIBCSTAGE")" && pwd)"
         ( cd "$GPARENT"

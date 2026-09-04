@@ -552,6 +552,21 @@ long lp_term_make_controlling(int fd)
     return lp_ioctl(fd, TIOCSCTTY, 0);
 }
 
+long lp_signal_handler(int sig, void (*fn)(int))
+{
+    u8 act[SA_SIZE];
+    memset(act, 0, sizeof(act));
+    *(unsigned long *)(act + SA_HANDLER) = (unsigned long)fn;
+
+#if defined(__x86_64__)
+    *(unsigned long *)(act + SA_FLAGS)        = SA_RESTORER;
+    *(unsigned long *)(act + SA_RESTORER_OFF) =
+        (unsigned long)&lp_sigreturn_trampoline;
+#endif
+
+    return sys_call4(SYS_rt_sigaction, (long)sig, (long)act, 0, SA_MASK_SIZE);
+}
+
 long lp_signal_ignore(int sig)  { return set_disposition(sig, 1); }
 long lp_signal_default(int sig) { return set_disposition(sig, 0); }
 

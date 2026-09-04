@@ -23,7 +23,16 @@
 
 #define ZRAM_DEV      "/dev/zram0"
 #define ZRAM_SYS      "/sys/block/zram0"
-#define DEFAULT_MB    256
+/* A quarter of RAM, rather than a fixed 256MB.
+ *
+ * 256 was chosen for a 512MB board, where it is half the machine and
+ * about right. The same number on a 4GB virtual machine is 6% of RAM -
+ * technically working, practically pointless, and misleading to anyone
+ * reading `free`. Compressed swap is only ever worth a fraction of RAM,
+ * so make it a fraction. */
+#define DEFAULT_FRACTION 4      /* RAM / 4 */
+#define DEFAULT_MB_MIN   64
+#define DEFAULT_MB_MAX   2048
 #define PAGE_SIZE     4096
 
 /* Swap header v1_2 layout, inside the first page.
@@ -169,6 +178,26 @@ static int cmd_status(void)
     return 0;
 }
 
+/* A quarter of what this machine actually has, within reason. */
+static u64 default_mb(void)
+{
+    char buf[2048];
+    long total_kb = 0;
+
+    if (proc_read("/proc/meminfo", buf, sizeof buf) > 0) {
+        const char *p = strstr(buf, "MemTotal:");
+        if (p)
+            total_kb = strtol(p + 9, NULL, 10);
+    }
+    if (total_kb <= 0)
+        return 256;                       /* cannot tell; the old default */
+
+    u64 mb = (u64)total_kb / 1024 / DEFAULT_FRACTION;
+    if (mb < DEFAULT_MB_MIN) mb = DEFAULT_MB_MIN;
+    if (mb > DEFAULT_MB_MAX) mb = DEFAULT_MB_MAX;
+    return mb;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -177,7 +206,7 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(argv[1], "on") == 0) {
-        u64 mb = DEFAULT_MB;
+        u64 mb = default_mb();
         if (argc > 2) {
             long v = strtol(argv[2], NULL, 10);
             if (v <= 0) {

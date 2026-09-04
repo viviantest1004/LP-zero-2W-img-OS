@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# build-micropython.sh - MicroPython 을 aarch64 정적 바이너리로 만든다.
+# build-micropython.sh - MicroPython 을 정적 바이너리로 만든다 (LP_ARCH).
 #
 # CPython 과 나란히 /data 에 들어간다. 둘을 다 두는 이유:
 #   CPython      표준 라이브러리가 전부 있다. 대신 25MB, 시작이 느리다.
@@ -25,8 +25,17 @@ WORK="${WORK:-${LPZERO_WORK}/thirdparty}"
 MPY_DIR="${MPY_DIR:-${WORK}/micropython}"
 MPY_REF="${MPY_REF:-v1.24.1}"
 JOBS="${JOBS:-$(nproc)}"
-CROSS=aarch64-linux-gnu-
-BUILD_DIR="build-lpzero"
+# LP_ARCH picks the machine. amd64 is a native build on this host, so
+# there is no cross prefix; the build directory is per-architecture so
+# the two never share objects.
+LP_ARCH="${LP_ARCH:-arm64}"
+if [[ "$LP_ARCH" == "amd64" ]]; then
+    CROSS=
+    BUILD_DIR="build-lpzero-amd64"
+else
+    CROSS=aarch64-linux-gnu-
+    BUILD_DIR="build-lpzero"
+fi
 
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 log()  { printf '  %s\n' "$*"; }
@@ -35,7 +44,7 @@ step() { printf '\n==> %s\n' "$*"; }
 FORCE=false
 [[ "${1:-}" == "--force" ]] && FORCE=true
 
-command -v "${CROSS}gcc" >/dev/null || die "${CROSS}gcc 가 없습니다"
+command -v "${CROSS:-}gcc" >/dev/null || die "${CROSS:-}gcc 가 없습니다"
 
 # ── 소스 ─────────────────────────────────────────────────────────
 if [[ ! -d "$MPY_DIR" ]]; then
@@ -63,7 +72,7 @@ else
     make -C mpy-cross -j"$JOBS" > /tmp/mpy-cross.log 2>&1 \
         || { tail -20 /tmp/mpy-cross.log; die "mpy-cross 빌드 실패"; }
 
-    step "MicroPython (aarch64 정적, mbedTLS 포함)"
+    step "MicroPython (${LP_ARCH} 정적, mbedTLS 포함)"
     $FORCE && rm -rf "ports/unix/${BUILD_DIR}"
     #  MICROPY_PY_SSL/MICROPY_SSL_MBEDTLS  tls 모듈 (HTTPS)
     #  MICROPY_PY_FFI=0                    libffi 를 요구한다. CPython 의
@@ -97,7 +106,10 @@ fi
 step "결과"
 ARCH=$( { "${CROSS}objdump" -f "$OUT" 2>/dev/null || true; } \
         | awk '/file format/ { a = $NF } END { print a }' )
-[[ "$ARCH" == *aarch64* ]] || die "aarch64 바이너리가 아닙니다: $ARCH"
+case "$LP_ARCH" in
+    amd64) [[ "$ARCH" == *x86-64* ]]  || die "x86-64 바이너리가 아닙니다: $ARCH" ;;
+    *)     [[ "$ARCH" == *aarch64* ]] || die "aarch64 바이너리가 아닙니다: $ARCH" ;;
+esac
 
 # mbedTLS 가 실제로 들어갔는지 본다. MICROPY_SSL_MBEDTLS 를 빠뜨리면
 # 빌드는 멀쩡히 성공하고 socket 도 되는데 tls 모듈만 없다. 그러면
