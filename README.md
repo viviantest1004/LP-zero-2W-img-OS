@@ -1,5 +1,19 @@
 # LP-zero / linux-LP
 
+> **Start here / 여기부터 보세요 — [`GUIDE/`](GUIDE/)**
+>
+> **EN** — Usage, login, build instructions and the source map are in
+> [`GUIDE/USAGE.txt`](GUIDE/USAGE.txt). What is on which branch is in
+> [`GUIDE/BRANCHES.txt`](GUIDE/BRANCHES.txt). Both files are written in
+> English and Korean. Prebuilt images ready to burn or attach are in
+> [`dist/`](dist/); check them against `dist/SHA256SUMS.txt`.
+>
+> **KO** — 사용법, 로그인, 빌드 방법, 소스 구조는
+> [`GUIDE/USAGE.txt`](GUIDE/USAGE.txt) 에 있습니다. 어느 브랜치에 무엇이
+> 있는지는 [`GUIDE/BRANCHES.txt`](GUIDE/BRANCHES.txt) 에 있습니다. 두 파일
+> 모두 영어와 한국어로 되어 있습니다. 바로 굽거나 붙일 수 있는 이미지는
+> [`dist/`](dist/) 에 있고, `dist/SHA256SUMS.txt` 로 확인하면 됩니다.
+
 **직접 만든 초경량 리눅스 배포판.** 커널 설정부터 libc, init, 셸,
 103개 명령어까지 전부 새로 썼습니다. 커널 이미지 하나가 곧 시스템
 전체이고, 부팅하면 램으로 풀립니다.
@@ -30,8 +44,8 @@ OpenSSL). **암호는 직접 만들면 안 되는 물건**이라 일부러 가�
 
 | 이미지 | 어디서 도나 |
 |---|---|
-| `dist/arm64/...img.xz` | **라즈베리파이 제로 2 W 실기 + arm64 가상머신 둘 다.** SD카드에 굽거나 UTM/QEMU에 붙이면 됩니다 |
-| `dist/amd64/linux-LP_amd64.img.xz` | **일반 PC와 데스크톱 가상머신.** VMware, VirtualBox, QEMU/KVM, Hyper-V |
+| `dist/test_a_123_LPzero2W_linux.img.xz` | **라즈베리파이 제로 2 W 실기 + arm64 가상머신 둘 다.** SD카드에 굽거나 UTM/QEMU에 붙이면 됩니다 |
+| `dist/linux-LP_amd64.img.xz` | **일반 PC와 데스크톱 가상머신.** VMware, VirtualBox, QEMU/KVM, Hyper-V |
 
 arm64 이미지 하나가 실기와 가상머신을 모두 지원합니다. 라즈베리파이 GPU가
 읽는 압축 안 된 커널과, UEFI가 읽는 EFI 실행 파일을 **둘 다** 담았기

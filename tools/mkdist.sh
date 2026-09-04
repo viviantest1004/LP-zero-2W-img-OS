@@ -99,6 +99,21 @@ if [[ "$WHAT" == "all" || "$WHAT" == "amd64" ]]; then
     ( cd "${REPO_ROOT}/userland" && ./mkrootfs.sh >/dev/null )
 fi
 
+# 체크섬은 여기서 만든다.
+#
+# 손으로 적어두었더니 이미지를 다시 빌드할 때마다 조용히 어긋났다.
+# 받는 사람 입장에서 맞지 않는 sha256 은 없느니만 못하다 - 파일이
+# 깨진 것인지 목록이 낡은 것인지 구별할 방법이 없기 때문이다.
+# 이미지를 만든 자리에서 같이 만들어야 어긋날 수가 없다.
+step "체크섬"
+( cd "$DIST" && rm -f SHA256SUMS.txt \
+  && sha256sum *.img.xz *.zip > SHA256SUMS.txt 2>/dev/null || true )
+if [[ -f "${DIST}/test_a_123_LPzero2W_linux.img.xz" ]]; then
+    ( cd "$DIST" && sha256sum test_a_123_LPzero2W_linux.img.xz \
+        > PI_IMAGE_SHA256.txt )
+fi
+while read -r _ name; do log "$name"; done < "${DIST}/SHA256SUMS.txt"
+
 step "결과"
 for f in "${DIST}"/*; do
     [[ -f "$f" ]] || continue

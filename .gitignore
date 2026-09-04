@@ -22,7 +22,18 @@ qemu-out/
 userland/rootfs/
 userland/initramfs.cpio.gz
 kernel/out/
-dist/
+# 배포 이미지.
+#
+# 원래는 통째로 제외했다. 지금은 이미지와 체크섬만 추적한다 -
+# 빌드 도구를 갖추지 않은 사람이 받아서 바로 구울 수 있어야 하기
+# 때문이다. 나머지 중간 산출물은 그대로 제외한다.
+# (dist/ 를 통째로 제외하면 하위 항목을 다시 포함시킬 수 없어서
+#  dist/* 로 적는다.)
+dist/*
+!dist/*.img.xz
+!dist/*.zip
+!dist/SHA256SUMS.txt
+!dist/PI_IMAGE_SHA256.txt
 
 # tools/build-sdk.sh 가 만든다 (userland/libc 에서 뽑아낸 것뿐)
 sdk/
