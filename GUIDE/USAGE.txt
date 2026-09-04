@@ -1,71 +1,136 @@
 ================================================================
- linux-LP / LP-zero  -  USAGE
- Everything you need to run it, and where the source lives.
+  linux-LP / LP-zero   -   USAGE
 ================================================================
 
-This file is in English first, Korean second.
-이 파일은 영어가 먼저, 한국어가 뒤에 있습니다.
+  English first, Korean second.
+  영어가 먼저 나오고, 한국어가 이어집니다.
 
 
 ================================================================
- ENGLISH
+  ENGLISH
 ================================================================
 
 WHAT THIS IS
 ------------
-A very small Linux distribution written from scratch: kernel
-configuration, C library, init, shell and 103 commands are all our
-own code. The kernel image IS the system - the userland is packed
-inside it and unpacks into RAM at boot.
+A small Linux distribution written from scratch. The kernel
+configuration, the C library, init, the shell and all 103 commands
+are original code. The kernel image is the whole system: the
+userland is packed inside it and unpacks into RAM when the machine
+boots.
 
-  Whole system      one file, 11-23 MB
-  RAM left after boot   480 MB free on a 512 MB board
-  Boot time         about 10 seconds to a prompt
-  Commands          103, all written here
-  SSH               built in, public key only
-  Python            CPython 3.12 + pip, manylinux wheels work
-  Firewall          on by default
-  Licence           MIT
+  Whole system            one file, 11-23 MB
+  RAM left after boot     480 MB free on a 512 MB board
+  Boot time               about 10 seconds to a prompt
+  Commands                103, every one written here
+  SSH                     built in, public key only
+  Python                  CPython 3.12 + pip, manylinux wheels work
+  Firewall                on by default
+  Licence                 MIT
 
-Only four things come from outside: the Broadcom GPU blob the
-Raspberry Pi boot ROM demands, and three cryptography
-implementations (dropbear, wpa_supplicant, OpenSSL). Cryptography
-is the one thing you should not write yourself.
+Four things come from outside: the Broadcom blob the Raspberry Pi
+GPU boot ROM insists on, and three cryptography implementations
+(dropbear, wpa_supplicant, OpenSSL). Cryptography is the one thing
+you should not write yourself, so it was deliberately borrowed.
+
+
+WHO WROTE IT
+------------
+All of it was written by Claude Code, Anthropic's coding agent,
+working from the repository owner's direction. That covers the
+kernel configuration, the C library, init, the shell, the 103
+commands, the build system, the self-test and the documentation.
+
+Two things follow from that, and both are worth knowing. The
+reasoning is unusually well recorded - the commit log explains why
+each change was made, and the comments say what was tried and what
+broke. And nobody independent has reviewed it, it has never run in
+production, and it has no track record. Read BEFORE YOU RELY ON
+THIS, further down, before you put it anywhere that matters.
+
+
+BEFORE YOU RELY ON THIS
+-----------------------
+None of this is a reason to avoid the system. All of it is a
+reason not to be surprised.
+
+  * It is a hobby operating system, not a supported product.
+    There is no security team, no CVE process, nobody on call.
+    For anything that has to keep working, use Raspberry Pi OS
+    Lite or Debian.
+
+  * Real hardware is not verified. Everything was tested in QEMU.
+    On a physical Pi Zero 2 W the WiFi association, the thermal
+    sensors and the hardware watchdog have not been confirmed.
+    Treat the arm64 image as untested on metal.
+
+  * The security work has not been audited. Update signature
+    checking, the firewall, the DNS and NTP hardening are all
+    implemented and all reasoned about in the comments - and none
+    of it has been reviewed by anybody else.
+
+  * The C library is ours and it is not complete. It covers what
+    the 103 commands need; anything else you compile against it
+    may reach for a function that is not there. Ordinary Linux
+    binaries run through the `run` command instead, against the
+    glibc that ships with Python.
+
+  * /data is the only thing that survives a reboot, and it is one
+    partition on one card. Cards die. Copy off anything you care
+    about.
+
+  * dd to the wrong device destroys that device. Check /dev/sdX
+    twice. It is the one mistake here that a reboot cannot undo.
+
+  * No GUI, a small package set, no containers.
+
+  * There are rough edges. A recent one: every message written
+    through our own logger was invisible to dmesg for months,
+    because a kmsg record with no trailing newline is a
+    continuation the kernel never finalises. It surfaced by
+    running the self-test end to end and asking why one check
+    failed. Expect more of that kind.
+
+What is verified: the amd64 image passes all 51 checks in
+tests/selftest.sh on real QEMU boots.
 
 
 WHICH IMAGE DO I WANT
 ---------------------
-Prebuilt images are in the dist/ folder of this branch.
+The prebuilt images are in dist/ on the main branch.
 
   dist/linux-LP_amd64.img.xz
-      A normal PC, or a desktop virtual machine - VMware,
+      An ordinary PC, or a desktop virtual machine - VMware,
       VirtualBox, QEMU/KVM, Hyper-V. UEFI boot.
 
   dist/test_a_123_LPzero2W_linux.img.xz
-      Raspberry Pi Zero 2 W hardware AND arm64 virtual machines.
-      One image does both: it carries the uncompressed kernel the
-      Pi's GPU reads and the EFI executable UEFI reads.
+      Raspberry Pi Zero 2 W hardware and arm64 virtual machines.
+      One image covers both, because it carries the uncompressed
+      kernel the Pi's GPU reads and the EFI executable UEFI reads.
 
   dist/test_a_123_LPzero2W_linux-utm.zip
       arm64 virtual machines only (UTM, UTM SE, QEMU). Smaller,
-      because a VM has no use for the GPU firmware.
+      since a VM has no use for the GPU firmware.
 
-Check what you downloaded against dist/SHA256SUMS.txt:
+Check what you downloaded before you use it:
 
   cd dist && sha256sum -c SHA256SUMS.txt
 
 
-RUN IT ON A RASPBERRY PI ZERO 2 W
----------------------------------
+ON A RASPBERRY PI ZERO 2 W
+--------------------------
   xz -d < dist/test_a_123_LPzero2W_linux.img.xz \
     | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
 
-Replace /dev/sdX with your card. Put the card in the board and
-power it up.
+Replace /dev/sdX with your card, and check it before you press
+return. Put the card in the board and power it up; /data grows to
+fill the card on the first boot.
 
 
-RUN IT IN A VIRTUAL MACHINE
----------------------------
+IN A VIRTUAL MACHINE
+--------------------
+Set the machine to UEFI boot. The MBR bootstrap is empty on
+purpose, so a legacy BIOS will not start it.
+
 amd64, QEMU:
 
   xz -d < dist/linux-LP_amd64.img.xz > lp.img
@@ -75,37 +140,40 @@ amd64, QEMU:
     -device virtio-net-pci,netdev=n0 -nographic
 
 arm64, UTM or UTM SE: unzip the -utm.zip and attach the .img
-inside it as the disk. UEFI boot, no other setting needed.
+inside it as the disk. Nothing else needs setting.
+
+To give it a bigger disk, truncate -s 16G the image file. It is
+sparse, so it only occupies what is written.
 
 
 LOGGING IN
 ----------
-There is one user: root.
+There is one user: root. On the screen or the serial console you
+get a prompt straight away.
 
-On the screen or serial console you get a prompt straight away.
+Over SSH there are no passwords. Password authentication is not
+compiled in at all - on a board facing the internet a password is
+only a matter of time, so it was never offered as an option.
+Public keys only:
 
-Over SSH there are no passwords - password authentication is not
-compiled in at all, because a password on a board facing the
-internet is only a matter of time. Public keys only:
+  1. The first partition of the card or image is FAT32, so it
+     opens on Windows, macOS and Linux. Put your public key into
+     a file called authorized_keys there:
 
- 1. The first partition of the card or image is FAT32, so it
-    opens on Windows, macOS and Linux. Put your public key in a
-    file called authorized_keys there:
+       cat ~/.ssh/id_ed25519.pub >> /media/BOOT/authorized_keys
 
-      cat ~/.ssh/id_ed25519.pub >> /media/BOOT/authorized_keys
+     While that file exists it is the master copy and overwrites
+     the device's own at every boot. That is deliberate: if /data
+     is destroyed you can still get in by pulling the card and
+     editing one file. Delete it from /boot if you would rather
+     manage keys on the machine.
 
-    While /boot/authorized_keys exists it is the master copy and
-    overwrites the one on the device at every boot. That is
-    deliberate: if /data is destroyed you can still get in by
-    pulling the card and editing this file. Delete it from /boot
-    if you would rather manage keys on the device.
+  2. Find the address with `ifconfig` on the console. DHCP is
+     automatic; for a fixed address write network.conf on the boot
+     partition.
 
- 2. Find the address with  ifconfig  on the console. DHCP is
-    automatic; for a fixed address write network.conf on the boot
-    partition.
-
- 3.  ssh root@192.168.0.42       (or  ssh -p 2222 root@localhost
-     with the QEMU line above)
+  3. ssh root@192.168.0.42
+     or, with the QEMU line above, ssh -p 2222 root@localhost
 
 If it will not connect:
 
@@ -117,33 +185,35 @@ If it will not connect:
 
 WHERE THE SOURCE IS
 -------------------
-All of it is on this branch. There are no per-architecture source
-trees: arm64 and amd64 build from the same code.
+All of it is on the main branch. There are no per-architecture
+source trees - arm64 and amd64 build from the same code.
 
-  userland/       our C library, init, shell and all 103 commands
-    libc/           the C library - no glibc, no musl
-    sh/             the shell
-    init/           pid 1
-    guard/          watchdog: CPU hogs, memory, temperature
-    <name>/         one directory per command
-    mkrootfs.sh     assembles the root filesystem
-  kernel/         kernel config and build script
-    lp-zero.config        arm64 (Raspberry Pi)
-    lp-zero-amd64.config  amd64 (PC)
-    build.sh              builds the kernel with our initramfs in it
-  tools/          image assembly, SDK, package builder, QEMU runner
-    mkdist.sh       builds all three distribution images
-    mksdcard.sh     assembles one card image
-    run-qemu.sh     boots it locally
-  tests/          selftest.sh - 51 checks, run on the machine
-  boot/           what lands on the FAT32 boot partition
-  packages/       package definitions
-  docs/           design notes
-  dist/           the prebuilt images described above
+  userland/     our C library, init, the shell, all 103 commands
+    libc/         the C library, straight on top of the syscalls
+    sh/           the shell
+    init/         pid 1
+    guard/        the watchdog daemon: CPU, memory, heat, power
+    <name>/       one directory per command
+    mkrootfs.sh   assembles the root filesystem
+  kernel/       kernel configuration and build script
+    lp-zero.config         arm64 (Raspberry Pi)
+    lp-zero-amd64.config   amd64 (PC)
+    build.sh               builds the kernel with our initramfs in it
+  tools/        image assembly, SDK, package builder, QEMU runner
+    mkdist.sh     builds all three distribution images
+    mksdcard.sh   assembles one card image
+    run-qemu.sh   boots it locally
+  tests/        selftest.sh - 51 checks that run on the machine
+  boot/         what lands on the FAT32 boot partition
+  packages/     package definitions
+  docs/         design notes
+  GUIDE/        this folder
+  dist/         the prebuilt images
 
-Read README.md at the top of the repository for the long version
-(in Korean): what every command does, why it does not fall over,
-the security model, and the known limits.
+README.en.md at the top of the repository is the long version in
+English: what every command does, why the system does not fall
+over, the security model, and the limits. README.md is the same
+document in Korean.
 
 
 BUILDING IT YOURSELF
@@ -175,8 +245,11 @@ All three distribution images at once:
 
   ./tools/mkdist.sh            # or: mkdist.sh amd64 | sd | utm
 
-Update signing key (do this once; never put the private key on a
-device - keys/ is in .gitignore):
+Intermediate build products go into .build/ beside the repository.
+Move them with LPZERO_WORK=/mnt/big/lpzero if the disk is tight.
+
+The update signing key, made once. Never put the private key on a
+device; keys/ is in .gitignore:
 
   ./tools/sign-release.sh --new-key
   make
@@ -186,7 +259,7 @@ device - keys/ is in .gitignore):
 CHECKING A BUILD
 ----------------
 tests/selftest.sh runs on the machine itself and prints one PASS
-or FAIL line per check - boot, storage, SSH, Python, graphics,
+or FAIL line per check: boot, storage, SSH, Python, graphics,
 security, error paths, redirection, logging, timing, and whether
 the watchdog notices a process pinning a core.
 
@@ -196,15 +269,15 @@ the watchdog notices a process pinning a core.
 
 
 ================================================================
- 한국어
+  한국어
 ================================================================
 
 이게 뭔가
 ---------
-처음부터 직접 만든 아주 작은 리눅스 배포판입니다. 커널 설정,
-C 라이브러리, init, 셸, 103개 명령어까지 전부 자체 코드입니다.
-커널 이미지 하나가 곧 시스템 전체이고, 유저랜드는 그 안에 들어
-있다가 부팅할 때 램으로 풀립니다.
+처음부터 직접 만든 작은 리눅스 배포판입니다. 커널 설정, C 라이브러리,
+init, 셸, 103개 명령어가 전부 자체 코드입니다. 커널 이미지 하나가
+곧 시스템 전체이고, 유저랜드는 그 안에 들어 있다가 부팅할 때 램으로
+풀립니다.
 
   시스템 전체        파일 하나, 11~23MB
   부팅 후 남는 램    512MB 보드에서 480MB
@@ -215,45 +288,105 @@ C 라이브러리, init, 셸, 103개 명령어까지 전부 자체 코드입니�
   방화벽             기본 켜짐
   라이선스           MIT
 
-외부에서 가져온 것은 네 개뿐입니다. 라즈베리파이 부트롬이 요구하는
-Broadcom GPU 블롭, 그리고 암호 구현 세 개(dropbear, wpa_supplicant,
+외부에서 가져온 것은 네 개뿐입니다. 라즈베리파이 GPU 부트롬이 요구하는
+Broadcom 블롭, 그리고 암호 구현 세 개(dropbear, wpa_supplicant,
 OpenSSL)입니다. 암호는 직접 만들면 안 되는 물건이라 일부러 가져다
 썼습니다.
 
 
+누가 만들었나
+-------------
+전부 Anthropic 의 코딩 에이전트인 Claude Code 가 썼습니다. 저장소
+주인의 지시를 받아 작업했고, 커널 설정부터 C 라이브러리, init, 셸,
+103개 명령어, 빌드 시스템, 셀프테스트, 문서까지 전부 해당됩니다.
+
+여기서 따라오는 것이 두 가지 있고, 둘 다 알아두실 만합니다. 하나는
+근거가 유난히 잘 남아 있다는 점입니다. 커밋 로그가 각 변경을 왜 했는지
+설명하는 글이고, 주석에는 무엇을 시도했고 무엇이 깨졌는지가 적혀
+있습니다. 다른 하나는, 독립적인 검토를 받은 적이 없고 실제 운영에
+쓰인 적도 없어 쌓아온 실적이 없다는 점입니다. 중요한 자리에 올리기
+전에 아래 "믿고 쓰기 전에"를 읽어보세요.
+
+
+믿고 쓰기 전에
+--------------
+어느 것도 "그러니 쓰지 마세요"는 아닙니다. 전부 "그러니 놀라지
+마세요"에 가깝습니다.
+
+  * 지원되는 제품이 아니라 취미로 만든 운영체제입니다. 보안팀도,
+    CVE 절차도, 대기하는 사람도 없습니다. 계속 돌아가야만 하는
+    일에는 Raspberry Pi OS Lite 나 데비안을 쓰세요.
+
+  * 실기기 검증이 아직입니다. 전부 QEMU 에서 시험했습니다.
+    라즈베리파이 실물에서의 WiFi 연결, 온도 센서, 하드웨어 워치독은
+    아직 확인하지 못했습니다. arm64 이미지는 실기 미검증이라고
+    보시면 됩니다.
+
+  * 보안 부분은 외부 감사를 받지 않았습니다. 업데이트 서명 검증,
+    방화벽, DNS·NTP 위조 방지가 전부 구현돼 있고 주석에 근거도 적혀
+    있지만, 다른 사람이 검토한 적은 없습니다.
+
+  * C 라이브러리가 자체 구현이고 완전하지 않습니다. 103개 명령어에
+    필요한 만큼만 들어 있어서, 그 밖의 것을 이 libc 로 컴파일하면
+    없는 함수를 만날 수 있습니다. 일반 리눅스 바이너리는 `run`
+    명령으로, 파이썬과 함께 들어 있는 glibc 위에서 돕니다.
+
+  * 재부팅을 넘겨 남는 곳은 /data 하나뿐이고, 그건 카드 한 장의
+    파티션 하나입니다. 카드는 죽습니다. 아까운 것은 따로 받아두세요.
+
+  * dd 를 엉뚱한 장치에 하면 그 장치가 사라집니다. /dev/sdX 를 두 번
+    확인하세요. 여기서 재부팅으로 되돌릴 수 없는 실수는 이것뿐입니다.
+
+  * GUI 없음, 패키지 적음, 컨테이너 안 됨.
+
+  * 거친 구석이 남아 있습니다. 최근 사례 하나: 자체 로거로 남긴 모든
+    메시지가 dmesg 에 몇 달 동안 보이지 않았습니다. 개행으로 끝나지
+    않는 kmsg 레코드는 커널이 확정하지 않는 continuation 이기
+    때문입니다. 셀프테스트를 끝까지 돌려보고 검사 하나가 왜
+    실패하는지 물은 끝에 찾았습니다. 이런 것이 더 나올 거라고
+    보시면 됩니다.
+
+확인된 것은 이렇습니다. amd64 이미지가 QEMU 실제 부팅에서
+tests/selftest.sh 의 51개 검사를 전부 통과합니다.
+
+
 어느 이미지를 받아야 하나
 -------------------------
-미리 빌드된 이미지는 이 브랜치의 dist/ 폴더에 있습니다.
+미리 빌드된 이미지는 main 브랜치의 dist/ 폴더에 있습니다.
 
   dist/linux-LP_amd64.img.xz
       일반 PC, 데스크톱 가상머신(VMware, VirtualBox, QEMU/KVM,
       Hyper-V). UEFI 부팅입니다.
 
   dist/test_a_123_LPzero2W_linux.img.xz
-      라즈베리파이 제로 2 W 실기와 arm64 가상머신 둘 다.
-      이미지 하나가 둘을 모두 지원합니다. 파이 GPU가 읽는 압축
-      안 된 커널과 UEFI가 읽는 EFI 실행 파일을 둘 다 담았습니다.
+      라즈베리파이 제로 2 W 실기와 arm64 가상머신. 이미지 하나가
+      둘을 모두 지원합니다. 파이 GPU 가 읽는 압축 안 된 커널과
+      UEFI 가 읽는 EFI 실행 파일을 둘 다 담았기 때문입니다.
 
   dist/test_a_123_LPzero2W_linux-utm.zip
-      arm64 가상머신 전용(UTM, UTM SE, QEMU). GPU 펌웨어가
-      필요 없어서 더 작습니다.
+      arm64 가상머신 전용(UTM, UTM SE, QEMU). GPU 펌웨어가 필요
+      없어서 더 작습니다.
 
-받은 파일은 dist/SHA256SUMS.txt 로 확인하세요.
+쓰기 전에 받은 파일을 확인하세요.
 
   cd dist && sha256sum -c SHA256SUMS.txt
 
 
-라즈베리파이 제로 2 W 에서 쓰기
--------------------------------
+라즈베리파이 제로 2 W 에서
+--------------------------
   xz -d < dist/test_a_123_LPzero2W_linux.img.xz \
     | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
 
-/dev/sdX 는 본인 카드로 바꾸세요. 카드를 보드에 꽂고 전원을 넣으면
-됩니다.
+/dev/sdX 는 본인 카드로 바꾸고, 엔터를 치기 전에 한 번 더
+확인하세요. 카드를 보드에 꽂고 전원을 넣으면 됩니다. 첫 부팅에
+/data 가 카드 전체로 늘어납니다.
 
 
-가상머신에서 쓰기
------------------
+가상머신에서
+------------
+UEFI 부팅으로 설정하세요. MBR 부트스트랩은 일부러 비워두었기 때문에
+legacy BIOS 로는 뜨지 않습니다.
+
 amd64, QEMU:
 
   xz -d < dist/linux-LP_amd64.img.xz > lp.img
@@ -263,36 +396,38 @@ amd64, QEMU:
     -device virtio-net-pci,netdev=n0 -nographic
 
 arm64, UTM 또는 UTM SE: -utm.zip 을 풀고 안에 있는 .img 를 디스크로
-붙이면 됩니다. UEFI 부팅이고 따로 설정할 것이 없습니다.
+붙이면 됩니다. 그 밖에 설정할 것은 없습니다.
+
+디스크를 키우려면 이미지 파일을 truncate -s 16G 하면 됩니다. 파일이
+sparse 라서 실제로 쓰는 만큼만 차지합니다.
 
 
 로그인
 ------
-사용자는 root 하나입니다.
-
-화면이나 시리얼 콘솔에서는 바로 프롬프트가 나옵니다.
+사용자는 root 하나입니다. 화면이나 시리얼 콘솔에서는 바로 프롬프트가
+나옵니다.
 
 SSH 는 비밀번호가 없습니다. 비밀번호 인증은 아예 컴파일하지
-않았습니다. 인터넷에 물린 보드에서 비밀번호는 시간 문제이기
-때문입니다. 공개키만 씁니다.
+않았습니다. 인터넷에 물린 보드에서 비밀번호는 시간 문제라서 선택지로
+두지 않았습니다. 공개키만 씁니다.
 
- 1. 카드(또는 이미지)의 첫 번째 파티션은 FAT32 라서 윈도우, 맥,
-    리눅스 어디서나 열립니다. 거기 authorized_keys 파일에 공개키를
-    넣으세요.
+  1. 카드(또는 이미지)의 첫 번째 파티션은 FAT32 라서 윈도우, 맥,
+     리눅스 어디서나 열립니다. 거기 authorized_keys 파일에 공개키를
+     넣으세요.
 
-      cat ~/.ssh/id_ed25519.pub >> /media/BOOT/authorized_keys
+       cat ~/.ssh/id_ed25519.pub >> /media/BOOT/authorized_keys
 
-    /boot/authorized_keys 가 있는 동안은 그쪽이 원본이고, 부팅할
-    때마다 기기 안의 것을 덮어씁니다. 일부러 그렇게 했습니다.
-    /data 가 망가져도 카드만 뽑아서 열쇠를 다시 넣으면 들어갈 수
-    있어야 하기 때문입니다. 기기에서 관리하고 싶으면 /boot 에서
-    그 파일을 지우세요.
+     이 파일이 있는 동안은 그쪽이 원본이고, 부팅할 때마다 기기 안의
+     것을 덮어씁니다. 일부러 그렇게 했습니다. /data 가 망가져도
+     카드만 뽑아서 파일 하나 고치면 들어갈 수 있어야 하기
+     때문입니다. 기기에서 관리하고 싶으면 /boot 에서 그 파일을
+     지우세요.
 
- 2. 콘솔에서 ifconfig 로 주소를 확인합니다. DHCP 는 자동입니다.
-    고정 주소를 쓰려면 부트 파티션에 network.conf 를 두세요.
+  2. 콘솔에서 ifconfig 로 주소를 확인합니다. DHCP 는 자동이고,
+     고정 주소를 쓰려면 부트 파티션에 network.conf 를 두세요.
 
- 3.  ssh root@192.168.0.42     (위 QEMU 설정이면
-     ssh -p 2222 root@localhost)
+  3. ssh root@192.168.0.42
+     위 QEMU 설정이면 ssh -p 2222 root@localhost
 
 안 될 때:
 
@@ -304,33 +439,34 @@ SSH 는 비밀번호가 없습니다. 비밀번호 인증은 아예 컴파일하
 
 소스는 어디에 있나
 ------------------
-전부 이 브랜치에 있습니다. 아키텍처별로 소스를 나누지 않았습니다.
+전부 main 브랜치에 있습니다. 아키텍처별로 소스를 나누지 않았습니다.
 arm64 와 amd64 가 같은 코드로 빌드됩니다.
 
-  userland/       자체 C 라이브러리, init, 셸, 103개 명령어
-    libc/           C 라이브러리. glibc 도 musl 도 안 씁니다
-    sh/             셸
-    init/           pid 1
-    guard/          워치독. CPU 점유, 메모리, 온도
-    <이름>/         명령어 하나당 디렉터리 하나
-    mkrootfs.sh     루트 파일시스템 조립
-  kernel/         커널 설정과 빌드 스크립트
-    lp-zero.config        arm64 (라즈베리파이)
-    lp-zero-amd64.config  amd64 (PC)
-    build.sh              initramfs 를 넣어 커널을 빌드
-  tools/          이미지 조립, SDK, 패키지 빌더, QEMU 실행
-    mkdist.sh       배포 이미지 세 개를 한 번에
-    mksdcard.sh     카드 이미지 하나 조립
-    run-qemu.sh     로컬에서 부팅
-  tests/          selftest.sh - 기기에서 도는 51개 검사
-  boot/           FAT32 부트 파티션에 들어가는 것
-  packages/       패키지 정의
-  docs/           설계 메모
-  dist/           위에서 설명한 미리 빌드된 이미지
+  userland/     자체 C 라이브러리, init, 셸, 103개 명령어
+    libc/         C 라이브러리. 시스템 콜 위에 바로 올렸습니다
+    sh/           셸
+    init/         pid 1
+    guard/        감시 데몬. CPU, 메모리, 온도, 전압
+    <이름>/       명령어 하나당 디렉터리 하나
+    mkrootfs.sh   루트 파일시스템 조립
+  kernel/       커널 설정과 빌드 스크립트
+    lp-zero.config         arm64 (라즈베리파이)
+    lp-zero-amd64.config   amd64 (PC)
+    build.sh               initramfs 를 넣어 커널을 빌드
+  tools/        이미지 조립, SDK, 패키지 빌더, QEMU 실행
+    mkdist.sh     배포 이미지 세 개를 한 번에
+    mksdcard.sh   카드 이미지 하나 조립
+    run-qemu.sh   로컬에서 부팅
+  tests/        selftest.sh - 기기에서 도는 51개 검사
+  boot/         FAT32 부트 파티션에 들어가는 것
+  packages/     패키지 정의
+  docs/         설계 메모
+  GUIDE/        이 폴더
+  dist/         미리 빌드된 이미지
 
-저장소 최상위의 README.md 에 훨씬 자세한 설명이 있습니다. 명령어
-하나하나가 무엇을 하는지, 왜 안 죽는지, 보안 모델, 알려진 한계까지
-들어 있습니다.
+저장소 최상위의 README.md 가 긴 설명입니다. 명령어 하나하나가 무엇을
+하는지, 왜 안 죽는지, 보안 모델, 알려진 한계까지 들어 있습니다.
+같은 문서의 영어판이 README.en.md 입니다.
 
 
 직접 빌드하기
@@ -362,8 +498,11 @@ amd64 (PC) - 네이티브라 크로스 컴파일러가 필요 없습니다:
 
   ./tools/mkdist.sh            # 또는: mkdist.sh amd64 | sd | utm
 
-업데이트 서명 키(한 번만 만들면 됩니다. 개인키는 절대 기기에 넣지
-마세요. keys/ 는 .gitignore 에 있습니다):
+빌드 중간 산출물은 저장소 옆 .build/ 에 쌓입니다. 디스크가 좁으면
+LPZERO_WORK=/mnt/big/lpzero 로 옮길 수 있습니다.
+
+업데이트 서명 키는 한 번만 만들면 됩니다. 개인키는 절대 기기에 넣지
+마세요. keys/ 는 .gitignore 에 있습니다.
 
   ./tools/sign-release.sh --new-key
   make
