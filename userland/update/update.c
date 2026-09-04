@@ -43,6 +43,7 @@
  */
 #include "types.h"
 #include "string.h"
+#include "rsa.h"
 #include "stdio.h"
 #include "stdlib.h"
 #include "unistd.h"
@@ -58,6 +59,8 @@
 
 /* A system image is the kernel plus the whole userland. Below the first
  * figure it cannot be one; above the second something is wrong. */
+#define PUBKEY      "/etc/update-key.pub"
+#define STAGING_SIG "/data/.update.sig"
 #define MIN_IMAGE   (4UL  * 1048576)
 #define MAX_IMAGE   (64UL * 1048576)
 
@@ -111,6 +114,106 @@ static bool active_image(char *out, size_t n)
  * PE header, and every arm64 Image has "ARM\x64" at offset 0x38. Either
  * one is proof this is a kernel rather than half a download or an
  * HTML error page that got saved with the wrong name. */
+/* Turn 64 hex characters into 32 bytes. */
+static bool hex_to_bytes(const char *hex, u8 *out, int nbytes)
+{
+    for (int i = 0; i < nbytes; i++) {
+        int v = 0;
+        for (int k = 0; k < 2; k++) {
+            char c = hex[i * 2 + k];
+            int  d;
+            if      (c >= '0' && c <= '9') d = c - '0';
+            else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+            else return false;
+            v = v * 16 + d;
+        }
+        out[i] = (u8)v;
+    }
+    return true;
+}
+
+/* Is this image signed by whoever built the running system?
+ *
+ * The signature travels beside the image as <name>.sig - 256 raw bytes,
+ * downloaded by the caller into STAGING_SIG. Returns false unless
+ * everything lines up, and says which part did not. */
+static bool check_signature(const char *image, const char *hash_hex,
+                            bool caller_gave_a_hash)
+{
+    (void)image;
+
+    u8 key[RSA2048_BYTES];
+    long kfd = lp_open(PUBKEY, O_RDONLY, 0);
+    if (kfd < 0) {
+        /* No key in this image: it was not built by anyone who signs.
+         * Fall back to the hash the person typed, and be plain that
+         * this is trust in them and not in the image. */
+        if (caller_gave_a_hash) {
+            printf("update: this system has no update key, so the image"
+                   " is trusted because\n"
+                   "update:   you gave its hash - not because it is"
+                   " signed.\n");
+            return true;
+        }
+        dprintf(STDERR_FILENO,
+                "update: ** this system has no update key (%s), so it"
+                " cannot tell\n"
+                "update:    who made this image.\n"
+                "update:    Check the hash yourself and pass it:"
+                " update --sha256 <hash> <url>\n", PUBKEY);
+        return false;
+    }
+
+    long kn = lp_read((int)kfd, key, sizeof key);
+    lp_close((int)kfd);
+    if (kn != (long)sizeof key) {
+        dprintf(STDERR_FILENO,
+                "update: ** %s is %ld bytes, not %d - the key is"
+                " damaged.\n", PUBKEY, kn, RSA2048_BYTES);
+        return false;
+    }
+
+    u8 sig[RSA2048_BYTES];
+    long sfd = lp_open(STAGING_SIG, O_RDONLY, 0);
+    if (sfd < 0) {
+        dprintf(STDERR_FILENO,
+                "update: ** the image is not signed.\n"
+                "update:    This system only installs images signed by"
+                " whoever built it.\n"
+                "update:    The signature goes beside the image, named"
+                " the same with .sig on the end.\n");
+        return false;
+    }
+    long sn = lp_read((int)sfd, sig, sizeof sig);
+    lp_close((int)sfd);
+    if (sn != (long)sizeof sig) {
+        dprintf(STDERR_FILENO,
+                "update: ** the signature is %ld bytes, not %d.\n",
+                sn, RSA2048_BYTES);
+        return false;
+    }
+
+    u8 digest[32];
+    if (!hex_to_bytes(hash_hex, digest, 32)) {
+        dprintf(STDERR_FILENO, "update: ** cannot read the image hash\n");
+        return false;
+    }
+
+    if (!lp_rsa2048_verify(key, sig, digest)) {
+        dprintf(STDERR_FILENO,
+                "update: ** the signature does not match this image.\n"
+                "update:    Either it was not made by whoever built this"
+                " system, or the\n"
+                "update:    image was changed after it was signed."
+                " Nothing was installed.\n");
+        return false;
+    }
+
+    printf("update: signature checked\n");
+    return true;
+}
+
 static bool looks_like_a_kernel(const char *path, u64 *size_out)
 {
     lp_stat_t st;
@@ -357,6 +460,14 @@ static int install(const char *source, const char *want_hash)
             boot_ro();
             return 1;
         }
+
+        /* And the signature beside it. A missing one is not an error
+         * here - check_signature decides what to do about it, because
+         * it is the piece that knows whether this system has a key. */
+        char sigurl[512];
+        snprintf(sigurl, sizeof sigurl, "%s.sig", source);
+        lp_unlink(STAGING_SIG);
+        net_http_get(sigurl, STAGING_SIG);
     } else {
         if (!lp_exists(source)) {
             dprintf(STDERR_FILENO, "update: %s is not there\n", source);
@@ -369,6 +480,17 @@ static int install(const char *source, const char *want_hash)
         if (!copy_file(source, STAGING, st.size)) {
             boot_ro();
             return 1;
+        }
+
+        /* The signature sits beside it under the same name with .sig
+         * on the end. Copy it where check_signature looks. */
+        char sigpath[512];
+        snprintf(sigpath, sizeof sigpath, "%s.sig", source);
+        lp_unlink(STAGING_SIG);
+        if (lp_exists(sigpath)) {
+            lp_stat_t ss;
+            if (lp_stat(sigpath, &ss, true) == 0)
+                copy_file(sigpath, STAGING_SIG, ss.size);
         }
     }
 
@@ -391,6 +513,30 @@ static int install(const char *source, const char *want_hash)
         return 1;
     }
 
+    /* ── The signature ──
+     *
+     * Everything above this point says the transfer worked. None of it
+     * says who wrote the file. Until this existed, anyone who could
+     * answer for the update URL - a hostile DNS reply, a machine on the
+     * same network, the server itself - could hand this board a kernel
+     * of their choosing, and it would install it and reboot into it.
+     *
+     * The public key lives in the initramfs, so it is part of the image
+     * that is running and cannot be edited on the card. If it is there,
+     * a signature is required: an image without one is refused. An
+     * image built by somebody else, with no key baked in, falls through
+     * to the --sha256 route and says clearly that it is trusting the
+     * person typing.
+     *
+     * There is no flag to skip this. A check with a way around it is a
+     * check nobody has, because the way around it is what ends up in
+     * the instructions somebody follows at two in the morning. */
+    if (!check_signature(STAGING, got, want_hash != NULL)) {
+        lp_unlink(STAGING);
+        boot_ro();
+        return 1;
+    }
+
     if (want_hash) {
         if (strcmp(want_hash, got) != 0) {
             dprintf(STDERR_FILENO,
@@ -405,9 +551,21 @@ static int install(const char *source, const char *want_hash)
         printf("update: hash matches\n");
     } else {
         printf("update: %s\n", got);
-        printf("update:   no --sha256 given, so this was not checked against\n");
-        printf("update:   anything. It is an arm64 kernel of a plausible size\n");
-        printf("update:   and that is all that is known about it.\n");
+        /* Only say this where it is true. With a key baked in, the
+         * signature has already established who made the image, and
+         * repeating "nothing is known about it" would be both wrong and
+         * the kind of wrong that teaches people to ignore warnings. */
+        if (!lp_exists(PUBKEY)) {
+            printf("update:   no --sha256 given and this system has no"
+                   " update key, so nothing\n");
+            printf("update:   was checked. It is an arm64 kernel of a"
+                   " plausible size and that\n");
+            printf("update:   is all that is known about it.\n");
+        } else {
+            printf("update:   signed by whoever built this system."
+                   " Pass --sha256 as well if\n");
+            printf("update:   you want to pin one exact image.\n");
+        }
     }
 
     char sz[12];

@@ -49,6 +49,24 @@ echo "rootfs 조립 중..."
 rm -rf "$ROOT_DIR"
 mkdir -p "$ROOT_DIR"/{bin,sbin,opt,srv,dev/pts,proc,sys,tmp,etc,root/.ssh,data,var/run,lib/firmware/brcm,usr/local/bin,usr/bin,usr/sbin,usr/lib}
 
+# The key that says an update is genuine.
+#
+# Public half only: the board checks signatures and cannot make one.
+# It goes in the initramfs rather than on the card so that it is part of
+# the running image - a key on a filesystem anyone can edit is not a key,
+# it is a suggestion.
+#
+# An image built without keys/update-key.pub has no key at all, and
+# `update` then refuses to install anything unless the person running it
+# passes the hash themselves. That is the right default for somebody
+# else's build: it cannot be signed by us, so it should not claim to be.
+if [ -f "${REPO_ROOT}/keys/update-key.pub" ]; then
+    cp "${REPO_ROOT}/keys/update-key.pub" "$ROOT_DIR/etc/update-key.pub"
+    echo "  update key: $(wc -c < "$ROOT_DIR/etc/update-key.pub") bytes"
+else
+    echo "  update key: none - this image will refuse unsigned updates"
+fi
+
 # ── 우리 프로그램 ────────────────────────────────────────────────
 for p in "${PROGRAMS[@]}"; do
     cp "${BIN_DIR}/${p}" "${ROOT_DIR}/bin/${p}"
