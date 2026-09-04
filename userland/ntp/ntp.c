@@ -183,6 +183,7 @@ static void report(s64 t)
  * We also resync from the network hourly. Save-and-restore alone falls
  * behind by however long the machine was off. */
 #define SAVE_EVERY_SEC   30
+#define RETRY_AFTER_SEC   60   /* try again a minute after a failure */
 #define RESYNC_EVERY_SEC 3600
 
 static int run_daemon(const char **servers)
@@ -201,15 +202,32 @@ static int run_daemon(const char **servers)
             save_clock(now);
 
         if (now - last_sync >= RESYNC_EVERY_SEC || last_sync == 0) {
+            bool got_it = false;
             for (int i = 0; servers[i]; i++) {
                 s64 t = query_ntp_quiet(servers[i]);
                 if (t >= SANITY_MIN && t <= SANITY_MAX) {
                     if (lp_settime(t) == 0)
                         save_clock(t);
+                    got_it = true;
                     break;
                 }
             }
-            last_sync = lp_time();
+
+            /* A failed attempt must not count as a sync.
+             *
+             * last_sync was set either way, so the first try - which on
+             * a first boot happens seconds after init starts, before
+             * WiFi has associated - failed and then booked itself an
+             * hour of silence. The board ran that whole hour believing
+             * it was 1970: every HTTPS certificate outside its validity
+             * window, pkg and python failing on dates, every log line
+             * stamped wrong, and nothing said why.
+             *
+             * On failure, come back in a minute instead. */
+            if (got_it)
+                last_sync = lp_time();
+            else
+                last_sync = lp_time() - RESYNC_EVERY_SEC + RETRY_AFTER_SEC;
         }
 
         lp_sleep_ms(SAVE_EVERY_SEC * 1000);

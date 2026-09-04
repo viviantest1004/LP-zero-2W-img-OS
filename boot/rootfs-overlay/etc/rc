@@ -349,11 +349,20 @@ echo "[rc] network address"
 # a fixed address is then the only way the board is reachable.
 ipconfig /boot/network.conf || echo "[rc]   no static address configured"
 
-echo "[rc] requesting an address"
-#   wlan0  WiFi
-#   eth0   USB Ethernet adapter (host mode)
-#   usb0   USB gadget - when plugged into a PC
-dhcp wlan0 || dhcp eth0 || dhcp usb0 || echo "[rc]   got no address"
+# No DHCP here any more, and no ntp below.
+#
+# Both used to run at this point, when wpa_supplicant was also started
+# from rc a few lines above. wpa_supplicant is a supervised service now,
+# which means it starts after rc has finished - so this line was asking
+# for an address over a radio that had not been switched on yet. It
+# could not succeed, and it was not free: four DISCOVERs with a
+# three-second timeout each, then eth0 and usb0 failing instantly
+# because this board has neither. Twelve seconds of every boot, spent
+# proving that WiFi was not up.
+#
+# `dhcp -d` and `ntp -d` are services, they retry, and they bring the
+# interface up themselves. The address arrives a few seconds after rc
+# instead of during it. Nothing else in rc needs the network.
 
 echo "[rc] the firewall"
 # Applied after the address is up and before rc.local, so anything the
@@ -366,10 +375,7 @@ echo "[rc] the firewall"
 # SSH open is not. A failure leaves no rules rather than half of them.
 firewall boot || echo "[rc]   no firewall - every port is open"
 
-echo "[rc] setting the time"
-# HTTPS depends on this. The boot carries on either way, but with the
-# clock wrong Python's certificate checks will fail.
-ntp || echo "[rc]   no time from the network - HTTPS certificate checks may fail"
+# (the time is set by the ntp service, for the reason above)
 
 # A user startup script. If it is on the data partition, run it.
 # This is the place to add things without burning the card again.
@@ -380,8 +386,21 @@ ntp || echo "[rc]   no time from the network - HTTPS certificate checks may fail
 # there is never a window to log in and fix the file. So after five boots
 # that did not last five minutes, bootcount fails here and the script is
 # skipped - the machine comes up plain and reachable.
+# It runs in the BACKGROUND, and that is not a detail.
+#
+# The shell's `while` loop used to stop itself after a million rounds.
+# That was removed so a supervision loop could run for months - and it
+# turned this line into a way to brick the board. rc runs synchronously,
+# so a `while` loop here never returns; and because rc has to finish
+# before init starts anything, a loop in rc.local meant no guard, no
+# dropbear, no WiFi and no console shell, on a board with no way in.
+# Ctrl-C does not help either: this shell is init's child, with no
+# controlling terminal, so no key reaches it.
+#
+# In the background it cannot hold the boot up. A runaway there is then
+# an ordinary runaway, which is guard's job and which guard can see.
 # (sh -q: stay quiet when the file is not there)
-bootcount && sh -q /data/rc.local
+bootcount && sh -q /data/rc.local &
 
 echo "[rc] checking what survived the reboot"
 # The root filesystem is inside the kernel image and unpacked into RAM

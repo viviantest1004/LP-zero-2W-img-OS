@@ -186,6 +186,7 @@ typedef struct {
                                        a service that ran for a week */
     bool   given_up;                /* failed too often; not tried again */
     bool   was_off;                 /* it was in the disabled list last look */
+    bool   off_refused;             /* said once: critical, listed, started anyway */
 } service_t;
 
 static service_t services[MAX_SERVICES];
@@ -572,9 +573,37 @@ static void restart_due_services(void)
     for (int i = 0; i < nservices; i++) {
         service_t *s = &services[i];
 
+        /* ── Why is_critical() is checked HERE and not in `service` ──
+         *
+         * `service stop guard` refuses without --force. That check lives
+         * in the service program, which is the wrong process for it:
+         * the file it guards is an ordinary line of text in /data, and
+         * anything that can write a file can append to it. Two commands
+         * -   echo guard >> /data/services.disabled
+         *     kill guard
+         * - reproduced exactly the failure the supervision was added to
+         * stop, and left guard down for the rest of the uptime.
+         *
+         * A refusal is only real where the decision is made. init is the
+         * only reader that acts on this file, so the answer belongs
+         * here: the three services the board cannot defend itself
+         * without are restarted whatever the file says. `service` still
+         * asks for --force, but that is now a courtesy to the person
+         * typing, not the enforcement. */
         if (service_disabled(s->argv[0])) {
-            s->was_off = true;
-            continue;                   /* somebody turned it off */
+            if (!is_critical(s->argv[0])) {
+                s->was_off = true;
+                continue;               /* somebody turned it off */
+            }
+            if (!s->off_refused) {
+                s->off_refused = true;
+                printf("init: %s is listed in %s, but it is one of the"
+                       " services this board cannot defend itself"
+                       " without.\n"
+                       "init:   Starting it anyway. Remove the line to"
+                       " stop seeing this.\n",
+                       s->argv[0], DISABLED_FILE);
+            }
         }
 
         /* Coming back from being turned off clears the failure history.

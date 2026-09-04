@@ -2522,11 +2522,30 @@ int main(int argc, char **argv)
         static block_line_t cblock[MAX_BLOCK];
         int  cn = 0;
 
+        /* Refuse a command that does not fit, rather than running the
+         * part of it that does.
+         *
+         * strlcpy truncates, and the cut lands wherever byte 1023 falls
+         * - mid-word, mid-path, inside a quote. `rm -rf .../run-37/data`
+         * becomes `rm -rf .../run-` and removes a parent directory;
+         * `echo ... > /data/report.new` becomes `> /data/report` and
+         * truncates the wrong file. And `sh -c` is what system(),
+         * popen() and python's subprocess(shell=True) call, which build
+         * their command strings by concatenation - a kilobyte is one
+         * `find` result away. Doing part of a destructive command is
+         * the worst of the available outcomes. */
         char work[MAX_LINE];
-        strlcpy(work, argv[first + 1], sizeof work);
+        if (strlcpy(work, argv[first + 1], sizeof work) >= sizeof work) {
+            dprintf(STDERR_FILENO,
+                    "sh: -c: command is longer than %d bytes - refusing to"
+                    " run part of it\n", MAX_LINE - 1);
+            return 2;
+        }
 
         char *p = work;
-        while (p && *p && cn < MAX_BLOCK) {
+        bool too_many = false;
+        while (p && *p) {
+            if (cn >= MAX_BLOCK) { too_many = true; break; }
             char *eol = strchr(p, '\n');
             if (eol) *eol = '\0';
 
@@ -2534,6 +2553,17 @@ int main(int argc, char **argv)
                 cn += split_statements(p, cblock + cn, MAX_BLOCK - cn);
 
             p = eol ? eol + 1 : NULL;
+        }
+
+        /* Same reasoning as the length check: running the first 256
+         * statements of a script and reporting the last one's status -
+         * normally success - hides the fact that the cleanup at the end
+         * never ran. */
+        if (too_many) {
+            dprintf(STDERR_FILENO,
+                    "sh: -c: more than %d statements - refusing to run"
+                    " part of it\n", MAX_BLOCK);
+            return 2;
         }
 
         exec_block(cblock, cn);

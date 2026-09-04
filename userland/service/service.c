@@ -58,6 +58,20 @@ static void load(void)
         if (!*p || *p == '#')
             continue;
 
+        /* A line may open with "?<path>", meaning init only starts it
+         * where that path exists. Skip the condition before taking the
+         * name, or the service is called "?/sys/class/net/wlan0" and
+         * every command that takes a name stops working for it. That is
+         * how `service restart wpa_supplicant` came to answer "not in
+         * /etc/services" - on a board where WiFi is the only way in,
+         * and restarting it is the first thing you reach for. */
+        if (*p == '?') {
+            while (*p && *p != ' ' && *p != '\t') p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p)
+                continue;              /* a condition and nothing else */
+        }
+
         strlcpy(lines[nservices], p, sizeof lines[0]);
 
         char *end = p;
