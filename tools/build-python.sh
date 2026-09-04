@@ -226,6 +226,15 @@ if [[ ! -f Makefile ]]; then
     # 순서가 맞는다.
 
 
+    # -D_GNU_SOURCE, explicitly.
+    #
+    # CPython builds with -std=c11, which is the STRICT standard: glibc
+    # then hides everything POSIX adds, including stack_t, dev_t and
+    # ino_t, and the build stops with "unknown type name" in its own
+    # headers. configure normally works out that it needs _GNU_SOURCE
+    # and writes it into pyconfig.h; on a fresh cross-configure here it
+    # decided otherwise, and the failure names types rather than the
+    # missing feature macro, which is a long way from the cause.
     ./configure \
         --host=${HOST_TRIPLE} \
         --build=${BUILD_TRIPLE} \
@@ -245,8 +254,8 @@ if [[ ! -f Makefile ]]; then
         AR="${CROSS}ar" \
         RANLIB="${CROSS}ranlib" \
         READELF="${CROSS}readelf" \
-        CFLAGS="-Os -fno-semantic-interposition -I${SYSROOT}/include" \
-        CPPFLAGS="-I${SYSROOT}/include" \
+        CFLAGS="-D_GNU_SOURCE -Os -fno-semantic-interposition -I${SYSROOT}/include" \
+        CPPFLAGS="-D_GNU_SOURCE -I${SYSROOT}/include" \
         LDFLAGS="$LINK_FLAGS" \
         LIBFFI_INCLUDEDIR="${SYSROOT}/include" \
         LIBREADLINE_CFLAGS="-I${SYSROOT}/include -I${SYSROOT}/include/ncursesw" \

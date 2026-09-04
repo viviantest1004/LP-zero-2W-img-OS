@@ -51,8 +51,22 @@ fi
 
 echo "=== GRAPHICS AND INPUT (what a UI package needs) ==="
 if test -d /sys/class/drm ; then echo "PASS  DRM present: `ls /sys/class/drm | wc -l` nodes" ; else echo "FAIL  no DRM - no UI package can work" ; fi
-if test -e /dev/dri/card0 ; then echo "PASS  /dev/dri/card0 exists" ; else echo "FAIL  /dev/dri/card0 missing" ; fi
-if ls /sys/class/input | grep -q event ; then echo "PASS  input event devices exist" ; else echo "FAIL  no input devices" ; fi
+# No card0 can mean two very different things: the driver is missing, or
+# there is no display device on this machine to drive. A VM started
+# without a GPU is the second, and calling that a failure trains people
+# to ignore the result.
+if test -e /dev/dri/card0 ; then
+  echo "PASS  /dev/dri/card0 exists"
+elif test -d /sys/class/drm ; then
+  echo "SKIP  no /dev/dri/card0 - DRM is built in but this machine has no display device attached"
+else
+  echo "FAIL  no DRM and no /dev/dri/card0"
+fi
+if ls /sys/class/input | grep -q event ; then
+  echo "PASS  input event devices exist"
+else
+  echo "SKIP  no input devices - none attached to this machine (serial console only)"
+fi
 if test -e /dev/fb0 ; then echo "PASS  /dev/fb0 exists" ; else echo "SKIP  no fbdev (DRM may still be fine)" ; fi
 
 echo "=== SECURITY ==="
