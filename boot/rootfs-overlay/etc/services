@@ -115,3 +115,19 @@ watchdog -t 15
 #   which is the record that makes a claim about months of uptime
 #   checkable afterwards rather than something to take on trust.
 beacon -d
+
+# Drives that get plugged in.
+#   Without this, a USB stick or an external disk appears in `disk` and
+#   nowhere else: you have to be logged in, know it came up as sdb1, and
+#   know what filesystem is on it. Nobody plugs a drive into a headless
+#   board and then goes to look up its device name.
+#
+#   -d listens on the kernel's uevent socket - the same messages udev
+#   reads - so a drive is mounted within a moment of being plugged in,
+#   and released when it is pulled. It mounts under /media, never
+#   touches the disk this system booted from, and uses nosuid,nodev
+#   because the filesystem was written by somebody else's machine.
+#
+#   It also runs one scan at startup, so a drive that was already
+#   attached at boot is mounted too.
+automount -d

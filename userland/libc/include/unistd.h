@@ -100,6 +100,10 @@ long  lp_open(const char *path, int flags, mode_t mode);
 long  lp_close(int fd);
 long  lp_read(int fd, void *buf, size_t n);
 long  lp_write(int fd, const void *buf, size_t n);
+/* lp_lseek 의 whence. 리눅스는 어느 아키텍처에서나 같은 값을 쓴다. */
+#define SEEK_SET  0
+#define SEEK_CUR  1
+#define SEEK_END  2
 long  lp_lseek(int fd, off_t off, int whence);
 long  lp_dup(int fd);
 long  lp_dup2(int oldfd, int newfd);
@@ -280,6 +284,17 @@ void  lp_gmtime(s64 t, lp_tm_t *out);
 s64   lp_timegm(const lp_tm_t *tm);
 
 /* ── System ── */
+/* lp_access 의 mode. 존재만 보려면 F_OK. */
+#define F_OK  0
+#define X_OK  1
+#define W_OK  2
+#define R_OK  4
+
+/* 마운트를 푼다. flags 에 MNT_DETACH(2) 를 주면 쓰는 사람이 있어도
+ * 트리에서 떼어낸다 - 뽑힌 드라이브를 정리할 때 필요하다. */
+#define MNT_DETACH  2
+long  lp_umount(const char *tgt, int flags);
+
 long  lp_mount(const char *src, const char *tgt, const char *fstype,
                unsigned long flags, const void *data);
 long  lp_reboot(int cmd);

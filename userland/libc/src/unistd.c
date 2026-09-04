@@ -209,6 +209,11 @@ long lp_mount(const char *src, const char *tgt, const char *fstype,
                      (long)flags, (long)data);
 }
 
+long lp_umount(const char *tgt, int flags)
+{
+    return sys_call2(SYS_umount2, (long)tgt, flags);
+}
+
 long lp_reboot(int cmd)
 {
     return sys_call4(SYS_reboot, (long)LINUX_REBOOT_MAGIC1,

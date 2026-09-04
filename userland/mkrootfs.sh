@@ -47,7 +47,10 @@ done
 
 echo "rootfs 조립 중..."
 rm -rf "$ROOT_DIR"
-mkdir -p "$ROOT_DIR"/{bin,sbin,opt,srv,dev/pts,proc,sys,tmp,etc,root/.ssh,data,var/run,lib/firmware/brcm,usr/local/bin,usr/bin,usr/sbin,usr/lib}
+# /media 는 automount 가 꽂힌 드라이브를 붙이는 자리다. 미리 만들어
+# 두는 이유는, 없으면 automount 가 첫 드라이브에서 디렉터리를 만들어야
+# 하는데 그 시점의 실패는 "드라이브를 못 읽는다" 처럼 보이기 때문이다.
+mkdir -p "$ROOT_DIR"/{bin,sbin,opt,srv,dev/pts,proc,sys,tmp,etc,root/.ssh,data,media,mnt,var/run,lib/firmware/brcm,usr/local/bin,usr/bin,usr/sbin,usr/lib}
 
 # The key that says an update is genuine.
 #

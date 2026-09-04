@@ -958,6 +958,65 @@ static void stop_everything(void)
  * most recently added first - which is what a stack needs. Anything
  * that will not come off is skipped and named; one stubborn mount is
  * not a reason to leave the rest attached. */
+/* Unmount everything under /media and /mnt.
+ *
+ * These are drives that were plugged in, so they may be pulled at any
+ * moment and they may be slow. Reverse order for the same reason as
+ * /data - a drive mounted inside another has to come off first - and
+ * MNT_DETACH as a fallback, because a shell sitting in a directory on a
+ * USB stick must not be able to stop the machine from shutting down.
+ */
+static void unmount_removable_drives(void)
+{
+    long fd = lp_open("/proc/mounts", O_RDONLY, 0);
+    if (fd < 0)
+        return;
+
+    char buf[8192];
+    long got = lp_read((int)fd, buf, sizeof buf - 1);
+    lp_close((int)fd);
+    if (got <= 0)
+        return;
+    buf[got] = '\0';
+
+    /* Collect first, then unmount in reverse: unmounting while walking
+     * /proc/mounts means walking a list that changes underneath. */
+    char points[24][96];
+    int n = 0;
+
+    for (char *line = buf; line && *line && n < 24; ) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+
+        char *sp = strchr(line, ' ');
+        if (sp) {
+            char *point = sp + 1;
+            char *sp2 = strchr(point, ' ');
+            if (sp2) *sp2 = '\0';
+            if (strncmp(point, "/media/", 7) == 0 ||
+                strncmp(point, "/mnt/", 5) == 0)
+                strlcpy(points[n++], point, sizeof points[0]);
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+
+    for (int i = n - 1; i >= 0; i--) {
+        if (sys_call2(SYS_umount2, (long)points[i], 0) == 0)
+            continue;
+        /* Busy. Detach it: the data is already flushed by the unmount
+         * attempt, and a drive nobody can unmount must not become a
+         * machine nobody can switch off. */
+        if (sys_call2(SYS_umount2, (long)points[i], 2 /* MNT_DETACH */) == 0)
+            printf("init:   %s was busy - detached\n", points[i]);
+        else
+            printf("init:   %s would not unmount\n", points[i]);
+    }
+
+    if (n)
+        printf("init:   %d plugged-in drive%s released\n",
+               n, n == 1 ? "" : "s");
+}
+
 static void unmount_stack_above(const char *keep)
 {
     char buf[8192];
@@ -1069,6 +1128,21 @@ static void do_shutdown(int what)
      * time something is added, read /proc/mounts and take them off in
      * reverse order - last mounted, first removed, which is the only
      * order that works when they are stacked. */
+    /* Drives somebody plugged in come off first.
+     *
+     * automount mounts them under /media, and `storage adopt` under
+     * /mnt. Neither existed when this shutdown path was written, so
+     * neither was in it - a USB drive stayed mounted right up to the
+     * moment the power stopped, and everything still in the page cache
+     * was lost. Nothing complained: the drive was fine on the next boot
+     * because ext4 replayed its journal, so the only sign was a file
+     * that came back empty.
+     *
+     * The same reverse-order walk /data uses works here, and it does
+     * the sync as part of unmounting rather than hoping the later
+     * lp_sync catches everything. */
+    unmount_removable_drives();
+
     unmount_stack_above("/data");
 
     if (sys_call2(SYS_umount2, (long)"/data", 0) < 0) {
