@@ -252,7 +252,9 @@
      * prefers-reduced-motion block, say, where every other transition
      * in the file already is - transitionend never fires and this
      * dialog stops at 18% with only Escape out of it. 초기화 chains off
-     * the same event and would merely lose its 완료 line. */
+     * the same event and would come off worse than that too - a bar
+     * left standing and a row that refuses the next press - so if this
+     * ever needs a fallback, both screens need the same one. */
     fill.addEventListener('transitionend', function () {
       if (++i < STEPS.length) { step(); return; }
 
