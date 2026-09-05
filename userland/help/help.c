@@ -137,6 +137,7 @@ static const entry_t KNOWN[] = {
     { "sudo",     "system",  "run something as root",       "sudo <program> [args...]" },
     { "service",  "system",  "what init keeps alive",       "service [start|stop|restart|status <name>]" },
     { "sha256sum","system",  "the checksum of a file",      "sha256sum [-c hash] <file>..." },
+    { "defend",   "system",  "watch for what happens to a board on the internet", "defend [-d] | status | baseline | unban <addr>" },
     { "integrity","system",  "has anything persistent changed","integrity [-c] [-u] [-l]" },
     { "kill",     "system",  "stop a process, by pid or name", "kill [-9] <pid|name>..." },
     { "sleep",    "system",  "wait",                        "sleep <seconds>" },

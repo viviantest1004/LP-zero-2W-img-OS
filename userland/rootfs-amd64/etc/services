@@ -131,3 +131,22 @@ beacon -d
 #   It also runs one scan at startup, so a drive that was already
 #   attached at boot is mounted too.
 automount -d
+
+# Watching for the things that actually happen to a small board on the
+# internet.
+#   Not an antivirus - there is no signature database here and one would
+#   not fit. What it looks at instead is what actually gets a board like
+#   this taken: repeated SSH failures from one address, which it blocks;
+#   setuid and world-writable files under /data, which is mounted
+#   nosuid so a setuid file there is either pointless or somebody
+#   testing something; a listening socket that was not there before,
+#   which on a board that has not changed is the single most useful
+#   signal there is; and a new key in authorized_keys, which is how a
+#   board stays lost after it has been found.
+#
+#   A service rather than a thing you remember to run, because the value
+#   is entirely in noticing between the times anybody looks. It sleeps
+#   most of the time; the walk of /data skips the Debian tree and the
+#   CPython install, which are thousands of files that legitimately look
+#   like matches.
+defend -d

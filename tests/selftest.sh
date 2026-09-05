@@ -274,6 +274,17 @@ if grep -q servedok /tmp/hd1 ; then echo "PASS  and served the right file" ; els
 kill httpd
 rm -rf /data/wwwtest /tmp/hd1 /tmp/hd.log
 
+# defend answers non-zero when it found something that wants a decision,
+# the way a linter does, so the status is not what says whether it ran.
+defend -n > /tmp/df1 2>&1
+if grep -q "defend:" /tmp/df1 ; then echo "PASS  defend runs its checks" ; else echo "FAIL  defend said nothing at all" ; fi
+if grep -q "listening" /tmp/df1 ; then echo "PASS  and lists what is listening" ; else echo "FAIL  defend did not report listeners" ; fi
+if defend -h | grep -q "not an antivirus" ; then echo "PASS  defend says plainly that it is not an antivirus" ; else echo "FAIL  defend -h overclaims" ; fi
+if defend baseline > /dev/null 2>&1 ; then echo "PASS  defend records a baseline" ; else echo "FAIL  defend baseline" ; fi
+if defend status | grep -q baseline ; then echo "PASS  and status reports it" ; else echo "FAIL  defend status" ; fi
+if pidof defend > /dev/null ; then echo "PASS  defend is running as a service" ; else echo "FAIL  init is not keeping defend alive" ; fi
+rm -f /tmp/df1
+
 echo "=== SETTINGS THAT SURVIVE A REBOOT ==="
 # The RAM root means /etc is rebuilt every boot. These check the two
 # ways out of that: a profile on /data, and named /etc files kept.
