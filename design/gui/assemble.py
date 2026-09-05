@@ -144,6 +144,30 @@ def main():
         if pid in new_html:
             body.append(new_html[pid])
 
+    # The factory reset is not a screen of its own. It is a block at the
+    # bottom of 초기화, and 초기화 ends with an empty div for it.
+    #
+    # Putting it in the sidebar instead would be easier and wrong: it
+    # would give the most destructive action on the machine its own
+    # entry, at the same weight as 프린터, reachable without passing the
+    # six recoverable resets that are what most people actually came
+    # for. It belongs underneath those, behind a scroll.
+    #
+    # The slot is renamed rather than filled in place, so that
+    # getElementById finds the id the renderer registered itself under.
+    if 'factory-zone' in new_html:
+        for i, pane in enumerate(body):
+            if 'id="factory-slot"' not in pane:
+                continue
+            body[i] = pane.replace(
+                '<div id="factory-slot"></div>',
+                '<div id="factory-zone">\n' + new_html['factory-zone'] +
+                '\n</div>')
+            break
+        else:
+            die('공장 초기화를 넣을 자리(factory-slot)가 초기화 화면에 '
+                '없습니다')
+
     side = []
     for grp, pid, glyph, label in NAV:
         if grp:

@@ -249,6 +249,20 @@ const LP = {
   render() {
     const fn = this.panes[this.current];
     if (fn) fn(document.getElementById(this.current));
+
+    /* Not everything that registers a renderer is a pane. The factory
+     * reset is a block inside 초기화, and it has to redraw when 초기화
+     * does - it is the part of that screen whose appearance depends
+     * most sharply on who is signed in. Anything registered under an id
+     * that exists and is not the pane itself gets the same treatment,
+     * so a second such block later needs no change here. */
+    for (const id in this.panes) {
+      if (id === this.current) continue;
+      const el = document.getElementById(id);
+      if (el && !el.classList.contains('pane') && el.closest('.pane.on'))
+        this.panes[id](el);
+    }
+
     this.renderSidebar();
   },
 

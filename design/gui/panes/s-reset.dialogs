@@ -1,0 +1,12 @@
+    <!-- 초기화 확인.
+         One dialog for seven rows. The title, the two paragraphs and the
+         caution are written when it opens, from the same table the rows
+         are drawn from - seven near-identical dialogs kept in the markup
+         are seven places for the wording to drift apart, and the whole
+         point of this screen is that the confirmation says exactly what
+         the row promised.
+         It can be left without answering three ways: 취소, the backdrop,
+         and Escape. -->
+    <div class="backdrop" id="dlg-reset">
+      <div class="modal appear"></div>
+    </div>

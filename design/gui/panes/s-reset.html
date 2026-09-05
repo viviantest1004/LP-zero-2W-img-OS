@@ -1,0 +1,26 @@
+<div class="pane" id="s-reset">
+  <h2>초기화</h2>
+  <div class="sub">바꾼 설정을 항목별로 처음 상태로 되돌립니다</div>
+  <!-- Said once, at the top, and then not repeated on seven rows. It is
+       the first question anybody has on this screen and the only one
+       that has the same answer for every row. -->
+  <div class="caption">어느 항목을 초기화해도 문서와 사진, 내려받은 파일, 설치한 앱은 지워지지 않습니다. 설정만 돌아갑니다.</div>
+
+  <!-- Both lists are drawn by LP.panes['s-reset'] rather than written
+       here: the row description and the confirmation that follows it
+       come from one table in the module, so a row and its dialog cannot
+       drift into saying different things about the same button. -->
+  <div class="sec">항목별 초기화</div>
+  <div class="rows" id="reset-rows"></div>
+
+  <!-- 모든 설정 is separated rather than made the seventh row of the
+       list above, because it is the six of them at once and a person
+       scanning the list should not find it by reading. -->
+  <div class="sec">전체</div>
+  <div class="rows" id="reset-all"></div>
+
+  <!-- 공장 초기화 is drawn into here by its own module. Left empty and
+       last: the one action that cannot be taken back has to be reached
+       by a deliberate scroll past everything that can. -->
+  <div id="factory-slot"></div>
+</div>

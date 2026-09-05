@@ -47,8 +47,9 @@
        * whether the pane happened to be visible when the account
        * changed - which is exactly the kind of "usually right" this
        * model cannot afford. */
-      document.querySelectorAll('.pane').forEach(function (p) {
-        if (LP.panes[p.id]) LP.panes[p.id](p);
+      Object.keys(LP.panes).forEach(function (id) {
+        const el = document.getElementById(id);
+        if (el) LP.panes[id](el);
       });
       LP.renderSidebar();
       LP.closeAll();
