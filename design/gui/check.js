@@ -313,6 +313,30 @@ async function run() {
      /관리자/.test(userText) && /표준/.test(userText));
   ok('권한 화면으로 가는 길이 있다', /권한/.test(userText));
 
+  /* The account dialogs. Worth pinning because s-user was written
+   * twice - the first attempt died mid-file - and its dialog markup
+   * came from the first while its code came from the second. A dialog
+   * whose id nothing opens is invisible until somebody clicks the row. */
+  for (const [label, want] of [
+    ['비밀번호 변경', /비밀번호/],
+    ['사용자 추가',   /계정을 만듭니다|새 계정/],
+    ['계정 유형',     /관리자|표준/],
+  ]) {
+    await page.evaluate(t => {
+      const r = [...document.querySelectorAll('#s-user .row')]
+        .find(x => x.textContent.includes(t));
+      if (r) r.click();
+    }, label);
+    await page.waitForTimeout(300);
+    const body = await page.evaluate(() => {
+      const d = document.querySelector('.backdrop.on');
+      return d ? d.textContent.replace(/\s+/g, ' ').trim() : '';
+    });
+    ok(label + ' 대화상자가 열린다', want.test(body), body.slice(0, 60) || '(열리지 않음)');
+    await page.evaluate(() => LP.closeAll());
+    await page.waitForTimeout(120);
+  }
+
   /* ── permissions ──────────────────────────────────────────────── */
   head('권한');
   const hasPerm = await page.evaluate(() => !!document.getElementById('s-perm'));
