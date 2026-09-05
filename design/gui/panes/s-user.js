@@ -302,12 +302,20 @@
     const may = LP.can(AREA);
 
     const facts = [
-      ['유형',        typeLine(a)],
-      ['로그인',      isMe(a) ? '현재 로그인' : '로그인해 있지 않습니다'],
-      ['홈 폴더',     home(a)],
-      ['자동 로그인', LP.autoLogin === a.name ? '켬' : '끔'],
-      ['비밀번호',    a.pwDays === 0 ? '오늘 바꿨습니다' : a.pwDays + '일 전에 바꿨습니다'],
+      ['유형',    typeLine(a)],
+      ['로그인',  isMe(a) ? '현재 로그인' : '로그인해 있지 않습니다'],
+      ['홈 폴더', home(a)],
     ];
+
+    /* The last two lines are about somebody else's account, so a standard
+     * account gets them only for its own. Who else uses the machine is
+     * on the list already; when they last changed their password is not
+     * the same kind of fact. */
+    if (isMe(a) || may) {
+      facts.push(['자동 로그인', LP.autoLogin === a.name ? '켬' : '끔']);
+      facts.push(['비밀번호',
+        a.pwDays === 0 ? '오늘 바꿨습니다' : a.pwDays + '일 전에 바꿨습니다']);
+    }
 
     modal(D_INFO).innerHTML =
       '<h3>' + LP.esc(a.name) + '</h3>' +
@@ -477,9 +485,13 @@
 
     modal(D_ADD).innerHTML =
       '<h3>사용자 추가</h3>' +
-      '<p>이 컴퓨터에 새 계정을 만듭니다. 홈 폴더는 계정 이름으로 만들어집니다.</p>' +
+      '<p>이 컴퓨터에 새 계정을 만듭니다. 이름은 영문 소문자로 시작하고, ' +
+        '홈 폴더는 그 이름으로 만들어집니다.</p>' +
+      /* Monospace and a Latin placeholder, because the value is a Unix
+       * account name and nothing else fits in it. A Korean placeholder
+       * in a mono face comes out spaced like a table. */
       '<div class="fieldlabel">이름</div>' +
-      '<input class="field mono" autocomplete="off" placeholder="영문 소문자로 시작" data-name>' +
+      '<input class="field mono" autocomplete="off" placeholder="minsu" data-name>' +
       '<div class="fieldlabel">비밀번호</div>' +
       '<input class="field" type="password" autocomplete="off" data-pw>' +
       '<div class="sec">계정 유형</div>' +

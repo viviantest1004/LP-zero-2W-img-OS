@@ -1,6 +1,20 @@
 <div class="pane" id="s-keys">
+  <!-- The way back is outside everything the renderer writes. A screen a
+       standard account may not change is still one it has to be able to
+       leave. -->
   <div class="back"><span>‹</span><span>키보드</span></div>
   <h2>키 지정</h2>
   <div class="sub" id="keys-sub"></div>
+
+  <!-- Here rather than inside #keys-list, which the renderer replaces.
+       Both things that produce a line - taking a combination off another
+       shortcut, and deleting a custom one - happen behind a dialog that
+       has just closed, so the eye is at the middle of the window and the
+       row that changed may be anywhere in a list that scrolls. This is
+       the one spot that is on screen either way, and being outside the
+       rebuilt markup means LP.say no longer has to be called after the
+       render that would otherwise have thrown the element away. -->
+  <div class="inline" id="keys-say"></div>
+
   <div id="keys-list"></div>
 </div>
