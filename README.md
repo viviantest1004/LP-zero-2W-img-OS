@@ -14,7 +14,7 @@
 `sha256sum -c dist/SHA256SUMS.txt` 로 확인하면 됩니다.
 
 **직접 만든 초경량 리눅스 배포판.** 커널 설정부터 libc, init, 셸,
-107개 명령어까지 전부 새로 썼습니다. 커널 이미지 하나가 곧 시스템
+108개 명령어까지 전부 새로 썼습니다. 커널 이미지 하나가 곧 시스템
 전체이고, 부팅하면 램으로 풀립니다.
 
 원래는 **라즈베리파이 제로 2 W** 한 대에 올리려고 만들었습니다. 512MB
@@ -27,7 +27,7 @@
 | 시스템 전체 | 커널 + 유저랜드 파일 **하나**, 11~23MB |
 | 부팅 후 남는 램 | 512MB 보드에서 **480MB** |
 | 부팅 시간 | 전원 인가 후 프롬프트까지 10초 남짓 |
-| 명령어 | 107개, 전부 자체 구현 |
+| 명령어 | 108개, 전부 자체 구현 |
 | SSH | **기본 내장**, 공개키 전용 (비밀번호 인증은 컴파일 자체가 안 됨) |
 | 파이썬 | CPython 3.12 + pip. manylinux 휠 설치됨 (numpy 확인) |
 | 방화벽 | 기본 켜짐. nftables 를 netlink 로 직접 |
@@ -43,7 +43,7 @@ OpenSSL). **암호는 직접 만들면 안 되는 물건**이라 일부러 가�
 
 **전부 [Claude Code](https://claude.com/claude-code) 가 썼습니다.**
 Anthropic 의 코딩 에이전트이고, 저장소 주인의 지시를 받아 작업했습니다.
-커널 설정, C 라이브러리, init, 셸, 107개 명령어, 빌드 시스템,
+커널 설정, C 라이브러리, init, 셸, 108개 명령어, 빌드 시스템,
 셀프테스트, 그리고 지금 읽고 계신 이 문서까지 전부 해당됩니다.
 
 이게 무슨 뜻인지는 분명히 해두는 편이 낫겠습니다. 설계와 디버깅과 수정이
@@ -85,7 +85,7 @@ Anthropic 의 코딩 에이전트이고, 저장소 주인의 지시를 받아 �
   방화벽, DNS·NTP 위조 방지는 전부 구현돼 있고 주석에 근거도 적혀
   있지만, 다른 사람이 검토한 적은 없습니다. 아래 보안 절만 믿고 적대적인
   망에 바로 올리지는 마세요.
-- **C 라이브러리가 자체 구현이고, 완전하지 않습니다.** 107개 명령어에
+- **C 라이브러리가 자체 구현이고, 완전하지 않습니다.** 108개 명령어에
   필요한 만큼만 들어 있습니다. 그 밖의 것을 이 libc 로 컴파일하면 없는
   함수를 만날 수 있습니다. 일반 리눅스 바이너리는 `run` 으로, 파이썬과
   함께 들어 있는 glibc 위에서 돕니다.
@@ -366,6 +366,54 @@ Broadcom 블롭 두 개(bootcode.bin, start.elf)는 GPU 부트롬이 요구하�
 
 ---
 
+## 데비안 패키지 (apt)
+
+`apt install` 이 됩니다. 진짜 데비안 apt 입니다.
+
+```
+apt install ripgrep htop           설치
+apt run htop                       설치한 것 실행
+apt search sqlite                  뭐가 있나
+apt shell                          그 안에서 셸
+apt status                         지금 상태
+apt purge-all                      통째로 삭제
+```
+
+### 어떻게 도나
+
+데비안 유저랜드 전체가 `/data/debian` 에 들어가고, apt 는 그 디렉터리를
+루트로 삼아 돕니다. dpkg 는 `/var/lib/dpkg` 같은 절대경로를 코드에 박고
+있어서, 그 트리를 진짜 루트로 보여주는 것 말고는 방법이 없습니다.
+
+그래서:
+
+- **시스템 이미지는 손대지 않습니다.** 크기가 그대로입니다.
+- **`apt remove` 가 이 기계의 명령어를 망가뜨릴 수 없습니다.** 거기
+  들어 있지 않으니까요.
+- **`rm -rf /data/debian` 하면 전부 되돌아갑니다.**
+
+### 처음 한 번은 시간이 걸립니다
+
+데비안 베이스가 **95MB 다운로드, 440MB 압축 해제**입니다. 이 시스템 전체가
+11~23MB 인 것을 생각하면 베이스만 스무 배입니다. 그래서 이미지에 넣지
+않고, `apt` 를 처음 쓸 때 받습니다. 받기 전에 얼마나 걸리는지 말해주고,
+`/data` 에 자리가 없으면 시작하지 않습니다.
+
+`/data` 에 최소 900MB 가 필요합니다. 카드가 작으면 `expandfs` 로 늘리거나
+`storage` 로 외장 드라이브를 붙이세요.
+
+### 알아둘 것
+
+설치한 프로그램은 **데비안 트리 안에서** 돕니다. `apt run htop` 처럼요.
+그리고 그 안의 서비스는 이 시스템의 init 이 시작하지 않습니다 - 부팅할
+때 자동으로 뜨게 하려면 `/data/rc.local` 에 적어야 합니다.
+
+`pkg` 는 그대로 있습니다. 이 시스템을 위해 만든 작은 패키지들은 여전히
+`pkg` 로 설치하고, `/data` 에 바로 풀립니다. apt 는 데비안이 가진 것을
+쓰고 싶을 때입니다.
+
+---
+
 ## 보안
 
 - **비밀번호 인증 없음.** dropbear를 그 기능 없이 컴파일했습니다.
@@ -488,7 +536,7 @@ Broadcom 블롭 두 개(bootcode.bin, start.elf)는 GPU 부트롬이 요구하�
 | `cut` | take columns out of lines |
 | `tee` | write to a file and pass on |
 
-### 시스템 (36개)
+### 시스템 (37개)
 
 | 명령 | 하는 일 |
 |---|---|
@@ -525,6 +573,7 @@ Broadcom 블롭 두 개(bootcode.bin, start.elf)는 GPU 부트롬이 요구하�
 | `bootcount` | detect a reboot loop |
 | `beacon` | report how the board is doing |
 | `calc` | integer calculator |
+| `apt` | install packages from Debian |
 | `pkg` | install and remove packages |
 | `update` | replace the system, reversibly |
 | `splash` | draw the boot screen |
@@ -631,7 +680,7 @@ make                                  # 공개키가 이미지에 들어감
 | `userland/libc/src/crt0.S` | 진입점 (`#if` 로 갈림) |
 | `kernel/lp-zero.config` / `lp-zero-amd64.fragment` | 커널 설정 |
 
-107개 명령어와 libc 본체는 **한 글자도 다르지 않습니다.** 폴더를 나눠
+108개 명령어와 libc 본체는 **한 글자도 다르지 않습니다.** 폴더를 나눠
 복사해두면 한쪽만 고치는 사고가 나고, 그건 실제로 겪었습니다 — amd64
 이미지에 arm64 바이너리가 43MB 섞여 나간 적이 있습니다. 지금은
 `check_tree_arch` 가 빌드할 때 모든 ELF의 아키텍처를 대조하고 다르면
@@ -640,7 +689,7 @@ make                                  # 공개키가 이미지에 들어감
 ```
 userland/          한 벌의 소스. make ARCH=amd64 로 갈림
   libc/            자체 libc (시스템 콜 위에 직접)
-  init/ sh/ ...    107개 명령어, 하나에 디렉터리 하나
+  init/ sh/ ...    108개 명령어, 하나에 디렉터리 하나
 kernel/            커널 설정과 빌드 스크립트
 boot/              부트 파티션에 들어가는 것들 (config.txt, /etc/rc)
 tools/             이미지 생성, 서명, 배포

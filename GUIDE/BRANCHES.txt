@@ -22,7 +22,7 @@ main
 The branch you want.
 
   Full source            kernel configuration, the C library,
-                         init, the shell, all 107 commands, the
+                         init, the shell, all 108 commands, the
                          image tools and the self-test
   README.md              the long description, in Korean
   README.en.md           the same document in English
@@ -88,7 +88,7 @@ WHO WROTE ALL OF IT
 -------------------
 Claude Code, Anthropic's coding agent, working from the repository
 owner's direction - the kernel configuration, the C library, init,
-the shell, the 107 commands, the build system, the self-test and
+the shell, the 108 commands, the build system, the self-test and
 the documentation. GUIDE/USAGE.txt and README.en.md both say what
 that means for how much you should trust it; the short version is
 that the reasoning is unusually well recorded, and that nobody
@@ -157,7 +157,7 @@ main
 받으실 브랜치입니다.
 
   전체 소스              커널 설정, C 라이브러리, init, 셸,
-                         107개 명령어, 이미지 도구, 셀프테스트
+                         108개 명령어, 이미지 도구, 셀프테스트
   README.md              긴 설명 (한국어)
   README.en.md           같은 문서의 영어판
   GUIDE/USAGE.txt        실행, 로그인, 빌드 방법
@@ -216,7 +216,7 @@ squash 로 합치면 사라지는 부분입니다. 무언가가 왜 그렇게 �
 전부 누가 만들었나
 ------------------
 Anthropic 의 코딩 에이전트인 Claude Code 가 저장소 주인의 지시를
-받아 썼습니다. 커널 설정, C 라이브러리, init, 셸, 107개 명령어,
+받아 썼습니다. 커널 설정, C 라이브러리, init, 셸, 108개 명령어,
 빌드 시스템, 셀프테스트, 문서까지 전부입니다. 그게 신뢰도에 어떤
 뜻인지는 GUIDE/USAGE.txt 와 README.md 에 적어두었습니다. 짧게
 말하면, 판단 근거가 유난히 잘 남아 있고, 독립적인 검토를 받은 적은

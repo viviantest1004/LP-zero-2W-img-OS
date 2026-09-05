@@ -8,7 +8,7 @@ Which image for which machine, how to check it, and how to burn it -
 on one page, without reading a source tree.
 
 **A Linux distribution written from scratch.** The kernel configuration,
-the C library, init, the shell and all 107 commands are original code.
+the C library, init, the shell and all 108 commands are original code.
 One kernel image is the entire system: the userland is packed inside it
 and unpacks into RAM at boot.
 
@@ -23,7 +23,7 @@ machines and amd64 PCs**.
 | Whole system | kernel + userland in **one file**, 11-23MB |
 | RAM left after boot | **480MB** free on a 512MB board |
 | Boot time | about 10 seconds from power to a prompt |
-| Commands | 107, every one of them written here |
+| Commands | 108, every one of them written here |
 | SSH | **built in**, public key only (password auth is not compiled in) |
 | Python | CPython 3.12 + pip, manylinux wheels install (numpy confirmed) |
 | Firewall | on by default, nftables driven straight over netlink |
@@ -41,7 +41,7 @@ write yourself**, so it was deliberately borrowed.
 **Every line of it was written by [Claude Code](https://claude.com/claude-code),
 Anthropic's coding agent**, working from the repository owner's
 direction. That includes the kernel configuration, the C library, init,
-the shell, all 107 commands, the build system, the self-test, and this
+the shell, all 108 commands, the build system, the self-test, and this
 document.
 
 It is worth being plain about what that means. The code was designed,
@@ -87,7 +87,7 @@ is a reason not to be surprised.
   reviewed by anybody else. Do not put this straight onto a hostile
   network on the strength of that section alone.
 - **The C library is ours, and it is not complete.** It covers what the
-  107 commands need. Anything else you compile against it may hit a
+  108 commands need. Anything else you compile against it may hit a
   function that is not there. Ordinary Linux binaries run through
   `run`, against the glibc that ships alongside Python.
 - **`/data` is the only place that survives a reboot,** and it is one
@@ -401,6 +401,55 @@ them before any ARM core runs at all.
 
 ---
 
+## Debian packages (apt)
+
+`apt install` works. It is Debian's own apt.
+
+```
+apt install ripgrep htop          install
+apt run htop                      run what you installed
+apt search sqlite                 what Debian has
+apt shell                         a shell in there
+apt status                        what is set up
+apt purge-all                     remove all of it
+```
+
+### How it works
+
+A whole Debian userland goes in `/data/debian`, and apt runs with that
+directory as its root. dpkg has paths like `/var/lib/dpkg` compiled in -
+it does not take a `--root` that means what you would want it to mean -
+so showing it that tree as the real root is the only way this works.
+
+Which means:
+
+- **The system image is untouched** and stays the size it is.
+- **`apt remove` cannot break this machine's own commands,** because
+  they are not in there.
+- **`rm -rf /data/debian` undoes every bit of it.**
+
+### The first run takes a while
+
+The Debian base is **a 95MB download that unpacks to 440MB**. This whole
+system is 11-23MB, so the base alone is twenty times everything else
+here - which is why it is fetched rather than shipped. apt says how big
+it is before it starts, and refuses if `/data` has no room.
+
+You need about 900MB free on `/data`. On a small card, `expandfs` grows
+it, or `storage` can adopt a drive.
+
+### Worth knowing
+
+Programs you install run **inside the Debian tree** - `apt run htop`.
+Services in there are not started by this system's init; put them in
+`/data/rc.local` if you want them at boot.
+
+`pkg` is still here. Small packages built for this system still install
+with `pkg` and unpack straight onto `/data`. apt is for when you want
+what Debian has.
+
+---
+
 ## Security
 
 - **No password authentication.** dropbear is compiled without it.
@@ -526,7 +575,7 @@ None of this has been independently audited. See
 | `cut` | take columns out of lines |
 | `tee` | write to a file and pass on |
 
-### System (36)
+### System (37)
 
 | | |
 |---|---|
@@ -563,6 +612,7 @@ None of this has been independently audited. See
 | `bootcount` | detect a reboot loop |
 | `beacon` | report how the board is doing |
 | `calc` | integer calculator |
+| `apt` | install packages from Debian |
 | `pkg` | install and remove packages |
 | `update` | replace the system, reversibly |
 | `splash` | draw the boot screen |
@@ -678,7 +728,7 @@ build from **the same source**. What actually differs:
 | `userland/libc/src/crt0.S` | the entry point, split by `#if` |
 | `kernel/lp-zero.config` / `lp-zero-amd64.config` | kernel configuration |
 
-The 107 commands and the body of libc are **identical, character for
+The 108 commands and the body of libc are **identical, character for
 character.** Split them into copied folders and sooner or later only one
 copy gets fixed — which is not hypothetical: an amd64 image once shipped
 with 43MB of arm64 binaries in it. `check_tree_arch` now compares the
@@ -688,7 +738,7 @@ mismatch.
 ```
 userland/          one set of sources; make ARCH=amd64 picks the target
   libc/            our own libc, straight on top of the syscalls
-  init/ sh/ ...    107 commands, one directory each
+  init/ sh/ ...    108 commands, one directory each
 kernel/            kernel configuration and build script
 boot/              what goes on the boot partition (config.txt, /etc/rc)
 tools/             image building, signing, distribution

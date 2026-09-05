@@ -13,7 +13,7 @@
 WHAT THIS IS
 ------------
 A small Linux distribution written from scratch. The kernel
-configuration, the C library, init, the shell and all 107 commands
+configuration, the C library, init, the shell and all 108 commands
 are original code. The kernel image is the whole system: the
 userland is packed inside it and unpacks into RAM when the machine
 boots.
@@ -69,7 +69,7 @@ reason not to be surprised.
     of it has been reviewed by anybody else.
 
   * The C library is ours and it is not complete. It covers what
-    the 107 commands need; anything else you compile against it
+    the 108 commands need; anything else you compile against it
     may reach for a function that is not there. Ordinary Linux
     binaries run through the `run` command instead, against the
     glibc that ships with Python.
@@ -224,7 +224,7 @@ WHERE THE SOURCE IS
 All of it is on the main branch. There are no per-architecture
 source trees - arm64 and amd64 build from the same code.
 
-  userland/     our C library, init, the shell, all 107 commands
+  userland/     our C library, init, the shell, all 108 commands
     libc/         the C library, straight on top of the syscalls
     sh/           the shell
     init/         pid 1
@@ -311,7 +311,7 @@ the watchdog notices a process pinning a core.
 이게 뭔가
 ---------
 처음부터 직접 만든 작은 리눅스 배포판입니다. 커널 설정, C 라이브러리,
-init, 셸, 107개 명령어가 전부 자체 코드입니다. 커널 이미지 하나가
+init, 셸, 108개 명령어가 전부 자체 코드입니다. 커널 이미지 하나가
 곧 시스템 전체이고, 유저랜드는 그 안에 들어 있다가 부팅할 때 램으로
 풀립니다.
 
@@ -334,7 +334,7 @@ OpenSSL)입니다. 암호는 직접 만들면 안 되는 물건이라 일부러 
 -------------
 전부 Anthropic 의 코딩 에이전트인 Claude Code 가 썼습니다. 저장소
 주인의 지시를 받아 작업했고, 커널 설정부터 C 라이브러리, init, 셸,
-107개 명령어, 빌드 시스템, 셀프테스트, 문서까지 전부 해당됩니다.
+108개 명령어, 빌드 시스템, 셀프테스트, 문서까지 전부 해당됩니다.
 
 여기서 따라오는 것이 두 가지 있고, 둘 다 알아두실 만합니다. 하나는
 근거가 유난히 잘 남아 있다는 점입니다. 커밋 로그가 각 변경을 왜 했는지
@@ -362,7 +362,7 @@ OpenSSL)입니다. 암호는 직접 만들면 안 되는 물건이라 일부러 
     방화벽, DNS·NTP 위조 방지가 전부 구현돼 있고 주석에 근거도 적혀
     있지만, 다른 사람이 검토한 적은 없습니다.
 
-  * C 라이브러리가 자체 구현이고 완전하지 않습니다. 107개 명령어에
+  * C 라이브러리가 자체 구현이고 완전하지 않습니다. 108개 명령어에
     필요한 만큼만 들어 있어서, 그 밖의 것을 이 libc 로 컴파일하면
     없는 함수를 만날 수 있습니다. 일반 리눅스 바이너리는 `run`
     명령으로, 파이썬과 함께 들어 있는 glibc 위에서 돕니다.
@@ -511,7 +511,7 @@ poweroff 는 /data 를 언마운트하기 전에 이 드라이브들을 먼저
 전부 main 브랜치에 있습니다. 아키텍처별로 소스를 나누지 않았습니다.
 arm64 와 amd64 가 같은 코드로 빌드됩니다.
 
-  userland/     자체 C 라이브러리, init, 셸, 107개 명령어
+  userland/     자체 C 라이브러리, init, 셸, 108개 명령어
     libc/         C 라이브러리. 시스템 콜 위에 바로 올렸습니다
     sh/           셸
     init/         pid 1
