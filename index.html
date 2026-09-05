@@ -133,30 +133,30 @@
     <h3>라즈베리파이 제로 2 W</h3>
     <p class="for">실기와 arm64 가상머신 둘 다. SD카드에 굽거나 UTM/QEMU에 붙이면 됩니다.</p>
     <div class="row">
-      <a class="dl" href="dist/@PI_NAME@">내려받기</a>
-      <span class="size">@PI_SIZE@ · xz 압축</span>
+      <a class="dl" href="dist/test_a_123_LPzero2W_linux.img.xz">내려받기</a>
+      <span class="size">30 MB · xz 압축</span>
     </div>
-    <div class="hash"><b>sha256</b><br>@PI_HASH@</div>
+    <div class="hash"><b>sha256</b><br>425e5f4402b3e902b2caf75261b91630c3f5c11746026632d6777c5043011ba1</div>
   </div>
 
   <div class="card">
     <h3>일반 PC / 데스크톱 가상머신</h3>
     <p class="for">VMware, VirtualBox, QEMU/KVM, Hyper-V. UEFI 부팅입니다.</p>
     <div class="row">
-      <a class="dl" href="dist/@AMD_NAME@">내려받기</a>
-      <span class="size">@AMD_SIZE@ · xz 압축</span>
+      <a class="dl" href="dist/linux-LP_amd64.img.xz">내려받기</a>
+      <span class="size">24 MB · xz 압축</span>
     </div>
-    <div class="hash"><b>sha256</b><br>@AMD_HASH@</div>
+    <div class="hash"><b>sha256</b><br>8410f0e90e2f4686ff86bc1b71b0aafeb76293a8e94cabbc6bbcad8ae21f093a</div>
   </div>
 
   <div class="card">
     <h3>arm64 가상머신 전용</h3>
     <p class="for">UTM, UTM SE, QEMU. GPU 펌웨어가 없어 더 작습니다. 실기에서는 안 뜹니다.</p>
     <div class="row">
-      <a class="dl" href="dist/@UTM_NAME@">내려받기</a>
-      <span class="size">@UTM_SIZE@ · zip</span>
+      <a class="dl" href="dist/test_a_123_LPzero2W_linux-utm.zip">내려받기</a>
+      <span class="size">28 MB · zip</span>
     </div>
-    <div class="hash"><b>sha256</b><br>@UTM_HASH@</div>
+    <div class="hash"><b>sha256</b><br>97b3745b4ca28ebe21d9cbcd1014afd2c8b465c80e3acd17d09bb5190840dcc7</div>
   </div>
 </div>
 
@@ -170,7 +170,7 @@
 <pre>sha256sum -c SHA256SUMS.txt</pre>
 
 <p><strong>SD카드에 굽기</strong> — <code>/dev/sdX</code>를 꼭 확인하세요. 틀리면 그 디스크가 사라집니다.</p>
-<pre>xz -d &lt; @PI_NAME@ | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress</pre>
+<pre>xz -d &lt; test_a_123_LPzero2W_linux.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress</pre>
 
 <p><strong>가상머신</strong> — 압축을 풀고 디스크로 붙인 뒤 <strong>UEFI 부팅</strong>으로 설정하세요.
    MBR 부트스트랩은 비어 있어서 legacy BIOS로는 뜨지 않습니다.</p>
@@ -201,7 +201,7 @@
 
 <h2>소스</h2>
 <p>전부 공개되어 있습니다 —
-   <a href="@REPO_URL@">@REPO_SHORT@</a>.
+   <a href="https://github.com/viviantest1004/LP-zero-2W-img-OS">github.com/viviantest1004/LP-zero-2W-img-OS</a>.
    자세한 설명은 저장소의 <code>README.md</code>와 <code>GUIDE/</code> 폴더에 한국어와 영어로
    같이 있습니다. 라이선스는 MIT입니다.</p>
 
@@ -235,12 +235,12 @@
 
 <p>What is verified: the amd64 image passes all 51 checks in the project's self-test on real QEMU
    boots. Full source, in English and Korean, at
-   <a href="@REPO_URL@">@REPO_SHORT@</a>. MIT licensed.</p>
+   <a href="https://github.com/viviantest1004/LP-zero-2W-img-OS">github.com/viviantest1004/LP-zero-2W-img-OS</a>. MIT licensed.</p>
 </div>
 
 <footer>
-  이미지 빌드: @BUILD_DATE@ · 이 페이지의 크기와 체크섬은 실제 파일에서 만들어집니다<br>
-  <span class="muted">Images built @BUILD_DATE@ · the sizes and checksums on this page are read
+  이미지 빌드: 2026-09-04 · 이 페이지의 크기와 체크섬은 실제 파일에서 만들어집니다<br>
+  <span class="muted">Images built 2026-09-04 · the sizes and checksums on this page are read
   from the files themselves, so they cannot drift</span>
 </footer>
 

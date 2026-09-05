@@ -96,7 +96,11 @@ tests/selftest.sh on real QEMU boots.
 
 WHICH IMAGE DO I WANT
 ---------------------
-The prebuilt images are in dist/ on the main branch.
+There is a download page, which is easier than reading this:
+
+  https://viviantest1004.github.io/LP-zero-2W-img-OS/
+
+The files themselves are in dist/ on the main branch.
 
   dist/linux-LP_amd64.img.xz
       An ordinary PC, or a desktop virtual machine - VMware,
@@ -384,7 +388,11 @@ tests/selftest.sh 의 51개 검사를 전부 통과합니다.
 
 어느 이미지를 받아야 하나
 -------------------------
-미리 빌드된 이미지는 main 브랜치의 dist/ 폴더에 있습니다.
+다운로드 페이지가 있습니다. 이 문서를 읽는 것보다 빠릅니다.
+
+  https://viviantest1004.github.io/LP-zero-2W-img-OS/
+
+파일 자체는 main 브랜치의 dist/ 폴더에 있습니다.
 
   dist/linux-LP_amd64.img.xz
       일반 PC, 데스크톱 가상머신(VMware, VirtualBox, QEMU/KVM,

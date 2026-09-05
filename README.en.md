@@ -2,6 +2,11 @@
 
 **한국어 문서: [README.md](README.md)** · Start here: **[`GUIDE/`](GUIDE/)**
 
+### ⬇ [Download an image](https://viviantest1004.github.io/LP-zero-2W-img-OS/)
+
+Which image for which machine, how to check it, and how to burn it -
+on one page, without reading a source tree.
+
 **A Linux distribution written from scratch.** The kernel configuration,
 the C library, init, the shell and all 107 commands are original code.
 One kernel image is the entire system: the userland is packed inside it

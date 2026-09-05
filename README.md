@@ -2,6 +2,11 @@
 
 **English: [README.en.md](README.en.md)** · 먼저 볼 곳: **[`GUIDE/`](GUIDE/)**
 
+### ⬇ [이미지 내려받기](https://viviantest1004.github.io/LP-zero-2W-img-OS/)
+
+어떤 이미지를 받아야 하는지, 받은 뒤에 무엇을 하는지가 한 페이지에
+정리되어 있습니다. 저장소를 뒤질 필요 없습니다.
+
 사용법과 로그인, 빌드 방법은 [`GUIDE/USAGE.txt`](GUIDE/USAGE.txt) 에,
 어느 브랜치에 무엇이 있는지는 [`GUIDE/BRANCHES.txt`](GUIDE/BRANCHES.txt)
 에 정리해 두었습니다. 둘 다 영어와 한국어로 같이 적혀 있습니다. 바로

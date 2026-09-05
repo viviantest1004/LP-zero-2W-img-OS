@@ -6,15 +6,24 @@
 # they go stale the first time somebody rebuilds an image and forgets,
 # and a checksum that does not match is worse than no checksum: the
 # person downloading cannot tell a corrupt transfer from a stale page.
+# That has already happened once here, to SHA256SUMS.txt.
 #
-# So the numbers are read out of dist/ every time, and the page is a
-# build product rather than a file anybody edits. web/template.html is
-# the part people edit.
+# So the numbers are read out of dist/ every time. web/template.html is
+# the part people edit; index.html at the repository root is the result
+# and is overwritten without warning.
+#
+# ── Why the root, and why it is committed ──
+# GitHub Pages serves this repository as it is. The page has to sit at
+# the root because that is where Pages looks, and it has to be committed
+# because Pages publishes what is in the branch - there is no build step
+# to run it. So this is the rare generated file that belongs in git.
+# mkdist.sh runs it, so rebuilding the images updates the page in the
+# same breath and the two cannot drift apart.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 DIST="${REPO_ROOT}/dist"
-OUT="${REPO_ROOT}/web/site"
+OUT="${REPO_ROOT}"
 TEMPLATE="${REPO_ROOT}/web/template.html"
 
 REPO_URL="${REPO_URL:-https://github.com/viviantest1004/LP-zero-2W-img-OS}"
@@ -47,8 +56,6 @@ size_of() { human "$(stat -c%s "${DIST}/$1")"; }
 # script again tomorrow must not claim the images are a day newer.
 BUILD_DATE="$(date -u -r "${DIST}/${AMD}" '+%Y-%m-%d')"
 
-mkdir -p "$OUT"
-
 sed -e "s|@PI_NAME@|${PI}|g" \
     -e "s|@PI_SIZE@|$(size_of "$PI")|g" \
     -e "s|@PI_HASH@|$(hash_of "$PI")|g" \
@@ -70,7 +77,7 @@ if grep -q '@[A-Z_]*@' "${OUT}/index.html"; then
     die "채우지 못한 자리가 남았습니다 (위 목록)"
 fi
 
-printf '  web/site/index.html  %s bytes\n' "$(stat -c%s "${OUT}/index.html")"
+printf '  index.html  %s bytes\n' "$(stat -c%s "${OUT}/index.html")"
 printf '  %s  %s\n' "$(size_of "$PI")"  "$PI"
 printf '  %s  %s\n' "$(size_of "$AMD")" "$AMD"
 printf '  %s  %s\n' "$(size_of "$UTM")" "$UTM"

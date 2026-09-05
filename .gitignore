@@ -56,7 +56,3 @@ repo/
 .tmp.config*
 .merge_tmp.config*
 keys/
-
-# tools/mkweb.sh 가 dist/ 의 실제 파일에서 만든다. 크기와 체크섬이
-# 손으로 적은 값이 아니어야 하므로 결과물은 커밋하지 않는다.
-web/site/

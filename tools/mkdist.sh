@@ -114,6 +114,15 @@ if [[ -f "${DIST}/test_a_123_LPzero2W_linux.img.xz" ]]; then
 fi
 while read -r _ name; do log "$name"; done < "${DIST}/SHA256SUMS.txt"
 
+# 다운로드 페이지도 여기서 같이 만든다.
+#
+# 페이지에는 파일 크기 셋과 sha256 셋이 들어간다. 이미지를 다시
+# 빌드하고 페이지를 잊으면 그 숫자들이 조용히 거짓말을 하기 시작한다 -
+# 체크섬 파일이 정확히 그렇게 네 번의 재빌드 동안 방치됐었다.
+# 이미지를 만드는 자리에서 같이 만들면 어긋날 수가 없다.
+step "다운로드 페이지"
+"${REPO_ROOT}/tools/mkweb.sh"
+
 step "결과"
 for f in "${DIST}"/*; do
     [[ -f "$f" ]] || continue
