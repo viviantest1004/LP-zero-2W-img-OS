@@ -43,6 +43,16 @@ function ok(name, cond, detail) {
 
 function head(t) { console.log('\n' + t); }
 
+/* Any check that reaches into the page can find nothing there. When it
+ * does, that is a failure of the thing being checked - but it must not
+ * be a failure of the checking, because a suite that throws on the
+ * fifth assertion never runs the thirtieth, and the thirtieth is where
+ * the permission rules are. */
+async function tryOk(name, fn, detail) {
+  try { ok(name, await fn(), detail); }
+  catch (e) { ok(name, false, String(e.message || e).slice(0, 70)); }
+}
+
 async function run() {
   const browser = await chromium.launch({
     executablePath: CHROME,
@@ -82,30 +92,34 @@ async function run() {
   /* Removing English must fail, and it must say why rather than doing
    * nothing. This is the owner's explicit requirement and it is the
    * single most important assertion in the file. */
-  const enRow = await page.evaluateHandle(() => {
+  const enDel = await page.evaluateHandle(() => {
     const rows = [...document.querySelectorAll('#s-kbd .row')];
-    return rows.find(r => (r.querySelector('.lb b') || {}).textContent &&
-                          r.querySelector('.lb b').textContent
-                            .includes('English (US)'));
+    const r = rows.find(x => (x.querySelector('.lb b') || {}).textContent &&
+                             x.querySelector('.lb b').textContent
+                               .includes('English (US)'));
+    return r ? r.querySelector('button') : null;
   });
-  const enDel = await enRow.asElement().$('button');
-  if (enDel) {
-    await enDel.click();
-    await page.waitForTimeout(350);
+  const enBtn = enDel.asElement();
+  const hasBtn = enBtn && await enBtn.evaluate(e => !!e);
+
+  if (hasBtn) {
+    await enBtn.click();
+    await page.waitForTimeout(400);
     const shown = await page.evaluate(() => {
       const open = document.querySelector('.backdrop.on');
       return open ? open.textContent : '';
     });
-    ok('English (US) 삭제가 거부된다', /지울 수 없|고정|삭제할 수 없/.test(shown),
-       shown.slice(0, 60));
+    ok('English (US) 삭제가 거부된다',
+       /지울 수 없|고정|삭제할 수 없|지울 수는 없/.test(shown), shown.slice(0, 60));
     ok('거부에 이유가 붙는다',
-       /키보드|비밀번호|복구|배열/.test(shown), shown.slice(0, 90));
+       /키보드|비밀번호|복구|배열|로그인/.test(shown), shown.slice(0, 90));
     await page.evaluate(() => LP.closeAll());
-    await page.waitForTimeout(200);
+    await page.waitForTimeout(250);
     ok('English (US) 가 아직 목록에 있다',
        (await sources()).some(s => s.includes('English (US)')));
   } else {
-    ok('English (US) 행에 삭제 버튼이 없다 (거부의 다른 형태)', true);
+    ok('English (US) 행에 삭제 버튼이 있다', false,
+       '행 자체를 못 찾았거나 버튼이 없습니다');
   }
 
   ok('canRemoveSource 가 English 를 거부한다',

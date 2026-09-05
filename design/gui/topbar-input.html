@@ -1,0 +1,256 @@
+<meta charset="utf-8">
+<title>상단바 입력 표시 — 입력 소스가 여럿일 때</title>
+<link rel="stylesheet" href="lp-motion.css">
+<link rel="stylesheet" href="lp-type.css">
+<link rel="stylesheet" href="lp-ui.css">
+<style>
+/* 설정이 입력 소스 목록을 관리한다면, 상단바는 그것을 실제로 쓰는
+ * 곳이다. 명세서 §2-1 은 오른쪽 묶음에 [한] 하나를 그려 두었는데, 그
+ * 그림은 소스가 둘일 때의 그림이다. 넷이면 무엇을 보여줄 것인가가 이
+ * 페이지의 질문이다. */
+body{padding:32px 20px 80px}
+.wrap{max-width:820px}
+h1{font-size:var(--s-sec);letter-spacing:var(--tr-sec);font-weight:var(--w-semi);margin-bottom:4px}
+.lede{font-size:var(--s-small);letter-spacing:var(--tr-small);color:var(--t3);margin-bottom:26px;max-width:62ch;line-height:1.6}
+.block{background:var(--canvas);border:var(--hair-w) solid var(--line);border-radius:var(--r-win);padding:18px 20px 20px;margin-bottom:18px}
+.block>h2{font-size:var(--s-title);letter-spacing:var(--tr-title);font-weight:var(--w-semi);margin-bottom:3px}
+.block>.sub{margin-bottom:var(--g4)}
+
+/* 바탕화면 한 조각. 상단바는 그 위에 떠 있는 것이라, 불투명한 판
+ * 위에 그리면 반투명이 하는 일이 보이지 않는다. */
+.desk{background:
+  radial-gradient(120% 130% at 22% 8%,#2b4a7a 0%,transparent 58%),
+  radial-gradient(120% 130% at 80% 84%,#6e3552 0%,transparent 55%),
+  linear-gradient(155deg,#151820,#1d1b17);
+  border-radius:var(--r-win);padding:0;overflow:visible;position:relative;
+  min-height:252px;margin-top:var(--g3)}
+/* 252px 는 임의의 값이 아니다. 메뉴가 소스 다섯 개일 때 가장 길고,
+ * 바탕화면 조각 밖으로 나가면 아래의 설명 위에 겹친다. 목업에서
+ * 무언가가 무언가를 가리면 읽는 사람은 그것을 디자인으로 읽는다. */
+
+/* tbar, not bar. lp-ui.css already owns .bar - it is the slider fill -
+ * and .search, which is the field inside a picker. Reusing either name
+ * here means the design system silently restyles this page, which is
+ * exactly what a shared stylesheet is supposed to do and exactly why a
+ * page must not borrow its names for something else. */
+.tbar{display:flex;align-items:center;gap:var(--g3);height:30px;padding:0 11px;
+  background:var(--glass-panel);backdrop-filter:var(--blur-panel);
+  -webkit-backdrop-filter:var(--blur-panel);
+  border-bottom:var(--hair-w) solid rgba(255,255,255,.07);
+  border-radius:var(--r-win) var(--r-win) 0 0;
+  font-size:var(--s-label);letter-spacing:var(--tr-label);color:var(--t2)}
+.tbar .rail{width:32px;height:3px;background:rgba(255,255,255,.14);border-radius:2px;position:relative}
+.tbar .rail i{position:absolute;top:0;height:3px;background:var(--t1);border-radius:2px;
+  left:0;width:16px}
+.tbar .tsearch{color:var(--t3);display:flex;gap:6px;align-items:center}
+.tbar .gap{flex:1}
+.tbar .right{display:flex;align-items:center;gap:var(--g3)}
+.tbar .mode{color:var(--amber)}
+.tbar .clock{font-variant-numeric:tabular-nums}
+.tbar .hw{color:var(--t3);letter-spacing:.06em}
+
+/* 입력 표시. 알약 배경을 쓰지 않는다 - 명세서 §2-1 이 윈도우 11 의
+ * 시각적 서명이라고 지목한 것이 그것이다. 평소엔 글자만 있고, 패널이
+ * 열렸을 때만 아래에 2px 밑줄. */
+.ime{position:relative;padding:4px 5px 3px;cursor:pointer;color:var(--t1);
+  border-bottom:2px solid transparent;line-height:1;
+  transition:border-color var(--t-menu) var(--e-menu),color var(--t-menu) var(--e-menu)}
+.ime:hover{color:#fff}
+.ime.open{border-bottom-color:var(--t1)}
+.ime .tag{display:inline-block;min-width:15px;text-align:center;font-weight:var(--w-medium)}
+.ime.none{display:none}
+
+/* 열리면 그 자리에서 자란다. transform-origin 이 오른쪽 위인 것이
+ * "이 아이콘에서 나왔다" 를 말하는 전부다. */
+.imenu{position:absolute;top:34px;right:11px;min-width:186px;z-index:5;
+  background:var(--glass-menu);backdrop-filter:var(--blur-menu);
+  -webkit-backdrop-filter:var(--blur-menu);
+  border:var(--hair-w) solid rgba(255,255,255,.09);border-radius:var(--r-card);
+  box-shadow:var(--shadow-menu);padding:5px;display:none;
+  transform-origin:top right}
+.imenu.on{display:block;animation:lp-appear var(--t-menu) var(--e-menu) both}
+.imenu a{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:var(--r-ctl);
+  color:var(--t2);font-size:var(--s-label);letter-spacing:var(--tr-label);cursor:pointer}
+.imenu a:hover{background:rgba(255,255,255,.07);color:var(--t1)}
+.imenu a .tag{width:19px;text-align:center;color:var(--t3);font-weight:var(--w-medium)}
+.imenu a.on{color:var(--t1)}
+.imenu a.on .tag{color:var(--t1)}
+.imenu a .kbd{margin-left:auto;font-size:var(--s-tiny);color:var(--t4)}
+.imenu hr{border:0;border-top:var(--hair-w) solid rgba(255,255,255,.08);margin:5px 2px}
+.imenu a.quiet{color:var(--t3);font-size:var(--s-small)}
+
+.count{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:var(--g3)}
+.tbl{width:100%;border-collapse:collapse;margin-top:var(--g3)}
+.tbl th{text-align:left;font-size:var(--s-tiny);font-weight:var(--w-normal);color:var(--t4);
+  padding:0 0 6px;border-bottom:var(--hair-w) solid var(--line)}
+.tbl td{padding:7px 0;font-size:var(--s-label);border-bottom:var(--hair-w) solid var(--line-soft);
+  vertical-align:top}
+.tbl td:first-child{width:118px;color:var(--t2)}
+.tbl td:last-child{color:var(--t3);font-size:var(--s-small)}
+.tbl .tagcell{font-weight:var(--w-medium);color:var(--t1);width:44px}
+</style>
+
+<div class="wrap">
+
+<h1>상단바 입력 표시</h1>
+<div class="lede">
+  설정이 입력 소스 목록을 관리한다면 상단바는 그것을 실제로 쓰는 곳입니다.
+  명세서 §2-1 은 오른쪽 묶음에 <code>[한]</code> 하나를 그려 두었는데,
+  그것은 소스가 둘일 때의 그림입니다. 넷이면 무엇을 보여줄지가 여기서
+  정해야 할 것입니다.
+</div>
+
+<div class="block">
+  <h2>개수에 따라</h2>
+  <div class="sub">입력 소스를 넣고 빼면서 상단바가 어떻게 되는지 보십시오.</div>
+  <div class="count" id="count"></div>
+  <div class="desk">
+    <div class="tbar">
+      <div class="rail"><i id="railmark"></i></div>
+      <div class="tsearch">⌕ 검색</div>
+      <div class="gap"></div>
+      <div class="right">
+        <span class="mode" id="mode" hidden>◑</span>
+        <span class="ime" id="ime"><span class="tag" id="imetag">한</span></span>
+        <span class="clock">화 18:42</span>
+        <span class="hw">▲ ◑ ▮</span>
+      </div>
+    </div>
+    <div class="imenu" id="imenu"></div>
+  </div>
+  <div class="caption" id="why"></div>
+</div>
+
+<div class="block">
+  <h2>왜 이름이 아니라 한두 글자인가</h2>
+  <div class="sub">상단바에서 가로폭은 가장 비싼 자원입니다.</div>
+  <table class="tbl">
+    <tr><th>입력 소스</th><th>표시</th><th></th></tr>
+    <tbody id="tags"></tbody>
+  </table>
+  <div class="caption">
+    각 소스는 한두 글자짜리 꼬리표를 가집니다. 그 언어를 쓰는 사람이
+    자기 언어를 알아보는 글자여야 하므로, 로마자 약어가 아니라 그
+    문자체계 자신의 글자를 씁니다 — 일본어에 <code>JA</code> 가 아니라
+    <code>あ</code>. 같은 언어의 다른 배열은 꼬리표가 같으므로, 메뉴에서만
+    배열 이름으로 구분합니다.
+    <br><br>
+    <b>국기를 쓰지 않습니다.</b> 언어와 나라는 같은 것이 아니고 —
+    영어는 한 나라의 것이 아니며 — 국기는 정치적 주장이 되는 일이
+    잦습니다. 글자는 그런 일이 없습니다.
+  </div>
+</div>
+
+<div class="block">
+  <h2>정해야 할 것 하나</h2>
+  <div class="sub">소스가 셋 이상일 때 전환 키가 무엇을 하는가.</div>
+  <table class="tbl">
+    <tr><th>방식</th><th></th><th></th></tr>
+    <tr><td>순환</td><td></td><td>한/영 키가 다음 소스로 넘어갑니다. 넷이면 원하는 것에 닿기까지 최대 세 번을 눌러야 하고, 몇 번 눌렀는지 세게 됩니다.</td></tr>
+    <tr><td>둘 사이 왕복</td><td></td><td>마지막에 쓴 두 개를 오갑니다. 나머지는 메뉴나 <code>Super+Space</code> 로. 실제 사용을 닮았습니다 — 셋을 쓰는 사람도 한 번에 두 개씩 씁니다.</td></tr>
+    <tr><td>직접 지정</td><td></td><td><code>Super+1..9</code> 로 소스마다 키를 답니다. 확실하지만 외울 것이 늘고, 작업공간 전환과 부딪힙니다.</td></tr>
+  </table>
+  <div class="caption">
+    <b>권장: 둘 사이 왕복.</b> 소스가 둘일 때는 순환과 완전히 같으므로
+    대다수에게는 차이가 없고, 셋 이상일 때만 다르게 동작하면서 그때
+    더 낫습니다. 목록 전체는 <code>Super+Space</code> 로 메뉴를 열어
+    고릅니다. 다만 이것은 아직 결정이 아니라 제안입니다 — 세 언어를
+    매일 쓰는 사람에게 물어보지 않았습니다.
+  </div>
+</div>
+
+</div>
+
+<script src="lp-spring.js"></script>
+<script>
+/* 꼬리표는 소스의 성질이지 상단바의 성질이 아니다. 여기서는 이
+ * 페이지가 혼자 서 있어야 해서 들고 있지만, 자리는 lp-core.js 의
+ * LP.catalogue 다. */
+const SOURCES = [
+  { id:'ko',   name:'한국어',       desc:'두벌식',  tag:'한',
+    why:'한글의 첫 글자. 한국어 IME 가 오래 써 온 표시입니다.' },
+  { id:'en',   name:'English (US)', desc:'QWERTY',  tag:'A', fixed:true,
+    why:'라틴 문자 자체. 지울 수 없는 소스이므로 가장 익숙해야 합니다.' },
+  { id:'ja',   name:'日本語',        desc:'Anthy',   tag:'あ',
+    why:'히라가나 첫 글자. JA 라고 쓰면 일본어 쓰는 사람에게 낯섭니다.' },
+  { id:'zh',   name:'中文',          desc:'拼音',    tag:'中',
+    why:'중국어를 뜻하는 글자 그 자체.' },
+  { id:'de',   name:'Deutsch',      desc:'QWERTZ',  tag:'DE',
+    why:'같은 라틴 문자를 쓰므로 글자로는 구분되지 않습니다. 이럴 때만 두 글자 약어.' },
+];
+
+let live = ['ko', 'en'];
+let current = 'ko';
+
+const $ = s => document.querySelector(s);
+const ime = $('#ime'), imenu = $('#imenu'), imetag = $('#imetag');
+
+function get(id) { return SOURCES.find(s => s.id === id); }
+
+function render() {
+  /* 소스가 하나면 표시 자체가 없다. 전환할 것이 없는데 전환기를
+   * 그려 두면, 눌러 보고 아무 일도 일어나지 않는 것을 확인하게
+   * 된다. 그것이 상단바에서 가장 비싼 종류의 낭비다. */
+  ime.classList.toggle('none', live.length < 2);
+  if (live.length && !live.includes(current)) current = live[0];
+  const cur = get(current);
+  if (cur) imetag.textContent = cur.tag;
+
+  imenu.innerHTML = live.map(id => {
+    const s = get(id);
+    return '<a data-pick="' + id + '"' + (id === current ? ' class="on"' : '') +
+      '><span class="tag">' + s.tag + '</span>' + s.name +
+      '<span class="kbd">' + s.desc + '</span></a>';
+  }).join('') +
+    '<hr><a class="quiet" data-pick="__settings">키보드 설정…</a>';
+
+  $('#count').innerHTML = SOURCES.map(s =>
+    '<button class="btn pressable' + (live.includes(s.id) ? '' : ' quiet') +
+    '" data-toggle="' + s.id + '"' + (s.fixed ? ' disabled' : '') + '>' +
+    s.tag + ' ' + s.name + (s.fixed ? ' · 고정' : '') + '</button>').join('');
+
+  const n = live.length;
+  $('#why').innerHTML =
+    n < 2
+      ? '입력 소스가 하나입니다. <b>표시가 사라집니다</b> — 전환할 것이 없으면 전환기도 없습니다.'
+      : n === 2
+      ? '둘입니다. 현재 소스의 꼬리표만 보이고, 한/영 키가 둘을 오갑니다. 명세서가 그린 그림이 이 상태입니다.'
+      : '셋 이상입니다. 표시는 그대로 한 글자 — <b>바 폭이 소스 개수만큼 늘어나지 않습니다.</b> 눌러서 목록을 열면 전부 보입니다. 작업공간 레일이 개수와 무관하게 32px 인 것과 같은 규칙입니다.';
+
+  $('#railmark').style.width = '16px';
+
+  $('#tags').innerHTML = SOURCES.map(s =>
+    '<tr><td>' + s.name + ' <span class="pill">' + s.desc + '</span></td>' +
+    '<td class="tagcell">' + s.tag + '</td><td>' + s.why + '</td></tr>').join('');
+}
+
+ime.addEventListener('click', e => {
+  e.stopPropagation();
+  const open = imenu.classList.toggle('on');
+  ime.classList.toggle('open', open);
+});
+
+imenu.addEventListener('click', e => {
+  const a = e.target.closest('[data-pick]');
+  if (!a) return;
+  if (a.dataset.pick !== '__settings') current = a.dataset.pick;
+  imenu.classList.remove('on');
+  ime.classList.remove('open');
+  render();
+});
+
+document.addEventListener('click', () => {
+  imenu.classList.remove('on');
+  ime.classList.remove('open');
+});
+
+$('#count').addEventListener('click', e => {
+  const b = e.target.closest('[data-toggle]');
+  if (!b || b.disabled) return;
+  const id = b.dataset.toggle;
+  live = live.includes(id) ? live.filter(x => x !== id) : [...live, id];
+  render();
+});
+
+render();
+</script>
