@@ -33,6 +33,18 @@
  * Both refuse in a dialog with the reason in it rather than by greying
  * a control out, for the reason 키보드 refuses in a dialog: somebody who
  * does not know why it will not go keeps pressing until they are told.
+ *
+ * ── One thing the mockup cannot show ──
+ *
+ * LP.can reads LP.account - which of the two seats the page is being
+ * viewed from - and not LP.accounts[].admin. So promoting guest here
+ * writes the promotion into the account table, and 표준 사용자로 보기
+ * still shows the standard view. On a machine the two are the same fact
+ * separated by a login; in one HTML file they are two, and the account
+ * switch above the window is a change of seat rather than a login. That
+ * is why every type change says 다음 로그인부터 적용됩니다 rather than
+ * pretending to take effect: it is the truthful half of a gap that
+ * closes in lp-core.js, not here.
  */
 
 (function () {
@@ -51,10 +63,19 @@
   /* The accounts, on LP with everything else rather than in this file.
    * 권한 draws the same standard account this screen adds and deletes,
    * and two lists of accounts is two answers to "who uses this machine"
-   * that drift apart the first time one of them is edited. */
+   * that drift apart the first time one of them is edited.
+   *
+   * `admin` is the type written down; `nowAdmin` is the type the running
+   * session was given at login. They are two facts, not one: a group
+   * change lands in the account file immediately and in a session only
+   * when that session starts. Keeping both is what lets the row say
+   * "다음 로그인부터" only while it is true, rather than carrying a flag
+   * that is set once and never cleared. */
   LP.accounts = LP.accounts || [
-    { name: 'cho',   admin: true,  photo: '이름 첫 글자', pwDays: 92 },
-    { name: 'guest', admin: false, photo: '이름 첫 글자', pwDays: 214 },
+    { name: 'cho',   admin: true,  nowAdmin: true,
+      photo: '이름 첫 글자', pwDays: 92 },
+    { name: 'guest', admin: false, nowAdmin: false,
+      photo: '이름 첫 글자', pwDays: 214 },
   ];
 
   /* Which account the machine starts without asking, or null. One value
@@ -87,9 +108,10 @@
    * test - that question is LP.can(AREA) and it is asked nowhere else. */
   function meName() { return LP.userName[LP.account]; }
   function find(name) { return LP.accounts.filter(a => a.name === name)[0]; }
-  function isMe(a) { return a.name === meName(); }
+  function isMe(a) { return !!a && a.name === meName(); }
   function admins() { return LP.accounts.filter(a => a.admin); }
   function home(a) { return '/home/' + a.name; }
+  function pane() { return document.getElementById(PANE); }
 
   /* The account signed in, guaranteed to exist.
    *
@@ -100,9 +122,11 @@
   function seat() {
     let a = find(meName());
     if (!a) {
+      const admin = LP.userName.admin === meName();
       a = {
         name: meName(),
-        admin: LP.userName.admin === meName(),
+        admin: admin,
+        nowAdmin: admin,
         photo: PHOTOS[0],
         pwDays: 0,
       };
@@ -111,18 +135,34 @@
     return a;
   }
 
+  /* Written down but not yet in force. Derived rather than flagged: a
+   * type changed and changed back is the type the session already has,
+   * and a row that still says 다음 로그인부터 적용됩니다 about it is
+   * telling somebody to log out for nothing. */
+  function pending(a) { return a.admin !== a.nowAdmin; }
+
   /* 다음 로그인부터: the group change is written now and a session picks
    * it up when it logs in. Saying so is the only way a 관리 section that
    * is still locked makes sense to somebody who was made an
    * administrator a minute ago. */
   function typeLine(a) {
     return (a.admin ? '관리자' : '표준') +
-           (a.pending ? ' · 다음 로그인부터 적용됩니다' : '');
+           (pending(a) ? ' · 다음 로그인부터 적용됩니다' : '');
   }
 
   function said()     { return document.getElementById('user-said'); }
   function mineSaid() { return document.getElementById('user-mine-said'); }
   function modal(id)  { return document.getElementById(id).querySelector('.modal'); }
+
+  /* What 자동 로그인 costs, said while it is costing it. A caution that
+   * is there whether or not the thing is happening is one people read
+   * past on the day it matters. */
+  function autoNote(mine) {
+    return LP.autoLogin === mine.name
+      ? '<div class="note">▲ 자동 로그인이 켜져 있습니다. 이 컴퓨터를 켜는 사람은 ' +
+        '비밀번호 없이 ' + LP.esc(mine.name) + ' 계정으로 들어옵니다.</div>'
+      : '';
+  }
 
   /* ── the pane ───────────────────────────────────────────────────
    *
@@ -134,20 +174,14 @@
     const mine = seat();
 
     el.querySelector('#user-sub').textContent =
-      '계정 ' + LP.accounts.length + '개 · 지금은 ' + mine.name + ' 로 로그인해 있습니다';
+      '계정 ' + LP.accounts.length + '개 · 지금은 ' + mine.name +
+      ' 계정으로 로그인해 있습니다';
 
     fillList(el.querySelector('#user-list'));
     fillMine(el.querySelector('#user-mine'), mine, may);
     fillAdmin(el.querySelector('#user-admin'), may);
 
-    /* On while the setting is on, gone when it is off. A caution that is
-     * there whether or not the thing is happening is one people read
-     * past on the day it matters. */
-    el.querySelector('#user-mine-note').innerHTML =
-      LP.autoLogin === mine.name
-        ? '<div class="note">▲ 자동 로그인이 켜져 있습니다. 이 컴퓨터를 켜는 사람은 ' +
-          '비밀번호 없이 ' + LP.esc(mine.name) + ' 로 들어옵니다.</div>'
-        : '';
+    el.querySelector('#user-mine-note').innerHTML = autoNote(mine);
 
     /* The administrators by name, under the section that needs them.
      * LP.whyLocked says 관리자만, which is the rule; this says which
@@ -158,7 +192,8 @@
           ? '이 컴퓨터의 관리자는 ' + who[0] + ' 하나뿐입니다. 관리자가 하나뿐이면 그 계정은 표준으로 바꿀 수 없습니다.'
           : '이 컴퓨터의 관리자는 ' + who.join(', ') + ' 입니다.')
       : (who.length
-          ? '계정을 추가하거나 지우려면 관리자 ' + who.join(', ') + ' 에게 요청하십시오.'
+          ? '계정을 추가·삭제하거나 유형과 권한을 바꾸려면 관리자 ' +
+            who.join(', ') + ' 에게 요청하십시오.'
           : '');
   };
 
@@ -184,10 +219,11 @@
 
   /* ── 내 계정 ────────────────────────────────────────────────────
    *
-   * Two of these three rows are live whatever the account may do, and
-   * the third is not. The line between them is who else it affects: a
-   * password and a picture end at the person, and 자동 로그인 decides
-   * whether anybody who opens the lid is already inside the machine. */
+   * Three settings and one statement about the hardware. Two of the
+   * three are live whatever the account may do, and the third is not:
+   * the line between them is who else it affects. A password and a
+   * picture end at the person; 자동 로그인 decides whether anybody who
+   * opens the lid is already inside the machine. */
   function fillMine(box, mine, may) {
     const lock = '<span class="lock">자물쇠</span>';
     const why  = '<div class="why">' + LP.whyLocked(AREA) + '</div>';
@@ -240,8 +276,11 @@
       { act: 'type', name: '계정 유형 바꾸기' },
       { act: 'perm', name: '권한',
         desc: '표준 계정이 스스로 바꿀 수 있는 설정을 정합니다' },
+      /* The description says the part the name does not: the name
+       * already says the account goes. What somebody hesitating over
+       * this row wants to know is what happens to the files. */
       { act: 'del',  name: '사용자 삭제',
-        desc: '계정을 지웁니다. 홈 폴더는 남겨 둘 수 있습니다' },
+        desc: '홈 폴더는 남겨 둘 수 있습니다' },
     ];
 
     box.innerHTML = rows.map(function (r) {
@@ -271,7 +310,27 @@
     });
   }
 
-  /* ── 자동 로그인 ────────────────────────────────────────────────── */
+  /* ── 자동 로그인 ──────────────────────────────────────────────
+   *
+   * The one change on this screen that does not redraw the screen, and
+   * that is the whole of why it is written out here. A full render
+   * replaces the row, and a knob that was created in its final position
+   * has nothing to travel from - the switch would arrive already
+   * flipped, which is the one thing feel.md §2-2 has a spring to
+   * prevent. So the switch is moved where it stands.
+   *
+   * Both lines below read LP rather than the click, so what this writes
+   * is what the next full render writes, and 자동 로그인 is on LP where
+   * no other screen reads it. */
+  function syncAuto() {
+    const el = pane();
+    if (!el) return;
+    const mine = seat();
+    const sw = el.querySelector('#user-mine [data-act="auto"] .sw');
+    if (sw) sw.classList.toggle('on', LP.autoLogin === mine.name);
+    el.querySelector('#user-mine-note').innerHTML = autoNote(mine);
+  }
+
   function toggleAuto(mine) {
     /* The lock on the row is the drawing of the rule. This is the rule,
      * asked again so that a click arriving another way - a row drawn
@@ -280,7 +339,7 @@
 
     const was = LP.autoLogin;
     LP.autoLogin = (was === mine.name) ? null : mine.name;
-    LP.render();
+    syncAuto();
 
     /* Said out loud only when turning it on took it from somebody else.
      * The switch moving is the feedback for everything else, and the
@@ -303,7 +362,7 @@
 
     const facts = [
       ['유형',    typeLine(a)],
-      ['로그인',  isMe(a) ? '현재 로그인' : '로그인해 있지 않습니다'],
+      ['로그인',  isMe(a) ? '지금 로그인해 있습니다' : '로그인해 있지 않습니다'],
       ['홈 폴더', home(a)],
     ];
 
@@ -357,7 +416,7 @@
 
     modal(D_PW).innerHTML =
       '<h3>비밀번호 변경</h3>' +
-      '<p>' + LP.esc(mine.name) + ' 로 로그인할 때 쓰는 비밀번호를 바꿉니다. ' +
+      '<p>' + LP.esc(mine.name) + ' 계정으로 로그인할 때 쓰는 비밀번호를 바꿉니다. ' +
         '바꾸고 나면 다음 로그인부터 새 비밀번호를 씁니다.</p>' +
       '<div class="fieldlabel">지금 비밀번호</div>' +
       '<input class="field" type="password" autocomplete="off" data-old>' +
@@ -454,7 +513,7 @@
                    '" data-photo="' + LP.esc(p) + '">' +
             '<div class="lb"><b>' + LP.esc(p) + '</b></div>' +
             '<div class="vl' + (on ? '' : ' off') + '">' +
-              (on ? '사용 중' : '선택 안 함') + '</div></div>';
+              (on ? '사용 중' : '사용 안 함') + '</div></div>';
         }).join('') +
       '</div>' +
       '<div class="foot">' +
@@ -555,7 +614,7 @@
       }
       if (find(want)) {
         name.classList.add('bad');
-        LP.say(line, want + ' 는 이미 있는 계정입니다. 계정 이름은 겹칠 수 없습니다', 'warn');
+        LP.say(line, want + ' 계정이 이미 있습니다. 계정 이름은 겹칠 수 없습니다', 'warn');
         return;
       }
       if (pw.value.length < PW_MIN) {
@@ -564,8 +623,12 @@
         return;
       }
 
+      /* nowAdmin equal to admin: an account that has never logged in has
+       * no session holding an older type, so there is nothing pending
+       * about it and the row says so by saying nothing. */
       LP.accounts.push({
-        name: want, admin: addAdmin, photo: PHOTOS[0], pwDays: 0,
+        name: want, admin: addAdmin, nowAdmin: addAdmin,
+        photo: PHOTOS[0], pwDays: 0,
       });
       LP.close(D_ADD);
       LP.render();
@@ -606,7 +669,7 @@
             '<div class="lb"><b>' + LP.esc(a.name) + pill + '</b>' +
               '<i>' + typeLine(a) + '</i></div>' +
             '<button class="btn quiet pressable" data-to="' + (a.admin ? 'std' : 'admin') + '">' +
-              (a.admin ? '표준으로' : '관리자로') + '</button></div>';
+              (a.admin ? '표준으로 바꾸기' : '관리자로 바꾸기') + '</button></div>';
         }).join('') +
       '</div>' +
       (msg ? '<div class="note' + (msg.ok ? ' plain' : '') + '">' +
@@ -645,18 +708,19 @@
       openType({ text: '지금 로그인해 있는 계정의 유형은 다른 관리자가 바꿉니다. ' +
                        '세션은 로그인할 때 받은 권한을 그대로 들고 있어서, 쓰는 ' +
                        '도중에 자기 권한만 따로 내려놓을 수 없습니다. 관리자 ' +
-                       other.join(', ') + ' 가 바꿀 수 있습니다.' });
+                       other.join(', ') + ' 계정이 바꿀 수 있습니다.' });
       return;
     }
 
+    /* Written now; nowAdmin is left where it is, which is what makes the
+     * row say 다음 로그인부터 적용됩니다 until the account logs in
+     * again. A session already open keeps what it had. */
     a.admin = toAdmin;
-    /* The change is written now and the account's next login is where it
-     * starts to mean anything. A session already open keeps what it had. */
-    a.pending = true;
+    const word = toAdmin ? '관리자로' : '표준으로';
     LP.render();
-    LP.say(said(), a.name + ' 의 계정 유형을 ' + (toAdmin ? '관리자' : '표준') + ' 로 바꿨습니다');
-    openType({ ok: true, text: a.name + ' 의 계정 유형을 ' +
-               (toAdmin ? '관리자' : '표준') + ' 로 바꿨습니다. 다음 로그인부터 적용됩니다.' });
+    LP.say(said(), a.name + ' 의 계정 유형을 ' + word + ' 바꿨습니다');
+    openType({ ok: true, text: a.name + ' 의 계정 유형을 ' + word +
+               ' 바꿨습니다. 다음 로그인부터 적용됩니다.' });
   }
 
   /* ── 사용자 삭제 ────────────────────────────────────────────────
@@ -768,11 +832,28 @@
     const warn = box.querySelector('[data-warn]');
     const go   = box.querySelector('[data-go]');
 
-    /* Starts closed the way LPSpring.height leaves a collapsed block, so
-     * that the first expansion is measured rather than jumped to. The
-     * class would survive the spring clearing display and the note would
-     * then fill a block nobody can see. */
+    /* overflow on every call rather than once: the spring clears it
+     * when it settles open, and the collapse has to measure the same
+     * height the expansion did - the note's own margin escaping that
+     * measurement is a jump at the start of the collapse. 초기화 keeps
+     * the same two lines together for the same reason. */
+    function slide(open) {
+      warn.style.overflow = 'hidden';
+      LPSpring.height(warn, open);
+    }
+
+    /* Closed with an inline display, because that is the state
+     * LPSpring.height leaves a collapsed block in - a class would
+     * survive the spring clearing display, and the note would then fill
+     * a block nobody can see.
+     *
+     * And seeded closed, the way 초기화 seeds its progress block: the
+     * spring is created on the first call at whatever that call asks
+     * for, so a block whose first call is "open" is already at its
+     * target and arrives with no motion at all. Measuring a hidden block
+     * costs a zero and buys the first expansion. */
     warn.style.display = 'none';
+    slide(false);
     go.textContent = '계정 삭제';
 
     box.querySelectorAll('[data-erase]').forEach(function (row) {
@@ -791,8 +872,7 @@
          * the block whose target changes mid-flight: somebody weighing
          * the two answers flips between them faster than 240ms, and a
          * CSS transition would stop dead and set off again each time. */
-        warn.style.overflow = 'hidden';
-        LPSpring.height(warn, delErase);
+        slide(delErase);
       });
     });
 
@@ -806,29 +886,41 @@
   }
 
   function doDelete(a, erase) {
-    /* The dialog is the drawing of the rule; these two lines are the
-     * rule. A click can arrive from a focused button after the account
-     * switched underneath it. */
+    /* The dialog is the drawing of the rule; this line is the rule,
+     * asked once more because a click can arrive from a focused button
+     * after the account switched underneath it. */
     if (!LP.can(AREA) || !canDelete(a).ok) return;
 
     LP.close(D_DEL);
     if (LP.autoLogin === a.name) LP.autoLogin = null;
 
-    const row = document.querySelector('#user-list .row[data-acct="' + a.name + '"]');
+    /* Taken out of LP only once the row has finished leaving, so the
+     * list is never a frame ahead of what is on the screen. */
+    let committed = false;
     const done = function () {
+      if (committed) return;
+      committed = true;
       const i = LP.accounts.indexOf(a);
       if (i >= 0) LP.accounts.splice(i, 1);
       LP.render();
       LP.say(said(), erase
         ? a.name + ' 계정과 홈 폴더를 지웠습니다'
-        : a.name + ' 계정을 지웠습니다. ' + home(a) + ' 는 그대로 있습니다');
+        : a.name + ' 계정을 지웠습니다. ' + home(a) + ' 폴더는 그대로 있습니다');
     };
 
-    /* Taken out of LP only once the row has finished leaving, so the
-     * list is never a frame ahead of what is on the screen. */
+    const row = document.querySelector('#user-list .row[data-acct="' + a.name + '"]');
     if (!row) { done(); return; }
     row.classList.add('leave');
     row.addEventListener('animationend', done, { once: true });
+
+    /* Whichever comes first, and the timer is not decoration.
+     * animationend never arrives if the row leaves the document before
+     * the animation ends - a sidebar click or an account switch inside
+     * those 154ms is enough - and the dialog has already closed, so a
+     * deletion lost that way is lost silently, with the account still
+     * there and nothing on screen saying so. An input source can afford
+     * that. An account cannot. */
+    setTimeout(done, 400);
   }
 
 })();

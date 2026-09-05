@@ -9,8 +9,17 @@
  * spring whose entire subject is this control. The 6.7% overshoot is
  * 1px over the 15px the knob travels: not a bounce anybody watches, the
  * difference between a switch a person flipped and a switch a machine
- * moved. 사용자 is the first screen this branch gives a switch to, which
- * is why the gap shows here first; it belongs in lp-ui.css beside .sw. */
+ * moved. 사용자 is the first screen this branch gives a working switch
+ * to, which is why the gap shows here first; it belongs in lp-ui.css
+ * beside .sw.
+ *
+ * A transition needs an element that was already on the screen holding
+ * the old value, so this pays for itself only because 자동 로그인 is
+ * flipped in place (s-user.js, syncAuto) instead of by redrawing the
+ * row. A screen that rebuilds its rows to move a switch gets these two
+ * rules and no animation at all: the knob is created where it was going.
+ * That is a note for the next screen with a switch, not a rule about
+ * this one. */
 .sw{transition:background var(--t-knob) var(--e-knob)}
 .sw::after{transition:left var(--t-knob) var(--e-knob),
                      background var(--t-knob) var(--e-knob)}
