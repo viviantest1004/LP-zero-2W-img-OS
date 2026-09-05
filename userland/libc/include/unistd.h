@@ -295,6 +295,11 @@ s64   lp_timegm(const lp_tm_t *tm);
 #define MNT_DETACH  2
 long  lp_umount(const char *tgt, int flags);
 
+/* 루트를 옮긴다. apt 가 데비안 트리 안에서 돌 때 쓴다 - dpkg 는
+ * /var/lib/dpkg 같은 절대경로를 코드에 박고 있어서, 그 트리를 진짜
+ * 루트로 보여주는 것 말고는 방법이 없다. */
+long  lp_chroot(const char *path);
+
 long  lp_mount(const char *src, const char *tgt, const char *fstype,
                unsigned long flags, const void *data);
 long  lp_reboot(int cmd);

@@ -49,6 +49,20 @@ else
   echo "SKIP  no micropython"
 fi
 
+echo "=== ORDINARY LINUX BINARIES ==="
+# The loader is named differently on every architecture, and /etc/rc
+# used to link only the arm64 one. On amd64 that produced a broken
+# symlink, no working loader, and a cheerful "ordinary Linux binaries
+# will run" message - so nothing external ran on half the images this
+# project ships and no test noticed. CPython is itself a dynamically
+# linked glibc binary, which makes it the obvious thing to check with.
+if test -d /data/glibc ; then
+  if run /data/python/bin/python3.12 -c "print('ran')" > /tmp/t20 2>&1 ; then echo "PASS  run starts a glibc binary" ; else echo "FAIL  run cannot start one: `head -1 /tmp/t20`" ; fi
+  if /data/python/bin/python3.12 -c "print('ran')" > /tmp/t21 2>&1 ; then echo "PASS  and the loader symlinks work without run" ; else echo "FAIL  /lib loader symlinks are wrong: `head -1 /tmp/t21`" ; fi
+else
+  echo "SKIP  no glibc on /data (an image built without python)"
+fi
+
 echo "=== GRAPHICS AND INPUT (what a UI package needs) ==="
 if test -d /sys/class/drm ; then echo "PASS  DRM present: `ls /sys/class/drm | wc -l` nodes" ; else echo "FAIL  no DRM - no UI package can work" ; fi
 # No card0 can mean two very different things: the driver is missing, or

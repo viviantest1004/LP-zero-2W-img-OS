@@ -256,13 +256,58 @@ echo "[rc] other people's programs"
 # kept is that none of this exists in the system image - it appears only
 # when /data carries glibc, and it goes away with the partition. Delete
 # /data/glibc and the door closes again.
+#
+# ── Why this is a glob and not a list ──
+#
+# It used to be a hardcoded list of ten library names, and the first
+# one on it was ld-linux-aarch64.so.1. That is the loader on arm64. On
+# amd64 the loader is called ld-linux-x86-64.so.2.
+#
+# So on every amd64 image this loop made /lib/ld-linux-aarch64.so.1
+# pointing at a file that was not there, never made the loader that
+# was, and then printed "ordinary Linux binaries will run". Not one of
+# them could. The message was the only part that worked, which is why
+# it went unnoticed - `run`, external tools, anything built on another
+# Linux, all failed with errors that sounded like the program's fault.
+#
+# A list has to be kept in step with what the build stages. A glob
+# cannot fall out of step with it.
 if test -d /data/glibc
 then
     mkdir -p /lib
-    for lib in ld-linux-aarch64.so.1 libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libresolv.so.2 libutil.so.1 libgcc_s.so.1 libstdc++.so.6
+    for lib in /data/glibc/*
     do
-        ln -s /data/glibc/$lib /lib/$lib
+        ln -s $lib /lib
     done
+
+    # x86-64 keeps the loader at /lib64, not /lib.
+    #
+    # That is not a convention, it is in the ABI: every x86-64 binary
+    # carries the string "/lib64/ld-linux-x86-64.so.2" in its program
+    # headers and the kernel opens exactly that path. A link in /lib is
+    # never consulted. arm64 uses /lib and needs nothing extra, which is
+    # part of why this went unseen while arm64 was the only target.
+    if test -f /data/glibc/ld-linux-x86-64.so.2
+    then
+        mkdir -p /lib64
+        ln -s /data/glibc/ld-linux-x86-64.so.2 /lib64
+    fi
+
+    # Debian's multiarch layout. Anything built on Debian or Ubuntu
+    # looks under one of these before it looks in /lib, and most of what
+    # anybody will want to drop on this machine was built on one of them.
+    mkdir -p /usr/lib
+    if test -f /data/glibc/ld-linux-x86-64.so.2
+    then
+        ln -s /data/glibc /lib/x86_64-linux-gnu
+        ln -s /data/glibc /usr/lib/x86_64-linux-gnu
+    fi
+    if test -f /data/glibc/ld-linux-aarch64.so.1
+    then
+        ln -s /data/glibc /lib/aarch64-linux-gnu
+        ln -s /data/glibc /usr/lib/aarch64-linux-gnu
+    fi
+
     echo "[rc]   glibc is on /data - ordinary Linux binaries will run"
 fi
 

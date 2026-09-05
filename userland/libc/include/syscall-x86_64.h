@@ -73,6 +73,7 @@
 #define SYS_sync             162
 #define SYS_mount            165
 #define SYS_umount2          166
+#define SYS_chroot           161
 #define SYS_swapon           167
 #define SYS_swapoff          168
 #define SYS_reboot           169

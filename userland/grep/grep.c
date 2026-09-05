@@ -19,6 +19,7 @@
 #include "types.h"
 #include "string.h"
 #include "stdio.h"
+#include "stdlib.h"
 #include "unistd.h"
 
 static bool fold;                     /* -i */
@@ -144,22 +145,69 @@ static bool match_line(const char *pat, const char *line)
 
 typedef struct {
     bool invert, numbers, count_only, names_only, quiet;
+    int  before;        /* -B: lines of context before a match */
+    int  after;         /* -A: lines after */
 } opts_t;
 
 /* Returns the number of matching lines. */
+/* ── Context lines: -A, -B, -C ──
+ *
+ * A match on its own is often not the answer - the answer is the line
+ * after it, or the three before. Without these, reading a log meant
+ * grepping for a line number and then paging to it by hand, and every
+ * script that wanted context had to be written some other way.
+ *
+ * "Before" needs the lines kept until we know whether they matter, so
+ * there is a small ring of them. "After" is only a countdown. */
+#define CTX_MAX 32
+
+static void emit(const char *name, bool show_name, long lineno,
+                 const opts_t *o, const char *text, char sep)
+{
+    if (show_name)
+        printf("%s%c", name, sep);
+    if (o->numbers)
+        printf("%ld%c", lineno, sep);
+    printf("%s\n", text);
+}
+
 static long grep_fd(int fd, const char *pat, const opts_t *o,
                     const char *name, bool show_name)
 {
     char line[8192];
     long lineno = 0, hits = 0;
 
+    /* The ring of lines waiting to be shown if a match turns up. */
+    static char ring[CTX_MAX][8192];
+    static long ring_no[CTX_MAX];
+    int  ring_n = 0, ring_head = 0;
+    int  before = o->before > CTX_MAX ? CTX_MAX : o->before;
+
+    int  after_left = 0;        /* lines still owed after a match */
+    long last_shown = 0;        /* to place --  separators */
+    bool any_output = false;
+
     while (readline(fd, line, sizeof(line)) >= 0) {
         lineno++;
         bool hit = match_line(pat, line);
         if (o->invert)
             hit = !hit;
-        if (!hit)
+
+        if (!hit) {
+            if (after_left > 0 && !o->quiet && !o->count_only &&
+                !o->names_only) {
+                emit(name, show_name, lineno, o, line, '-');
+                last_shown = lineno;
+                after_left--;
+            } else if (before > 0) {
+                strlcpy(ring[ring_head], line, sizeof ring[0]);
+                ring_no[ring_head] = lineno;
+                ring_head = (ring_head + 1) % before;
+                if (ring_n < before)
+                    ring_n++;
+            }
             continue;
+        }
 
         hits++;
         if (o->quiet || o->count_only)
@@ -169,11 +217,24 @@ static long grep_fd(int fd, const char *pat, const opts_t *o,
             break;                    /* one mention per file is enough */
         }
 
-        if (show_name)
-            printf("%s:", name);
-        if (o->numbers)
-            printf("%ld:", lineno);
-        printf("%s\n", line);
+        /* A gap between groups gets a separator, the way grep does it.
+         * Without it two runs of context read as one continuous quote
+         * from the file, which is exactly the wrong impression. */
+        if ((o->before || o->after) && any_output &&
+            last_shown && lineno > last_shown + 1)
+            printf("--\n");
+
+        for (int i = 0; i < ring_n; i++) {
+            int idx = (ring_head + before - ring_n + i) % before;
+            if (ring_no[idx] > last_shown)
+                emit(name, show_name, ring_no[idx], o, ring[idx], '-');
+        }
+        ring_n = 0;
+
+        emit(name, show_name, lineno, o, line, ':');
+        last_shown = lineno;
+        any_output = true;
+        after_left = o->after;
     }
     return hits;
 }
@@ -258,11 +319,45 @@ static void grep_tree(const char *path, const char *pat, opts_t *o, int depth)
 
 int main(int argc, char **argv)
 {
-    opts_t o = { false, false, false, false, false };
+    opts_t o = { false, false, false, false, false, 0, 0 };
     const char *pat = NULL;
     int files = 0;
 
     for (int i = 1; i < argc; i++) {
+        if (!argv[i][0])
+            continue;                     /* a consumed option value */
+
+        /* -A 3 / -B 3 / -C 3, and the attached form -A3. These take a
+         * value, so they cannot be folded in with the flag letters. */
+        if (argv[i][0] == '-' && !pat &&
+            (argv[i][1] == 'A' || argv[i][1] == 'B' || argv[i][1] == 'C')) {
+            char which = argv[i][1];
+            const char *val = argv[i][2] ? argv[i] + 2
+                                         : (i + 1 < argc ? argv[++i] : NULL);
+            if (!val || val[0] < '0' || val[0] > '9') {
+                dprintf(STDERR_FILENO,
+                        "grep: -%c wants a number of lines\n", which);
+                return 2;
+            }
+            int n = atoi(val);
+            if (n < 0) n = 0;
+            if (which == 'A' || which == 'C') o.after  = n;
+            if (which == 'B' || which == 'C') o.before = n;
+
+            /* Mark the value as consumed.
+             *
+             * Three later loops walk argv again to find the pattern and
+             * the files, and they decide by "does it start with -".
+             * The number after -A does not, so `grep -A 2 foo file`
+             * looked for a file called "2" and said "2: cannot open"
+             * while still doing the right thing with the real file -
+             * the sort of half-working that is worse than a clean
+             * failure. Blanking it here means every one of those loops
+             * skips it without having to know the option exists. */
+            argv[i] = (char *)"";
+            continue;
+        }
+
         if (argv[i][0] == '-' && argv[i][1] && !pat) {
             for (const char *f = argv[i] + 1; *f; f++) {
                 switch (*f) {
@@ -274,11 +369,12 @@ int main(int argc, char **argv)
                 case 'q': o.quiet = true; break;
                 case 'r': case 'R': recursive = true; break;
                 case 'h':
-                    printf("usage: grep [-invclqr] <pattern> [file|dir]...\n");
+                    printf("usage: grep [-invclqr] [-A n] [-B n] [-C n] <pattern> [file|dir]...\n");
                     printf("  -i ignore case   -v show the lines that do not match\n");
                     printf("  -n line numbers  -c count only\n");
                     printf("  -l name the files  -q say nothing, just the exit code\n");
                     printf("  -r walk into directories\n");
+                    printf("  -A n lines after a match   -B n before   -C n both\n");
                     printf("\npattern: . any character, * + ? repeats,\n");
                     printf("         [abc] [a-z] [^a] sets, ^ $ the line ends\n");
                     return 0;
@@ -305,6 +401,7 @@ int main(int argc, char **argv)
         bool searched = false;
         bool seen = false;
         for (int i = 1; i < argc; i++) {
+            if (!argv[i][0]) continue;
             if (argv[i][0] == '-' && argv[i][1]) continue;
             if (!seen && strcmp(argv[i], pat) == 0) { seen = true; continue; }
             grep_tree(argv[i], pat, &o, 0);
@@ -330,6 +427,7 @@ int main(int argc, char **argv)
     int  rc_any = 1;
 
     for (int i = 1; i < argc; i++) {
+        if (!argv[i][0]) continue;
         if (argv[i][0] == '-' && argv[i][1])
             continue;
         if (!seen_pat && strcmp(argv[i], pat) == 0) { seen_pat = true; continue; }

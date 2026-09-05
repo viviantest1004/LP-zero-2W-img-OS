@@ -133,6 +133,8 @@ static const entry_t KNOWN[] = {
     { "bootcount","system",  "detect a reboot loop",        "bootcount" },
     { "beacon",   "system",  "report how the board is doing", "beacon [-d] [-n]" },
     { "calc",     "system",  "integer calculator",          "calc \"1 + 2 * 3\"" },
+    { "apt",      "system",  "install packages from Debian",
+                                                            "apt install|remove|search|run|shell <...>" },
     { "pkg",      "system",  "install and remove packages", "pkg list|add|remove|install" },
     { "update",   "system",  "replace the system, reversibly", "update [<file|url>|--rollback]" },
     { "splash",   "system",  "draw the boot screen",        "splash [device]" },
