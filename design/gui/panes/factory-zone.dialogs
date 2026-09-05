@@ -13,7 +13,7 @@
            asked to prove who you are before being told what you are
            agreeing to is how people agree to the wrong thing. -->
     <div class="backdrop" id="dlg-factory-what">
-      <div class="modal wide appear">
+      <div class="modal wide tall appear">
         <h3>공장 초기화</h3>
         <p>이 컴퓨터를 처음 켠 상태로 되돌립니다.</p>
 
@@ -99,7 +99,7 @@
       <div class="modal appear">
         <h3>마지막 확인</h3>
         <p>시작하면 계정과 파일, 설치한 앱이 모두 지워집니다. 되돌릴 수 없습니다.</p>
-        <div class="fieldlabel">확인을 위해 초기화 라고 입력합니다</div>
+        <div class="fieldlabel">확인을 위해 초기화라고 입력합니다</div>
         <input class="field" autocomplete="off" placeholder="초기화" data-phrase>
         <div class="foot">
           <button class="btn quiet pressable" data-close="dlg-factory-sure">취소</button>

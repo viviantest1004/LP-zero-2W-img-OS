@@ -1,8 +1,9 @@
-/* 공장 초기화 - two spacing rules the existing set did not have.
+/* 공장 초기화 - three spacing rules and one bound on a dialog's height.
  *
- * No new component and no new colour: the zone, the modal, the field and
- * the label were all already there. What was missing is that both of
- * them are used here in a position nothing had used them in before. */
+ * No new colour and no new component: the zone, the modal, the field and
+ * the label were all already drawn. What was missing is that this screen
+ * uses them in positions nothing had used them in before, and that one
+ * of its dialogs is the first that can outgrow the window. */
 
 /* The zone gains a second paragraph for a standard account - the
  * description, and then the line naming who can do this. .modal already
@@ -13,7 +14,43 @@
 
 /* .fieldlabel was drawn for a field that begins a block. In these
  * dialogs it follows a sentence, and with no margin above it the label
- * sits directly on the paragraph. Scoped to a modal so it stays a fix
- * to the dialog case rather than a change to the class everywhere; it
- * probably belongs in lp-ui.css next to .fieldlabel itself. */
+ * sits directly on the paragraph.
+ *
+ * s-user.css carries this identical declaration for 비밀번호 변경 and
+ * 사용자 추가, and names this screen in its comment. It is repeated here
+ * rather than borrowed for the reason the four sibling stylesheets give
+ * for repeating .row.arrive: a screen that is spaced correctly only
+ * while another screen happens to be in the build is worse than a
+ * duplicated declaration. Same selector and same value on purpose -
+ * merging the two into lp-ui.css beside .fieldlabel is then a delete
+ * rather than a decision. */
 .modal .fieldlabel{margin-top:14px}
+
+/* And the same for .sec, for the same reason and the same pair of
+ * screens. .sec was drawn for a settings pane, where 22px separates two
+ * groups of rows; in a dialog it follows a paragraph or a list and the
+ * gap reads as the thing above it having been abandoned. 지워지는 것 and
+ * 남는 것 are the group heads in the first dialog, and until this line
+ * existed they were spaced by s-user.css or not at all. */
+.modal .sec{margin-top:16px}
+
+/* The one dialog in this mockup that can outgrow the window it is drawn
+ * in.
+ *
+ * 지워지는 것 and 남는 것 are eight rows under two heads, over a caption
+ * and a caution: about 720px. It fits today only because 초기화 is a
+ * long screen and drags .win to 857px. .body declares min-height:560px
+ * and .win clips at overflow:hidden, so at that floor 취소 and 계속 land
+ * below the bottom edge of a window that cannot be scrolled - and the
+ * list is exactly the thing a person is here to read. Capped at the
+ * backdrop and scrolled inside it instead.
+ *
+ * The thumb is a token rather than the #3a3a3a that .side and .picker
+ * use, for the reason lp-ui.css gives beside .swatch: one step off and
+ * invisibly so, against a rule that stops being a rule the moment it has
+ * an exception nobody can justify. When these three lines move to
+ * lp-ui.css, .modal.tall belongs on the .side/.picker scrollbar
+ * selectors and this colour goes away with them. */
+.modal.tall{max-height:100%;overflow-y:auto}
+.modal.tall::-webkit-scrollbar{width:6px}
+.modal.tall::-webkit-scrollbar-thumb{background:var(--t4);border-radius:3px}

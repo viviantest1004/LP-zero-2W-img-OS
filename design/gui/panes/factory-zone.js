@@ -72,6 +72,23 @@
 
   function dlg(id) { return document.getElementById(id); }
 
+  /* Asked at every step of the flow rather than only at the last one.
+   *
+   * The disabled button in the zone is a drawing of the rule; this is
+   * the rule. The dialogs are static markup wired once, so they outlive
+   * every render and a click can arrive at any of the three doors after
+   * the account changed underneath - not only at 시작.
+   *
+   * Refusing by taking the flow away rather than by returning quietly:
+   * a dialog left standing with a button that does nothing reads as
+   * broken, and the honest thing to show somebody who may not do this
+   * is the zone, where the line naming who can is. */
+  function allowed() {
+    if (LP.can(AREA)) return true;
+    LP.closeAll();
+    return false;
+  }
+
   /* ── the zone ───────────────────────────────────────────────────
    *
    * Called again on every render, so everything that depends on the
@@ -88,7 +105,7 @@
 
     const oldLock = zone.querySelector('.lock');
     if (oldLock) oldLock.remove();
-    const oldWhy = zone.querySelector('[data-why]');
+    const oldWhy = zone.querySelector('.why');
     if (oldWhy) oldWhy.remove();
 
     if (!may) {
@@ -98,12 +115,18 @@
       zone.querySelector('h3').appendChild(glyph);
 
       /* Never a bare 권한이 없습니다. whyLocked names who can, which is
-       * the only version of the sentence somebody can act on - and it
-       * is a paragraph of the zone rather than the dimmer .why used on
-       * rows, because in a block this size it is the line that has to
-       * be read. */
+       * the only version of the sentence somebody can act on.
+       *
+       * It carries .why - the class every other locked thing in this
+       * mockup marks its explanation with - so that one convention
+       * covers rows and blocks alike rather than two. A <p> and not the
+       * <div> the rows use, because .zone p is what sizes and colours a
+       * line in this block: .zone.locked p wins over .why on
+       * specificity, so the sentence is read at the block's brightness
+       * rather than at a row's, and the class is left doing what it is
+       * for, which is saying what the element is. */
       const why = document.createElement('p');
-      why.setAttribute('data-why', '');
+      why.className = 'why';
       why.textContent = LP.whyLocked(AREA);
       zone.insertBefore(why, act);
     }
@@ -151,6 +174,8 @@
   }
 
   function checkPassword() {
+    if (!allowed()) return;
+
     const el    = dlg(D_WHO);
     const field = el.querySelector('[data-pw]');
 
@@ -162,7 +187,13 @@
       /* Emptied rather than selected. A rejected password is retyped
        * from the start every time, and leaving the old one in the box
        * under a selection highlight only invites a second press of the
-       * same wrong thing. */
+       * same wrong thing.
+       *
+       * The message clears itself after four seconds and the red border
+       * does not; it goes when the person types, which is the same pair
+       * 사용자 uses for a wrong 지금 비밀번호. The border is the mark on
+       * the field that was refused, and it has to outlast a sentence
+       * somebody may have looked away from. */
       field.value = '';
       field.classList.add('bad');
       el.querySelector('[data-go]').disabled = true;
@@ -178,12 +209,7 @@
 
   /* ── doing it ───────────────────────────────────────────────────── */
   function start() {
-    /* The disabled button in the zone is the drawing of the rule. This
-     * is the rule. The dialogs are wired once and outlive every render,
-     * so this is the check that actually holds when a click arrives
-     * some other way - a focused button and a stray Enter, or a console
-     * that opened the dialog directly. */
-    if (!LP.can(AREA)) return;
+    if (!allowed()) return;
 
     const el   = dlg(D_RUN);
     const box  = el.querySelector('.prog');
@@ -202,7 +228,10 @@
     /* Reading the layout is what gives the width below something to
      * travel from: a node inserted and moved inside one tick has no
      * previous computed style and the browser has nothing to
-     * interpolate, so the bar would snap to 18% in silence. */
+     * interpolate, so the bar would snap to 18% in silence. It is read
+     * after LP.open rather than before, because a bar inside a backdrop
+     * that is still display:none has no layout to read and no
+     * transition to run. */
     void fill.offsetWidth;
 
     let i = 0;
@@ -211,11 +240,19 @@
       fill.style.width = STEPS[i].at + '%';
     }
 
-    /* Nothing here picks a duration. The bar is a readout rather than an
-     * object arriving somewhere, which is why lp-motion.css keeps it
-     * linear, and each step is timed by the width transition that
-     * lp-ui.css already gives .prog - the steps are chained off it
-     * rather than off a clock this file invented. */
+    /* Nothing here picks a duration. Each step is timed by the width
+     * transition lp-ui.css already gives .prog div - a flat 0.4s
+     * linear, written there as a literal and not out of lp-motion.css,
+     * because a bar filling at a known rate is a readout and easing it
+     * would make it lie about the rate.
+     *
+     * Which file owns that line matters more than it looks: this is the
+     * only flow in the mockup that has nowhere to go without it. If
+     * .prog ever loses its transition - collapsed into lp-motion.css's
+     * prefers-reduced-motion block, say, where every other transition
+     * in the file already is - transitionend never fires and this
+     * dialog stops at 18% with only Escape out of it. 초기화 chains off
+     * the same event and would merely lose its 완료 line. */
     fill.addEventListener('transitionend', function () {
       if (++i < STEPS.length) { step(); return; }
 
@@ -241,6 +278,7 @@
   function wire() {
     dlg(D_WHAT).querySelector('[data-go]')
       .addEventListener('click', function () {
+        if (!allowed()) return;
         LP.close(D_WHAT);
         openWho();
       });
