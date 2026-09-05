@@ -2,3 +2,7 @@
 # sending. Regenerated in a second, half a megabyte of base64 in a diff
 # nobody can read - so it is made on demand rather than kept.
 dist/
+
+# What check.js photographs on its way through. Useful to look at after
+# a run, worthless in a diff.
+shot-*.png

@@ -284,13 +284,15 @@ async function run() {
   head('오류');
   ok('콘솔 오류 없음', errors.length === 0, errors.slice(0, 3).join(' | '));
 
+  /* Beside the page they are of, not in the repository root. A test
+   * that litters the top of the tree is a test people stop running. */
   await page.screenshot({
-    path: path.join(HERE, '..', '..', 'settings-admin.png'), fullPage: true });
+    path: path.join(HERE, 'shot-admin.png'), fullPage: true });
   await page.click('.appswitch button[data-acct="std"]');
   await page.evaluate(() => LP.go('s-reset'));
   await page.waitForTimeout(400);
   await page.screenshot({
-    path: path.join(HERE, '..', '..', 'settings-std.png'), fullPage: true });
+    path: path.join(HERE, 'shot-std.png'), fullPage: true });
 
   await browser.close();
 
