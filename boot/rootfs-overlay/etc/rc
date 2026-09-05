@@ -418,6 +418,20 @@ fi
 # nothing restarted it, so a board that lost its association was off the
 # network for good with nothing watching. init has it now.
 
+echo "[rc] loopback"
+# 127.0.0.1 did not work at all until this line existed.
+#
+# The kernel creates lo but leaves it down, and nothing here ever
+# brought it up - so a program that bound to 127.0.0.1 was listening on
+# an address nothing could reach. `httpd -p 8451` then `wget
+# http://127.0.0.1:8451/` answered "cannot connect", with netstat
+# cheerfully showing the socket in LISTEN. Every language's "start a
+# local server and talk to it" does this, so did our own tests, and the
+# failure looks like the server being broken rather than the interface
+# being absent.
+ifconfig lo 127.0.0.1 netmask 255.0.0.0 || echo "[rc]   no loopback address"
+ifconfig lo up || echo "[rc]   ** 127.0.0.1 is unreachable - anything that binds to localhost will fail"
+
 echo "[rc] name resolution"
 # A fallback nameserver, written before DHCP runs and overwritten by it
 # when it succeeds.

@@ -135,7 +135,7 @@
   <p class="tag">처음부터 직접 만든 초경량 리눅스 배포판<br>
      <span class="muted">A small Linux distribution, written from scratch</span></p>
   <div class="by">
-    커널 설정부터 C 라이브러리, init, 셸, 108개 명령어까지
+    커널 설정부터 C 라이브러리, init, 셸, 130개 남짓한 명령어까지
     <strong>전부 <a href="https://claude.com/claude-code">Claude Code</a>가 썼습니다.</strong>
     사람이 검토한 코드가 아닙니다 — 아래 <a href="#caveats">쓰기 전에 알아둘 것</a>을
     꼭 읽어주세요.
@@ -155,10 +155,12 @@
 <table class="facts">
   <tr><td>시스템 전체</td><td>커널 + 유저랜드 파일 하나, 13~22MB</td></tr>
   <tr><td>부팅 후 남는 램</td><td>512MB 보드에서 약 480MB</td></tr>
-  <tr><td>명령어</td><td>108개, 전부 자체 구현</td></tr>
+  <tr><td>명령어</td><td>130개 남짓, 전부 자체 구현</td></tr>
   <tr><td>SSH</td><td>기본 내장, 공개키 전용 (비밀번호 인증은 컴파일 자체를 안 함)</td></tr>
   <tr><td>파이썬</td><td>CPython 3.12 + pip, manylinux 휠 설치됨</td></tr>
   <tr><td>패키지</td><td>자체 <code>pkg</code>, 그리고 <code>apt</code> — 진짜 데비안 패키지</td></tr>
+  <tr><td>서버</td><td><code>httpd</code> 정적 웹서버, <code>netstat</code>, 사용자 서비스 등록</td></tr>
+  <tr><td>텍스트 도구</td><td><code>sed</code> <code>awk</code> <code>grep</code> <code>diff</code> — 정규식 엔진 하나를 공유</td></tr>
   <tr><td>외장 드라이브</td><td>꽂으면 자동으로 붙고, 원하면 고정해서 계속 씁니다</td></tr>
   <tr><td>라이선스</td><td>MIT</td></tr>
 </table>
@@ -232,6 +234,13 @@
 <h2>안에서 할 수 있는 것<span class="en">What you get once it boots</span></h2>
 
 <ul>
+  <li><strong>SSH 로 들어가기가 쉬워졌습니다.</strong> <code>authkey new</code> 하나면 기기에서 키를
+      만들고, 등록하고, 개인키를 가져갈 자리에 두고, 이 기계의 실제 주소가 들어간 접속
+      명령줄을 그대로 출력합니다. 비밀번호 인증은 여전히 컴파일하지 않았습니다.</li>
+  <li><strong>서버로 쓸 수 있습니다.</strong> <code>httpd</code> 로 디렉터리를 HTTP 로 서비스하고,
+      <code>service add httpd</code> 로 등록하면 init 이 지킵니다 — 죽으면 다시 뜨고, 재부팅해도
+      남고, 메모리가 모자라도 guard 가 죽이지 않습니다. 포트는 <code>firewall allow 8080</code> 으로
+      기기에서 바로 엽니다.</li>
   <li><strong>데비안 패키지가 됩니다.</strong> <code>apt install ripgrep htop</code> — 진짜
       데비안 apt입니다. 데비안 유저랜드가 <code>/data/debian</code>에 따로 들어가므로
       시스템 이미지는 손대지 않고, <code>rm -rf /data/debian</code> 하면 전부 되돌아갑니다.
@@ -271,15 +280,18 @@
   <li><strong>GUI가 없고 컨테이너를 돌리지 않습니다.</strong> DRM 드라이버는 커널에 있지만
       X11/Wayland는 직접 올려야 하고, cgroup·네임스페이스는 컨테이너 용도로 켜두지
       않았습니다.</li>
-  <li><strong>거친 구석이 남아 있습니다.</strong> 최근 사례 하나: amd64 이미지에서 외부
-      바이너리가 전혀 실행되지 않았습니다. 동적 링커 이름이 두 아키텍처 모두 arm64용으로
-      박혀 있었기 때문입니다. 이런 것이 더 나올 거라고 보시는 편이 맞습니다.</li>
+  <li><strong>거친 구석이 남아 있고, 대개 조용한 쪽입니다.</strong> 최근 사례:
+      <code>echo x | grep x</code> 가 셸이 존재한 내내 "command not found" 였고,
+      <code>cmd ; echo $?</code> 는 항상 0이었고, <code>127.0.0.1</code> 은 루프백 인터페이스가
+      올라오지 않아 통하지 않았습니다. 전부 고쳤고 각각 셀프테스트에 검사가 생겼지만,
+      이런 것이 더 나올 거라고 보시는 편이 맞습니다.</li>
 </ul>
 
-<p class="muted"><strong>확인된 것:</strong> 두 이미지 모두 QEMU 실제 부팅에서 프로젝트
-   셀프테스트의 검사 53개를 전부 통과합니다 — 부팅, 저장소, SSH, 파이썬, 외부 바이너리,
-   그래픽, 보안, 오류 경로, 리다이렉션, 로깅, 시간, 그리고 워치독이 코어를 붙잡은 프로세스를
-   알아채는지까지.</p>
+<p class="muted"><strong>확인된 것:</strong> 두 아키텍처 모두 QEMU 실제 부팅에서 프로젝트
+   셀프테스트를 실패 없이 통과합니다 — 부팅, 저장소, SSH, 파이썬, 외부 바이너리, 그래픽,
+   보안, 오류 경로, 리다이렉션, 로깅, 시간, 새 명령어들, 셸 문법까지. 따로: 포크 폭탄이 한
+   번의 패스로 정리되고 init·SSH·로그가 살아 있으며, 메모리 고갈은 원인이 된 프로세스만
+   죽이고, <code>apt</code> 가 데비안 패키지를 받아 설치하고 실행합니다.</p>
 
 <h2>소스<span class="en">Source</span></h2>
 <p>전부 공개되어 있습니다 — <a href="@REPO_URL@">@REPO_SHORT@</a>.
@@ -291,7 +303,7 @@
 <h2>English</h2>
 
 <p>A small Linux distribution written from scratch — kernel configuration, C library, init, shell
-   and 108 commands, <strong>all of it written by <a href="https://claude.com/claude-code">Claude
+   and about 130 commands, <strong>all of it written by <a href="https://claude.com/claude-code">Claude
    Code</a></strong>, Anthropic's coding agent, working under the repository owner's direction.
    No human wrote or reviewed this code. Please read the warnings below before trusting it with
    anything.</p>
@@ -318,11 +330,14 @@
    your public key in <code>authorized_keys</code> on the card's first partition, which is FAT32
    and opens on any PC. There is one user, root.</p>
 
-<p><strong>Once it boots</strong> you get real Debian packages through <code>apt install</code>
-   (into a separate tree under <code>/data/debian</code>, so removing it undoes everything),
-   CPython 3.12 with pip and working manylinux wheels, USB drives that mount themselves when
-   plugged in and can be pinned across reboots by filesystem label, and a watchdog plus a
-   supervisor that clears fork bombs and memory exhaustion on its own.</p>
+<p><strong>Once it boots</strong> you get sed, awk, grep and diff over one shared regular
+   expression engine; real Debian packages through <code>apt install</code>, into a separate tree
+   under <code>/data/debian</code> so removing it undoes everything; CPython 3.12 with pip and
+   working manylinux wheels; USB drives that mount themselves and can be pinned across reboots by
+   filesystem label; <code>httpd</code> to serve a directory, supervised by init once you
+   <code>service add</code> it; <code>firewall allow 8080</code> to open a port without a card
+   reader; and <code>authkey new</code>, which makes a key on the machine and prints the exact
+   ssh command to get in with.</p>
 
 <div class="warn">
   <b>This is a hobby operating system, not a supported product.</b>
@@ -332,8 +347,11 @@
   anything that has to keep working, use Raspberry Pi OS Lite or Debian.
 </div>
 
-<p>What is verified: both images pass all 53 checks in the project's self-test on real QEMU
-   boots. Full source, documented in English and Korean, at
+<p>What is verified: both architectures pass the project's self-test with nothing failing, on
+   real QEMU boots. Separately: a fork bomb is cleared in one sweep with init, SSH and the log
+   still running; memory exhaustion kills the process that caused it and nothing else; and apt
+   fetches, installs and runs a Debian package. Full source, documented in English and Korean,
+   at
    <a href="@REPO_URL@">@REPO_SHORT@</a>. MIT licensed.</p>
 </div>
 

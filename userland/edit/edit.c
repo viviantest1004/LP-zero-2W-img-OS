@@ -629,7 +629,10 @@ static void draw_line(int idx, int screen_row)
     int    col   = 0;
     int    width = text_cols();
 
-    for (size_t i = 0; i < l->len && r < sizeof(render) - 16; ) {
+    /* The margin is what one turn of the loop can add at most: four
+     * bytes of escape, four bytes of character, and a tab's worth of
+     * spaces - plus the reset at the end. */
+    for (size_t i = 0; i < l->len && r < sizeof(render) - 32; ) {
         bool want = sel && (int)i >= b0 && (int)i < b1;
 
         if (l->text[i] == '\t') {
@@ -1453,15 +1456,19 @@ static void replace_prompt(void)
             break;
         }
         if (k == 'y') {
-            record_change(cy, 1, 1);
-            line_reserve(&lines[cy], lines[cy].len - plen + rlen);
-            {
-                line_t *l = &lines[cy];
-                memmove(l->text + at + rlen, l->text + at + plen,
-                        l->len - (size_t)at - plen + 1);
-                memcpy(l->text + at, rep, rlen);
-                l->len = l->len - plen + rlen;
+            /* Room first: a replacement longer than what it replaces
+             * would otherwise run off the end of the line. */
+            if (!line_reserve(&lines[cy], lines[cy].len - plen + rlen)) {
+                set_status("out of memory - nothing more was replaced");
+                break;
             }
+            record_change(cy, 1, 1);
+            line_t *l = &lines[cy];
+            memmove(l->text + at + rlen, l->text + at + plen,
+                    l->len - (size_t)at - plen + 1);
+            memcpy(l->text + at, rep, rlen);
+            l->len = l->len - plen + rlen;
+
             cx = at + (int)rlen;
             done++;
             modified = true;
@@ -1470,8 +1477,12 @@ static void replace_prompt(void)
         }
     }
 
+    /* Replacing everything in a large file makes an undo record the
+     * history cannot hold, and record_change then throws it away. Say
+     * that here, or the count would quietly paper over it. */
     char msg[160];
-    snprintf(msg, sizeof(msg), "%d replaced", done);
+    snprintf(msg, sizeof(msg), "%d replaced%s", done,
+             (done && !undo_s.count) ? " - too big to undo" : "");
     set_status(msg);
     clamp_cx();
     dirty = DIRTY_ALL;
@@ -1643,10 +1654,13 @@ int main(int argc, char **argv)
         case KEY_FILE_TOP: cy = 0; cx = 0; break;
         case KEY_FILE_END: cy = nlines - 1; cx = (int)lines[cy].len; break;
 
+        /* Erasing counts as typing for the undo history: a run of
+         * backspaces on one line is one step to take back, the same as
+         * the run of characters that put them there. */
         case KEY_DEL:
             if (may_edit()) {
                 if (mark_on) delete_selection();
-                else         delete_forward();
+                else       { delete_forward(); typed = true; }
             }
             break;
 
@@ -1654,7 +1668,7 @@ int main(int argc, char **argv)
         case 8:
             if (may_edit()) {
                 if (mark_on) delete_selection();
-                else         backspace();
+                else       { backspace(); typed = true; }
             }
             break;
 

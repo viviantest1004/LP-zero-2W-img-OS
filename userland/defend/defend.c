@@ -107,16 +107,70 @@ static int  interval = DEFAULT_INTERVAL;
 
 static int findings;
 
+/* The routine lines - how many failures, how many sockets, how many
+ * files - as opposed to the findings.
+ *
+ * They are what you want to read when you typed the command, and they
+ * are noise when a service prints four of them to the console every
+ * five minutes for four months. So the service says everything on its
+ * first pass after a start, which is the one an operator reads at boot,
+ * and after that only speaks when there is something to say. */
+static bool quiet;
+#define say(...)  do { if (!quiet) printf(__VA_ARGS__); } while (0)
+
+/* ── not saying the same thing every hour ──
+ *
+ * A finding nobody has dealt with yet is still true at the next pass,
+ * and at the one after that. Repeating it to the console and to
+ * /data/log/messages every hour for the months this board is meant to
+ * sit unattended would write tens of thousands of identical lines and
+ * push everything else out of the two files logd keeps - so the record
+ * of the break-in would be destroyed by the reports about it.
+ *
+ * Each distinct finding is therefore announced at most once a day while
+ * running as a service. It is always counted, so the exit status and
+ * `defend status` are unaffected, and somebody running the command by
+ * hand still sees every one of them. */
+#define TOLD_MAX 24
+static struct { char text[208]; s64 when; } told[TOLD_MAX];
+static int ntold;
+
+static bool said_recently(const char *text)
+{
+    s64 now = lp_time();
+    for (int i = 0; i < ntold; i++)
+        if (strcmp(told[i].text, text) == 0) {
+            if (now - told[i].when < 24 * 3600)
+                return true;
+            told[i].when = now;
+            return false;
+        }
+    if (ntold < TOLD_MAX) {
+        strlcpy(told[ntold].text, text, sizeof told[0].text);
+        told[ntold].when = now;
+        ntold++;
+    }
+    return false;
+}
+
 /* Every finding goes through here, so that all of them are counted the
  * same way and all of them reach the log when this runs as a service.
  * The console scrolls and is gone; /data/log/messages is not. */
+static bool telling;
 static void report(const char *text)
 {
     findings++;
+    telling = !(quiet && said_recently(text));
+    if (!telling)
+        return;
     printf("defend: ** %s\n", text);
     if (opt_daemon)
         lp_log("defend", text);
 }
+
+/* The lines after a finding say what to do about it, so they are part
+ * of it and are held back with it. */
+#define tell(...)  do { if (telling) printf(__VA_ARGS__); } while (0)
 
 /* ── /proc/net address parsing ───────────────────────────────────────
  *
@@ -390,7 +444,7 @@ static void pad4(batch_t *b)
     }
 }
 
-static void msg_begin(batch_t *b, u16 type, u16 flags)
+static void msg_begin(batch_t *b, u16 type, u16 flags, u8 family, u16 res_id)
 {
     pad4(b);
     b->msg_start = b->len;
@@ -400,9 +454,9 @@ static void msg_begin(batch_t *b, u16 type, u16 flags)
     h->nlmsg_seq   = ++b->seq;
     h->nlmsg_pid   = 0;
     nfgenmsg_t *g = reserve(b, sizeof *g);
-    g->nfgen_family = NFPROTO_INET;
+    g->nfgen_family = family;
     g->version      = 0;
-    g->res_id       = htons(0);
+    g->res_id       = htons(res_id);
 }
 
 static void msg_end(batch_t *b)
@@ -411,6 +465,25 @@ static void msg_end(batch_t *b)
     nlmsghdr_t *h = (nlmsghdr_t *)(b->buf + b->msg_start);
     h->nlmsg_len = b->len - b->msg_start;
     pad4(b);
+}
+
+/* An nftables message: the family is inet because that is the family of
+ * our table, and res_id is unused. */
+static void nft_begin(batch_t *b, u16 msg, u16 flags)
+{
+    msg_begin(b, NFT(msg), flags, NFPROTO_INET, 0);
+}
+
+/* The two markers around a transaction, which are NOT nftables messages
+ * and do not follow that rule: the family is AF_UNSPEC and res_id names
+ * the subsystem the batch belongs to. Sending them with res_id 0 gets
+ * the whole transaction refused with EOPNOTSUPP - and the refusal
+ * arrives against the marker, not against any rule, so it reads exactly
+ * like a kernel built without nftables. It cost an afternoon once. */
+static void batch_marker(batch_t *b, u16 type)
+{
+    msg_begin(b, type, NLM_F_REQUEST, 0, NFNL_SUBSYS_NFTABLES);
+    msg_end(b);
 }
 
 static void attr_put(batch_t *b, u16 type, const void *data, u16 len)
@@ -502,7 +575,7 @@ static void rule_ban(batch_t *b, u32 addr_be, const char *label)
     memcpy(udata + 2, label, n - 1);
     udata[2 + n - 1] = 0;
 
-    msg_begin(b, NFT(NFT_MSG_NEWRULE),
+    nft_begin(b, NFT_MSG_NEWRULE,
               NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND);
     attr_str(b, NFTA_RULE_TABLE, TABLE_NAME);
     attr_str(b, NFTA_RULE_CHAIN, CHAIN_NAME);
@@ -553,6 +626,19 @@ static long nl_send(int fd, const void *buf, u32 len)
     return lp_sendto(fd, buf, len, 0, &kernel, sizeof kernel);
 }
 
+/* What the kernel's -errno means in the context of a ban list. */
+static const char *why(int err)
+{
+    switch (err) {
+    case 1:   return "not permitted - defend has to run as root";
+    case 22:  return "the kernel rejected the rule as malformed";
+    case 93:  return "this kernel was built without nftables";
+    case 95:  return "the kernel has no such expression, or the batch was"
+                     " addressed to the wrong subsystem";
+    default:  return "rejected";
+    }
+}
+
 /* Read replies until the acknowledgement for last_seq. 0 if the whole
  * batch was accepted. quiet is for the "is the table there" probe,
  * where -ENOENT is the answer and not a fault. */
@@ -580,8 +666,8 @@ static int nl_wait(int fd, u32 last_seq, bool quiet)
                     failed = 1;
                     if (!quiet)
                         dprintf(STDERR_FILENO,
-                                "defend: the kernel refused message %u:"
-                                " errno %d\n", h->nlmsg_seq, -err);
+                                "defend: the kernel refused a ban rule:"
+                                " %s (%d)\n", why(-err), -err);
                 }
             }
             if (h->nlmsg_seq >= last_seq &&
@@ -598,7 +684,7 @@ static bool table_exists(int fd)
 {
     batch_t b;
     memset(&b, 0, sizeof b);
-    msg_begin(&b, NFT(NFT_MSG_GETTABLE), NLM_F_REQUEST | NLM_F_ACK);
+    nft_begin(&b, NFT_MSG_GETTABLE, NLM_F_REQUEST | NLM_F_ACK);
     attr_str(&b, NFTA_TABLE_NAME, TABLE_NAME);
     msg_end(&b);
     if (nl_send(fd, b.buf, b.len) < 0) return false;
@@ -676,6 +762,36 @@ static bool save_bans(void)
     return true;
 }
 
+/* Drop the bans that have served their time.
+ *
+ * load_bans already skips expired lines, which is enough for a command
+ * that runs and exits - but the service holds this list in memory for
+ * as long as the board is up, and this board is meant to be up for
+ * months. Without this, a seven-day ban on a machine that is never
+ * restarted is a permanent one. */
+static bool prune_bans(void)
+{
+    s64 now = lp_time();
+    if (now <= 0)
+        return false;                  /* no clock yet; nothing expires */
+
+    int  keep = 0;
+    bool dropped = false;
+    for (int i = 0; i < nbans; i++) {
+        if (bans[i].when > 0 && now - bans[i].when > BAN_SECS) {
+            char host[20];
+            ipv4_format(bans[i].addr, host);
+            printf("defend: %s has served its %d days and can connect"
+                   " again\n", host, BAN_SECS / 86400);
+            dropped = true;
+            continue;
+        }
+        bans[keep++] = bans[i];
+    }
+    nbans = keep;
+    return dropped;
+}
+
 static bool is_banned(u32 be)
 {
     for (int i = 0; i < nbans; i++)
@@ -702,22 +818,21 @@ static bool apply_bans(void)
 
     batch_t b;
     memset(&b, 0, sizeof b);
-    msg_begin(&b, NFNL_MSG_BATCH_BEGIN, NLM_F_REQUEST);
-    msg_end(&b);
+    batch_marker(&b, NFNL_MSG_BATCH_BEGIN);
 
     if (replacing) {
-        msg_begin(&b, NFT(NFT_MSG_DELTABLE), NLM_F_REQUEST | NLM_F_ACK);
+        nft_begin(&b, NFT_MSG_DELTABLE, NLM_F_REQUEST | NLM_F_ACK);
         attr_str(&b, NFTA_TABLE_NAME, TABLE_NAME);
         msg_end(&b);
     }
 
     if (nbans > 0) {
-        msg_begin(&b, NFT(NFT_MSG_NEWTABLE),
+        nft_begin(&b, NFT_MSG_NEWTABLE,
                   NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE);
         attr_str(&b, NFTA_TABLE_NAME, TABLE_NAME);
         msg_end(&b);
 
-        msg_begin(&b, NFT(NFT_MSG_NEWCHAIN),
+        nft_begin(&b, NFT_MSG_NEWCHAIN,
                   NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE);
         attr_str(&b, NFTA_CHAIN_TABLE, TABLE_NAME);
         attr_str(&b, NFTA_CHAIN_NAME,  CHAIN_NAME);
@@ -739,9 +854,11 @@ static bool apply_bans(void)
         }
     }
 
+    /* The last message that asked to be acknowledged. BATCH_END does
+     * not ask and gets no reply, so waiting for its sequence number is
+     * waiting for something that never comes. */
     u32 ack_seq = b.seq;
-    msg_begin(&b, NFNL_MSG_BATCH_END, NLM_F_REQUEST);
-    msg_end(&b);
+    batch_marker(&b, NFNL_MSG_BATCH_END);
 
     if (b.overflow) {
         dprintf(STDERR_FILENO,
@@ -946,7 +1063,7 @@ static bool check_auth(void)
 
     long fd = lp_open(AUTH_LOG, O_RDONLY, 0);
     if (fd < 0) {
-        printf("defend: no %s yet - nothing has tried to log in, or logd"
+        say("defend: no %s yet - nothing has tried to log in, or logd"
                " is not running (`service status logd`)\n", AUTH_LOG);
         return false;
     }
@@ -975,13 +1092,13 @@ static bool check_auth(void)
     }
     lp_close((int)fd);
 
-    printf("defend: ssh in the last %d minutes: %d failed, %d succeeded,"
+    say("defend: ssh in the last %d minutes: %d failed, %d succeeded,"
            " from %d address%s\n",
            WINDOW_SECS / 60, auth_fail, auth_ok, nsources,
            nsources == 1 ? "" : "es");
 
     if (auth_nonv4 > 0)
-        printf("defend:    %d failure%s came from an address that is not"
+        say("defend:    %d failure%s came from an address that is not"
                " IPv4 - counted, not bannable (see -h)\n",
                auth_nonv4, auth_nonv4 == 1 ? "" : "s");
 
@@ -1010,25 +1127,25 @@ static bool check_auth(void)
          * the same NAT as whatever is guessing passwords. Dropping it
          * ends that session and there is no console on this board. */
         if (is_ssh_peer(sources[i].addr) && npeers == 1) {
-            printf("defend:    not banned - %s holds the only ssh session"
+            tell("defend:    not banned - %s holds the only ssh session"
                    " open right now, and this board has no other way in\n",
                    host);
-            printf("defend:    if that session is not yours: log in from"
+            tell("defend:    if that session is not yours: log in from"
                    " somewhere else first, then run `defend` again\n");
             continue;
         }
         if (sources[i].addr == htonl(0x7F000001u)) {
-            printf("defend:    not banned - that is this machine talking"
+            tell("defend:    not banned - that is this machine talking"
                    " to itself\n");
             continue;
         }
         if (opt_dry) {
-            printf("defend:    -n given, so nothing was blocked -"
+            tell("defend:    -n given, so nothing was blocked -"
                    " run `defend` without -n to block %s\n", host);
             continue;
         }
         if (nbans >= MAX_BANS) {
-            printf("defend:    not banned - the list is full at %d."
+            tell("defend:    not banned - the list is full at %d."
                    " `defend status` shows it; `defend unban <addr>`"
                    " makes room\n", MAX_BANS);
             continue;
@@ -1039,7 +1156,7 @@ static bool check_auth(void)
         bans[nbans].fails = sources[i].fails;
         nbans++;
         changed = true;
-        printf("defend:    blocked. `defend unban %s` lets it back in\n",
+        tell("defend:    blocked. `defend unban %s` lets it back in\n",
                host);
     }
     return changed;
@@ -1109,7 +1226,7 @@ static void fs_note(const char *headline, const char *fix)
     if (fs_extra + findings >= MAX_LINES) { fs_extra++; return; }
     report(headline);
     if (fix && *fix)
-        printf("defend:    %s\n", fix);
+        tell("defend:    %s\n", fix);
 }
 
 static void walk(const char *path, int depth)
@@ -1249,22 +1366,22 @@ static void check_files(void)
     nknown = 0;
 
     if (!lp_is_dir("/data")) {
-        printf("defend: /data is not mounted - nothing to walk\n");
+        say("defend: /data is not mounted - nothing to walk\n");
         return;
     }
 
     int before = findings;
     walk("/data", 0);
 
-    printf("defend: /data: %d files in %d directories, %d worth a look%s\n",
+    say("defend: /data: %d files in %d directories, %d worth a look%s\n",
            fs_files, fs_dirs, findings - before,
            opt_all ? "" : " (/data/debian and /data/python skipped, -a"
                           " includes them)");
     if (fs_extra > 0)
-        printf("defend:    and %d more of the same, not listed - deal with"
+        say("defend:    and %d more of the same, not listed - deal with"
                " the ones above and run it again\n", fs_extra);
     if (fs_capped)
-        printf("defend:    stopped at %d directories deep; anything below"
+        say("defend:    stopped at %d directories deep; anything below"
                " that was not looked at\n", MAX_DEPTH);
 }
 
@@ -1281,7 +1398,11 @@ static void check_files(void)
  * a readlink per open descriptor of every process. It is built once for
  * all four socket files. */
 
-#define OWNER_MAX 256
+/* Enough for every socket every process on this board holds open with
+ * room to spare; a socket past it simply shows "-" as its owner. This
+ * table is resident for the life of the service, so it is sized for
+ * this machine and not for a server. */
+#define OWNER_MAX 160
 typedef struct { u64 ino; int pid; char name[16]; } owner_t;
 static owner_t owners[OWNER_MAX];
 static int     nowners;
@@ -1382,20 +1503,28 @@ static void owner_of(u64 ino, char *out, size_t cap)
  * file: "listen tcp 0.0.0.0:22 dropbear" and "key SHA256:... comment".
  * Comparing text keeps the file readable and editable, which matters
  * for something an owner is asked to trust. */
-#define MAX_BASE 96
-static char base_line[MAX_BASE][160];
+#define MAX_BASE  64
+#define BASE_LINE 128
+static char base_line[MAX_BASE][BASE_LINE];
 static int  nbase;
 static s64  base_when;
+/* Separate from nbase, because a baseline recorded on a board with
+ * nothing listening and no key is a legitimate baseline with no lines
+ * in it - and treating that as "never recorded" would report every
+ * listener that ever appeared as if nothing had been decided yet. */
+static bool base_exists;
 
 static void load_baseline(void)
 {
     nbase = 0;
     base_when = 0;
+    base_exists = false;
 
     long fd = lp_open(F_BASELINE, O_RDONLY, 0);
     if (fd < 0)
         return;
-    char line[256];
+    base_exists = true;
+    char line[BASE_LINE];
     while (readline((int)fd, line, sizeof line) >= 0 && nbase < MAX_BASE) {
         if (strncmp(line, "# recorded ", 11) == 0)
             base_when = strtol(line + 11, NULL, 10);
@@ -1421,8 +1550,8 @@ static const char *base_find(const char *prefix)
 /* Collected here so `defend baseline` can write the same lines that
  * `defend` compares against - one function producing both is the only
  * way they cannot drift apart. */
-#define MAX_LISTEN 64
-static char listen_line[MAX_LISTEN][160];
+#define MAX_LISTEN 48
+static char listen_line[MAX_LISTEN][112];
 static int  nlisten;
 
 static void collect_file(const char *path, const char *proto, bool udp)
@@ -1475,13 +1604,13 @@ static void check_listeners(void)
 {
     collect_listeners();
 
-    printf("defend: listening: %d socket%s\n",
+    say("defend: listening: %d socket%s\n",
            nlisten, nlisten == 1 ? "" : "s");
 
-    if (nbase == 0) {
+    if (!base_exists) {
         for (int i = 0; i < nlisten; i++)
-            printf("defend:    %s\n", listen_line[i]);
-        printf("defend:    no baseline recorded - run `defend baseline`"
+            say("defend:    %s\n", listen_line[i]);
+        say("defend:    no baseline recorded - run `defend baseline`"
                " once this is the set you expect, and anything new after"
                " that gets reported\n");
         return;
@@ -1491,7 +1620,7 @@ static void check_listeners(void)
         /* The key is "listen <proto> <addr:port>"; the holder is the
          * rest of the line and is compared separately, because the same
          * port held by a different program is its own kind of news. */
-        char key[160];
+        char key[BASE_LINE];
         strlcpy(key, listen_line[i], sizeof key);
         char *sp = strchr(key, ' ');
         sp = sp ? strchr(sp + 1, ' ') : NULL;
@@ -1508,7 +1637,7 @@ static void check_listeners(void)
                      "new listener: %s, held by %s - it was not there when"
                      " the baseline was recorded", key + 7, who);
             report(msg);
-            printf("defend:    `netstat -lp` shows it, `ps` shows the"
+            tell("defend:    `netstat -lp` shows it, `ps` shows the"
                    " process. If it is yours: `defend baseline`\n");
             continue;
         }
@@ -1522,7 +1651,7 @@ static void check_listeners(void)
                      "%s is now held by %s, and the baseline says %s",
                      key + 7, who, waswho);
             report(msg);
-            printf("defend:    a different program answering on a port"
+            tell("defend:    a different program answering on a port"
                    " that was already open. `ps` shows it\n");
         }
     }
@@ -1536,21 +1665,38 @@ static void check_listeners(void)
  * hasher here would mean two lists to keep in step, and the one that
  * was forgotten would be the one that mattered. So this runs it.
  *
- * -c so that it checks and records nothing: accepting a change is a
- * decision a person makes, with `integrity -u`, not something a
- * background service does on their behalf. Its own output is already
- * specific about which file changed and why that file matters, so it
- * goes straight to the terminal and this only adds the count. */
+ * Its own output is already specific about which file changed and why
+ * that file matters, so it goes straight to the terminal and this adds
+ * only the count and what to do next. */
 static void check_integrity(void)
 {
     if (!lp_exists("/bin/integrity")) {
         report("integrity is not installed - nothing is checking the files"
                " that survive a reboot");
-        printf("defend:    /data/rc.local, authorized_keys, /data/users"
+        tell("defend:    /data/rc.local, authorized_keys, /data/users"
                " are the ones that decide whether something runs again\n");
         return;
     }
 
+    /* The path integrity.c calls RECORD. Without it there is nothing to
+     * compare against, and `integrity -c` deliberately records nothing -
+     * so it would answer "first check" at every run, for ever, and look
+     * like a check that was passing. /etc/rc runs plain `integrity` at
+     * every boot, so a missing record means /data was not mounted then. */
+    if (!lp_exists("/data/.integrity")) {
+        report("integrity has never recorded what survives a reboot, so a"
+               " change to those files cannot be seen");
+        tell("defend:    run `integrity` once. /etc/rc does it at every"
+               " boot, so this means /data was not mounted at the last"
+               " one\n");
+        return;
+    }
+
+    /* -c so that it checks and records nothing: accepting a change is a
+     * decision a person makes with `integrity -u`, not something a
+     * background service does on their behalf. Without -c the first run
+     * after a break-in would quietly adopt the attacker's rc.local as
+     * the new correct state. */
     char *const argv[] = { (char *)"integrity", (char *)"-c", NULL };
     pid_t pid = lp_fork();
     if (pid < 0) {
@@ -1558,6 +1704,18 @@ static void check_integrity(void)
         return;
     }
     if (pid == 0) {
+        /* Its own report names the file and says why that file matters,
+         * and belongs on the terminal whenever a person asked for it.
+         * A service repeating those eight lines every hour is the log
+         * flood said_recently exists to stop, so there it is thrown
+         * away and the one-line finding below carries the news. */
+        if (quiet) {
+            long null = lp_open("/dev/null", O_WRONLY, 0);
+            if (null >= 0) {
+                lp_dup2((int)null, STDOUT_FILENO);
+                lp_dup2((int)null, STDERR_FILENO);
+            }
+        }
         lp_execve("/bin/integrity", argv, environ);
         lp_exit(127);
     }
@@ -1565,12 +1723,18 @@ static void check_integrity(void)
     int status = 0;
     lp_waitpid(pid, &status, 0);
     if (LP_WIFEXITED(status) && LP_WEXITSTATUS(status) == 1) {
-        findings++;
-        if (opt_daemon)
-            lp_log("defend", "integrity: a file that survives a reboot"
-                             " has changed");
-        printf("defend:    the lines above are integrity's. `integrity -u`"
-               " accepts the change if it was yours\n");
+        if (quiet) {
+            report("a file that survives a reboot has changed -"
+                   " `integrity -c` names it");
+            tell("defend:    /data/rc.local, authorized_keys and"
+                 " /data/users are what decide whether something runs"
+                 " again or somebody gets back in\n");
+        } else {
+            findings++;
+            printf("defend:    the lines above are integrity's."
+                   " `integrity -u` accepts the change if it was"
+                   " yours\n");
+        }
     }
 }
 
@@ -1705,7 +1869,10 @@ static void key_comment(const char *line, char *out, size_t cap)
     strlcpy(out, end, cap);
 }
 
-static char key_line[MAX_BASE][160];
+/* authkey stops at 32 keys, so anything past that cannot log in
+ * anyway. */
+#define MAX_KEYS 32
+static char key_line[MAX_KEYS][BASE_LINE];
 static int  nkeylines;
 
 static void collect_keys(void)
@@ -1721,10 +1888,10 @@ static void collect_keys(void)
             while (*p == ' ' || *p == '\t') p++;
             if (!*p || *p == '#')
                 continue;
-            if (nkeylines >= MAX_BASE)
+            if (nkeylines >= MAX_KEYS)
                 break;
 
-            char fp[64], comment[80];
+            char fp[64], comment[48];
             if (!fingerprint(line, fp, sizeof fp))
                 strlcpy(fp, "SHA256:(unreadable)", sizeof fp);
             key_comment(line, comment, sizeof comment);
@@ -1742,18 +1909,18 @@ static void check_keys(void)
     if (nkeylines == 0) {
         report("no SSH key is authorized anywhere - nobody can log in,"
                " including you");
-        printf("defend:    put your public key in authorized_keys on the"
+        tell("defend:    put your public key in authorized_keys on the"
                " boot partition (it is FAT32) and reboot. `authkey -l`\n");
         return;
     }
 
-    printf("defend: %d ssh key%s can log in:\n",
+    say("defend: %d ssh key%s can log in:\n",
            nkeylines, nkeylines == 1 ? "" : "s");
     for (int i = 0; i < nkeylines; i++)
-        printf("defend:    %s\n", key_line[i] + 4);
+        say("defend:    %s\n", key_line[i] + 4);
 
-    if (nbase == 0) {
-        printf("defend:    no baseline recorded - `defend baseline`, and a"
+    if (!base_exists) {
+        say("defend:    no baseline recorded - `defend baseline`, and a"
                " key added after that gets reported\n");
         return;
     }
@@ -1762,7 +1929,7 @@ static void check_keys(void)
         /* Matched on the fingerprint alone: the same key added again
          * under a new comment, or copied to another of the three files,
          * is still the same key and is not news. */
-        char key[96];
+        char key[BASE_LINE];
         strlcpy(key, key_line[i], sizeof key);
         char *sp = strchr(key, ' ');
         sp = sp ? strchr(sp + 1, ' ') : NULL;
@@ -1776,7 +1943,7 @@ static void check_keys(void)
                  "an ssh key that was not in the baseline can log in: %s",
                  key_line[i] + 4);
         report(msg);
-        printf("defend:    if you did not add it, that is how somebody"
+        tell("defend:    if you did not add it, that is how somebody"
                " keeps getting back in - edit /root/.ssh/authorized_keys"
                " and `defend baseline`\n");
     }
@@ -1828,8 +1995,10 @@ static int run_once(bool full)
     findings = 0;
     load_baseline();
 
-    int  before = nbans;
-    bool changed = check_auth();
+    bool changed = prune_bans();
+    int  before  = nbans;
+    if (check_auth())
+        changed = true;
     check_listeners();
     if (full) {
         check_files();
@@ -1838,7 +2007,8 @@ static int run_once(bool full)
     }
 
     if (changed) {
-        st_banned_total += nbans - before;
+        if (nbans > before)
+            st_banned_total += nbans - before;
         if (!save_bans())
             dprintf(STDERR_FILENO,
                     "defend: cannot write %s - is /data mounted?\n", F_BANS);
@@ -1864,10 +2034,12 @@ static int run_once(bool full)
     save_state();
 
     if (findings == 0)
-        printf("defend: nothing to report\n");
+        say("defend: nothing to report from %s\n",
+            full ? "every check"
+                 : "the ssh log and the socket tables");
     else
-        printf("defend: %d thing%s above want%s a decision\n",
-               findings, findings == 1 ? "" : "s", findings == 1 ? "s" : "");
+        say("defend: %d thing%s above want%s a decision\n",
+            findings, findings == 1 ? "" : "s", findings == 1 ? "s" : "");
     return findings ? 1 : 0;
 }
 
@@ -1886,7 +2058,7 @@ static int cmd_status(void)
 
     when_str(base_when, buf, sizeof buf);
     printf("baseline       %s", buf);
-    if (nbase == 0)
+    if (!base_exists)
         printf("  - nothing recorded; run `defend baseline`");
     else
         printf("  (%d items)", nbase);
@@ -2131,6 +2303,7 @@ int main(int argc, char **argv)
 
     for (s64 pass = 0; ; pass++) {
         run_once(pass % FULL_EVERY == 0);
+        quiet = true;
         lp_sleep_ms((long)interval * 1000);
     }
 }
