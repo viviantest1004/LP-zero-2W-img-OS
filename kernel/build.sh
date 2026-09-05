@@ -45,12 +45,12 @@ if [[ "$LP_ARCH" == "amd64" ]]; then
     # fragment. Keeping the merged file in the tree by hand is what put
     # a Pi's "no 8250 serial" answer after the PC's "yes 8250" one.
     "${REPO_ROOT}/tools/mkamd64config.sh" >/dev/null
-    OUT_SUBDIR=out-amd64
+    OUT_SUBDIR="${LP_OUT_SUBDIR:-out-amd64}"
 else
     ARCH=arm64
     CROSS=aarch64-linux-gnu-
     KCONFIG_NAME=lp-zero.config
-    OUT_SUBDIR=out
+    OUT_SUBDIR="${LP_OUT_SUBDIR:-out}"
 fi
 
 FRAGMENT="${REPO_ROOT}/kernel/${KCONFIG_NAME}"
@@ -115,6 +115,19 @@ GEN="${BUILD_DIR}/lp-zero-generated.config"
     echo "CONFIG_INITRAMFS_SOURCE=\"${ROOTFS}\""
     echo "CONFIG_INITRAMFS_ROOT_UID=0"
     echo "CONFIG_INITRAMFS_ROOT_GID=0"
+
+    # LP_CMDLINE builds a kernel that knows where its root is.
+    #
+    # The images that carry their whole system in the initramfs need no
+    # root= at all. A disk-rooted one does, and it cannot come from a
+    # bootloader here: UEFI loads the kernel's own EFI stub directly,
+    # with nothing in between to pass a command line. So it is compiled
+    # in, and cmdline.txt on the FAT partition can still override it
+    # where a real bootloader is involved.
+    if [[ -n "${LP_CMDLINE:-}" ]]; then
+        echo "CONFIG_CMDLINE_BOOL=y"
+        echo "CONFIG_CMDLINE=\"${LP_CMDLINE}\""
+    fi
 } > "$GEN"
 
 "${LINUX_SRC}/scripts/kconfig/merge_config.sh" -m -O "$BUILD_DIR" \

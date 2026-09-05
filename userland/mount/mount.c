@@ -201,12 +201,25 @@ static int do_umount(const char *target)
  * Returns the flags; `rest` gets everything not consumed. */
 static unsigned long opt_flag(const char *word)
 {
-    if (strcmp(word, "bind")   == 0) return MS_BIND;
-    if (strcmp(word, "ro")     == 0) return MS_RDONLY;
-    if (strcmp(word, "noexec") == 0) return MS_NOEXEC;
-    if (strcmp(word, "nosuid") == 0) return MS_NOSUID;
-    if (strcmp(word, "nodev")  == 0) return MS_NODEV;
+    if (strcmp(word, "bind")    == 0) return MS_BIND;
+    if (strcmp(word, "ro")      == 0) return MS_RDONLY;
+    if (strcmp(word, "noexec")  == 0) return MS_NOEXEC;
+    if (strcmp(word, "nosuid")  == 0) return MS_NOSUID;
+    if (strcmp(word, "nodev")   == 0) return MS_NODEV;
+    if (strcmp(word, "remount") == 0) return MS_REMOUNT;
     return 0;
+}
+
+/* "rw" is the absence of MS_RDONLY rather than a flag of its own, so it
+ * cannot come back from opt_flag - but it still has to be recognised,
+ * or it would be passed through to the filesystem, which has never
+ * heard of it and refuses the whole mount. */
+static bool opt_is_noop(const char *word)
+{
+    return strcmp(word, "rw") == 0 || strcmp(word, "defaults") == 0 ||
+           strcmp(word, "async") == 0 || strcmp(word, "atime") == 0 ||
+           strcmp(word, "dev") == 0 || strcmp(word, "exec") == 0 ||
+           strcmp(word, "suid") == 0;
 }
 
 static unsigned long parse_options(const char *opts, char *rest, size_t size)
@@ -226,6 +239,8 @@ static unsigned long parse_options(const char *opts, char *rest, size_t size)
         unsigned long f = opt_flag(word);
         if (f) {
             flags |= f;
+        } else if (opt_is_noop(word)) {
+            /* nothing to do, and nothing to pass on */
         } else if (word[0]) {
             if (rest[0])
                 strlcat(rest, ",", size);
@@ -280,6 +295,27 @@ int main(int argc, char **argv)
         } else if (nargs < 2) {
             args[nargs++] = argv[i];
         }
+    }
+
+    /* A remount names one thing, not two: the place it is mounted. The
+     * kernel ignores the source and the type for MS_REMOUNT - what it
+     * changes is the flags of a mount that already exists. This is how
+     * /etc/rc turns the disk-rooted amd64 root read-write after preinit
+     * mounted it read-only to let ext4 replay its journal first. */
+    if (flags & MS_REMOUNT) {
+        if (nargs < 1) {
+            dprintf(STDERR_FILENO, "usage: mount -o remount,rw <dir>\n");
+            return 2;
+        }
+        const char *at = args[nargs - 1];
+        long rc = lp_mount(nargs > 1 ? args[0] : "none", at, type,
+                           flags, data);
+        if (rc < 0) {
+            dprintf(STDERR_FILENO, "mount: remount %s: failed (%ld)\n",
+                    at, -rc);
+            return 1;
+        }
+        return 0;
     }
 
     if (nargs < 2) {

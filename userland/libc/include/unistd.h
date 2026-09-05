@@ -86,6 +86,11 @@ long  lp_signal_default(int sig);
  * No filesystem type is given; it keeps the original's. */
 #define MS_BIND     4096
 #define MS_REMOUNT    32
+/* Move a mount somewhere else without unmounting it. The one thing that
+ * makes switch_root possible: the real root is mounted under the
+ * initramfs, and then moved to / with everything already on it still
+ * open. */
+#define MS_MOVE     8192
 
 /* reboot magic numbers */
 #define LINUX_REBOOT_MAGIC1     0xfee1dead

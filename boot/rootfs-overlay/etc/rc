@@ -12,6 +12,33 @@ echo "[rc] naming the machine"
 # prompt and in every log line. One word, and the machine has a name.
 echo lpzero > /proc/sys/kernel/hostname || echo "[rc]   could not set it"
 
+echo "[rc] the root filesystem"
+# Two shapes of machine run this same script, and most of what follows
+# depends on which one it is.
+#
+#   in RAM    Every arm64 image, and the amd64 one meant for a USB
+#             stick. The root is a cpio inside the kernel, unpacked at
+#             every boot. Nothing written to it survives, so /data is
+#             mounted from a partition and /bin, /usr and the home
+#             directory are made to point at it.
+#
+#   on disk   The amd64 desktop image. preinit mounted a real ext4
+#             partition and switched to it before this script started.
+#             / is an ordinary filesystem: files stay, packages install
+#             into /usr, and every one of those workarounds is not just
+#             unnecessary but wrong.
+#
+# preinit mounts the root read-only on purpose - ext4 replays its
+# journal either way, and a root made writable before anything has
+# looked at it is a root a half-finished write can make worse. Now that
+# it has been mounted cleanly, it can be written to.
+if grep -q " / ext4 " /proc/mounts
+then
+    mount -o remount,rw / && echo "[rc]   on disk, writable" || echo "[rc]   on disk but still read-only - files will not save"
+else
+    echo "[rc]   in RAM (the data partition is what survives a reboot)"
+fi
+
 echo "[rc] arming the watchdog"
 # The watchdog daemon starts from /etc/services, which is after this
 # script finishes - so a boot that hangs partway through this file would
@@ -180,8 +207,19 @@ echo "[rc] storage"
 #
 # These stay on one line each: our shell has no line continuation, and a
 # trailing backslash would be passed through as an argument.
+#
+# On a disk-rooted machine the partition being grown is the root itself,
+# already mounted at /, and /data is a directory on it rather than a
+# partition of its own - so there is nothing to mount and the whole
+# chain of candidate device names would be four failures and a
+# misleading "continuing in RAM".
 expandfs /dev/mmcblk0 /dev/mmcblk0p2 || expandfs /dev/vda /dev/vda2 || expandfs /dev/nvme0n1 /dev/nvme0n1p2 || expandfs -w /dev/sda /dev/sda2 || echo "[rc]   nothing to expand"
-datadisk --boot || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/mmcblk0p2 /data || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/vda2 /data || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/nvme0n1p2 /data || mount -L LPZERODATA -w -o errors=remount-ro,nosuid,nodev /dev/sda2 /data || echo "[rc]   no data partition - continuing in RAM"
+if grep -q " / ext4 " /proc/mounts
+then
+    mkdir -p /data || echo "[rc]   cannot make /data on the root"
+else
+    datadisk --boot || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/mmcblk0p2 /data || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/vda2 /data || mount -L LPZERODATA -o errors=remount-ro,nosuid,nodev /dev/nvme0n1p2 /data || mount -L LPZERODATA -w -o errors=remount-ro,nosuid,nodev /dev/sda2 /data || echo "[rc]   no data partition - continuing in RAM"
+fi
 
 # Somewhere for logd to write. It starts from /etc/services right
 # after this script, so the directory has to exist by now.
@@ -332,7 +370,17 @@ ntp -r || echo "[rc]   no saved time (first boot)"
 echo "[rc] home directory on storage"
 # /root is in RAM and would vanish on reboot. Bind a directory from the
 # data partition over it so whatever is saved in home stays.
-mkdir -p /data/root/.ssh && mount -o bind /data/root /root || echo "[rc]   home is in RAM (lost on reboot)"
+#
+# On a disk root /root is already a real directory that keeps what is
+# put in it, and binding /data/root over it would move somebody's home
+# to a strange path for no reason - and hide anything the image shipped
+# there, .profile included.
+if grep -q " / ext4 " /proc/mounts
+then
+    mkdir -p /root/.ssh || echo "[rc]   cannot make /root/.ssh"
+else
+    mkdir -p /data/root/.ssh && mount -o bind /data/root /root || echo "[rc]   home is in RAM (lost on reboot)"
+fi
 
 echo "[rc] reading settings from the boot partition"
 # A copy on /data, so that WiFi still comes up on a boot where /boot

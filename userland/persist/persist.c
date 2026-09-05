@@ -44,6 +44,7 @@
 #include "unistd.h"
 #include "stdio.h"
 #include "string.h"
+#include "disk.h"
 
 /* getdents64 records: reclen at byte 16, the name at 19. */
 #define DIRENT_RECLEN  16
@@ -192,6 +193,17 @@ static void measure(const char *path, int *files, long *bytes, int depth)
 
 static void show(void)
 {
+    if (root_is_persistent()) {
+        printf("The root filesystem is on disk, not in RAM.\n\n"
+               "  Anything written to /bin, /usr, /etc or anywhere else"
+               " is simply there\n"
+               "  after a reboot. There is no overlay, and nothing for"
+               " this command to\n"
+               "  set up or take away.\n\n"
+               "  df /   shows how much room is left.\n");
+        return;
+    }
+
     printf("Files installed into the system are kept on the data"
            " partition,\nso they are still there after a reboot.\n\n");
 
@@ -369,6 +381,19 @@ static void etc_restore_one(const char *name, void *ctx)
 
 static int etc_cmd(int argc, char **argv)
 {
+    /* /etc is a real directory on a disk-rooted machine, so both halves
+     * of this - copying files out to /data and putting them back at the
+     * next boot - are answering a question that is not being asked.
+     * Restore is a plain success; keep says so rather than making a
+     * second copy that will drift from the file it came from. */
+    if (root_is_persistent()) {
+        if (argc > 2 && strcmp(argv[2], "restore") == 0)
+            return 0;
+        printf("persist: /etc is on disk here - it keeps what you write"
+               " to it, with nothing to set up\n");
+        return 0;
+    }
+
     /* persist etc restore - what /etc/rc calls. Quiet unless it fails. */
     if (argc > 2 && strcmp(argv[2], "restore") == 0) {
         int failed = 0;
@@ -477,6 +502,20 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "on") == 0) {
         /* Called from /etc/rc, once, after /data is mounted. Quiet when
          * it works: the boot has enough to say already. */
+
+        /* On a disk-rooted machine there is nothing to do, and doing it
+         * anyway would be harmful: an overlay whose lower layer is the
+         * real /bin and whose upper layer is a directory on that same
+         * filesystem hides the real one behind a copy of itself, and
+         * every later update writes to the copy. Success, because /bin
+         * does keep what is written to it - which is what the caller
+         * asked about. */
+        if (root_is_persistent()) {
+            printf("persist: the root is on disk and already keeps what"
+                   " is installed into it\n");
+            return 0;
+        }
+
         if (!lp_is_dir("/data")) {
             dprintf(STDERR_FILENO,
                     "persist: no /data - nothing installed into the system"

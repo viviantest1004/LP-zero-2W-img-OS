@@ -64,6 +64,28 @@ bool disk_identify(const char *dev, char *fs, size_t fsn,
 /* Where this device is mounted, from /proc/mounts. false if nowhere. */
 bool disk_mountpoint(const char *dev, char *out, size_t n);
 
+/* Does the root filesystem survive a reboot?
+ *
+ * Two shapes of machine run this system and the difference decides what
+ * half a dozen programs should do.
+ *
+ * The RAM-rooted one - every arm64 image, and the amd64 one meant for a
+ * USB stick - has its whole root as a cpio inside the kernel, unpacked
+ * into RAM at boot. Nothing written to /bin or /etc is there tomorrow,
+ * which is why `persist` mounts overlays and why /root is a bind mount
+ * off the data partition.
+ *
+ * The disk-rooted one boots a small initramfs that mounts a real ext4
+ * partition and switches to it. There / is an ordinary writable
+ * filesystem: `cp mytool /bin/` just works, /etc keeps what it is told,
+ * and every one of those workarounds is not merely unnecessary but
+ * actively wrong - an overlay over a directory that already persists
+ * hides the real one behind a copy on itself.
+ *
+ * Told apart by the filesystem type mounted at /: rootfs, ramfs and
+ * tmpfs are memory, anything else is a disk. */
+bool root_is_persistent(void);
+
 /* Size in bytes, straight from the kernel (BLKGETSIZE64). 0 on failure. */
 u64 disk_bytes(const char *dev);
 

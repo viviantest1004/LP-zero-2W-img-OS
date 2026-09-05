@@ -281,6 +281,41 @@ bool disk_mountpoint(const char *dev, char *out, size_t n)
     return found;
 }
 
+bool root_is_persistent(void)
+{
+    long fd = lp_open("/proc/mounts", O_RDONLY, 0);
+    if (fd < 0)
+        return false;          /* cannot tell: assume the cautious answer */
+
+    char line[512];
+    bool persistent = false;
+    while (readline((int)fd, line, sizeof line) >= 0) {
+        /* device mountpoint fstype ... - we want the third field of the
+         * line whose second is exactly "/". */
+        char *sp = strchr(line, ' ');
+        if (!sp)
+            continue;
+        char *point = sp + 1;
+        char *end = strchr(point, ' ');
+        if (!end)
+            continue;
+        *end = '\0';
+        if (strcmp(point, "/") != 0)
+            continue;
+
+        char *fs = end + 1;
+        char *fend = strchr(fs, ' ');
+        if (fend) *fend = '\0';
+
+        persistent = strcmp(fs, "rootfs") != 0 &&
+                     strcmp(fs, "ramfs")  != 0 &&
+                     strcmp(fs, "tmpfs")  != 0;
+        break;
+    }
+    lp_close((int)fd);
+    return persistent;
+}
+
 bool disk_whole(const char *part, char *out, size_t n)
 {
     size_t len = strlen(part);

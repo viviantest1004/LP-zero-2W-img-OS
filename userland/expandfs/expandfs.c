@@ -20,6 +20,7 @@
 #include "stdio.h"
 #include "unistd.h"
 #include "syscall.h"
+#include "disk.h"
 
 /* Defaults to the SD card. Pass arguments to use another device, e.g.
  *   expandfs /dev/vda /dev/vda2 */
@@ -28,6 +29,18 @@ static const char *dev_part = "/dev/mmcblk0p2";
 #define DEV_DISK      dev_disk
 #define DEV_PART      dev_part
 #define MOUNT_POINT   "/data"
+
+/* Where the ext4 that is being grown is reachable from.
+ *
+ * Growing an ext4 is an ioctl on any directory inside it, so what
+ * matters is that the filesystem is mounted somewhere - not that it is
+ * mounted at /data. On the disk-rooted amd64 image the partition being
+ * grown IS the root, already mounted at /, and mounting a second copy
+ * of the running root at /data to grow it would be both unnecessary and
+ * a good way to confuse everything that reads /proc/mounts. So this is
+ * set to wherever the partition already is, and only falls back to
+ * mounting it at /data when it is not mounted at all. */
+static char grow_at[64] = MOUNT_POINT;
 #define PART_INDEX    2            /* 1-based */
 #define SECTOR_SIZE   512
 #define MBR_SIZE      512
@@ -66,7 +79,14 @@ static const char *dev_part = "/dev/mmcblk0p2";
 #define EXT_LABEL_LEN       16
 #define EXT_MAGIC       0xEF53
 
-#define OUR_LABEL "LPZERODATA"   /* what mksdcard.sh writes */
+/* The labels this project writes on a partition it is allowed to grow.
+ *
+ * LPZERODATA is the data partition of a RAM-rooted image; LPROOT is the
+ * root of the disk-rooted amd64 one. Both are ours. Anything else -
+ * somebody's photo drive that happened to be plugged in when the board
+ * booted - is refused, which is the whole reason this check exists. */
+#define OUR_LABEL  "LPZERODATA"   /* what mksdcard.sh writes */
+#define OUR_LABEL2 "LPROOT"       /* what mkdisk.sh writes */
 
 /* -1 cannot read, 0 not ours, 1 ours, 2 unlabelled */
 static int check_label(const char *part)
@@ -99,7 +119,8 @@ static int check_label(const char *part)
     if (label[0] == '\0')
         return 2;
 
-    return strcmp(label, OUR_LABEL) == 0 ? 1 : 0;
+    return (strcmp(label, OUR_LABEL) == 0 ||
+            strcmp(label, OUR_LABEL2) == 0) ? 1 : 0;
 }
 
 /* Block device ioctls */
@@ -388,7 +409,7 @@ static bool grow_filesystem(u64 part_bytes)
     u8 st[STATFS_SIZE];
     memset(st, 0, sizeof(st));
 
-    long rc = sys_call2(SYS_statfs, (long)MOUNT_POINT, (long)st);
+    long rc = sys_call2(SYS_statfs, (long)grow_at, (long)st);
     if (rc < 0) {
         dprintf(STDERR_FILENO, "expandfs: statfs failed (%ld)\n", -rc);
         return false;
@@ -412,10 +433,10 @@ static bool grow_filesystem(u64 part_bytes)
            (unsigned long)(want * bsize / 1048576));
 
     /* The kernel adds the block groups. This works while mounted. */
-    long fd = lp_open(MOUNT_POINT, O_RDONLY | O_DIRECTORY, 0);
+    long fd = lp_open(grow_at, O_RDONLY | O_DIRECTORY, 0);
     if (fd < 0) {
         dprintf(STDERR_FILENO, "expandfs: cannot open %s (%ld)\n",
-                MOUNT_POINT, -fd);
+                grow_at, -fd);
         return false;
     }
 
@@ -481,7 +502,8 @@ int main(int argc, char **argv)
     if (owned == 0) {
         dprintf(STDERR_FILENO,
                 "expandfs: %s belongs to something else - not touching it\n"
-                "expandfs:   (its label is not %s)\n", DEV_PART, OUR_LABEL);
+                "expandfs:   (its label is neither %s nor %s)\n",
+                DEV_PART, OUR_LABEL, OUR_LABEL2);
         return 1;
     }
     if (owned == 2)
@@ -509,8 +531,20 @@ int main(int argc, char **argv)
     if (part_bytes == 0)
         return 1;
 
-    /* Growing requires it to be mounted. */
+    /* Growing requires it to be mounted - somewhere, not necessarily
+     * here. Ask where it already is before deciding to mount it. */
     bool mounted_here = false;
+    char where[64] = "";
+    if (disk_mountpoint(DEV_PART, where, sizeof where) && where[0]) {
+        strlcpy(grow_at, where, sizeof grow_at);
+        printf("expandfs: %s is already mounted at %s\n", DEV_PART, grow_at);
+        u64 pb = part_bytes;
+        pid_t p = watchdog_petter_start();
+        bool k = grow_filesystem(pb);
+        watchdog_petter_stop(p);
+        return k ? 0 : 1;
+    }
+
     if (!lp_is_dir(MOUNT_POINT))
         lp_mkdir(MOUNT_POINT, 0755);
 
@@ -544,11 +578,11 @@ int main(int argc, char **argv)
      * own mount then fails with EBUSY down every candidate device, and
      * rc reports "no data partition - continuing in RAM" while /data is
      * in fact mounted. */
-    if (mounted_here && sys_call2(SYS_umount2, (long)MOUNT_POINT, 0) < 0)
+    if (mounted_here && sys_call2(SYS_umount2, (long)grow_at, 0) < 0)
         dprintf(STDERR_FILENO,
                 "expandfs: could not unmount %s - it stays mounted, and"
                 " the boot may report there is no data partition\n",
-                MOUNT_POINT);
+                grow_at);
 
     return ok ? 0 : 1;
 }
