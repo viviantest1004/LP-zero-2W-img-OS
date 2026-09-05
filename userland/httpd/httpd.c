@@ -24,12 +24,15 @@
  * machine in somebody's house, forever, for no reason. Turn it on
  * deliberately:
  *
- *   service add httpd -d /data/www
+ *   service add httpd -f -l /data/log/httpd.log
  *
- * and init will supervise it from then on. Note that a supervised
- * service must stay in the foreground - init reads a process that forks
- * and lets the parent exit as an instant death and spends its life
- * restarting it - so `service add` gets -f. See the -h text.
+ * and init will supervise it from then on. Two details in that line:
+ * -f, because a supervised service must stay in the foreground - init
+ * reads a process that forks and lets the parent exit as an instant
+ * death and spends its life restarting it - and -l, because with -f the
+ * request log goes to stdout, which on a supervised service means the
+ * console. One line per request on the console is fine for a minute and
+ * unbearable for a week.
  *
  * ── One process per connection ──
  * The alternative was a single process polling every socket. That is
@@ -261,14 +264,30 @@ static void log_request(const char *addr, const char *method,
     lp_tm_t tm;
     lp_gmtime(lp_time(), &tm);
 
-    char line[512];
+    /* The path is trimmed here rather than with a "%.300s" precision,
+     * because this printf has no precision: it copies "%.300s" out
+     * literally and then every argument after it lands in the wrong
+     * conversion. The log said "GET %.400s -765559792 200" until this
+     * was written the long way. */
+    char shortpath[301], shortmethod[24];
+    strlcpy(shortpath, path[0] ? path : "-", sizeof shortpath);
+    /* The method comes off the request line, so it is whatever the
+     * client felt like sending - up to a couple of thousand bytes of
+     * it. Trimmed for the same reason as the path: `line` below is
+     * sized so that the newline at the end can never be the part that
+     * gets cut, and two log lines can never run together. */
+    strlcpy(shortmethod, method[0] ? method : "-", sizeof shortmethod);
+
+    char line[420];
     int n = snprintf(line, sizeof line,
-                     "%04d-%02d-%02dT%02d:%02d:%02dZ %s %s %.400s %d %lu\n",
+                     "%04d-%02d-%02dT%02d:%02d:%02dZ %s %s %s %d %lu\n",
                      tm.year, tm.mon, tm.day, tm.hour, tm.min, tm.sec,
-                     addr, method[0] ? method : "-",
-                     path[0] ? path : "-", status, bytes);
-    if (n > 0)
+                     addr, shortmethod, shortpath, status, bytes);
+    if (n > 0) {
+        if (n > (int)sizeof line - 1)
+            n = (int)sizeof line - 1;   /* snprintf returns what it wanted */
         lp_write(g_logfd, line, (size_t)n);
+    }
 }
 
 /* ── the connection ───────────────────────────────────────────────
@@ -334,6 +353,22 @@ static bool conn_write(conn_t *c, const void *buf, size_t n)
     return true;
 }
 
+/* Header names are case insensitive, and there is no strcasecmp here.
+ * `want` is lower case; `name` is whatever the client typed. Matching
+ * only the two spellings curl happens to use is the kind of thing that
+ * works for a year and then meets a proxy that shouts. */
+static bool hdr_is(const char *name, const char *want)
+{
+    for (; *name && *want; name++, want++) {
+        char a = *name;
+        if (a >= 'A' && a <= 'Z')
+            a = (char)(a + 32);
+        if (a != *want)
+            return false;
+    }
+    return *name == '\0' && *want == '\0';
+}
+
 static void set_timeout(int fd, int opt, int seconds)
 {
     s64 tv[2] = { seconds, 0 };
@@ -378,6 +413,16 @@ static int hexval(char c)
 static bool clean_path(const char *target, char *out, size_t outsz)
 {
     char raw[PATH_MAX], dec[PATH_MAX];
+
+    /* "GET http://board/index.html HTTP/1.1" is legal to send to any
+     * server, not just a proxy, and the spec says accept it. No browser
+     * does it, but something will, and 403 would be the wrong answer.
+     * The host part is thrown away: this server has one document root
+     * and does not care what name was used to reach it. */
+    if (strncmp(target, "http://", 7) == 0) {
+        const char *slash = strchr(target + 7, '/');
+        target = slash ? slash : "/";
+    }
 
     size_t n = 0;
     for (const char *p = target; *p && *p != '?' && *p != '#'; p++) {
@@ -489,8 +534,14 @@ static int walk_path(const char *rel, char *full, size_t fullsz,
         memcpy(full + cur + 1, seg, seglen);
         full[cur + 1 + seglen] = '\0';
 
-        if (lp_stat(full, st, false) < 0)
-            return 404;
+        long rc = lp_stat(full, st, false);
+        if (rc < 0) {
+            /* EACCES is worth telling apart from ENOENT: "you may not"
+             * and "there is nothing there" send whoever is running this
+             * to completely different places, and after the privileges
+             * are dropped the first one is the likely mistake. */
+            return -rc == 13 ? 403 : 404;
+        }
         if ((st->mode & LP_S_IFMT) == LP_S_IFLNK)
             return 403;
 
@@ -918,11 +969,18 @@ static void serve(int fd, const char *addr)
             log_request(addr, "-", "-", 414, 0);
             return;
         }
-        if (n == RD_NUL || n == 0) {
+        if (n == RD_NUL) {
             send_error(&c, 400, NULL, false, "GET");
             log_request(addr, "-", "-", 400, 0);
             return;
         }
+        /* A stray empty line before the request. The spec says ignore
+         * at least one, and old clients really do send them. It costs
+         * one of this connection's MAX_REQUESTS turns, so a client
+         * sending nothing but blank lines runs out rather than looping
+         * here forever. */
+        if (n == 0)
+            continue;
 
         /* "GET /path HTTP/1.1" */
         char *sp1 = strchr(line, ' ');
@@ -992,20 +1050,21 @@ static void serve(int fd, const char *addr)
             char *val = colon + 1;
             while (*val == ' ' || *val == '\t') val++;
 
-            if (strcmp(h, "Connection") == 0 ||
-                strcmp(h, "connection") == 0) {
-                if (strstr(val, "close") || strstr(val, "Close"))
+            if (hdr_is(h, "connection")) {
+                char v[64];
+                strlcpy(v, val, sizeof v);
+                for (char *q = v; *q; q++)
+                    if (*q >= 'A' && *q <= 'Z')
+                        *q = (char)(*q + 32);
+                if (strstr(v, "close"))
                     keepalive = false;
-            } else if (strcmp(h, "Range") == 0 || strcmp(h, "range") == 0) {
+            } else if (hdr_is(h, "range")) {
                 strlcpy(range, val, sizeof range);
                 have_range = true;
-            } else if (strcmp(h, "If-Modified-Since") == 0 ||
-                       strcmp(h, "if-modified-since") == 0) {
+            } else if (hdr_is(h, "if-modified-since")) {
                 strlcpy(ims_raw, val, sizeof ims_raw);
-            } else if (strcmp(h, "Content-Length") == 0 ||
-                       strcmp(h, "content-length") == 0 ||
-                       strcmp(h, "Transfer-Encoding") == 0 ||
-                       strcmp(h, "transfer-encoding") == 0) {
+            } else if (hdr_is(h, "content-length") ||
+                       hdr_is(h, "transfer-encoding")) {
                 /* A GET with a body. Nothing here reads bodies, so the
                  * bytes would still be in the socket when the next
                  * request was read off it - and the client would get to
@@ -1200,9 +1259,11 @@ static void usage(void)
     printf("Symlinks under the directory are never followed, and nothing "
            "outside it\nis reachable.\n");
     printf("\nIt is not started at boot and should not be. To have init "
-           "keep it running:\n\n    service add httpd -f -d %s\n\n"
-           "-f matters there: init supervises a child that stays in the "
-           "foreground.\n", DEF_ROOT);
+           "keep it running:\n\n"
+           "    service add httpd -f -d %s -l %s\n\n"
+           "-f because init can only supervise a child that stays in the "
+           "foreground,\nand -l because otherwise every request would be "
+           "printed on the console.\n", DEF_ROOT, DEF_LOG);
 }
 
 int main(int argc, char **argv)
@@ -1329,12 +1390,17 @@ int main(int argc, char **argv)
      * again after, because a root-only path is a real mistake to make -
      * everything starts cleanly and then every single request is a 404
      * with nothing anywhere saying why. */
-    if (as && !lp_is_dir(g_root))
+    /* lp_access, not lp_is_dir: stat() only needs the parent to be
+     * traversable, so a directory nobody can enter still looks like a
+     * perfectly good directory from outside it. R_OK|X_OK is the
+     * question actually being asked - can this user list it and open
+     * what is in it. */
+    if (as && lp_access(g_root, R_OK | X_OK) < 0)
         dprintf(STDERR_FILENO,
-                "httpd: %s cannot be read as %s, so every request will "
-                "get a 404.\n"
-                "       chmod -R a+rX %s, or serve somewhere %s can "
-                "reach.\n", g_root, as, g_root, as);
+                "httpd: the %s account cannot read %s, so every request "
+                "will be refused.\n"
+                "       chmod -R a+rX %s, or point -d at a directory that "
+                "account can read.\n", as, g_root, g_root);
 
     char shown[16] = "0.0.0.0";
     if (addr_be)

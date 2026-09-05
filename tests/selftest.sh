@@ -252,6 +252,22 @@ if netstat -r | grep -q "destination" ; then echo "PASS  netstat -r shows the ro
 if netstat -i | grep -q "lo" ; then echo "PASS  netstat -i shows the interfaces" ; else echo "FAIL  netstat -i" ; fi
 rm -f /tmp/ns1
 
+echo "=== THE SERVER SIDE ==="
+if info -s > /tmp/if1 2>&1 ; then echo "PASS  info runs" ; else echo "FAIL  info: `head -1 /tmp/if1`" ; fi
+if grep -q "linux-LP\|LP-zero" /tmp/if1 ; then echo "PASS  and names the system" ; else echo "FAIL  info does not say what this is" ; fi
+if info project | grep -qF "github.com/viviantest1004" ; then echo "PASS  info project has the source link" ; else echo "FAIL  info project" ; fi
+if info net | grep -q "eth0\|wlan0\|no network" ; then echo "PASS  info net reports the interfaces" ; else echo "FAIL  info net" ; fi
+rm -f /tmp/if1
+mkdir -p /data/wwwtest
+echo "servedok" > /data/wwwtest/index.html
+httpd -p 8451 -d /data/wwwtest -l /tmp/hd.log
+sleep 3
+if netstat -l | grep -q 8451 ; then echo "PASS  httpd is listening" ; else echo "FAIL  httpd did not come up: `cat /tmp/hd.log`" ; fi
+if wget -O /tmp/hd1 http://127.0.0.1:8451/ > /dev/null 2>&1 ; then echo "PASS  httpd answers a request" ; else echo "FAIL  httpd did not answer" ; fi
+if grep -q servedok /tmp/hd1 ; then echo "PASS  and served the right file" ; else echo "FAIL  httpd served: `head -1 /tmp/hd1`" ; fi
+kill httpd
+rm -rf /data/wwwtest /tmp/hd1 /tmp/hd.log
+
 echo "=== SETTINGS THAT SURVIVE A REBOOT ==="
 # The RAM root means /etc is rebuilt every boot. These check the two
 # ways out of that: a profile on /data, and named /etc files kept.

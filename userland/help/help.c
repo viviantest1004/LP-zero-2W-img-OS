@@ -142,6 +142,7 @@ static const entry_t KNOWN[] = {
     { "watchdog", "system",  "reboot the board if it hangs","watchdog [-t s] [-x]" },
     { "logd",     "system",  "collect logs to /data/log",   "(started by init)" },
     { "dmesg",    "system",  "the kernel's own log",        "dmesg [-n]" },
+    { "info",     "system",  "everything about this machine",  "info [-s] [os|cpu|mem|disk|net|kernel|project]" },
     { "sysinfo",  "system",  "memory, CPU, disks, network", "sysinfo" },
     { "zram",     "system",  "compressed swap in RAM",      "zram on|off|status" },
     { "guard",    "system",  "the safety net (memory, heat, power, CPU)",
@@ -171,6 +172,7 @@ static const entry_t KNOWN[] = {
     { "dropbearkey", "network", "make an SSH host key",     "dropbearkey -t ed25519 -f <file>" },
     { "authkey",  "network", "keep a way in over SSH",      "authkey [-l]" },
     { "netstat",  "network", "what is listening, and connected", "netstat [-latunp] [-r] [-i] [-s]" },
+    { "httpd",    "network", "serve a directory over http",  "httpd [-p port] [-d dir] [-i addr] [-f]" },
     { "firewall", "network", "which ports are open",        "firewall [on|strict|off]" },
 
     { "python",   "python",  "CPython 3.12",                "python [file]" },

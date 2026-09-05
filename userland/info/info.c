@@ -108,8 +108,10 @@ static void emit(const char *s)
 
 #define P(...) do { snprintf(lb, sizeof lb, __VA_ARGS__); emit(lb); } while (0)
 
-/* label column width: long enough for "temperature" and "nameserver". */
-#define L "  %-11s "
+/* The label column, wide enough for the longest label there is
+ * ("architecture"). One place, so a label added later that overflows it
+ * shifts every value in the file rather than one line in one section. */
+#define L "  %-12s "
 
 /* ── reading files ───────────────────────────────────────────────── */
 
@@ -236,16 +238,23 @@ static bool board_model(char *out, size_t n)
            slurp("/sys/firmware/devicetree/base/model", out, n);
 }
 
-/* The root filesystem's device and type, from /proc/mounts.
+/* One line of /proc/mounts, found either by its device or by where it
+ * is mounted, with any of the three fields handed back.
  *
- * "Is the root the RAM image" is the question behind several answers on
- * this system - nothing written to / survives - so it is worth being
- * exact. The initramfs is unpacked into rootfs, which reports itself as
- * rootfs or tmpfs with no device behind it; anything else is a real
- * partition somebody could have booted from instead. */
-static bool root_fs(char *dev, size_t dn, char *type, size_t tn)
+ * Three questions here need this file - what the root filesystem is,
+ * what kind of filesystem a partition holds, and what /data is on - and
+ * they were three separate parsers before. A mount point never contains
+ * a space: the kernel writes one as \040, which is exactly so that
+ * splitting on spaces is safe. */
+static bool mounts_lookup(const char *key, bool by_point,
+                          char *dev, size_t dn,
+                          char *point, size_t pn,
+                          char *type, size_t tn)
 {
-    dev[0] = type[0] = '\0';
+    if (dev)   dev[0]   = '\0';
+    if (point) point[0] = '\0';
+    if (type)  type[0]  = '\0';
+
     if (proc_read("/proc/mounts", mountbuf, sizeof mountbuf) <= 0)
         return false;
 
@@ -253,25 +262,34 @@ static bool root_fs(char *dev, size_t dn, char *type, size_t tn)
         char *nl = strchr(line, '\n');
         if (nl) *nl = '\0';
 
-        char *sp = strchr(line, ' ');
-        if (sp) {
-            *sp = '\0';
-            char *point = sp + 1;
-            char *sp2 = strchr(point, ' ');
-            if (sp2) {
-                *sp2 = '\0';
-                if (strcmp(point, "/") == 0) {
-                    char *sp3 = strchr(sp2 + 1, ' ');
-                    if (sp3) *sp3 = '\0';
-                    strlcpy(dev, line, dn);
-                    strlcpy(type, sp2 + 1, tn);
-                    return true;
-                }
-            }
+        char *f[3];
+        int nf = 0;
+        for (char *q = line; *q && nf < 3; ) {
+            while (*q == ' ') q++;
+            if (!*q) break;
+            f[nf++] = q;
+            while (*q && *q != ' ') q++;
+            if (*q) *q++ = '\0';
+        }
+        if (nf == 3 && strcmp(by_point ? f[1] : f[0], key) == 0) {
+            if (dev)   strlcpy(dev,   f[0], dn);
+            if (point) strlcpy(point, f[1], pn);
+            if (type)  strlcpy(type,  f[2], tn);
+            return true;
         }
         line = nl ? nl + 1 : NULL;
     }
     return false;
+}
+
+/* "Is the root the RAM image" is the question behind several answers on
+ * this system - nothing written to / survives - so it is worth being
+ * exact. The initramfs is unpacked into rootfs, which reports itself as
+ * rootfs or tmpfs with no device behind it; anything else is a real
+ * partition somebody could have booted from instead. */
+static bool root_fs(char *dev, size_t dn, char *type, size_t tn)
+{
+    return mounts_lookup("/", true, dev, dn, NULL, 0, type, tn);
 }
 
 static bool root_is_ram(const char *dev, const char *type)
@@ -391,8 +409,8 @@ static void show_os(void)
                     v = strtol(tok, NULL, 10);
             }
             if (field == 22)
-                P(L "%ld.%02lds before init started"
-                    "   (the kernel's own share; /etc/rc is not timed)",
+                P(L "%ld.%02lds to reach init"
+                    "   (what /etc/rc then took is not recorded)",
                   "boot took", v / 100, v % 100);
         }
     }
@@ -438,13 +456,20 @@ static void show_kernel(void)
             for (char *q = p; (size_t)(q - p) < 62 && *q; q++)
                 if (*q == ' ') cut = q;
             if (!cut) {
-                P(L "%s", label, p);
-                break;
+                /* One word wider than the column. Let it wrap itself
+                 * and carry on after it - breaking out here instead
+                 * dropped every argument that followed. */
+                cut = strchr(p, ' ');
+                if (!cut) {
+                    P(L "%s", label, p);
+                    break;
+                }
             }
             *cut = '\0';
             P(L "%s", label, p);
             label = "";
             p = cut + 1;
+            while (*p == ' ') p++;
         }
     }
 }
@@ -491,11 +516,11 @@ static const char *X86_FLAGS[] = {
 
 static void show_cpu(void)
 {
-    static char ci[16384];
-    if (proc_read("/proc/cpuinfo", ci, sizeof ci) <= 0) {
+    if (proc_read("/proc/cpuinfo", scratch, sizeof scratch) <= 0) {
         P("  /proc/cpuinfo cannot be read - this kernel has no procfs?");
         return;
     }
+    const char *ci = scratch;
 
     int cores = 0;
     for (const char *p = ci; *p; ) {
@@ -504,7 +529,11 @@ static void show_cpu(void)
         if (*p) p++;
     }
 
-    char v[512];
+    /* Big enough for the x86 flags line, which is a little over a
+     * thousand characters and holds the interesting names near its end -
+     * truncate it at 512 and this machine loses aes, avx512f and
+     * sha_ni and quietly reports that it has none of them. */
+    char v[2048];
     if (cpu_field(ci, "model name", v, sizeof v))
         P(L "%s", "model", v);
     else if (cpu_field(ci, "CPU part", v, sizeof v))
@@ -513,40 +542,37 @@ static void show_cpu(void)
     else
         P(L "%s", "model", "not named in /proc/cpuinfo");
 
-    P(L "%d, %s", "cores", cores, arch_name());
+    P(L "%d   (%s)", "cores", cores, arch_name());
 
     if (cpu_field(ci, "Features", v, sizeof v)) {
         P(L "%s", "features", v);
     } else if (cpu_field(ci, "flags", v, sizeof v)) {
         char list[128];
         list[0] = '\0';
-        for (int i = 0; X86_FLAGS[i]; i++) {
-            /* Space-delimited so "sse2" cannot match inside "sse2foo",
-             * and the haystack is padded at both ends for the same
-             * reason - the first and last flag have no space beside
-             * them otherwise. */
-            char pat[24], hay[576];
-            snprintf(pat, sizeof pat, " %s ", X86_FLAGS[i]);
-            snprintf(hay, sizeof hay, " %s ", v);
-            if (strstr(hay, pat)) {
+        for (int i = 0; X86_FLAGS[i]; i++)
+            if (word_in(v, X86_FLAGS[i])) {
                 if (list[0]) strlcat(list, " ", sizeof list);
                 strlcat(list, X86_FLAGS[i], sizeof list);
             }
-        }
-        P(L "%s   (of the ones that matter)", "features",
-          list[0] ? list : "none of the usual ones");
+        /* On its own line, because saying that the list is filtered
+         * takes more room than fits beside it on an 80-column console -
+         * and leaving it unsaid would make a filtered list look like
+         * the whole one. */
+        P(L "%s", "features", list[0] ? list : "none of the usual ones");
+        P(L "%s", "", "(only the ones that change what will run)");
     }
 
     /* What it is running at now, what it may run at, and who decides.
      * "powersave" on this board normally means guard has stepped in
      * because the supply or the temperature could not keep up. */
-    long cur = readnum(CPUFREQ "scaling_cur_freq");
-    long max = readnum(CPUFREQ "cpuinfo_max_freq");
+    long cur = 0, max = 0;
+    bool has_cur = readnum(CPUFREQ "scaling_cur_freq", &cur);
+    bool has_max = readnum(CPUFREQ "cpuinfo_max_freq", &max);
     char gov[32];
-    if (cur > 0 || max > 0) {
-        if (cur > 0 && max > 0)
+    if (has_cur || has_max) {
+        if (has_cur && has_max)
             P(L "%ld MHz now, %ld MHz maximum", "speed", cur / 1000, max / 1000);
-        else if (cur > 0)
+        else if (has_cur)
             P(L "%ld MHz now", "speed", cur / 1000);
         else
             P(L "%ld MHz maximum", "speed", max / 1000);
@@ -555,7 +581,14 @@ static void show_cpu(void)
     } else if (cpu_field(ci, "cpu MHz", v, sizeof v)) {
         /* No cpufreq driver, which is normal on a virtual machine. The
          * number cpuinfo prints there is the nominal clock, not a
-         * measurement of anything, and saying so costs one line. */
+         * measurement of anything, and saying so costs one line.
+         *
+         * It is printed as "2100.000" and there is no floating point
+         * anywhere in this system, so the fraction is cut off rather
+         * than passed through as the only decimal point in the
+         * output. */
+        char *dot = strchr(v, '.');
+        if (dot) *dot = '\0';
         P(L "%s MHz nominal - no cpufreq driver, so this is not measured",
           "speed", v);
     } else {
@@ -565,8 +598,8 @@ static void show_cpu(void)
     /* Millidegrees C. thermal_zone0 is the SoC on a Pi; its "type" file
      * says what the sensor is actually attached to, which is worth
      * printing rather than assuming. */
-    long mc = readnum("/sys/class/thermal/thermal_zone0/temp");
-    if (mc > -273000) {
+    long mc = 0;
+    if (readnum("/sys/class/thermal/thermal_zone0/temp", &mc)) {
         char kind[32];
         if (!slurp("/sys/class/thermal/thermal_zone0/type", kind, sizeof kind))
             strlcpy(kind, "thermal_zone0", sizeof kind);
@@ -598,8 +631,8 @@ static void show_cpu(void)
                                 " no undervoltage record");
     } else {
         P(L "%s", "power",
-          (thr & 0x1)     ? "UNDERVOLTAGE NOW - fix the supply first,"
-                            " everything else here is unreliable"
+          (thr & 0x1)     ? "UNDERVOLTAGE NOW - fix the supply; nothing"
+                            " else here is reliable"
         : (thr & 0x10000) ? "undervoltage has happened since this board"
                             " was powered on"
                           : "ok");
@@ -623,11 +656,11 @@ static long kv(const char *text, const char *key)
 
 static void show_memory(void)
 {
-    static char mi[8192];
-    if (proc_read("/proc/meminfo", mi, sizeof mi) <= 0) {
+    if (proc_read("/proc/meminfo", scratch, sizeof scratch) <= 0) {
         P("  /proc/meminfo cannot be read");
         return;
     }
+    const char *mi = scratch;
 
     long total = kv(mi, "MemTotal");
     long avail = kv(mi, "MemAvailable");
@@ -642,8 +675,10 @@ static void show_memory(void)
      * takes whatever is going and gives it back on demand, so MemFree on
      * a healthy machine is near zero and reads as a machine about to
      * die. Available is what a new program could actually have. */
-    P(L "%ld MB   (%ld%%)", "used", mb(total - avail), pct((u64)(total - avail),
-                                                           (u64)total));
+    long used = total - avail;
+    if (used < 0) used = 0;               /* never seen, but the cast below
+                                           * would turn it into 16 exabytes */
+    P(L "%ld MB   (%ld%%)", "used", mb(used), pct((u64)used, (u64)total));
     P(L "%ld MB   what a new program can have without swapping",
       "available", mb(avail));
     P(L "%ld MB   nothing at all is using it", "free", mb(freem));
@@ -652,10 +687,24 @@ static void show_memory(void)
 
     if (stot > 0) {
         char algo[32];
-        long disksize = readnum("/sys/block/zram0/disksize");
-        if (disksize > 0) {
-            if (!slurp("/sys/block/zram0/comp_algorithm", algo, sizeof algo))
+        long disksize = 0;
+        if (readnum("/sys/block/zram0/disksize", &disksize) && disksize > 0) {
+            /* comp_algorithm lists every algorithm this kernel has and
+             * puts the one actually in use in [brackets] - printing
+             * the line whole would claim the swap is compressed with
+             * four algorithms at once. */
+            if (!slurp("/sys/block/zram0/comp_algorithm", algo, sizeof algo)) {
                 strlcpy(algo, "zram", sizeof algo);
+            } else {
+                char *open  = strchr(algo, '[');
+                char *close = open ? strchr(open, ']') : NULL;
+                if (open && close) {
+                    char active[32];
+                    *close = '\0';
+                    strlcpy(active, open + 1, sizeof active);
+                    strlcpy(algo, active, sizeof algo);
+                }
+            }
             P(L "%ld MB total, %ld MB used   (zram0 in RAM)",
               "swap", mb(stot), mb(stot - sfree));
 
@@ -696,7 +745,8 @@ static void show_memory(void)
         else
             P(L "%s", "ram root", "/ is in RAM but its size cannot be read");
     } else {
-        P(L "%s on %s, so it costs no RAM", "ram root", type, dev);
+        P(L "/ is %s on %s - not a RAM filesystem, so it costs none",
+          "ram root", type, dev);
     }
 }
 
@@ -728,6 +778,16 @@ static void volume_line(const blk_t *b)
     char size[12];
     disk_human(b->bytes, size, sizeof size);
 
+    /* The filesystem type. /proc/mounts is asked first and the
+     * superblock second, not the other way round: disk_identify only
+     * knows the handful of superblock magics this system writes, so a
+     * mounted squashfs or an XFS somebody plugged in reads as "no
+     * filesystem" there while the kernel has already named it. */
+    char fs[16];
+    if (!b->mount[0] ||
+        !mounts_lookup(b->path, false, NULL, 0, NULL, 0, fs, sizeof fs))
+        strlcpy(fs, b->fs, sizeof fs);
+
     char full[40];
     if (b->mount[0]) {
         u64 fre = 0, tot = 0;
@@ -740,14 +800,17 @@ static void volume_line(const blk_t *b)
             strlcpy(full, "mounted, size unreadable", sizeof full);
         }
     } else if (!b->fs[0]) {
-        strlcpy(full, "no filesystem on it", sizeof full);
+        /* Not "empty": disk_identify only knows the superblock magics
+         * this system writes, so this covers a blank partition and an
+         * XFS one alike. `storage format` makes an ext4 one either way. */
+        strlcpy(full, "blank, or a filesystem we do not know", sizeof full);
     } else {
         strlcpy(full, "not mounted", sizeof full);
     }
 
-    P("    %-16s %5s %-5s %-8s %-6s %s",
+    P("  %-16s %5s %-8s %-8s %-14s %s",
       b->path, size,
-      b->fs[0]    ? b->fs    : "-",
+      fs[0]       ? fs       : "-",
       b->label[0] ? b->label : "-",
       b->mount[0] ? b->mount : "-",
       full);
@@ -763,15 +826,27 @@ static void show_storage(void)
         return;
     }
 
+    /* The hardware first and the filesystems second, rather than the
+     * partitions of each disk indented under it. The two have different
+     * columns, so interleaving them meant a heading above every disk or
+     * a table whose headings did not line up with half its rows. The
+     * names carry the nesting anyway: mmcblk0p2 is plainly part of
+     * mmcblk0. */
+    P("  %-16s %5s  %-13s %s", "disk", "size", "kind", "model");
     for (int i = 0; i < nd; i++) {
         char size[12];
         disk_human(disks[i].bytes, size, sizeof size);
-        P("  %-16s %5s  %-13s %s", disks[i].path, size, disk_kind(&disks[i]),
-          disks[i].model[0] ? disks[i].model : "");
+        if (disks[i].model[0])
+            P("  %-16s %5s  %-13s %s", disks[i].path, size,
+              disk_kind(&disks[i]), disks[i].model);
+        else
+            P("  %-16s %5s  %s", disks[i].path, size, disk_kind(&disks[i]));
+    }
 
-        P("    %-16s %5s %-5s %-8s %-6s %s",
-          "volume", "size", "fs", "label", "mount", "how full");
-
+    emit("");
+    P("  %-16s %5s %-8s %-8s %-14s %s",
+      "volume", "size", "fs", "label", "mount", "how full");
+    for (int i = 0; i < nd; i++) {
         blk_t parts[DISK_PARTS];
         int np = disk_parts(disks[i].path, parts, DISK_PARTS);
         if (np <= 0)
@@ -780,47 +855,64 @@ static void show_storage(void)
             for (int j = 0; j < np; j++)
                 volume_line(&parts[j]);
     }
+    emit("");
 
-    /* /data is the only thing on this machine that survives a reboot,
-     * so which device is behind it is the fact worth stating outright
-     * rather than leaving to be read out of the table above. */
-    bool said = false;
-    for (int i = 0; i < nd && !said; i++) {
-        blk_t parts[DISK_PARTS];
-        int np = disk_parts(disks[i].path, parts, DISK_PARTS);
-        for (int j = 0; j < np; j++)
-            if (strcmp(parts[j].mount, "/data") == 0) {
-                P("  /data is on %s, %s", parts[j].path, disk_kind(&disks[i]));
-                said = true;
-                break;
-            }
-        if (!said && strcmp(disks[i].mount, "/data") == 0) {
-            P("  /data is on %s, %s", disks[i].path, disk_kind(&disks[i]));
-            said = true;
+    /* /data is the only thing on this machine meant to survive a
+     * reboot, so which device is behind it is the fact worth stating
+     * outright rather than leaving to be read out of the table above.
+     *
+     * The device name is matched back against the disks so the kind can
+     * be named too: "SD card" is the difference between a partition
+     * that will wear out in two years of logging and one that will not. */
+    char ddev[64], dtype[16];
+    if (mounts_lookup("/data", true, ddev, sizeof ddev, NULL, 0,
+                      dtype, sizeof dtype)) {
+        const char *kind = "";
+        for (int i = 0; i < nd; i++) {
+            char whole[48];
+            if (strcmp(ddev, disks[i].path) == 0 ||
+                (disk_whole(ddev, whole, sizeof whole) &&
+                 strcmp(whole, disks[i].path) == 0))
+                kind = disk_kind(&disks[i]);
         }
+        P("  /data is %s on %s%s%s", dtype, ddev,
+          kind[0] ? ", " : "", kind);
+    } else {
+        char rdev[64], rtype[16];
+        bool ram = root_fs(rdev, sizeof rdev, rtype, sizeof rtype) &&
+                   root_is_ram(rdev, rtype);
+        P("  /data is not a filesystem of its own - it is part of /%s",
+          ram ? ", which is in RAM, so nothing written there survives"
+                " a reboot"
+              : ", which is on disk");
     }
-    if (!said)
-        P("  /data is not on any partition - nothing written will survive"
-          " a reboot");
 }
 
 /* ── network ─────────────────────────────────────────────────────── */
 
-/* The netmask, from the on-link route this interface has in
- * /proc/net/route: the line with no gateway and a non-zero destination.
- * The kernel does not publish a netmask anywhere else that does not
- * mean opening a socket and asking by ioctl. */
-static bool netmask_of(const char *iface, char *out, size_t n)
+/* The prefix length of this interface's network - the 24 in
+ * 192.168.0.42/24 - from the on-link route it has in /proc/net/route:
+ * the line with no gateway and a destination that is not the default.
+ * The kernel publishes a netmask nowhere else short of opening a socket
+ * and asking by ioctl.
+ *
+ * A prefix length rather than the mask spelled out. "192.168.0.42 /
+ * 255.255.255.0" is thirty characters and pushed the columns beside it
+ * off an 80-column console; the same fact written /24 is fifteen.
+ *
+ * -1 when the interface has no such route, which is normal for loopback
+ * and for an interface that has an address and no network yet. */
+static int prefix_of(const char *iface)
 {
     long fd = lp_open("/proc/net/route", O_RDONLY, 0);
     if (fd < 0)
-        return false;
+        return -1;
 
     char line[512];
-    bool found = false;
+    int  bits = -1;
     readline((int)fd, line, sizeof line);          /* the header */
 
-    while (!found && readline((int)fd, line, sizeof line) >= 0) {
+    while (bits < 0 && readline((int)fd, line, sizeof line) >= 0) {
         char *f[9];
         int nf = 0;
         for (char *p = line; *p && nf < 9; ) {
@@ -837,18 +929,16 @@ static bool netmask_of(const char *iface, char *out, size_t n)
         if (strcmp(f[1], "00000000") == 0)         /* the default route */
             continue;
 
-        char m[16];
-        /* Eight hex digits of a little-endian u32, which is the same
-         * four bytes an address already is in network order - so what
-         * strtol gives back goes straight to ipv4_format with no
-         * swapping. Get this wrong and 255.255.255.0 prints as
-         * 0.255.255.255, which looks like a mask and is not one. */
-        ipv4_format((u32)strtol(f[7], NULL, 16), m);
-        strlcpy(out, m, n);
-        found = true;
+        /* Counting the bits that are set, not the leading ones. A mask
+         * is contiguous in every network anyone will attach this to,
+         * and a count is right for both while a scan from the top has
+         * to know which end the bytes are at. */
+        u32 mask = (u32)strtol(f[7], NULL, 16);
+        bits = 0;
+        while (mask) { bits += (int)(mask & 1); mask >>= 1; }
     }
     lp_close((int)fd);
-    return found;
+    return bits;
 }
 
 static u32 default_gw(char *iface, size_t n)
@@ -953,9 +1043,13 @@ static int firewall_on(void)
     s64 tv[2] = { 2, 0 };
     lp_setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO_NEW, tv, sizeof tv);
 
-    u8 msg[32];
-    memset(msg, 0, sizeof msg);
-    *(u32 *)(msg + 0)  = sizeof msg;
+    /* Declared as u32 arrays, not u8 ones. Netlink is a stream of
+     * 4-byte-aligned records read back through u32 and u16 pointers,
+     * and a char array carries no such alignment guarantee. */
+    u32 words[8];
+    u8 *msg = (u8 *)words;
+    memset(msg, 0, sizeof words);
+    *(u32 *)(msg + 0)  = (u32)sizeof words;
     *(u16 *)(msg + 4)  = NFT_GETTABLE;
     *(u16 *)(msg + 6)  = NLM_REQUEST | NLM_ACK;
     *(u32 *)(msg + 8)  = 1;                       /* sequence */
@@ -965,17 +1059,24 @@ static int firewall_on(void)
     *(u16 *)(msg + 22) = NFTA_TABLE_NAME;
     memcpy(msg + 24, FW_TABLE, sizeof FW_TABLE);
 
-    if (lp_sendto((int)fd, msg, sizeof msg, 0, &sa, sizeof sa) < 0) {
+    if (lp_sendto((int)fd, msg, sizeof words, 0, &sa, sizeof sa) < 0) {
         lp_close((int)fd);
         return -1;
     }
 
-    u8 buf[4096];
-    long n = lp_recvfrom((int)fd, buf, sizeof buf, 0, 0, 0);
+    u32 reply[1024];
+    u8 *buf = (u8 *)reply;
+    long n = lp_recvfrom((int)fd, buf, sizeof reply, 0, 0, 0);
     lp_close((int)fd);
     if (n <= 0)
-        return -1;
+        return -1;                                /* the two-second timeout */
 
+    /* The kernel answers a successful GETTABLE with the table itself and
+     * then an acknowledgement; a missing table is a plain error record.
+     * Anything else - EPERM without root, ENOPROTOOPT on a kernel built
+     * without nftables - is "cannot tell", not "off". Reporting a
+     * firewall that is on as off is the one wrong answer here that
+     * would get somebody to open a port they did not need to. */
     u32 off = 0;
     while (off + 16 <= (u32)n) {
         u32 len  = *(u32 *)(buf + off);
@@ -983,12 +1084,14 @@ static int firewall_on(void)
         if (len < 16 || off + len > (u32)n)
             break;
         if (type == NFT_NEWTABLE)
-            return 1;                             /* the table is there */
+            return 1;
         if (type == NLMSG_IS_ERROR) {
+            if (off + 20 > (u32)n)
+                break;
             s32 err = *(s32 *)(buf + off + 16);
             if (err == 0)  return 1;              /* a plain ack: it exists */
             if (err == -2) return 0;              /* ENOENT: no such table */
-            return -1;                            /* EPERM, ENOPROTOOPT, ... */
+            return -1;
         }
         off += (len + 3) & ~3u;
     }
@@ -1022,10 +1125,11 @@ static void show_network(void)
         char addr[24] = "no address";
         u32 a = 0;
         if (net_get_addr(name, &a) >= 0 && a != 0) {
-            char ip[16], mask[16];
+            char ip[16];
             ipv4_format(a, ip);
-            if (netmask_of(name, mask, sizeof mask))
-                snprintf(addr, sizeof addr, "%s / %s", ip, mask);
+            int bits = prefix_of(name);
+            if (bits >= 0)
+                snprintf(addr, sizeof addr, "%s/%d", ip, bits);
             else
                 strlcpy(addr, ip, sizeof addr);
         }
@@ -1040,16 +1144,20 @@ static void show_network(void)
         if (!slurp(path, oper, sizeof oper))
             strlcpy(oper, net_if_is_up(name) ? "up" : "down", sizeof oper);
         snprintf(path, sizeof path, "/sys/class/net/%s/carrier", name);
-        long carrier = readnum(path);
+        long carrier = 0;
+        bool has_carrier = readnum(path, &carrier);
 
         char mac[24] = "no hardware address";
         snprintf(path, sizeof path, "/sys/class/net/%s/address", name);
         slurp(path, mac, sizeof mac);
 
-        P("  %-8s %-24s %-8s %s", name, addr, oper, mac);
+        P("  %-8s %-19s %-8s %s", name, addr, oper, mac);
+        /* Reading carrier fails outright on an interface that is down.
+         * That is not an error to report, it is the answer. */
         P("  %-8s link %s", "",
-          carrier == 1 ? "up" : carrier == 0 ? "down - nothing on the other end"
-                                             : "unknown (the interface is down)");
+          !has_carrier ? "unknown - the interface is down"
+        : carrier == 1 ? "up"
+                       : "down - nothing on the other end of it");
 
         /* /proc/net/dev: eight receive counters then eight transmit
          * ones. bytes, packets, errors and dropped are the first four
@@ -1065,10 +1173,10 @@ static void show_network(void)
             char rb[12], tb[12];
             disk_human(c[0], rb, sizeof rb);
             disk_human(c[8], tb, sizeof tb);
-            P("  %-8s in  %6s in %lu packets, %lu errors, %lu dropped",
+            P("  %-8s received %6s in %lu packets, %lu errors, %lu dropped",
               "", rb, (unsigned long)c[1], (unsigned long)c[2],
               (unsigned long)c[3]);
-            P("  %-8s out %6s in %lu packets, %lu errors, %lu dropped",
+            P("  %-8s sent     %6s in %lu packets, %lu errors, %lu dropped",
               "", tb, (unsigned long)c[9], (unsigned long)c[10],
               (unsigned long)c[11]);
         }
@@ -1112,11 +1220,12 @@ static void show_network(void)
 
     char ssid[64];
     if (wifi_ssid(ssid, sizeof ssid)) {
-        long carrier = readnum("/sys/class/net/wlan0/carrier");
+        long carrier = 0;
+        bool has = readnum("/sys/class/net/wlan0/carrier", &carrier);
         P(L "set up for \"%s\", %s", "wifi", ssid,
-          carrier == 1 ? "and associated"
-        : carrier == 0 ? "but not associated - wrong password, or out of range"
-                       : "but wlan0 is down");
+          !has          ? "but wlan0 is down or not present"
+        : carrier == 1  ? "and associated"
+                        : "but not associated - wrong password, or out of range");
     } else {
         P(L "%s", "wifi", "no network configured - `net wifi <name> <password>`");
     }
@@ -1176,8 +1285,8 @@ static void show_short(void)
         P(L "%s,  load %s", "uptime", d, load);
     }
 
-    static char ci[16384];
-    if (proc_read("/proc/cpuinfo", ci, sizeof ci) > 0) {
+    if (proc_read("/proc/cpuinfo", scratch, sizeof scratch) > 0) {
+        const char *ci = scratch;
         int cores = 0;
         for (const char *p = ci; *p; ) {
             if (strncmp(p, "processor", 9) == 0) cores++;
@@ -1190,17 +1299,18 @@ static void show_short(void)
             strlcpy(model, cpu_field(ci, "CPU part", part, sizeof part)
                            ? arm_part(part) : "unknown", sizeof model);
         }
-        long cur = readnum(CPUFREQ "scaling_cur_freq");
-        long mc  = readnum("/sys/class/thermal/thermal_zone0/temp");
+        long cur = 0, mc = 0;
+        bool has_cur = readnum(CPUFREQ "scaling_cur_freq", &cur);
+        bool has_mc  = readnum("/sys/class/thermal/thermal_zone0/temp", &mc);
 
         char extra[48];
-        if (cur > 0 && mc > -273000)
+        if (has_cur && has_mc)
             snprintf(extra, sizeof extra, "%ld MHz, %ld.%ld C",
                      cur / 1000, mc / 1000, (mc % 1000) / 100);
-        else if (cur > 0)
+        else if (has_cur)
             snprintf(extra, sizeof extra, "%ld MHz, no temperature sensor",
                      cur / 1000);
-        else if (mc > -273000)
+        else if (has_mc)
             snprintf(extra, sizeof extra, "%ld.%ld C", mc / 1000,
                      (mc % 1000) / 100);
         else
@@ -1209,8 +1319,8 @@ static void show_short(void)
         P(L "%s x%d, %s", "cpu", model, cores, extra);
     }
 
-    static char mi[8192];
-    if (proc_read("/proc/meminfo", mi, sizeof mi) > 0) {
+    if (proc_read("/proc/meminfo", scratch, sizeof scratch) > 0) {
+        const char *mi = scratch;
         long total = kv(mi, "MemTotal"), avail = kv(mi, "MemAvailable");
         long stot = kv(mi, "SwapTotal"), sfree = kv(mi, "SwapFree");
         P(L "%ld MB total, %ld MB used, %ld MB available",
@@ -1228,14 +1338,21 @@ static void show_short(void)
         P(L "%ld%% of %s used%s", "/", pct(tot - fre, tot), t,
           ram ? "   (in RAM)" : "");
     }
-    if (lp_fs_space("/data", &fre, &tot) >= 0 && tot > 0) {
+    /* lp_fs_space answers for whatever filesystem holds the path, so on
+     * a machine where /data is an ordinary directory it would happily
+     * report the root filesystem's free space as /data's. Asking
+     * /proc/mounts whether /data is a mount point of its own comes
+     * first, because "your data partition has 2GB free" is exactly the
+     * wrong thing to tell somebody who does not have one. */
+    if (!mounts_lookup("/data", true, NULL, 0, NULL, 0, NULL, 0)) {
+        P(L "%s", "/data", "not a filesystem of its own - see `storage`");
+    } else if (lp_fs_space("/data", &fre, &tot) >= 0 && tot > 0) {
         char t[12], f[12];
         disk_human(tot, t, sizeof t);
         disk_human(fre, f, sizeof f);
         P(L "%s free of %s, %ld%% used", "/data", f, t, pct(tot - fre, tot));
     } else {
-        P(L "%s", "/data", "not mounted - nothing written will survive a"
-                           " reboot");
+        P(L "%s", "/data", "mounted, but its size cannot be read");
     }
 
     char gwif[IFNAMSIZ], g[16] = "none";
