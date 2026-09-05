@@ -186,6 +186,21 @@
    * would refuse the next press for the rest of the session. */
   let running = {};
 
+  /* Opening and closing the block the bar sits in.
+   *
+   * The bar carries 14px of margin above it, and a margin that is not
+   * inside the block being opened collapses out through it - the row
+   * would take the 14px in one frame and then spring the 4 that are
+   * left, which is a jump with an animation after it. overflow makes
+   * the wrapper a formatting context, so the gap is measured with the
+   * bar and the whole thing travels together. The spring writes this
+   * property itself while it runs; setting it here only puts it in
+   * place before the measurement rather than after. */
+  function slide(slot, open) {
+    slot.style.overflow = 'hidden';
+    LPSpring.height(slot, open);
+  }
+
   /* ── drawing ────────────────────────────────────────────────────
    *
    * The buttons are disabled rather than dropped. A standard account
@@ -226,7 +241,7 @@
        * "open" is already at its target and arrives with no motion at
        * all. Measuring a hidden block costs a zero and buys the first
        * expansion. */
-      LPSpring.height(slot, false);
+      slide(slot, false);
 
       /* Bound to a button this render has just made, so nothing is left
        * over from the drawing before it. A locked row has no handler at
@@ -293,7 +308,7 @@
 
     /* Opening it also lays the bar out, which is what gives the width
      * below something to travel from. */
-    LPSpring.height(slot, true);
+    slide(slot, true);
     fill.style.width = '100%';
 
     /* Nothing here picks a duration. The bar's rate is the one thing on
@@ -303,7 +318,7 @@
      * appears under the row that caused it. */
     fill.addEventListener('transitionend', function () {
       running[kind.key] = false;
-      LPSpring.height(slot, false);
+      slide(slot, false);
       LP.say(line, kind.done);
     }, { once: true });
   }
@@ -311,9 +326,10 @@
   /* ── the pane ───────────────────────────────────────────────────
    *
    * Rebuilt from LP on every call, because it is called again every time
-   * the account changes. Only the two lists are rewritten: the heading,
-   * the caption and #factory-slot are left alone, and the last of those
-   * is not ours to touch - 공장 초기화 draws into it. */
+   * the account changes. Only the two lists are rewritten - never the
+   * pane - because the block the assembler drops into the slot at the
+   * bottom belongs to 공장 초기화, and an innerHTML on the pane would
+   * take it away every time somebody switched account. */
   function render(el) {
     running = {};
     const may = LP.can(AREA);
@@ -321,15 +337,11 @@
     fillRows(el, el.querySelector('#reset-all'),  KINDS.filter(isAll),  may);
   }
 
-  /* 공장 초기화 lives at the bottom of this pane and registers for the
-   * same id. Whichever module loaded second would otherwise replace the
-   * first without a word, and the screen would come up either without
-   * its rows or without its danger zone. Chaining costs three lines and
-   * makes the order they load in stop mattering. */
-  const also = LP.panes[PANE];
-  LP.panes[PANE] = function (el) {
-    render(el);
-    if (also) also(el);
-  };
+  /* 공장 초기화 sits at the bottom of this pane and draws itself: it
+   * registers under the id of its own block rather than under this
+   * pane, and LP.render calls it after this one. So the rows are
+   * rewritten here on every render and the slot below them is never
+   * touched. */
+  LP.panes[PANE] = render;
 
 })();
