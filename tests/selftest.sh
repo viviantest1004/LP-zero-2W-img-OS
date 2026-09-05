@@ -252,6 +252,12 @@ if netstat -r | grep -q "destination" ; then echo "PASS  netstat -r shows the ro
 if netstat -i | grep -q "lo" ; then echo "PASS  netstat -i shows the interfaces" ; else echo "FAIL  netstat -i" ; fi
 rm -f /tmp/ns1
 
+if dd if=/dev/zero of=/tmp/dd1 bs=1M count=2 status=none ; then echo "PASS  dd makes a file of a given size" ; else echo "FAIL  dd" ; fi
+if wc -c < /tmp/dd1 | grep -q 2097152 ; then echo "PASS  and it is exactly that size" ; else echo "FAIL  dd size is `wc -c < /tmp/dd1`" ; fi
+if dd if=/tmp/dd1 of=/tmp/dd2 bs=512 count=1 status=none && wc -c < /tmp/dd2 | grep -q 512 ; then echo "PASS  dd count= stops where told" ; else echo "FAIL  dd count=" ; fi
+if dd nosuchkey=1 > /dev/null 2>&1 ; then echo "FAIL  dd accepted a key it does not know" ; else echo "PASS  dd refuses a key it does not know" ; fi
+rm -f /tmp/dd1 /tmp/dd2
+
 echo "=== THE SERVER SIDE ==="
 if info -s > /tmp/if1 2>&1 ; then echo "PASS  info runs" ; else echo "FAIL  info: `head -1 /tmp/if1`" ; fi
 if grep -q "linux-LP\|LP-zero" /tmp/if1 ; then echo "PASS  and names the system" ; else echo "FAIL  info does not say what this is" ; fi

@@ -59,4 +59,14 @@ int   re_ngroups(const lpre *re);
 bool  re_search(lpre *re, const char *text, int from, bool notbol,
                 int *caps);
 
+/* Did the last re_search stop because it ran out of steps rather than
+ * because there was no match?
+ *
+ * Without this the two are indistinguishable, and a pattern like
+ * \(a*\)* against a long line of a's makes sed quietly not substitute -
+ * which reads as "that pattern does not match" and is not true. Check it
+ * after a search that found nothing and say so; the answer is about the
+ * most recent search only. */
+bool  re_gave_up(const lpre *re);
+
 #endif /* _LP_REGEX_H */

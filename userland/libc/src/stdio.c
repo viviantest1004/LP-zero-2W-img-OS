@@ -150,6 +150,27 @@ static void format(sink_t *s, const char *fmt, va_list ap)
                 width = width * 10 + (unsigned)(*fmt++ - '0');
         }
 
+        /* ".N" or ".*" - a precision. For %s it is a maximum length,
+         * which is how you print part of a string that is not NUL
+         * terminated where you want it to end: "%.*s" with a length. It
+         * was not handled at all, so "dd: no such key: %.*s" printed the
+         * format itself and consumed neither argument, and every
+         * conversion after it in the same call took the wrong one. -1
+         * means "no precision given", which is not the same as 0. */
+        int precision = -1;
+        if (*fmt == '.') {
+            fmt++;
+            if (*fmt == '*') {
+                fmt++;
+                precision = va_arg(ap, int);
+                if (precision < 0) precision = -1;
+            } else {
+                precision = 0;
+                while (*fmt >= '0' && *fmt <= '9')
+                    precision = precision * 10 + (*fmt++ - '0');
+            }
+        }
+
         int longness = 0;
         while (*fmt == 'l' || *fmt == 'z') { longness++; fmt++; }
 
@@ -160,8 +181,16 @@ static void format(sink_t *s, const char *fmt, va_list ap)
         case 's': {
             const char *p = va_arg(ap, const char *);
             if (!p) p = "(null)";
-            emit_padded(s, NULL, p, (unsigned)strlen(p), width,
-                        left_align, ' ');
+            unsigned len = (unsigned)strlen(p);
+            /* A precision on %s caps the length, and must not read past
+             * it either - the string may not be NUL terminated within
+             * that many bytes, which is the whole point of using it. */
+            if (precision >= 0) {
+                unsigned cap = (unsigned)precision;
+                len = 0;
+                while (len < cap && p[len]) len++;
+            }
+            emit_padded(s, NULL, p, len, width, left_align, ' ');
             break;
         }
         case 'd': case 'i':

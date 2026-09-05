@@ -34,6 +34,7 @@ static bool fold;                     /* -i */
 static bool extended;                 /* -E */
 static bool fixed;                    /* -F */
 static lpre *program;                 /* the compiled pattern */
+static bool  gave_up_somewhere;       /* the engine ran out of steps */
 
 /* -F means the pattern is a plain string. Escaping it into a regular
  * expression would work, but a straight search is both faster and
@@ -67,7 +68,14 @@ static bool match_line(const char *line)
     }
 
     int caps[RE_MAX_CAPS];
-    return re_search(program, line, 0, false, caps);
+    bool hit = re_search(program, line, 0, false, caps);
+    /* A pattern written to make a backtracking matcher take forever -
+     * \(a*\)* against a long line of a's - is stopped by a step budget
+     * in the engine, and stopping looks exactly like not matching. Say
+     * so once at the end rather than silently answering "no". */
+    if (!hit && re_gave_up(program))
+        gave_up_somewhere = true;
+    return hit;
 }
 
 typedef struct {

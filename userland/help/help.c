@@ -67,6 +67,7 @@ static const entry_t KNOWN[] = {
     { "touch",    "files",   "create an empty file",        "touch <file>..." },
     { "mount",    "files",   "mount a filesystem",          "mount [-t type] <dev> <dir>" },
     { "umount",   "files",   "unmount a filesystem",        "umount <dir>" },
+    { "dd",       "files",   "copy blocks, exactly as told",  "dd if=<file> of=<file> [bs=N] [count=N]" },
     { "expandfs", "files",   "grow /data to fill the card", "expandfs [disk part]" },
     { "disk",     "files",   "what storage is attached",    "disk [device]" },
     { "part",     "files",   "change the partition table",  "part <disk> [new|del|type|boot]" },

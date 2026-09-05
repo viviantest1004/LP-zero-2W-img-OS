@@ -121,6 +121,9 @@ struct lpre {
     btrack *st;   int stcap;
     jent   *jr;   int jrcap;
     bool    has_first;                       /* first[] is usable */
+    bool    gave_up;                         /* the last search hit the
+                                                step budget rather than
+                                                finishing */
     u8      first[32];                       /* bytes a match can start on */
 };
 
@@ -1022,6 +1025,12 @@ bool re_search(lpre *re, const char *text, int from, bool notbol, int *caps)
 {
     if (!re || !text || !caps) return false;
 
+    /* Cleared here so that re_gave_up() answers about THIS search and not
+     * about one three lines ago. A caller that checks it after every
+     * search - which is the only useful way to check it - would otherwise
+     * keep reporting a budget that was spent on a different line. */
+    re->gave_up = false;
+
     int  len = (int)strlen(text);
     long left = STEPS_TOTAL;
 
@@ -1036,12 +1045,19 @@ bool re_search(lpre *re, const char *text, int from, bool notbol, int *caps)
         long allow = left < STEPS_PER_START ? left : STEPS_PER_START;
         long used  = 0;
 
-        if (allow <= 0) return false;        /* budget spent: no match */
+        if (allow <= 0) { re->gave_up = true; return false; }
         if (run(re, text, len, i, notbol, allow, &used)) {
             for (int k = 0; k < RE_MAX_CAPS; k++) caps[k] = re->save[k];
             return true;
         }
         left -= used;
+        if (used >= allow)
+            re->gave_up = true;              /* this start position ran out */
     }
     return false;
+}
+
+bool re_gave_up(const lpre *re)
+{
+    return re && re->gave_up;
 }
