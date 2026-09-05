@@ -135,8 +135,20 @@ static void format(sink_t *s, const char *fmt, va_list ap)
         }
 
         unsigned width = 0;
-        while (*fmt >= '0' && *fmt <= '9')
-            width = width * 10 + (unsigned)(*fmt++ - '0');
+        if (*fmt == '*') {
+            /* "%*d" takes the width from the argument list. Without this
+             * the format was copied out literally and the argument it
+             * was meant to consume shifted every later conversion by
+             * one - which reads as a crash somewhere else entirely. A
+             * negative width means left-aligned, the same as "%-*d". */
+            fmt++;
+            int w = va_arg(ap, int);
+            if (w < 0) { left_align = true; w = -w; }
+            width = (unsigned)w;
+        } else {
+            while (*fmt >= '0' && *fmt <= '9')
+                width = width * 10 + (unsigned)(*fmt++ - '0');
+        }
 
         int longness = 0;
         while (*fmt == 'l' || *fmt == 'z') { longness++; fmt++; }

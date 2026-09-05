@@ -621,7 +621,8 @@ static char    conf_mode[16];
  *     tcp 8080
  *     udp 5353
  */
-static void read_conf(const char *path)
+static void read_conf_into(const char *path, extra_t *list, int *listn,
+                           char *mode, unsigned modesz)
 {
     long fd = lp_open(path, O_RDONLY, 0);
     if (fd < 0) return;
@@ -648,7 +649,7 @@ static void read_conf(const char *path)
         if (!*sp) continue;
 
         if (strcmp(p, "mode") == 0) {
-            strlcpy(conf_mode, sp, sizeof conf_mode);
+            strlcpy(mode, sp, modesz);
         } else if (strcmp(p, "tcp") == 0 || strcmp(p, "udp") == 0) {
             int port = atoi(sp);
             if (port <= 0 || port > 65535) {
@@ -657,20 +658,204 @@ static void read_conf(const char *path)
                         path, sp);
                 continue;
             }
-            if (extra_n >= MAX_EXTRA) {
+            if (*listn >= MAX_EXTRA) {
                 dprintf(STDERR_FILENO,
                         "firewall: %s: no room for more than %d extra ports\n",
                         path, MAX_EXTRA);
                 continue;
             }
-            extra[extra_n].proto = (p[0] == 't') ? IPPROTO_TCP : IPPROTO_UDP;
-            extra[extra_n].port  = (u16)port;
-            extra_n++;
+            list[*listn].proto = (p[0] == 't') ? IPPROTO_TCP : IPPROTO_UDP;
+            list[*listn].port  = (u16)port;
+            (*listn)++;
         } else {
             dprintf(STDERR_FILENO, "firewall: %s: ignoring \"%s\"\n", path, p);
         }
     }
     lp_close((int)fd);
+}
+
+static void read_conf(const char *path)
+{
+    read_conf_into(path, extra, &extra_n, conf_mode, sizeof conf_mode);
+}
+
+/* Declared here because the commands below need them and they are
+ * defined further down, next to the rest of the netlink work. */
+static int  apply(bool strict);
+static int  nl_open(void);
+static bool table_exists(int fd);
+
+/* ── opening a port without a card reader ────────────────────────── */
+
+/* Until now the only way to open a port was to edit
+ * /boot/firewall.conf, which means shutting the board down, taking the
+ * card out, finding a computer with a slot, and putting it all back. For
+ * a board three metres up a wall that is the difference between a
+ * machine you can run a web server on and one you cannot - and "the
+ * firewall is too tight to use" is how a firewall ends up turned off
+ * altogether.
+ *
+ * So `firewall allow 8080` writes the port into /data/firewall.conf and
+ * puts the new ruleset in place immediately.
+ *
+ * /data rather than /boot, because /boot is mounted read-only and stays
+ * that way: it is the way back in when /data is gone, and a partition
+ * nothing writes to is one a power cut cannot corrupt. /boot still gets
+ * the last word - a port listed there cannot be closed from in here -
+ * which is what you want when you are holding the card and the machine
+ * is not behaving. */
+#define DATA_CONF "/data/firewall.conf"
+
+static bool write_data_conf(const extra_t *list, int n, const char *mode)
+{
+    char out[2048];
+    int  len = 0;
+    len += snprintf(out + len, sizeof out - len,
+                    "# Written by `firewall allow` / `firewall deny`.\n"
+                    "# Ports listed here are opened on top of ssh, ping,\n"
+                    "# DHCP replies and loopback. /boot/firewall.conf, if\n"
+                    "# it exists, is read as well and cannot be edited\n"
+                    "# from here.\n");
+    if (mode && mode[0])
+        len += snprintf(out + len, sizeof out - len, "mode %s\n", mode);
+    for (int i = 0; i < n && len < (int)sizeof out - 32; i++)
+        len += snprintf(out + len, sizeof out - len, "%s %u\n",
+                        list[i].proto == IPPROTO_TCP ? "tcp" : "udp",
+                        (unsigned)list[i].port);
+
+    /* Written to a temporary name and renamed over the top: a power cut
+     * halfway through a rewrite would otherwise leave a truncated file,
+     * and a truncated firewall.conf is a board with ports the person
+     * thinks are open and are not. */
+    long fd = lp_open(DATA_CONF ".new", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return false;
+    bool ok = lp_write((int)fd, out, (unsigned)len) == len;
+    lp_close((int)fd);
+    if (!ok) { lp_unlink(DATA_CONF ".new"); return false; }
+    return lp_rename(DATA_CONF ".new", DATA_CONF) == 0;
+}
+
+/* "8080" or "tcp 8080" or "udp 5353". Returns false and says why if it
+ * is neither. */
+static bool parse_port(int argc, char **argv, int i, u8 *proto, u16 *port)
+{
+    const char *pstr = NULL;
+    *proto = IPPROTO_TCP;
+
+    if (i < argc && (strcmp(argv[i], "tcp") == 0 || strcmp(argv[i], "udp") == 0)) {
+        *proto = (argv[i][0] == 't') ? IPPROTO_TCP : IPPROTO_UDP;
+        i++;
+    }
+    if (i < argc) pstr = argv[i];
+
+    if (!pstr) {
+        dprintf(STDERR_FILENO,
+                "firewall: which port? e.g. `firewall allow 8080`"
+                " or `firewall allow udp 5353`\n");
+        return false;
+    }
+    int n = atoi(pstr);
+    if (n <= 0 || n > 65535) {
+        dprintf(STDERR_FILENO, "firewall: \"%s\" is not a port number\n", pstr);
+        return false;
+    }
+    *port = (u16)n;
+    return true;
+}
+
+static int cmd_allow(bool add, int argc, char **argv)
+{
+    u8  proto; u16 port;
+    if (!parse_port(argc, argv, 2, &proto, &port)) return 2;
+
+    extra_t list[MAX_EXTRA];
+    int     n = 0;
+    char    mode[16] = "";
+    read_conf_into(DATA_CONF, list, &n, mode, sizeof mode);
+
+    /* Drop any existing entry for this port first, so `allow` twice is
+     * one rule and `deny` after `allow` really removes it. */
+    int keep = 0;
+    bool had = false;
+    for (int i = 0; i < n; i++) {
+        if (list[i].proto == proto && list[i].port == port) { had = true; continue; }
+        list[keep++] = list[i];
+    }
+    n = keep;
+
+    if (add) {
+        if (n >= MAX_EXTRA) {
+            dprintf(STDERR_FILENO,
+                    "firewall: no room for more than %d extra ports\n", MAX_EXTRA);
+            return 1;
+        }
+        list[n].proto = proto;
+        list[n].port  = port;
+        n++;
+    } else if (!had) {
+        printf("firewall: %s %u was not open from here\n",
+               proto == IPPROTO_TCP ? "tcp" : "udp", (unsigned)port);
+        /* It may still be open because /boot says so. Say that rather
+         * than let someone believe a port is closed when it is not. */
+        extra_t b[MAX_EXTRA]; int bn = 0; char bm[16] = "";
+        read_conf_into("/boot/firewall.conf", b, &bn, bm, sizeof bm);
+        for (int i = 0; i < bn; i++)
+            if (b[i].proto == proto && b[i].port == port)
+                printf("firewall:   it is open because /boot/firewall.conf"
+                       " lists it, and that file is read-only here\n");
+        return 0;
+    }
+
+    if (!write_data_conf(list, n, mode)) {
+        dprintf(STDERR_FILENO,
+                "firewall: cannot write %s - is /data mounted?\n", DATA_CONF);
+        return 1;
+    }
+
+    printf("firewall: %s %u %s\n",
+           proto == IPPROTO_TCP ? "tcp" : "udp", (unsigned)port,
+           add ? "is now open" : "is no longer open");
+
+    /* Put it into effect now. Writing the file and waiting for a reboot
+     * is the behaviour that makes people stop trusting the command. */
+    int fd = nl_open();
+    if (fd < 0) return 1;
+    bool live = table_exists(fd);
+    lp_close(fd);
+    if (!live) {
+        printf("firewall:   the firewall is off, so nothing is blocked"
+               " anyway - `firewall on` applies this\n");
+        return 0;
+    }
+
+    /* Re-read both files so the new ruleset is the whole policy again. */
+    extra_n = 0; conf_mode[0] = 0;
+    read_conf("/boot/firewall.conf");
+    if (!conf_mode[0]) read_conf(DATA_CONF);
+    return apply(strcmp(conf_mode, "strict") == 0);
+}
+
+static int cmd_ports(void)
+{
+    extra_t b[MAX_EXTRA]; int bn = 0; char bm[16] = "";
+    extra_t d[MAX_EXTRA]; int dn = 0; char dm[16] = "";
+    read_conf_into("/boot/firewall.conf", b, &bn, bm, sizeof bm);
+    read_conf_into(DATA_CONF, d, &dn, dm, sizeof dm);
+
+    printf("open on top of ssh, ping, DHCP replies and loopback:\n");
+    if (!bn && !dn) {
+        printf("  nothing yet - `firewall allow 8080` opens one\n");
+        return 0;
+    }
+    for (int i = 0; i < dn; i++)
+        printf("  %-3s %-5u  from here (%s)\n",
+               d[i].proto == IPPROTO_TCP ? "tcp" : "udp",
+               (unsigned)d[i].port, DATA_CONF);
+    for (int i = 0; i < bn; i++)
+        printf("  %-3s %-5u  from the boot partition - cannot be closed"
+               " from here\n",
+               b[i].proto == IPPROTO_TCP ? "tcp" : "udp", (unsigned)b[i].port);
+    return 0;
 }
 
 /* A rule shaped "this protocol, this destination port -> accept". */
@@ -1089,8 +1274,15 @@ static void usage(void)
     printf("  firewall on           accept ssh, ping and replies; drop the rest\n");
     printf("  firewall strict       the same, and only let the system itself out\n");
     printf("  firewall off          remove every rule\n\n");
-    printf("Extra ports go in /boot/firewall.conf, which you can edit from\n");
-    printf("any computer with an SD card reader:\n\n");
+    printf("  firewall allow 8080   open a port, right now\n");
+    printf("  firewall allow udp 5353\n");
+    printf("  firewall deny 8080    close it again\n");
+    printf("  firewall ports        which extra ports are open, and why\n\n");
+    printf("`allow` and `deny` write /data/firewall.conf and take effect\n");
+    printf("at once - no reboot, no card reader.\n\n");
+    printf("/boot/firewall.conf is read as well, and wins: it is on the\n");
+    printf("FAT boot partition, so any computer with a card reader can\n");
+    printf("set it, and nothing on the machine can undo it.\n\n");
     printf("  mode strict\n");
     printf("  tcp 8080\n");
     printf("  udp 5353\n\n");
@@ -1123,8 +1315,15 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "strict") == 0) return apply(true);
     if (strcmp(cmd, "off") == 0)    return turn_off();
     if (strcmp(cmd, "status") == 0) return status();
+    if (strcmp(cmd, "allow") == 0 || strcmp(cmd, "open") == 0)
+        return cmd_allow(true, argc, argv);
+    if (strcmp(cmd, "deny") == 0 || strcmp(cmd, "close") == 0)
+        return cmd_allow(false, argc, argv);
+    if (strcmp(cmd, "ports") == 0)  return cmd_ports();
 
     dprintf(STDERR_FILENO, "firewall: no idea what \"%s\" means\n", cmd);
-    dprintf(STDERR_FILENO, "try: firewall on | strict | off | status\n");
+    dprintf(STDERR_FILENO,
+            "try: firewall on | strict | off | status | ports"
+            " | allow <port> | deny <port>\n");
     return 1;
 }

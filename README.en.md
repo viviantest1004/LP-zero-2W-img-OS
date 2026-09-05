@@ -1,118 +1,121 @@
 # LP-zero / linux-LP
 
-**한국어 문서: [README.md](README.md)** · Start here: **[`GUIDE/`](GUIDE/)**
+**한국어 → [README.md](README.md)**
 
 ### ⬇ [Download an image](https://viviantest1004.github.io/LP-zero-2W-img-OS/)
 
-Which image for which machine, how to check it, and how to burn it -
-on one page, without reading a source tree.
+One page: which image you want, and what to do with it once you have it.
+If that page does not open, the same files are in [`dist/`](dist/).
 
-**A Linux distribution written from scratch.** The kernel configuration,
-the C library, init, the shell and all 108 commands are original code.
-One kernel image is the entire system: the userland is packed inside it
-and unpacks into RAM at boot.
+---
 
-It began as an attempt to get something useful out of a single
-**Raspberry Pi Zero 2 W**. Put Ubuntu on 512MB of RAM and half of it is
-gone before you have done anything. Nothing about the result turned out
-to be tied to that board, so it now runs just as well on **arm64 virtual
-machines and amd64 PCs**.
+**A small Linux distribution written from scratch.** Kernel configuration,
+C library, init, shell, 108 commands — all of it new. A single kernel image
+file is the whole system, and it unpacks into RAM at boot.
+
+It started with one **Raspberry Pi Zero 2 W**. That board has 512MB of RAM,
+and Ubuntu spends half of it before you have done anything, which seemed
+like a waste. Nothing in it turned out to be specific to that board, so it
+now runs on **arm64 virtual machines and amd64 PCs** as well.
 
 | | |
 |---|---|
-| Whole system | kernel + userland in **one file**, 11-23MB |
-| RAM left after boot | **480MB** free on a 512MB board |
-| Boot time | about 10 seconds from power to a prompt |
-| Commands | 108, every one of them written here |
-| SSH | **built in**, public key only (password auth is not compiled in) |
-| Python | CPython 3.12 + pip, manylinux wheels install (numpy confirmed) |
-| Firewall | on by default, nftables driven straight over netlink |
+| Whole system | **one** kernel + userland file, 13–22MB |
+| RAM left after boot | about **480MB** on a 512MB board |
+| Boot time | roughly 10 seconds from power to a prompt |
+| Commands | **108**, every one written here |
+| SSH | **built in**, public key only (password auth is not compiled) |
+| Python | CPython 3.12 + pip. manylinux wheels install (numpy confirmed) |
+| Packages | its own `pkg`, and `apt` — real Debian packages |
+| External drives | mounted on plug-in, and pinnable across reboots |
+| Firewall | on by default. nftables driven straight over netlink |
 | Licence | MIT |
 
-Four things come from outside: the Broadcom blob the Raspberry Pi GPU
-boot ROM insists on, and three cryptography implementations (dropbear,
-wpa_supplicant, OpenSSL). **Cryptography is the one thing you should not
-write yourself**, so it was deliberately borrowed.
+Four things come from elsewhere — the Broadcom blobs the Pi's GPU boot ROM
+insists on, and three cryptographic implementations (dropbear,
+wpa_supplicant, OpenSSL). **Cryptography is the one thing you do not write
+yourself**, so those were taken rather than written.
 
 ---
 
 ## Who wrote this
 
-**Every line of it was written by [Claude Code](https://claude.com/claude-code),
-Anthropic's coding agent**, working from the repository owner's
-direction. That includes the kernel configuration, the C library, init,
-the shell, all 108 commands, the build system, the self-test, and this
-document.
+**All of it was written by [Claude Code](https://claude.com/claude-code)**,
+Anthropic's coding agent, working under the direction of the repository's
+owner. That covers the kernel configuration, the C library, init, the shell,
+all 108 commands, the bare-metal bootloader, the build system, the self-test,
+and this document.
 
-It is worth being plain about what that means. The code was designed,
-debugged and revised in the open — the commit log reads as an
-explanation of why each change was made, and the comments say what was
-tried and what broke. It was also not reviewed by an independent
-engineer, has never run in production, and carries no track record.
-Read [Before you rely on this](#before-you-rely-on-this) before you put
-it anywhere that matters.
+It is worth being clear about what that means.
 
----
+The design, the debugging and the corrections are **all on the record.**
+Commit messages explain why each change was made; comments say what was
+tried and what broke. You can follow how a decision was reached.
 
-## What is on which branch
-
-| Branch | What it holds |
-|---|---|
-| **`main`** | Everything. Full source, `GUIDE/`, both READMEs, and prebuilt images in `dist/`. This is the branch you want. |
-| **`dev`** | The development branch. The same files as `main` right now — it exists to carry the commit history, where each change is explained at length. |
-
-New work goes on a branch, gets built, passes `tests/selftest.sh`, and
-is then merged into `main`.
-
-`GUIDE/BRANCHES.txt` says the same in more detail, in English and
-Korean.
+At the same time, **no human wrote or reviewed this code.** It has had no
+independent engineering review, no production use, and no track record.
+Read the next section before you put it anywhere that matters.
 
 ---
 
 ## Before you rely on this
 
-An honest list. None of it is a reason not to try the system; all of it
-is a reason not to be surprised.
+Honestly stated. None of this is "so do not use it" — it is all closer to
+"so do not be surprised."
 
-- **It is a hobby operating system, not a supported product.** There is
-  no security team, no CVE process and nobody on call. For anything
-  that has to keep working, use Raspberry Pi OS Lite or Debian.
-- **Real hardware is not verified.** Everything here was tested in
-  QEMU. On a physical Pi Zero 2 W, the WiFi association, the thermal
-  sensors and the hardware watchdog have not yet been confirmed. Treat
-  the arm64 image as untested on metal.
-- **The security work has not been audited.** Update signature
-  checking, the firewall, the DNS and NTP hardening are all implemented
-  and all reasoned about in the comments, and none of it has been
-  reviewed by anybody else. Do not put this straight onto a hostile
-  network on the strength of that section alone.
-- **The C library is ours, and it is not complete.** It covers what the
-  108 commands need. Anything else you compile against it may hit a
-  function that is not there. Ordinary Linux binaries run through
-  `run`, against the glibc that ships alongside Python.
-- **`/data` is the only place that survives a reboot,** and it is one
+- **This is a hobby operating system, not a supported product.** No security
+  team, no CVE process, nobody on call. For anything that has to keep
+  working, use Raspberry Pi OS Lite or Debian.
+- **Real hardware is not verified.** Everything was tested in QEMU. WiFi on
+  a real Pi, the thermal sensors, the hardware watchdog, and the EMMC driver
+  against an actual SD card are all unconfirmed.
+- **The security work has not been audited.** Signature checking on updates,
+  the firewall, and the DNS and NTP spoofing defences are all implemented and
+  the reasoning is in the comments, but nobody else has reviewed them. Do not
+  put this straight onto a hostile network on the strength of the
+  [Security](#security) section alone.
+- **The network path in `apt` is unverified.** The code that fetches the
+  Debian base and the chroot it runs in were each confirmed separately, but
+  the two have never been run end to end over a real internet connection.
+  The first `apt setup` may go wrong.
+- **The C library is ours, and it is not complete.** It has what the 108
+  commands need and no more. Compiling something else against it can run into
+  a function that is not there. Ordinary Linux binaries run under `run`, on
+  the glibc that ships alongside Python.
+- **`/data` is the only thing that survives a reboot,** and it is one
   partition on one card. Cards die. Back up anything you care about.
-- **`dd` to the wrong device destroys that device.** Check `/dev/sdX`
-  twice. This is the one mistake here that cannot be undone by
-  rebooting.
-- **No GUI, a small package set, no containers.** The DRM drivers are
-  in the kernel, but X11 or Wayland is yours to install; packages are
-  what `pkg` and pip can reach; cgroups and namespaces are not
-  configured for container runtimes.
-- **The bootloader does not apply device tree overlays.** On real
-  hardware this is invisible: start.elf hands us a tree with them
-  already applied and we prefer that one. Where there is no start.elf,
-  `config.txt` overlays are skipped and the loader says which.
-- **Things will be rough in places.** A recent example: every message
-  logged through our own logger was invisible to `dmesg` for months,
-  because a kmsg record without a trailing newline is a continuation
-  the kernel never finalises. It was found by running the self-test end
-  to end and asking why one check failed. Expect more of that kind.
+- **`dd` to the wrong device destroys that device.** Check `/dev/sdX` twice.
+  It is the one mistake here that a reboot cannot undo.
+- **No GUI, and it does not run containers.** The DRM drivers are in the
+  kernel but X11/Wayland is yours to install, and cgroups and namespaces are
+  not enabled for container use.
+- **There are rough edges.** Two recent ones. Every message our own logger
+  wrote was invisible to `dmesg` for months — a kmsg record that does not end
+  in a newline is a continuation the kernel never finalises. And on the amd64
+  image no external binary would start at all: the dynamic linker's name was
+  hardcoded to the arm64 one on both architectures. Both are fixed and the
+  self-test now guards them, but expect more of the same.
 
-What *is* verified: the amd64 image passes all 51 checks in
-`tests/selftest.sh` on real QEMU boots — boot, storage, SSH, Python,
-graphics, security, error paths, redirection, logging, timing, and the
-watchdog noticing a process pinning a core.
+**What is verified:** both images pass **all 53 checks** in
+`tests/selftest.sh` on real QEMU boots — booting, storage, SSH, Python,
+external glibc binaries, graphics, security, error paths, redirection,
+logging, time, and whether the watchdog notices a process pinning a core.
+
+---
+
+## What is on which branch
+
+| Branch | What is in it |
+|---|---|
+| **`main`** | Everything. Full source, `GUIDE/`, both READMEs, the pre-built images in `dist/`, the download page. **This is the branch you want.** |
+| **`dev`** | The development branch. Currently identical in content to `main`. This is where the commit history, with its long explanations of each change, accumulates. |
+
+New work happens on `dev`, gets built, has to pass `tests/selftest.sh`, and
+then goes up to `main`. So the images on `main` are always the images the
+source next to them actually produces.
+
+There is more detail in [`GUIDE/BRANCHES.txt`](GUIDE/BRANCHES.txt), in
+English and Korean.
 
 ---
 
@@ -120,22 +123,23 @@ watchdog noticing a process pinning a core.
 
 | Image | Where it runs |
 |---|---|
-| `dist/test_a_123_LPzero2W_linux.img.xz` | **Raspberry Pi Zero 2 W hardware and arm64 virtual machines.** Burn it to a card, or attach it in UTM/QEMU |
-| `dist/linux-LP_amd64.img.xz` | **Ordinary PCs and desktop virtual machines.** VMware, VirtualBox, QEMU/KVM, Hyper-V |
-| `dist/test_a_123_LPzero2W_linux-utm.zip` | arm64 virtual machines only. Smaller, because a VM has no use for the GPU firmware |
+| `dist/test_a_123_LPzero2W_linux.img.xz` | **Raspberry Pi Zero 2 W hardware and arm64 VMs alike.** Burn it to a card, or attach it in UTM/QEMU |
+| `dist/linux-LP_amd64.img.xz` | **Ordinary PCs and desktop VMs.** VMware, VirtualBox, QEMU/KVM, Hyper-V |
+| `dist/test_a_123_LPzero2W_linux-utm.zip` | **arm64 VMs only.** Unzip and double-click; UTM opens it. No GPU firmware, so it will not boot on the board |
 
-One arm64 image covers both the board and a VM, because it carries the
-uncompressed kernel the Raspberry Pi GPU reads **and** the EFI
-executable UEFI reads.
+One arm64 image covers both hardware and virtual machines because it carries
+**both** an uncompressed kernel for the Pi's GPU and an EFI executable for
+UEFI.
 
-The amd64 image calls itself **`linux-LP`** on the inside. It is not a
-Raspberry Pi and should not claim to be.
-
-Verify what you downloaded:
+Check what you downloaded. A truncated image fails in confusing ways
+halfway through boot.
 
 ```bash
-cd dist && sha256sum -c SHA256SUMS.txt
+sha256sum -c dist/SHA256SUMS.txt
 ```
+
+The amd64 image calls itself **`linux-LP`** from the inside. It is not a
+Raspberry Pi and should not claim to be one.
 
 ---
 
@@ -144,82 +148,12 @@ cd dist && sha256sum -c SHA256SUMS.txt
 | | Minimum | Comfortable |
 |---|---|---|
 | RAM | **64MB** | 256MB or more |
-| Storage | **256MB** | 4GB or more (1GB if you want Python) |
+| Storage | **256MB** | 4GB or more (1GB for Python, 2GB with `apt`) |
 | CPU | arm64 (ARMv8) or x86-64 | any number of cores |
-| Display | not needed — serial and SSH do everything | |
+| Display | not required (serial/SSH is enough for everything) | |
 
-64MB is not an exaggeration: the kernel and userland together use about
-30MB just after boot. Without Python, 256MB of storage is genuinely
-enough.
-
----
-
-## SSH, which is already running
-
-The SSH server (dropbear) is **built in and starts on its own.** There
-is nothing to install and nothing to enable. What there is not, is
-password login — **it is not compiled in at all.** On a board facing the
-internet a password is only a matter of time, so it was never offered as
-an option. Public keys only.
-
-### 1. Put your key in
-
-The **first partition of the card (or image) is FAT32**, so it opens on
-Windows, macOS and Linux without ceremony. Put your public key in a file
-called `authorized_keys` there.
-
-```bash
-# on the boot partition that appears when you insert the card
-cat ~/.ssh/id_ed25519.pub >> /media/BOOT/authorized_keys
-```
-
-No key yet? `ssh-keygen -t ed25519`
-
-> While `/boot/authorized_keys` exists, **it is the master copy** and it
-> overwrites the device's own at every boot. Edit it on the device and
-> the change is gone next time. Delete it from `/boot` if you would
-> rather manage keys on the machine. The reason it works this way: if
-> `/data` is destroyed, you can still get in by pulling the card and
-> editing one file.
-
-### 2. Find the address
-
-```
-# on the device's screen or serial console
-ifconfig
-```
-
-DHCP is automatic. For a fixed address, write `network.conf` on the boot
-partition.
-
-### 3. Connect
-
-```bash
-ssh root@192.168.0.42
-```
-
-There is **one user, root.** Port 22, which the firewall opens by
-default.
-
-### From a virtual machine
-
-Forward the port in QEMU:
-
-```bash
--netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0
-```
-```bash
-ssh -p 2222 root@localhost
-```
-
-### When it will not connect
-
-```
-authkey -l           # which keys are accepted right now
-service status dropbear
-firewall status
-cat /data/log/auth   # login records
-```
+64MB is not an exaggeration — the kernel and userland use around 30MB just
+after boot. Without Python, 256MB of storage really is enough.
 
 ---
 
@@ -228,27 +162,24 @@ cat /data/log/auth   # login records
 ### Burning a card (Raspberry Pi)
 
 ```bash
-xz -d < dist/test_a_123_LPzero2W_linux.img.xz \
-  | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
+xz -d < test_a_123_LPzero2W_linux.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 **Check `/dev/sdX`.** Get it wrong and that disk is gone.
 
-On the first boot, the `/data` partition grows to fill the card by
-itself.
+On first boot the `/data` partition grows to fill the card by itself.
 
-### Virtual machines (UTM / QEMU / VMware / VirtualBox)
+### In a virtual machine (UTM / QEMU / VMware / VirtualBox)
 
-Decompress it, attach it as a disk, and set the machine to **UEFI
-boot** — the MBR bootstrap is empty on purpose, so legacy BIOS will not
-start it.
+Decompress and attach it as a disk. Set **UEFI boot** — the MBR bootstrap is
+deliberately empty, so legacy BIOS will not start it.
 
 ```bash
 # QEMU, arm64
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 4096 -smp 4 \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd \
   -drive if=pflash,format=raw,file=vars.fd \
-  -drive file=lp-zero.img,format=raw,if=virtio \
+  -drive file=test_a_123_LPzero2W_linux.img,format=raw,if=virtio \
   -netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0
 
 # QEMU, amd64
@@ -258,111 +189,165 @@ qemu-system-x86_64 -m 4096 -smp 4 \
   -drive file=linux-LP_amd64.img,format=raw,if=virtio
 ```
 
-To make the disk bigger, `truncate -s 16G` the image file. It is sparse,
-so it only takes up what is written, and `/data` expands on the first
+To get a bigger disk, `truncate -s 16G` the image file. It is sparse, so it
+only takes the space it actually uses, and `/data` grows into it on the next
 boot.
 
 ### WiFi (Raspberry Pi)
 
-Write it on the boot partition, in `wpa_supplicant.conf`:
+Write it into `wpa_supplicant.conf` on the boot partition.
 
 ```
 network={
-    ssid="my network"
-    psk="the password"
+    ssid="home"
+    psk="password"
 }
+```
+
+---
+
+## Getting in over SSH
+
+The SSH server (dropbear) is **there from the start and comes up on its
+own.** Nothing to install, nothing to enable.
+
+**Password login is not compiled in at all.** On a board facing the internet
+a password is a matter of time, so it was not offered as an option. Public
+keys only.
+
+### 1. Put a key in
+
+The **first partition of the card (or image) is FAT32**, so it opens on
+Windows, macOS and Linux alike. Put your public key in `authorized_keys`
+there.
+
+```bash
+cat ~/.ssh/id_ed25519.pub >> /media/BOOT/authorized_keys
+```
+
+No key yet? `ssh-keygen -t ed25519`.
+
+> While `/boot/authorized_keys` exists, **it is the source of truth.**
+> Editing the copy on the machine is overwritten at boot. To manage keys on
+> the machine instead, delete that file from `/boot`. It works this way so
+> that even if `/data` is destroyed you can pull the card, put a key back,
+> and get in.
+
+### 2. Find the address
+
+`ifconfig`, on the screen or the serial console. DHCP is automatic. For a
+fixed address, write `network.conf` on the boot partition.
+
+### 3. Connect
+
+```bash
+ssh root@192.168.0.42
+```
+
+There is **one user, root**. Port 22, and the firewall opens it by default.
+
+In a virtual machine, forward the port:
+
+```bash
+-netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0
+ssh -p 2222 root@localhost
+```
+
+### When it does not work
+
+```
+authkey -l              which keys are authorized right now
+service status dropbear
+firewall status
+logd                    login records in /data/log/auth
 ```
 
 ---
 
 ## Why it does not fall over
 
-This is the part the system was actually built around. Three designs
-stack on top of each other.
+This is the point of the whole thing. Three designs stacked on each other.
 
-### 1. The root filesystem lives in RAM
+### 1. The root filesystem is in RAM
 
-The whole system is a cpio inside the kernel image, unpacked into RAM at
+The entire system is a cpio inside the kernel image, unpacked into RAM at
 boot. **Nothing on disk is part of the running system.**
 
-- Pull the power at any moment and there is nothing to corrupt. The next
-  boot is always the factory state.
-- Delete something you should not have, and a reboot puts it back.
-- An update replaces one file, and a failed one goes back to the
-  previous file.
+- Pulling the power leaves nothing to corrupt. The next boot is always the
+  factory state.
+- Delete the wrong thing and a reboot puts it back.
+- An update is one file replaced, and a failed one is the previous file
+  restored.
 
-Losing whatever you installed into `/bin` would be no fun, so `/bin`,
-`/lib`, `/usr`, `/opt` and friends are **overlays**: reads see the
-image, writes land on `/data`. `cp mytool /bin/` survives a reboot.
+Losing what you installed into `/bin` would be no fun, though, so `/bin`,
+`/lib`, `/usr`, `/opt` and friends are **overlays** — reads see the image,
+writes land on `/data`. `cp mytool /bin/` survives a reboot.
 
-### 2. `guard`, the watchdog daemon
+### 2. `guard` — the watching daemon
 
 It keeps an eye on memory, temperature, voltage, CPU and disk.
 
-- **Out of memory**: below the reserve, it clears the largest processes
-  first. init, the shell, SSH and the watchdog are never touched.
-- **Fork bomb**: killed by process group, all at once. A measured
-  **2937 processes cleared in a single pass**. Your logged-in shell
-  survives.
-- **CPU runaway**: a warning at 10 seconds, a priority demotion at 30.
-  It does not kill — you may have meant it.
-- **Overheating and undervoltage**: it reads the Raspberry Pi throttle
-  bits and says so.
-- **Disk full**: logs go first.
+- **Memory exhaustion**: below the reserve, it clears the largest processes
+  first. It will never touch init, the shell, SSH or the watchdog.
+- **Fork bombs**: killed a whole process group at a time. Measured: **2937
+  processes cleared in a single pass.** Logged-in shells survive.
+- **A runaway CPU**: a warning at 10 seconds, a priority drop at 30. It does
+  not kill — you may have meant it.
+- **Overheating / undervoltage**: it reads the Pi's throttle bits and says
+  so.
+- **A full disk**: logs go first.
 
 init watches guard in turn. Kill it and it is **back within a second.**
 
 ### 3. There is always a way back
 
-- **Watchdog**: a hardware timer. If the kernel stops, the board
-  restarts itself.
-- **`bootcount`**: five boots in a row that fail to last five minutes,
-  and `/data/rc.local` is skipped. That is the way out when a user
-  script is what stops the machine booting.
-- **Update rollback**: a new system that cannot survive five minutes
-  reverts to the previous image automatically.
-- **SSH keys in three places**: inside the image, on the FAT boot
-  partition (editable anywhere), and on `/data`. Lose `/data` entirely
-  and the card still lets you in.
-- **`fsck`**: check and repair `/data` from the machine itself.
-- **A real shutdown**: `poweroff` stops the services, flushes to disk
-  and **unmounts `/data`** before cutting power, so the next boot has no
-  journal to replay.
+- **Watchdog**: a hardware timer. If the kernel stops, the board restarts
+  itself.
+- **`bootcount`**: five consecutive boots that fail to last five minutes and
+  `/data/rc.local` is skipped. That is the way out when a user script is what
+  is preventing boot.
+- **Update rollback**: a new system that cannot survive five minutes is
+  replaced by the previous image automatically.
+- **Three copies of the SSH keys**: in the image, on the boot partition (FAT,
+  editable anywhere), and on `/data`. Even if `/data` is lost entirely, the
+  card gets you back in.
+- **`fsck`**: check and repair `/data` on the machine itself.
+- **A real shutdown**: `poweroff` stops services, flushes to disk, and
+  **unmounts `/data`** before cutting power. The next boot needs no journal
+  recovery.
 
 ---
 
 ## Plugging a drive in
 
-A USB stick or an external disk mounts itself. automount listens to the
-kernel's uevent messages, so a drive appears under `/media/<name>`
-within a moment of being plugged in and is released when it is pulled.
-It also scans once at startup for drives that were already there.
+A USB stick or an external disk mounts itself. A listener on the kernel's
+uevent socket puts it on `/media/<name>` within a moment and cleans up when
+it is pulled. Drives already attached at boot get picked up in a sweep.
 
 ```
-automount -l            what is mounted right now
-automount -u <name>     release one
+automount -l                   what is mounted right now
+automount -u <name>            detach one
 ```
 
-It never touches the disk this system booted from, and it mounts
-nosuid,nodev for the same reason /data does: that filesystem was written
-by somebody else's machine.
+The disk the system booted from is never touched. The mount options are the
+same `nosuid,nodev` as `/data` — it is a filesystem written on somebody
+else's machine.
 
-### Drives you want to keep
+### For a drive you want to keep
 
-`/media` is a temporary place. For a drive that should be at the same
-path after every reboot, adopt it:
+`/media` is a temporary place. For a drive that should be in the same place
+after a reboot, adopt it.
 
 ```
-storage                        what survives a reboot, and how full
-storage adopt /dev/sdb photos  keep it at /mnt/photos
-storage format /dev/sdb backup erase it, make ext4, then keep it
-storage forget photos          stop keeping it
+storage                          what survives a reboot, and how full it is
+storage adopt /dev/sdb photos    pinned at /mnt/photos
+storage format /dev/sdb backup   wipe it, make it ext4, pin it
+storage forget photos            stop
 ```
 
-An adopted drive is matched by **filesystem label, not device name**, so
-it works in any port. sdb1 becomes sdc1 the moment somebody plugs in a
-second drive first, and a system that loses its storage over the order
-things were plugged in is not one you can leave alone for months.
+Adopted drives are found **by filesystem label**, not by device name, so
+they come back in the same place through a different port. `sdb1` becomes
+`sdc1` the moment you plug in another drive first.
 
 ```
 storage
@@ -372,145 +357,180 @@ storage
     photos     /mnt/photos       51M free of 55M       8% used   /dev/sdb
 ```
 
-`poweroff` releases these before it unmounts /data, detaching anything
-busy - a drive nobody can unmount must not become a machine nobody can
-switch off.
+`poweroff` clears these drives before it unmounts `/data`, detaching them if
+somebody is still using one — one drive should not be able to stop you
+turning the machine off.
+
+### Disks and partitions
+
+```
+disk                           every block device the kernel found
+part /dev/sdb                  look at and change the partition table
+datadisk                       choose which partition /data comes from
+expandfs                       grow /data to the end of the card
+fsck                           check and repair /data
+```
+
+---
+
+## Debian packages (apt)
+
+`apt install` works. It is real Debian apt.
+
+```
+apt install ripgrep htop           install
+apt run htop                       run what you installed
+apt search sqlite                  what is available
+apt shell                          a shell inside it
+apt status                         where things stand
+apt purge-all                      remove the whole thing
+```
+
+### How it works
+
+A whole Debian userland goes into `/data/debian`, and apt runs with that
+directory as its root. dpkg has absolute paths like `/var/lib/dpkg`
+compiled into it, so showing it that tree as a real root is the only way.
+
+Which means:
+
+- **The system image is untouched.** Its size does not change.
+- **`apt remove` cannot break this machine's commands.** They are not in
+  there.
+- **`rm -rf /data/debian` undoes all of it.**
+
+### The first time takes a while
+
+The Debian base is **95MB to download, 440MB unpacked**. Given that this
+entire system is 13–22MB, the base alone is twenty times larger. So it is
+not in the image; it is fetched the first time you use `apt`. You are told
+how long it will take before it starts, and it will not begin if `/data` has
+no room.
+
+It needs at least 900MB free on `/data`. On a small card, grow it with
+`expandfs` or attach an external drive with `storage`.
+
+### Things to know
+
+What you install runs **inside the Debian tree** — hence `apt run htop`. And
+this system's init does not start services in there; to have one come up at
+boot, put it in `/data/rc.local`.
+
+`pkg` is still here. The small packages built for this system still install
+with `pkg`, straight onto `/data`. `apt` is for when you want something
+Debian already has.
+
+And, as noted above, **`apt setup` over a real internet connection is still
+unverified.**
+
+---
+
+## Python and ordinary Linux binaries
+
+Python is `/data/python/bin/python3.12`, and `python` finds it.
+
+It is dynamically linked, with glibc alongside it in `/data/glibc`. Building
+it statically would rule out every wheel with a C extension in it — numpy,
+pillow, cryptography. The operating system itself does not use glibc: init,
+the shell and every command run on `userland/libc`.
+
+```bash
+pip install requests
+python -m pip install numpy    # manylinux wheels work
+```
+
+**Ordinary Linux binaries** run on that same glibc. Call them through
+`run ./whatever`, or just run them directly — the loader symlinks are set up
+at boot. The right dynamic linker is chosen per architecture, so this works
+on arm64 and amd64 alike; that it did not work on amd64 was a bug fixed
+recently.
 
 ---
 
 ## How much of the boot chain is ours
 
 ```
-boot ROM -> bootcode.bin -> start.elf -> our firmware -> Linux
-              (Broadcom blobs)           (firmware/)     (kernel/)
+boot ROM → bootcode.bin → start.elf → our firmware → Linux
+              (Broadcom blobs)         (firmware/)    (kernel/)
 ```
 
-The bare-metal firmware in `firmware/` reads the SD card itself and
-loads Linux: our own EMMC driver (Arasan SDHCI), MBR parsing, FAT32
-with long filenames, device tree rewriting, and the handover per the
-arm64 boot protocol.
+The bare-metal firmware in `firmware/` reads the SD card itself and loads
+Linux. The EMMC driver (Arasan SDHCI), MBR parsing, FAT32 reading (long
+names included), device-tree rewriting, and the handover under the arm64
+boot protocol are all our own code.
 
-start.elf can load a kernel by itself, so this step does not add a
-capability - it replaces a link in the chain with our own. When
-something goes wrong, the exception vectors catch it and say what and
-where: the exception class, the address being touched, whether it was
-being read or written, and the call path that led there.
+start.elf can load a kernel directly too, so this stage is not a new
+capability — it is one link of the chain replaced with ours. When it goes
+wrong the exception vectors catch it and say what broke and where: the kind
+of exception, the address touched, whether it was a read or a write, and the
+call path that got there.
 
-The two Broadcom blobs cannot be replaced: the GPU boot ROM demands
-them before any ARM core runs at all.
-
----
-
-## Debian packages (apt)
-
-`apt install` works. It is Debian's own apt.
-
-```
-apt install ripgrep htop          install
-apt run htop                      run what you installed
-apt search sqlite                 what Debian has
-apt shell                         a shell in there
-apt status                        what is set up
-apt purge-all                     remove all of it
-```
-
-### How it works
-
-A whole Debian userland goes in `/data/debian`, and apt runs with that
-directory as its root. dpkg has paths like `/var/lib/dpkg` compiled in -
-it does not take a `--root` that means what you would want it to mean -
-so showing it that tree as the real root is the only way this works.
-
-Which means:
-
-- **The system image is untouched** and stays the size it is.
-- **`apt remove` cannot break this machine's own commands,** because
-  they are not in there.
-- **`rm -rf /data/debian` undoes every bit of it.**
-
-### The first run takes a while
-
-The Debian base is **a 95MB download that unpacks to 440MB**. This whole
-system is 11-23MB, so the base alone is twenty times everything else
-here - which is why it is fetched rather than shipped. apt says how big
-it is before it starts, and refuses if `/data` has no room.
-
-You need about 900MB free on `/data`. On a small card, `expandfs` grows
-it, or `storage` can adopt a drive.
-
-### Worth knowing
-
-Programs you install run **inside the Debian tree** - `apt run htop`.
-Services in there are not started by this system's init; put them in
-`/data/rc.local` if you want them at boot.
-
-`pkg` is still here. Small packages built for this system still install
-with `pkg` and unpack straight onto `/data`. apt is for when you want
-what Debian has.
+The two Broadcom blobs (bootcode.bin, start.elf) are what the GPU boot ROM
+demands, and cannot be replaced.
 
 ---
 
 ## Security
 
 - **No password authentication.** dropbear is compiled without it.
-- **Signed updates.** RSA-2048 / PKCS#1 v1.5 / SHA-256. The public key
-  lives inside the kernel image, so pulling the card does not let you
-  change it. A bad signature refuses the install, and **there is no
+- **Signature checking on updates.** RSA-2048 / PKCS#1 v1.5 / SHA-256. The
+  public key lives inside the kernel image, so it cannot be changed by
+  pulling the card. A bad signature refuses the install, and **there is no
   override.**
-- **Firewall on by default.** nftables rules go in over netlink
-  directly, in a single transaction, so there is no moment where half
-  the rules are live.
-- **DNS spoofing defences.** Transaction IDs from `getrandom`, a
-  connected socket, and the question section checked on the way back.
-- **NTP spoofing defences.** Nonce, mode and stratum are all verified.
-- **`/data` is mounted nosuid,nodev.** Planting a setuid file by putting
-  the card in another PC achieves nothing.
-- **`integrity`**: hashes the files that survive a reboot and tells you
-  if one changed.
-- **Login records** in `/data/log/auth`.
+- **Firewall on by default.** nftables rules are pushed straight over
+  netlink, in one transaction, so there is no moment when half the rules are
+  in place.
+- **DNS spoofing defences.** Transaction IDs from `getrandom`, a connected
+  socket, and the question section checked against what was asked.
+- **NTP spoofing defences.** Nonce, mode and stratum all verified.
+- **`/data` is mounted nosuid,nodev.** Putting the card in another PC and
+  planting a setuid file achieves nothing. External drives get the same
+  options.
+- **`integrity`**: checks hashes of the files that survive a reboot.
+- **Login records**: `/data/log/auth`.
 
-None of this has been independently audited. See
+None of this has been audited by anyone. See
 [Before you rely on this](#before-you-rely-on-this).
 
 ---
 
-## Who it suits
+## Who this suits
 
 ### A good fit
 
-- **Anyone running something around the clock on a Pi Zero or Zero 2 W.**
-  480MB of RAM stays free. A temperature logger, home automation or
-  sensor collection does not need Ubuntu under it.
-- **Devices that have to run untouched for a long time.** Unreliable
-  power, or somewhere physically awkward to reach — everything in "why
-  it does not fall over" exists for exactly that.
+- **Anyone running something around the clock on a Pi Zero / Zero 2 W.** You
+  keep 480MB of RAM. A temperature logger, home automation or sensor
+  collection does not need Ubuntu under it.
+- **Devices that have to run untouched for a long time.** Unreliable power,
+  or physically hard to reach — everything in
+  [Why it does not fall over](#why-it-does-not-fall-over) exists for that.
 - **Anyone who wants to see how Linux actually works.** From kernel
-  configuration to the shell, it is small enough to read, and the
-  comments explain why things are the way they are.
-- **Anyone who needs a minimal environment.** The attack surface is
-  small.
+  configuration to the shell it is small enough to read, and the comments
+  explain why things were done the way they were.
+- **Anyone who needs a minimal environment.** The attack surface is small.
 
-### A bad fit
+### Not a good fit
 
-- **A desktop.** There is no GUI. The DRM drivers are there, but X11 and
-  Wayland are yours to install.
-- **Anyone who needs a lot of packages.** There is no apt or dnf behind
-  it. You live within what `pkg` and pip can do.
-- **Multi-user setups.** You can create users, but the design assumes
-  one root.
-- **Work that needs a proven distribution.** This has not been tested
-  the way Debian or Ubuntu has. Use Raspberry Pi OS Lite there.
+- **A desktop.** There is no GUI. The DRM drivers are in the kernel, but
+  X11/Wayland is yours to install.
+- **Several users.** You can create them, but the design assumes one root.
+- **Work that needs a proven distribution.** This has not been tested the way
+  Debian or Ubuntu has. Use Raspberry Pi OS Lite there.
 - **Containers.** cgroups and namespaces are not enabled for that.
+
+`apt` has removed a lot of the "not enough packages" objection. But it runs
+inside the Debian tree, and this system's init does not manage services in
+there.
 
 ---
 
 ## Every command
 
-`help` prints this list on the machine. `help <command>` explains one.
+`help` prints this on the machine too. `help <command>` explains just one.
 
 ### Shell (16)
 
-| | |
+| Command | What it does |
 |---|---|
 | `cd` | change directory |
 | `pwd` | print the current directory |
@@ -531,7 +551,7 @@ None of this has been independently audited. See
 
 ### Files and storage (25)
 
-| | |
+| Command | What it does |
 |---|---|
 | `ls` | list a directory |
 | `cp` | copy files |
@@ -561,12 +581,12 @@ None of this has been independently audited. See
 
 ### Text (11)
 
-| | |
+| Command | What it does |
 |---|---|
 | `cat` | print a file |
 | `edit` | edit a file on screen |
 | `more` | read it a screen at a time |
-| `grep` | print the lines that match |
+| `grep` | print the lines that match, with context |
 | `head` | the first lines |
 | `tail` | the last lines |
 | `wc` | count lines, words, characters |
@@ -577,7 +597,7 @@ None of this has been independently audited. See
 
 ### System (37)
 
-| | |
+| Command | What it does |
 |---|---|
 | `top` | what is running, and stop it |
 | `ps` | what is running, once |
@@ -619,7 +639,7 @@ None of this has been independently audited. See
 
 ### Network (14)
 
-| | |
+| Command | What it does |
 |---|---|
 | `dhcp` | get an address, and keep it |
 | `ipconfig` | a fixed address from a file |
@@ -638,15 +658,15 @@ None of this has been independently audited. See
 
 ### Python (3)
 
-| | |
+| Command | What it does |
 |---|---|
 | `python` | CPython 3.12 |
 | `python3` | the same as python |
-| `micropython` | MicroPython - small, fast |
+| `micropython` | MicroPython — small, fast |
 
 ### Time (2)
 
-| | |
+| Command | What it does |
 |---|---|
 | `date` | show or set the clock |
 | `ntp` | set the clock from the net |
@@ -663,14 +683,14 @@ sudo apt install clang lld llvm gcc-aarch64-linux-gnu \
      bsdextrautils qemu-system-arm qemu-system-x86 python3
 ```
 
-arm64 cross-builds from an x86 host. amd64 is native, so no cross
-compiler is needed.
+arm64 is cross-compiled from an x86 host. amd64 is native, so no
+cross-compiler is needed for it.
 
-### arm64 (Raspberry Pi and arm64 VMs)
+### arm64 (Raspberry Pi + arm64 VMs)
 
 ```bash
-./tools/fetch-kernel.sh      # Linux source
-./tools/fetch-blobs.sh       # Raspberry Pi GPU firmware
+./tools/fetch-kernel.sh      # the Linux source
+./tools/fetch-blobs.sh       # the Pi's GPU firmware
 make                         # userland
 make kernel                  # kernel + initramfs
 make sdcard-linux            # sdcard/lp-zero.img
@@ -687,129 +707,134 @@ LP_ARCH=amd64 LP_ROOTFS_DIR=rootfs-amd64 ./kernel/build.sh
 LP_ARCH=amd64 LP_ROOTFS_DIR=rootfs-amd64 ./tools/mksdcard.sh --linux --uefi-only
 ```
 
-### All three distribution images at once
+### All three releases at once
 
 ```bash
-./tools/mkdist.sh            # everything, into dist/
+./tools/mkdist.sh            # three images, checksums and the download page into dist/
 ```
 
-Build products land in `.build/` beside the repository. Move them with
-`LPZERO_WORK=/mnt/big/lpzero ./tools/mkdist.sh` if the disk is tight.
+The checksums and `index.html` are generated from the actual files by that
+script. Written by hand they go stale on the next rebuild, and a checksum
+that does not match is worse than none — the person downloading cannot tell
+a corrupt transfer from a stale page. That has already happened here once.
+
+Intermediate build output goes into `.build/` next to the repository. If
+disk is tight, `LPZERO_WORK=/mnt/big/lpzero ./tools/mkdist.sh` moves it.
+
+### Checking a build
+
+```bash
+./tests/selftest.sh          # on the machine. 53 checks
+```
 
 ### The update signing key
 
 ```bash
-./tools/sign-release.sh --new-key    # creates a key in keys/, once
+./tools/sign-release.sh --new-key    # makes a key in keys/ (once)
 make                                  # the public key goes into the image
 ./tools/sign-release.sh kernel/out/Image
 ```
 
 **Never put the private key on a device.** `keys/` is in `.gitignore`.
 
-### Checking a build
-
-`tests/selftest.sh` runs on the machine and prints one PASS or FAIL per
-check.
-
-```bash
-sh /path/to/selftest.sh
-```
-
 ---
 
-## Why the source is not split by architecture
+## How the source is laid out
 
-There are no `arm64/` and `amd64/` folders, because both architectures
-build from **the same source**. What actually differs:
+```
+userland/          one set of sources. make ARCH=amd64 switches
+  libc/            our libc (straight on top of syscalls)
+  init/ sh/ ...    108 commands, one directory each
+firmware/          the bare-metal bootloader (EMMC, FAT32, DTB, vectors)
+kernel/            kernel configuration and build scripts
+boot/              what goes on the boot partition (config.txt, /etc/rc)
+tools/             image building, signing, download-page generation
+tests/             the self-test
+GUIDE/             usage and branch notes (English/Korean)
+web/               the download page template
+dist/              the finished images
+```
+
+### Why there are no per-architecture directories
+
+There is no `arm64/` and no `amd64/`, because both architectures use **the
+same sources.** Exactly three things actually differ:
 
 | | |
 |---|---|
 | `userland/libc/include/syscall-arm64.h` / `-x86_64.h` | syscall numbers and calling convention |
-| `userland/libc/src/crt0.S` | the entry point, split by `#if` |
-| `kernel/lp-zero.config` / `lp-zero-amd64.config` | kernel configuration |
+| `userland/libc/src/crt0.S` | the entry point (branched with `#if`) |
+| `kernel/lp-zero.config` / `lp-zero-amd64.fragment` | kernel configuration |
 
-The 108 commands and the body of libc are **identical, character for
-character.** Split them into copied folders and sooner or later only one
-copy gets fixed — which is not hypothetical: an amd64 image once shipped
-with 43MB of arm64 binaries in it. `check_tree_arch` now compares the
-architecture of every ELF at build time and **stops the build** on a
-mismatch.
-
-```
-userland/          one set of sources; make ARCH=amd64 picks the target
-  libc/            our own libc, straight on top of the syscalls
-  init/ sh/ ...    108 commands, one directory each
-kernel/            kernel configuration and build script
-boot/              what goes on the boot partition (config.txt, /etc/rc)
-tools/             image building, signing, distribution
-tests/             the self-test
-GUIDE/             usage and branch map, in English and Korean
-dist/              finished images
-```
+The 108 commands and the body of the libc are **identical, character for
+character.** Splitting them into copied directories invites fixing one side
+and not the other, and that has happened here twice — 43MB of arm64 binaries
+once shipped inside an amd64 image, and the dynamic linker's name was
+hardcoded to the arm64 one on both. The first is now caught by
+`check_tree_arch`, which compares the architecture of every ELF at build time
+and **stops the build**; the second is guarded by two self-test checks.
 
 ---
 
 ## Details
 
-### Partitions
+### Partition layout
 
 | | |
 |---|---|
-| p1 | FAT32, 128MB. Kernel, `config.txt`, `authorized_keys`, WiFi and firewall settings. **Editable on any PC** |
-| p2 | ext4, all the rest, mounted as `/data`. Expands to fill the card on the first boot |
+| p1 | FAT32, 128MB. Kernel, `config.txt`, `authorized_keys`, WiFi settings, firewall settings. **Editable on any PC** |
+| p2 | ext4, all the rest → `/data`. Grows to fill the card on first boot |
 
-### What survives a reboot
+### What survives
 
 | Path | After a reboot |
 |---|---|
 | `/data` | kept |
-| `/root` | kept (bound to `/data/root`) |
-| `/bin` `/lib` `/usr` `/opt` `/sbin` `/srv` | kept (overlay on `/data`) |
-| `/etc` `/tmp` `/var` | **gone**, deliberately |
+| `/root` | kept (bind of `/data/root`) |
+| `/bin` `/lib` `/usr` `/opt` `/sbin` `/srv` | kept (overlay onto `/data`) |
+| `/mnt/<adopted drive>` | kept (found again by label) |
+| `/media/<automounted>` | **temporary** (gone when unplugged) |
+| `/etc` `/tmp` `/var` | **gone** (deliberately) |
 
 `/etc` is left out on purpose: `/etc/rc` and `/etc/services` are read
-**before** `/data` is mounted. A stale copy shadowing a system update is
+**before** `/data` is mounted. A stale copy shadowing a system update means
 a board that does not come up.
-
-### Python
-
-`/data/python/bin/python3.12`, reachable as `python`.
-
-It is dynamically linked, with glibc alongside it in `/data/glibc`.
-Build it statically and every wheel with a C extension — numpy, pillow,
-cryptography — stops working. The operating system itself uses no glibc:
-init, the shell and every command run on `userland/libc`.
-
-```bash
-pip install requests
-python -m pip install numpy    # manylinux wheels work
-```
 
 ### Logs
 
-`/data/log/messages` and `/data/log/auth`. Kernel messages and our own
-programs' messages go into the same file. They rotate, so they do not
-grow without limit.
+`/data/log/messages` and `/data/log/auth`. Kernel messages and our
+programs' messages go into the same place. They rotate, so they cannot grow
+without bound.
 
 ### Services
 
-init keeps them alive; `service` shows you.
+init keeps them alive; `service` shows them.
 
 ```
-service                    the state of all of them
+service                    the state of everything
 service restart dropbear
 service stop beacon
 ```
 
-`guard`, `dropbear` and `watchdog` **cannot be stopped.** Without those
-three there is no way left to get the device back.
+`guard`, `dropbear` and `watchdog` **cannot be turned off.** Without those
+three there is no way left to get the machine back.
+
+---
+
+## Known limits
+
+They are all in [Before you rely on this](#before-you-rely-on-this). One
+thing that is not there: our bootloader **does not apply device-tree
+overlays.** On real hardware this does not matter, because it takes the tree
+start.elf already applied them to; anywhere else, `dtoverlay` lines in
+`config.txt` are ignored and the loader names what it skipped.
 
 ---
 
 ## Licence
 
-MIT; see `LICENSE`.
+MIT — see [`LICENSE`](LICENSE).
 
-Bundled third-party software keeps its own licence — dropbear (MIT),
+The bundled third-party software keeps its own licences: dropbear (MIT),
 wpa_supplicant (BSD), OpenSSL (Apache 2.0), the Broadcom GPU firmware
-(proprietary, redistribution permitted), the Linux kernel (GPL-2.0).
+(proprietary, redistribution permitted), and the Linux kernel (GPL-2.0).

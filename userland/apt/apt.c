@@ -87,8 +87,20 @@ static int run_wait(const char *path, char *const argv[])
     return LP_WIFEXITED(status) ? LP_WEXITSTATUS(status) : -1;
 }
 
+/* Write a file into the Debian tree, replacing whatever is there.
+ *
+ * The unlink first is not tidiness. A Debian base image ships
+ * /etc/resolv.conf as a symlink to /run/systemd/resolve/stub-resolv.conf
+ * - a file that exists only once systemd-resolved is running, which here
+ * it never is. Opening that path with O_CREAT follows the link and fails
+ * with ENOENT, because the directory it points into does not exist. The
+ * write silently does nothing, the tree ends up with no name servers,
+ * and `apt update` answers "Ign:1 ... InRelease" for every line in
+ * sources.list with no explanation of why. That cost a while to find,
+ * so: remove the name first, then create it. */
 static bool write_file(const char *path, const char *text)
 {
+    lp_unlink(path);
     long fd = lp_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
         return false;
@@ -111,6 +123,42 @@ static void mkdirs(const char *path)
     lp_mkdir(buf, 0755);
 }
 
+/* Name resolution for the tree, refreshed every time apt runs.
+ *
+ * Not once at setup: DHCP hands out a different name server when the
+ * board moves to another network, and a tree pinned to the one that was
+ * current in March is a tree that cannot reach the mirror in April.
+ * Writing it costs a syscall or two against a download of megabytes. */
+static bool sync_resolv(void)
+{
+    char resolv[512] = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n";
+
+    long fd = lp_open("/etc/resolv.conf", O_RDONLY, 0);
+    if (fd >= 0) {
+        char buf[512];
+        long n = lp_read((int)fd, buf, sizeof buf - 1);
+        lp_close((int)fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            /* An empty or comment-only file means DHCP has not answered
+             * yet. The public resolvers above are a worse answer than the
+             * local one and a much better answer than none. */
+            if (strstr(buf, "nameserver"))
+                strlcpy(resolv, buf, sizeof resolv);
+        }
+    }
+
+    mkdirs(ROOT "/etc");
+    if (!write_file(RESOLV, resolv)) {
+        dprintf(STDERR_FILENO,
+                "%s: cannot write %s - the tree has no name servers and\n"
+                "%s:   every mirror lookup inside it will fail.\n", me,
+                RESOLV, me);
+        return false;
+    }
+    return true;
+}
+
 /* ── is it there ─────────────────────────────────────────────────── */
 
 static bool is_set_up(void)
@@ -124,9 +172,10 @@ static bool is_set_up(void)
  * network needs /dev. These are bind mounts, so nothing is copied and
  * unmounting them leaves the tree exactly as it was.
  *
- * Left mounted between runs on purpose: mounting costs nothing while
- * they sit there, and a tree with /proc missing fails in ways that read
- * as "this package is broken" rather than "the mount is missing". */
+ * Put up when apt starts and taken down when it finishes, so that
+ * between runs /data holds nothing but files. A tree with /proc missing
+ * fails in ways that read as "this package is broken" rather than "the
+ * mount is missing", so they do have to be here while apt runs. */
 static void mount_kernel_fs(void)
 {
     static const struct { const char *src, *dir, *type; unsigned long flags; }
@@ -246,24 +295,20 @@ static int cmd_setup(bool quiet)
      * pointing at a snapshot, which is right for a container built to
      * be reproducible and wrong for a machine that wants updates. */
     mkdirs(ROOT "/etc/apt");
-    write_file(SOURCES,
+    if (!write_file(SOURCES,
         "# Written by `apt setup` on linux-LP.\n"
         "deb " MIRROR " " SUITE " main contrib non-free-firmware\n"
         "deb " MIRROR "-security " SUITE "-security main contrib non-free-firmware\n"
-        "deb " MIRROR " " SUITE "-updates main contrib non-free-firmware\n");
-
-    /* Name resolution. The tree has its own /etc, so it needs its own
-     * copy of where to ask - a bind mount would be undone by the next
-     * unmount and this file never changes on this system. */
-    char resolv[256] = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n";
-    long fd = lp_open("/etc/resolv.conf", O_RDONLY, 0);
-    if (fd >= 0) {
-        char buf[256];
-        long n = lp_read((int)fd, buf, sizeof buf - 1);
-        lp_close((int)fd);
-        if (n > 0) { buf[n] = '\0'; strlcpy(resolv, buf, sizeof resolv); }
+        "deb " MIRROR " " SUITE "-updates main contrib non-free-firmware\n")) {
+        dprintf(STDERR_FILENO,
+                "%s: cannot write %s - apt would have nowhere to fetch from\n",
+                me, SOURCES);
+        return 1;
     }
-    write_file(RESOLV, resolv);
+
+    /* The tree has its own /etc, so it needs its own name servers. */
+    if (!sync_resolv())
+        return 1;
 
     /* Keep apt from asking questions nobody is there to answer. A board
      * that stops mid-install waiting for a keypress is a board that has
@@ -319,6 +364,11 @@ static int in_debian(char *const argv[])
  * is not left inside a chroot it cannot leave. */
 static int call_in_debian(char *const argv[])
 {
+    /* Before anything else: the tree's name servers. Cheap, and it is
+     * the difference between `apt update` working and answering "Ign"
+     * for every line with no reason given. */
+    sync_resolv();
+
     pid_t pid = lp_fork();
     if (pid < 0) {
         dprintf(STDERR_FILENO, "%s: cannot fork\n", me);
@@ -329,6 +379,20 @@ static int call_in_debian(char *const argv[])
 
     int status = 0;
     lp_waitpid(pid, &status, 0);
+
+    /* Take the bind mounts back down.
+     *
+     * They used to be left up, on the grounds that mounting is cheap and
+     * a missing mount reads as a broken package. The cost of leaving
+     * them turned out to be worse: /data then contains a live copy of
+     * /dev, /proc and /sys, so `du /data` walks the whole of /proc,
+     * `tar` of the data partition tries to archive it, unmounting /data
+     * at shutdown finds it busy, and - the one that matters - a person
+     * who types `rm -rf /data/debian` deletes the real /dev through the
+     * bind mount. Two syscalls per apt run is a cheap price for /data
+     * being an ordinary directory again the moment apt is done. */
+    unmount_kernel_fs();
+
     return LP_WIFEXITED(status) ? LP_WEXITSTATUS(status) : 1;
 }
 
@@ -384,7 +448,7 @@ static void usage(void)
     printf("\n");
     printf("  run <cmd> [args]   run something installed, inside the tree\n");
     printf("  shell              a shell in there\n");
-    printf("  setup              fetch the Debian base (about 30MB)\n");
+    printf("  setup              fetch the Debian base (95MB download)\n");
     printf("  status             what is set up\n");
     printf("  purge-all          delete the whole thing\n");
     printf("\n");
