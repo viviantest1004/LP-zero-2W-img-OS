@@ -568,6 +568,47 @@ async function run() {
   ok('스타일시트에 없는 클래스가 없다', undefinedClasses.length === 0,
      undefinedClasses.join(' '));
 
+  /* Motion, actually applied rather than merely documented.
+   *
+   * The easiest way for a design system's motion to be decorative is
+   * for the screens to keep writing their own durations while the
+   * springs sit in a stylesheet nobody imports. So: every spring
+   * resolves, dialogs animate in, controls respond to a press, and
+   * nothing anywhere has a hand-written cubic-bezier - which is the one
+   * that would mean somebody reached past the system. */
+  const motion = await page.evaluate(() => {
+    const cs = getComputedStyle(document.documentElement);
+    const springs = ['window', 'sheet', 'menu', 'press', 'insert',
+                     'expand', 'knob', 'slide', 'rubber']
+      .filter(n => cs.getPropertyValue('--e-' + n).includes('linear('));
+    let usingSpring = 0;
+    const bezier = new Set();
+    document.querySelectorAll('*').forEach(e => {
+      const t = getComputedStyle(e).transitionTimingFunction || '';
+      if (t.includes('linear(')) usingSpring++;
+      /* The browser reports an unset timing function as this exact
+       * bezier, so it is the default rather than a choice. */
+      else if (t.includes('cubic-bezier') && !t.includes('0.25, 0.1'))
+        bezier.add((e.className || e.tagName).toString().slice(0, 30));
+    });
+    return {
+      springs: springs.length,
+      pressable: document.querySelectorAll('.pressable').length,
+      appear: document.querySelectorAll('.appear, .appear-anchored').length,
+      usingSpring,
+      bezier: [...bezier],
+    };
+  });
+  ok('스프링 아홉 개가 전부 정의되어 있다', motion.springs === 9,
+     motion.springs + '/9');
+  ok('대화상자가 스프링으로 나타난다', motion.appear >= 6, motion.appear + '개');
+  ok('누를 수 있는 것이 눌린 티를 낸다', motion.pressable >= 10,
+     motion.pressable + '개');
+  ok('스프링으로 전환하는 요소가 있다', motion.usingSpring > 20,
+     motion.usingSpring + '개');
+  ok('직접 쓴 베지어가 없다', motion.bezier.length === 0,
+     motion.bezier.join(', '));
+
   head('오류');
   ok('콘솔 오류 없음', errors.length === 0, errors.slice(0, 3).join(' | '));
 
