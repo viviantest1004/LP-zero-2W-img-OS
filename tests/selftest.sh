@@ -184,6 +184,17 @@ if printf "a\nb\n" | xargs echo | grep -q "a b" ; then echo "PASS  xargs joins l
 if printf "a\nb\n" | xargs -I {} echo "[{}]" | grep -q "\[b\]" ; then echo "PASS  xargs -I substitutes" ; else echo "FAIL  xargs -I" ; fi
 if grep -A 1 root /etc/passwd | wc -l | grep -q "[2-9]" ; then echo "PASS  grep -A prints trailing context" ; else echo "FAIL  grep -A" ; fi
 
+if echo aXbXc | sed 's/X/-/g' | grep -q "a-b-c" ; then echo "PASS  sed replaces every match with g" ; else echo "FAIL  sed s///g: `echo aXbXc | sed 's/X/-/g'`" ; fi
+if echo aXbXc | sed 's/X/-/' | grep -q "a-bXc" ; then echo "PASS  sed without g changes only the first" ; else echo "FAIL  sed s/// changed more than the first match" ; fi
+if seq 5 | sed -n '3p' | grep -q "^3$" ; then echo "PASS  sed -n Np prints one line" ; else echo "FAIL  sed -n 3p: `seq 5 | sed -n '3p'`" ; fi
+if seq 5 | sed '2,4d' | tr "\n" " " | grep -q "1 5" ; then echo "PASS  sed deletes an address range" ; else echo "FAIL  sed 2,4d" ; fi
+if echo "hello world" | sed -E 's/(hello) (world)/\2 \1/' | grep -q "world hello" ; then echo "PASS  sed keeps the groups in a replacement" ; else echo "FAIL  sed group references" ; fi
+if echo abc | sed 'y/abc/xyz/' | grep -q xyz ; then echo "PASS  sed y transliterates" ; else echo "FAIL  sed y///" ; fi
+if echo "a1b2" | sed 's/[[:digit:]]//g' | grep -q "^ab$" ; then echo "PASS  sed knows the POSIX classes" ; else echo "FAIL  sed [[:digit:]]" ; fi
+if printf "one\ntwo\n" > /tmp/sd1 && sed -i 's/one/1/' /tmp/sd1 && grep -q "^1$" /tmp/sd1 ; then echo "PASS  sed -i rewrites the file" ; else echo "FAIL  sed -i" ; fi
+if sed 'k' /tmp/sd1 2>&1 | grep -q position ; then echo "PASS  sed names the position of a bad command" ; else echo "FAIL  sed accepted a broken script" ; fi
+rm -f /tmp/sd1
+
 echo "=== SETTINGS THAT SURVIVE A REBOOT ==="
 # The RAM root means /etc is rebuilt every boot. These check the two
 # ways out of that: a profile on /data, and named /etc files kept.

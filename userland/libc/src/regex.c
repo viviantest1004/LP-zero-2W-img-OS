@@ -42,8 +42,10 @@
  * whose body can match nothing - \(a*\)* - would otherwise spin on the
  * spot until the budget ran out and then report a wrong answer for a
  * pattern people do write by accident. LOOP is the back edge of such a
- * loop and takes it only if the last iteration actually moved forward.
- * It costs one instruction and only when the body really is nullable.
+ * loop: it goes round again if the iteration just finished moved
+ * forward, and if it did not it fails, which throws that empty
+ * iteration away and leaves \1 holding what the last real one matched.
+ * It costs one instruction, and only when the body really is nullable.
  *
  * What it does NOT do:
  *
@@ -51,6 +53,10 @@
  *     unlike POSIX: a|ab on "ab" matches "a". Getting the longest
  *     alternative means running every branch to the end on every
  *     attempt, and nothing here is worth that.
+ *   - python's idea of what \1 holds after a repeat whose body matched
+ *     nothing last time round. \(a*\)* on "aaa" leaves \1 as "aaa" here,
+ *     which is what GNU sed does and what anyone comparing the two
+ *     would expect; python leaves it empty.
  *   - backreferences in the pattern. \1 in a sed replacement is sed's
  *     business, not the matcher's; \1 in a pattern is refused with a
  *     message saying so.
@@ -92,7 +98,6 @@ typedef struct { s32 slot, old; } jent;      /* one undone SAVE */
 
 #define MAX_INST   4096                      /* after repeats are expanded */
 #define MAX_REG    16                        /* nullable loops in one pattern */
-#define MAX_DEPTH  32                        /* nested groups */
 #define ST_MAX     32768                     /* backtrack stack entries */
 #define JR_MAX     32768                     /* undo journal entries */
 
@@ -161,12 +166,15 @@ static void set_fold(u8 *s)
 
 /* ── the parser ──────────────────────────────────────────────────── */
 
+/* p_alt and p_atom call each other, so the parser recurses - but only
+ * for a group, and there can be at most nine of those, so the depth is
+ * capped at ten frames however long the pattern is. Nothing else in
+ * this file recurses; the matcher does not recurse at all. */
 typedef struct {
     const char *p;
     bool        ere;
     lpre       *re;
     const char *err;
-    int         depth;
 } pst;
 
 static bool p_alt(pst *ps);
@@ -194,9 +202,24 @@ static int emit(pst *ps, u8 op, u8 ch, int x, int y)
 }
 
 /* Put one instruction in front of an already emitted stretch of code.
- * Everything after `at` shifts up by one, so every jump that pointed
- * there has to move with it. Targets of -1 are holes waiting to be
- * patched and stay holes. */
+ * Everything from `at` on shifts up by one, so the jumps that pointed
+ * there have to move with it - except the ones that land exactly on
+ * `at`, where "there" is ambiguous and the answer depends on where the
+ * jump is coming from:
+ *
+ *   from before at   it means "carry on with the code that starts
+ *                    here", and the instruction being inserted is now
+ *                    the first of it. The target stays.
+ *   from at or after it is inside the stretch being wrapped and means
+ *                    that particular instruction - a star's back edge
+ *                    to its own SPLIT, say, when a second star wraps
+ *                    it. The target moves.
+ *
+ * Getting that wrong is subtle and stays hidden: x*y* compiled with one
+ * blanket rule sends the exit of the first star into the middle of the
+ * second one, and only patterns with two adjacent repeats break.
+ *
+ * Targets of -1 are holes waiting to be patched and stay holes. */
 static bool insert_inst(pst *ps, int at, u8 op, u8 ch, int x, int y)
 {
     lpre *re = ps->re;
@@ -207,8 +230,9 @@ static bool insert_inst(pst *ps, int at, u8 op, u8 ch, int x, int y)
 
     for (int i = 0; i < re->n; i++) {
         reinst *in = &re->prog[i];
-        if ((in->op == I_JMP || in->op == I_SPLIT) && in->x >= at) in->x++;
-        if ((in->op == I_SPLIT || in->op == I_LOOP) && in->y >= at) in->y++;
+        int    low = (i < at) ? at + 1 : at;     /* == at: stay, or move */
+        if ((in->op == I_JMP || in->op == I_SPLIT) && in->x >= low) in->x++;
+        if ((in->op == I_SPLIT || in->op == I_LOOP) && in->y >= low) in->y++;
     }
     re->prog[at].op = op;
     re->prog[at].ch = ch;
@@ -247,7 +271,7 @@ static bool closure(lpre *re, int start, int stop, u8 *set, bool *any)
             case I_WORDB: case I_NWORDB:      t1 = i + 1; break;
             case I_JMP:                       t1 = in->x; break;
             case I_SPLIT:                     t1 = in->x; t2 = in->y; break;
-            case I_LOOP:                      t1 = in->y; t2 = i + 1; break;
+            case I_LOOP:                      t1 = in->y; break;
             case I_MATCH:                     if (any) *any = true; break;
             case I_CHAR:
                 if (set) {
@@ -304,6 +328,12 @@ static bool frag_emit(pst *ps, const reinst *f, int L)
  *    body: [SAVE reg]  the guard, only when the body can match nothing
  *          ...
  *          LOOP reg, start  or  JMP start
+ *
+ * With the guard the back edge is a LOOP, which fails instead of going
+ * round when the iteration matched nothing. Failing rather than falling
+ * out matters: it makes the machine undo that iteration's SAVEs, so
+ * \(a*\)* on "aaa" leaves \1 as "aaa" and not as the empty string the
+ * last spin round the loop would have put there.
  */
 static bool emit_star(pst *ps, int start)
 {
@@ -313,8 +343,9 @@ static bool emit_star(pst *ps, int start)
 
     if (guard) {
         if (re->nreg >= MAX_REG) {
-            ps->err = "too many repeats in this pattern can match nothing - "
-                      "write the ones that can plainly, without * or {}";
+            ps->err = "more than 16 repeats in this pattern have a body "
+                      "that can match nothing - take the * off the parts "
+                      "that are already optional";
             return false;
         }
         reg = RE_MAX_CAPS + re->nreg++;
@@ -628,12 +659,7 @@ static bool p_atom(pst *ps, bool first)
         }
         int g = ++ps->re->ngroup;
         if (emit(ps, I_SAVE, 0, 2 * g, 0) < 0) return false;
-        if (++ps->depth > MAX_DEPTH) {
-            ps->err = "the pattern nests groups more than 32 deep";
-            return false;
-        }
         if (!p_alt(ps)) return false;
-        ps->depth--;
         if ((k = at_close(ps)) == 0) {
             ps->err = ps->ere ? "unmatched ( in the pattern"
                               : "unmatched \\( in the pattern";
@@ -783,7 +809,7 @@ static bool p_alt(pst *ps)
         int j = emit(ps, I_JMP, 0, jchain, 0);
         if (j < 0) return false;
         jchain = j;
-        ps->re->prog[branch].y = ps->re->n;
+        ps->re->prog[branch].y = ps->re->n;      /* on to the next branch */
         branch = ps->re->n;
         if (!p_concat(ps)) return false;
     }
@@ -810,7 +836,7 @@ lpre *re_compile(const char *pattern, bool ere, bool icase, const char **err)
     re->icase = icase;
 
     pst ps;
-    ps.p = pattern; ps.ere = ere; ps.re = re; ps.err = NULL; ps.depth = 0;
+    ps.p = pattern; ps.ere = ere; ps.re = re; ps.err = NULL;
 
     if (emit(&ps, I_SAVE, 0, 0, 0) < 0) goto fail;
     if (!p_alt(&ps)) goto fail;
@@ -971,8 +997,9 @@ static bool run(lpre *re, const char *text, int len, int sp0, bool notbol,
             pc = in->x; ok = true;
             break;
         case I_LOOP:
-            pc = (sv[in->x] != sp) ? in->y : pc + 1;
-            ok = true;
+            /* nothing consumed this time round: fail, so the SAVEs the
+             * empty iteration made are undone with it */
+            if (sv[in->x] != sp) { pc = in->y; ok = true; }
             break;
         case I_MATCH:
             *used = steps;
