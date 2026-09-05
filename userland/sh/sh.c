@@ -2658,6 +2658,81 @@ static int build_prompt(char *out, size_t size)
     return (int)utf8_str_width(out, strlen(out));
 }
 
+/* ── the files read at login ──────────────────────────────────────
+ *
+ * The root filesystem is unpacked into RAM at every boot, so anything
+ * written into /etc is gone by morning. Until now that left no way at
+ * all to set a variable, extend PATH or define a function once and
+ * still have it tomorrow: every session started from nothing, and the
+ * only place to put anything was /data/rc.local, which runs as root at
+ * boot rather than in the shell a person is typing into.
+ *
+ * So an interactive shell reads two files at startup when they exist:
+ *
+ *   /etc/profile   shipped in the image, for the system as a whole
+ *   ~/.profile     the person's own. /root is a bind mount of
+ *                  /data/root, so this one is on the card and survives
+ *                  a reboot - which is the whole point.
+ *
+ * The lines go through split_statements and exec_block, the same path
+ * the prompt uses, so a function definition or an if in a profile
+ * behaves exactly as it does when typed.
+ *
+ * A profile that fails does not stop the shell from starting. A syntax
+ * error in a startup file that left somebody with no shell would be a
+ * board you have to take the card out of to fix, and this system's one
+ * rule is that there is always a way back. */
+static void source_file(const char *path)
+{
+    long fd = lp_open(path, O_RDONLY, 0);
+    if (fd < 0)
+        return;
+
+    static block_line_t sblock[MAX_BLOCK];
+    char line[MAX_LINE];
+    int  nblock = 0, depth = 0;
+
+    for (;;) {
+        long len = readline((int)fd, line, sizeof line);
+        if (len < 0)
+            break;
+        if (len == 0 || line[0] == '#')
+            continue;
+
+        int added = split_statements(line, sblock + nblock,
+                                     MAX_BLOCK - nblock);
+        for (int i = 0; i < added; i++) {
+            char w[32], fname[64];
+            first_word(sblock[nblock + i], w, sizeof w);
+            if (opens_block(w))  depth++;
+            if (closes_block(w)) depth--;
+            if (is_func_def(sblock[nblock + i], fname, sizeof fname)) depth++;
+            if (strcmp(w, "}") == 0) depth--;
+        }
+        nblock += added;
+
+        if (depth <= 0) {
+            if (nblock > 0)
+                exec_block(sblock, nblock);
+            nblock = 0;
+            depth  = 0;
+        }
+        if (nblock >= MAX_BLOCK - 8) {
+            dprintf(STDERR_FILENO,
+                    "sh: %s is too long to read in one piece - the rest was"
+                    " ignored\n", path);
+            break;
+        }
+    }
+
+    if (depth > 0)
+        dprintf(STDERR_FILENO,
+                "sh: %s ends with %d block%s still open - it was not run\n",
+                path, depth, depth == 1 ? "" : "s");
+
+    lp_close((int)fd);
+}
+
 int main(int argc, char **argv)
 {
     char line[MAX_LINE];
@@ -2808,6 +2883,17 @@ int main(int argc, char **argv)
         hist_load();
         if (lp_is_dir(HOME_DIR))
             lp_chdir(HOME_DIR);
+
+        /* Read after chdir, so a profile that does something relative to
+         * the home directory means what it looks like it means. */
+        source_file("/etc/profile");
+        {
+            const char *home = getenv("HOME");
+            char rc[512];
+            snprintf(rc, sizeof rc, "%s/.profile",
+                     (home && *home) ? home : HOME_DIR);
+            source_file(rc);
+        }
     }
 
     while (shell_running) {

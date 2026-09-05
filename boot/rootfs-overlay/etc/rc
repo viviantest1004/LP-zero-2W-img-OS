@@ -204,6 +204,15 @@ echo "[rc] keeping what gets installed"
 # down. `persist` on its own lists what is being kept.
 persist on || echo "[rc]   things installed into the system will NOT survive a reboot"
 
+# And the individual /etc files somebody asked to keep. /etc itself has
+# no overlay on purpose - the two files the boot has already read by now,
+# /etc/rc and /etc/services, must come from the image or an old copy on
+# the card could stop the board booting. Everything else in /etc is fair
+# game, and `persist etc keep /etc/hosts` is how it gets kept. This is a
+# copy rather than a mount, so a /data that vanishes mid-boot cannot
+# leave /etc half shadowed.
+persist etc restore || echo "[rc]   some kept /etc files could not be put back"
+
 echo "[rc] the system update"
 # Nothing happens here unless a new system was installed and has not yet
 # proved itself. When one has, this counts the attempt: three starts

@@ -222,6 +222,11 @@ static void show(void)
            total_files, total_files == 1 ? "" : "s",
            (total_bytes + 1023) / 1024);
 
+    printf("\n  /etc is not in that list - the boot reads part of it before"
+           " /data\n"
+           "  exists. Individual files can still be kept:"
+           " `persist etc`.\n");
+
     for (int i = 0; DIRS[i]; i++) {
         if (!already_overlaid(DIRS[i])) {
             printf("\n  ** is a directory that is NOT being kept: anything"
@@ -235,8 +240,240 @@ static void show(void)
     }
 }
 
+
+/* ── keeping a file from /etc ─────────────────────────────────────
+ *
+ * /etc deliberately has no overlay. /etc/rc and /etc/services are read
+ * BEFORE /data is mounted, so an overlay could not be in place in time
+ * anyway, and a stale copy of either shadowing a system update is
+ * exactly how a board stops booting.
+ *
+ * But that reasoning only applies to the files the boot itself reads.
+ * Everything else in /etc - a hosts file, a timezone, a message of the
+ * day, a configuration file something installed through apt expects -
+ * is simply lost at every reboot, and the answer "put it in
+ * /data/rc.local" is not an answer for a file.
+ *
+ * So: a named file can be kept. `persist etc keep /etc/hosts` copies it
+ * to /data/etc, and /etc/rc copies /data/etc back over /etc once /data
+ * is mounted - after the boot has already read the two files it must
+ * read from the image. A copy, not a mount: /etc is small, the copy
+ * costs nothing, and it cannot leave /etc half-shadowed if /data goes
+ * away mid-boot.
+ *
+ * The refused list is short and each entry has a reason, because a
+ * silent refusal reads as a bug. */
+#define ETC_KEEP "/data/etc"
+
+static bool etc_refused(const char *name, const char **why)
+{
+    if (strcmp(name, "rc") == 0 || strcmp(name, "services") == 0) {
+        *why = "the boot reads it before /data is mounted, so a kept copy"
+               " could never be in place in time - and an old one shadowing"
+               " a system update is how a board stops booting";
+        return true;
+    }
+    if (strcmp(name, "passwd") == 0 || strcmp(name, "shadow") == 0 ||
+        strcmp(name, "group") == 0) {
+        *why = "users are already kept, in /data/users, and merged in at"
+               " boot. Keeping the whole file would let a line with uid 0"
+               " in it arrive from a card written on another machine";
+        return true;
+    }
+    return false;
+}
+
+static bool copy_file(const char *from, const char *to, mode_t mode)
+{
+    long in = lp_open(from, O_RDONLY, 0);
+    if (in < 0)
+        return false;
+    long out = lp_open(to, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    if (out < 0) { lp_close((int)in); return false; }
+
+    char buf[8192];
+    bool ok = true;
+    for (;;) {
+        long n = lp_read((int)in, buf, sizeof buf);
+        if (n < 0)  { ok = false; break; }
+        if (n == 0) break;
+        if (lp_write((int)out, buf, (size_t)n) != n) { ok = false; break; }
+    }
+    lp_close((int)in);
+    lp_close((int)out);
+    if (!ok) lp_unlink(to);
+    return ok;
+}
+
+/* Walk /data/etc, calling back for each plain file in it. */
+static int etc_each(void (*fn)(const char *name, void *ctx), void *ctx)
+{
+    long fd = lp_open(ETC_KEEP, O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0)
+        return 0;
+
+    int seen = 0;
+    char buf[4096];
+    for (;;) {
+        long got = sys_getdents((int)fd, buf, sizeof buf);
+        if (got <= 0)
+            break;
+        for (long off = 0; off < got; ) {
+            char *rec  = buf + off;
+            u16   rlen = *(u16 *)(rec + DIRENT_RECLEN);
+            char *name = rec + DIRENT_NAME;
+            if (rlen == 0) break;
+            off += rlen;
+            if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+
+            char full[512];
+            snprintf(full, sizeof full, "%s/%s", ETC_KEEP, name);
+            lp_stat_t st;
+            if (lp_stat(full, &st, false) < 0) continue;
+            if ((st.mode & LP_S_IFMT) != LP_S_IFREG) continue;
+
+            seen++;
+            if (fn) fn(name, ctx);
+        }
+    }
+    lp_close((int)fd);
+    return seen;
+}
+
+static void etc_print(const char *name, void *ctx)
+{
+    (void)ctx;
+    char full[512];
+    snprintf(full, sizeof full, "%s/%s", ETC_KEEP, name);
+    lp_stat_t st;
+    long size = (lp_stat(full, &st, false) == 0) ? (long)st.size : 0;
+    printf("    /etc/%-24s %6ld bytes\n", name, size);
+}
+
+static void etc_restore_one(const char *name, void *ctx)
+{
+    int *failed = (int *)ctx;
+    char from[512], to[512];
+    snprintf(from, sizeof from, "%s/%s", ETC_KEEP, name);
+    snprintf(to,   sizeof to,   "/etc/%s", name);
+
+    const char *why;
+    if (etc_refused(name, &why))
+        return;                        /* never, whatever is on the card */
+
+    lp_stat_t st;
+    mode_t mode = (lp_stat(from, &st, false) == 0) ? (st.mode & 07777) : 0644;
+    if (!copy_file(from, to, mode))
+        (*failed)++;
+}
+
+static int etc_cmd(int argc, char **argv)
+{
+    /* persist etc restore - what /etc/rc calls. Quiet unless it fails. */
+    if (argc > 2 && strcmp(argv[2], "restore") == 0) {
+        int failed = 0;
+        etc_each(etc_restore_one, &failed);
+        if (failed)
+            dprintf(STDERR_FILENO,
+                    "persist: %d kept /etc file%s could not be put back\n",
+                    failed, failed == 1 ? "" : "s");
+        return failed ? 1 : 0;
+    }
+
+    if (argc > 3 && strcmp(argv[2], "keep") == 0) {
+        const char *arg = argv[3];
+        const char *name = leaf(arg);
+
+        /* Accept "hosts" and "/etc/hosts" alike, but refuse a path that
+         * is not in /etc at all rather than quietly keeping the leaf of
+         * something else. */
+        if (strchr(arg, '/') && strncmp(arg, "/etc/", 5) != 0) {
+            dprintf(STDERR_FILENO,
+                    "persist: %s is not in /etc.\n"
+                    "persist:   /bin /sbin /lib /usr /opt and /srv are"
+                    " already kept whole - just write the file.\n", arg);
+            return 1;
+        }
+        if (strchr(name, '/')) {
+            dprintf(STDERR_FILENO,
+                    "persist: only files directly in /etc can be kept,"
+                    " not %s\n", arg);
+            return 1;
+        }
+
+        const char *why;
+        if (etc_refused(name, &why)) {
+            dprintf(STDERR_FILENO,
+                    "persist: /etc/%s is not kept, because %s.\n", name, why);
+            return 1;
+        }
+
+        char src[512];
+        snprintf(src, sizeof src, "/etc/%s", name);
+        lp_stat_t st;
+        if (lp_stat(src, &st, false) < 0) {
+            dprintf(STDERR_FILENO, "persist: there is no %s to keep\n", src);
+            return 1;
+        }
+        if ((st.mode & LP_S_IFMT) != LP_S_IFREG) {
+            dprintf(STDERR_FILENO, "persist: %s is not a plain file\n", src);
+            return 1;
+        }
+
+        if (!ensure_dir(ETC_KEEP)) {
+            dprintf(STDERR_FILENO,
+                    "persist: cannot create %s - is /data mounted?\n",
+                    ETC_KEEP);
+            return 1;
+        }
+        char dst[512];
+        snprintf(dst, sizeof dst, "%s/%s", ETC_KEEP, name);
+        if (!copy_file(src, dst, st.mode & 07777)) {
+            dprintf(STDERR_FILENO, "persist: could not copy %s\n", src);
+            return 1;
+        }
+
+        printf("persist: /etc/%s is kept, and put back at every boot.\n", name);
+        printf("persist:   `persist etc keep /etc/%s` again after you edit"
+               " it - the copy\n"
+               "persist:   on the card is not updated by editing /etc.\n",
+               name);
+        return 0;
+    }
+
+    if (argc > 3 && strcmp(argv[2], "forget") == 0) {
+        const char *name = leaf(argv[3]);
+        char dst[512];
+        snprintf(dst, sizeof dst, "%s/%s", ETC_KEEP, name);
+        if (lp_unlink(dst) < 0) {
+            dprintf(STDERR_FILENO, "persist: /etc/%s was not being kept\n",
+                    name);
+            return 1;
+        }
+        printf("persist: /etc/%s is no longer kept. The image's copy is back"
+               " at the next reboot.\n", name);
+        return 0;
+    }
+
+    /* persist etc - what is being kept */
+    printf("/etc is rebuilt from the kernel image at every boot, so files"
+           " kept here\nare copied back over it once /data is mounted.\n\n");
+    int n = etc_each(etc_print, NULL);
+    if (!n)
+        printf("    nothing yet\n");
+    printf("\n  persist etc keep /etc/hosts     keep one\n");
+    printf("  persist etc forget /etc/hosts   stop\n\n");
+    printf("/etc/rc and /etc/services cannot be kept: the boot reads them"
+           " before\n/data exists. Put boot-time commands in"
+           " /data/rc.local instead.\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && strcmp(argv[1], "etc") == 0)
+        return etc_cmd(argc, argv);
+
     if (argc > 1 && strcmp(argv[1], "on") == 0) {
         /* Called from /etc/rc, once, after /data is mounted. Quiet when
          * it works: the boot has enough to say already. */
