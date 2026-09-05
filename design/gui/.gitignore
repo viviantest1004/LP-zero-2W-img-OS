@@ -1,0 +1,4 @@
+# Built by bundle.py: the same pages with everything folded in, for
+# sending. Regenerated in a second, half a megabyte of base64 in a diff
+# nobody can read - so it is made on demand rather than kept.
+dist/
