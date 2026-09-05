@@ -1064,7 +1064,7 @@ static bool check_auth(void)
     long fd = lp_open(AUTH_LOG, O_RDONLY, 0);
     if (fd < 0) {
         say("defend: no %s yet - nothing has tried to log in, or logd"
-               " is not running (`service status logd`)\n", AUTH_LOG);
+            " is not running (`service status logd`)\n", AUTH_LOG);
         return false;
     }
 
@@ -1093,14 +1093,14 @@ static bool check_auth(void)
     lp_close((int)fd);
 
     say("defend: ssh in the last %d minutes: %d failed, %d succeeded,"
-           " from %d address%s\n",
-           WINDOW_SECS / 60, auth_fail, auth_ok, nsources,
-           nsources == 1 ? "" : "es");
+        " from %d address%s\n",
+        WINDOW_SECS / 60, auth_fail, auth_ok, nsources,
+        nsources == 1 ? "" : "es");
 
     if (auth_nonv4 > 0)
         say("defend:    %d failure%s came from an address that is not"
-               " IPv4 - counted, not bannable (see -h)\n",
-               auth_nonv4, auth_nonv4 == 1 ? "" : "s");
+            " IPv4 - counted, not bannable (see -h)\n",
+            auth_nonv4, auth_nonv4 == 1 ? "" : "s");
 
     find_ssh_peers();
 
@@ -1128,26 +1128,30 @@ static bool check_auth(void)
          * ends that session and there is no console on this board. */
         if (is_ssh_peer(sources[i].addr) && npeers == 1) {
             tell("defend:    not banned - %s holds the only ssh session"
-                   " open right now, and this board has no other way in\n",
-                   host);
+                 " open right now, and this board has no other way in\n",
+                 host);
             tell("defend:    if that session is not yours: log in from"
-                   " somewhere else first, then run `defend` again\n");
+                 " somewhere else first, then run `defend` again\n");
             continue;
         }
-        if (sources[i].addr == htonl(0x7F000001u)) {
-            tell("defend:    not banned - that is this machine talking"
-                   " to itself\n");
+        /* The whole of 127.0.0.0/8, not just 127.0.0.1: the first
+         * octet is the first byte of a network-order address. */
+        u8 first;
+        memcpy(&first, &sources[i].addr, 1);
+        if (first == 127) {
+            tell("defend:    not banned - 127.0.0.0/8 is this machine"
+                 " talking to itself\n");
             continue;
         }
         if (opt_dry) {
             tell("defend:    -n given, so nothing was blocked -"
-                   " run `defend` without -n to block %s\n", host);
+                 " run `defend` without -n to block %s\n", host);
             continue;
         }
         if (nbans >= MAX_BANS) {
             tell("defend:    not banned - the list is full at %d."
-                   " `defend status` shows it; `defend unban <addr>`"
-                   " makes room\n", MAX_BANS);
+                 " `defend status` shows it; `defend unban <addr>`"
+                 " makes room\n", MAX_BANS);
             continue;
         }
 
@@ -1157,7 +1161,7 @@ static bool check_auth(void)
         nbans++;
         changed = true;
         tell("defend:    blocked. `defend unban %s` lets it back in\n",
-               host);
+             host);
     }
     return changed;
 }
@@ -1374,15 +1378,15 @@ static void check_files(void)
     walk("/data", 0);
 
     say("defend: /data: %d files in %d directories, %d worth a look%s\n",
-           fs_files, fs_dirs, findings - before,
-           opt_all ? "" : " (/data/debian and /data/python skipped, -a"
-                          " includes them)");
+        fs_files, fs_dirs, findings - before,
+        opt_all ? "" : " (/data/debian and /data/python skipped, -a"
+                       " includes them)");
     if (fs_extra > 0)
         say("defend:    and %d more of the same, not listed - deal with"
-               " the ones above and run it again\n", fs_extra);
+            " the ones above and run it again\n", fs_extra);
     if (fs_capped)
         say("defend:    stopped at %d directories deep; anything below"
-               " that was not looked at\n", MAX_DEPTH);
+            " that was not looked at\n", MAX_DEPTH);
 }
 
 /* ── 3. what is listening ────────────────────────────────────────────
@@ -1605,14 +1609,14 @@ static void check_listeners(void)
     collect_listeners();
 
     say("defend: listening: %d socket%s\n",
-           nlisten, nlisten == 1 ? "" : "s");
+        nlisten, nlisten == 1 ? "" : "s");
 
     if (!base_exists) {
         for (int i = 0; i < nlisten; i++)
             say("defend:    %s\n", listen_line[i]);
         say("defend:    no baseline recorded - run `defend baseline`"
-               " once this is the set you expect, and anything new after"
-               " that gets reported\n");
+            " once this is the set you expect, and anything new after"
+            " that gets reported\n");
         return;
     }
 
@@ -1638,7 +1642,7 @@ static void check_listeners(void)
                      " the baseline was recorded", key + 7, who);
             report(msg);
             tell("defend:    `netstat -lp` shows it, `ps` shows the"
-                   " process. If it is yours: `defend baseline`\n");
+                 " process. If it is yours: `defend baseline`\n");
             continue;
         }
 
@@ -1652,7 +1656,7 @@ static void check_listeners(void)
                      key + 7, who, waswho);
             report(msg);
             tell("defend:    a different program answering on a port"
-                   " that was already open. `ps` shows it\n");
+                 " that was already open. `ps` shows it\n");
         }
     }
 }
@@ -1674,7 +1678,7 @@ static void check_integrity(void)
         report("integrity is not installed - nothing is checking the files"
                " that survive a reboot");
         tell("defend:    /data/rc.local, authorized_keys, /data/users"
-               " are the ones that decide whether something runs again\n");
+             " are the ones that decide whether something runs again\n");
         return;
     }
 
@@ -1687,8 +1691,8 @@ static void check_integrity(void)
         report("integrity has never recorded what survives a reboot, so a"
                " change to those files cannot be seen");
         tell("defend:    run `integrity` once. /etc/rc does it at every"
-               " boot, so this means /data was not mounted at the last"
-               " one\n");
+             " boot, so this means /data was not mounted at the last"
+             " one\n");
         return;
     }
 
@@ -1910,18 +1914,18 @@ static void check_keys(void)
         report("no SSH key is authorized anywhere - nobody can log in,"
                " including you");
         tell("defend:    put your public key in authorized_keys on the"
-               " boot partition (it is FAT32) and reboot. `authkey -l`\n");
+             " boot partition (it is FAT32) and reboot. `authkey -l`\n");
         return;
     }
 
     say("defend: %d ssh key%s can log in:\n",
-           nkeylines, nkeylines == 1 ? "" : "s");
+        nkeylines, nkeylines == 1 ? "" : "s");
     for (int i = 0; i < nkeylines; i++)
         say("defend:    %s\n", key_line[i] + 4);
 
     if (!base_exists) {
         say("defend:    no baseline recorded - `defend baseline`, and a"
-               " key added after that gets reported\n");
+            " key added after that gets reported\n");
         return;
     }
 
@@ -1944,8 +1948,8 @@ static void check_keys(void)
                  key_line[i] + 4);
         report(msg);
         tell("defend:    if you did not add it, that is how somebody"
-               " keeps getting back in - edit /root/.ssh/authorized_keys"
-               " and `defend baseline`\n");
+             " keeps getting back in - edit /root/.ssh/authorized_keys"
+             " and `defend baseline`\n");
     }
 }
 
@@ -2036,7 +2040,7 @@ static int run_once(bool full)
     if (findings == 0)
         say("defend: nothing to report from %s\n",
             full ? "every check"
-                 : "the ssh log and the socket tables");
+              : "the ssh log and the socket tables");
     else
         say("defend: %d thing%s above want%s a decision\n",
             findings, findings == 1 ? "" : "s", findings == 1 ? "s" : "");
