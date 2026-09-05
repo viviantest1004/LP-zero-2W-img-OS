@@ -2236,17 +2236,6 @@ static void first_word(const char *line, char *out, size_t size)
     out[n] = '\0';
 }
 
-static bool is_keyword(const char *w)
-{
-    static const char *kw[] = {
-        "if", "then", "elif", "else", "fi",
-        "while", "do", "done", "for", NULL
-    };
-    for (int i = 0; kw[i]; i++)
-        if (strcmp(w, kw[i]) == 0)
-            return true;
-    return false;
-}
 
 /* "name() {" or "name () {" - the line that starts a function.
  * Writes the name into `out` when it is one. */
@@ -2300,54 +2289,60 @@ static bool closes_block(const char *w)
  *
  * The same bug hit anything with a semicolon in a quoted argument:
  * grep 'a;b', echo "one; two", a sed script. */
+/* The next ; that really separates two statements.
+ *
+ * Not one inside quotes, not one escaped, and not one inside a command
+ * substitution: `echo $(date ; uptime)` is one statement with a ; in the
+ * middle of it, and splitting there would hand half of it to the shell
+ * as a command of its own. */
 static const char *unquoted_semicolon(const char *p)
 {
     char quote = 0;
+    int  depth = 0;              /* nesting inside $( ) */
+    bool backtick = false;
+
     for (; *p; p++) {
         if (*p == '\\' && p[1]) { p++; continue; }
+
         if (quote) {
             if (*p == quote)
                 quote = 0;
             continue;
         }
+        if (backtick) {
+            if (*p == '`')
+                backtick = false;
+            continue;
+        }
+
         if (*p == '\'' || *p == '"') { quote = *p; continue; }
-        if (*p == ';')
+        if (*p == '`')                { backtick = true; continue; }
+        if (*p == '$' && p[1] == '(') { depth++; p++; continue; }
+        if (*p == '(' && depth)       { depth++; continue; }
+        if (*p == ')' && depth)       { depth--; continue; }
+
+        if (*p == ';' && depth == 0)
             return p;
     }
     return NULL;
 }
 
-/* Does this line contain "; <keyword>" outside of quotes? */
-static bool has_semi_keyword(const char *line)
-{
-    static const char *KW[] = { "then", "do", "fi", "done", "else",
-                                "elif", NULL };
-    for (const char *semi = unquoted_semicolon(line); semi;
-         semi = unquoted_semicolon(semi + 1)) {
-        const char *q = semi + 1;
-        while (*q == ' ' || *q == '\t') q++;
-        for (int i = 0; KW[i]; i++) {
-            size_t l = strlen(KW[i]);
-            if (strncmp(q, KW[i], l) == 0 &&
-                (q[l] == '\0' || q[l] == ' ' || q[l] == '\t' ||
-                 q[l] == ';'))
-                return true;
-        }
-    }
-    return false;
-}
 
 static int split_statements(const char *line, block_line_t *out, int max)
 {
-    char w[32];
-    first_word(line, w, sizeof(w));
-
-    /* No keyword anywhere: leave it exactly as typed. */
-    if (!is_keyword(w) && !has_semi_keyword(line)) {
-        strlcpy(out[0], line, MAX_LINE);
-        return 1;
-    }
-
+    /* Every line is split on its unquoted semicolons, keyword or not.
+     *
+     * This used to hand a line with no keyword in it straight through as
+     * one statement, and `false ; echo $?` then answered 0: the whole
+     * line was parsed - and $? expanded - before any of it ran, so the
+     * value came from the command before the line rather than from
+     * `false`. Every one-liner using $? was quietly wrong, while the
+     * same two commands on two lines of a script were right, which is
+     * the sort of difference nobody thinks to test.
+     *
+     * Splitting here means each statement is parsed just before it runs.
+     * && and || are deliberately NOT split: those join two commands into
+     * one decision and have to be parsed together. */
     int  n = 0;
     const char *p = line;
 
@@ -2718,12 +2713,182 @@ static void call_func(func_t *f, char **argv, int argc)
 }
 
 /* Run a run of logical lines, handling any control structures in them. */
+/* ── a pipeline feeding a loop ─────────────────────────────────────
+ *
+ *   cat log | while read line ; do ... ; done
+ *   ls | while read f ; do ... ; done
+ *
+ * This is how you process output a line at a time, and it did not work:
+ * the parser splits on | into pipeline stages and forks each one, so the
+ * second stage was the word "while", which is not a program. It answered
+ * "sh: while: command not found" and then tried to run "do" and "done"
+ * as commands too.
+ *
+ * A loop cannot be forked like a stage - it has to run in this shell, or
+ * variables set inside it would be lost, which is half of why anybody
+ * writes the loop. So the left-hand side is forked instead, with its
+ * output on a pipe, and the loop runs here with that pipe as its stdin.
+ * That is what every other shell does, and it is why `x=1` inside such a
+ * loop is visible afterwards here but not in bash - bash forks the loop.
+ * Ours is the more useful half of that trade on a machine with no job
+ * control.
+ *
+ * Returns the position of the keyword inside the line, having cut the
+ * line short at the |, or NULL when this is not that shape. */
+static char *pipe_into_block(char *line)
+{
+    char quote = 0;
+    int  depth = 0;
+    bool backtick = false;
+
+    for (char *p = line; *p; p++) {
+        if (*p == '\\' && p[1]) { p++; continue; }
+        if (quote)    { if (*p == quote) quote = 0; continue; }
+        if (backtick) { if (*p == '`')   backtick = false; continue; }
+        if (*p == '\'' || *p == '"') { quote = *p; continue; }
+        if (*p == '`')                { backtick = true; continue; }
+        if (*p == '$' && p[1] == '(') { depth++; p++; continue; }
+        if (*p == '(' && depth)       { depth++; continue; }
+        if (*p == ')' && depth)       { depth--; continue; }
+        if (depth || *p != '|')       continue;
+
+        /* || is an operator, not a pipe. */
+        if (p[1] == '|') { p++; continue; }
+
+        char *q = p + 1;
+        while (*q == ' ' || *q == '\t') q++;
+
+        char w[16];
+        int  k = 0;
+        while (q[k] && q[k] != ' ' && q[k] != '\t' && k < (int)sizeof w - 1) {
+            w[k] = q[k];
+            k++;
+        }
+        w[k] = '\0';
+
+        if (strcmp(w, "while") == 0 || strcmp(w, "for") == 0 ||
+            strcmp(w, "if") == 0) {
+            /* Trim the left side back off the | and hand back the rest. */
+            char *end = p;
+            while (end > line && (end[-1] == ' ' || end[-1] == '\t')) end--;
+            *end = '\0';
+            return q;
+        }
+
+        /* An ordinary pipe: everything after it is another stage, and
+         * run_logical_line already knows what to do with that. */
+        return NULL;
+    }
+    return NULL;
+}
+
 static int exec_block(block_line_t *lines, int n)
 {
     int i = 0;
     while (i < n && shell_running) {
+        /* `cmd | while ...` - fork the left side onto a pipe and let the
+         * loop below read it. Done before first_word, because after this
+         * the line starts with the keyword. */
+        pid_t feeder     = -1;
+        int   saved_in   = -1;
+        {
+            char left[MAX_LINE];
+            strlcpy(left, lines[i], sizeof left);
+            char *kw = pipe_into_block(left);
+            if (kw && left[0]) {
+                int fds[2];
+                if (lp_pipe(fds) == 0) {
+                    feeder = lp_fork();
+                    if (feeder == 0) {
+                        lp_close(fds[0]);
+                        lp_dup2(fds[1], STDOUT_FILENO);
+                        lp_close(fds[1]);
+                        lp_signal_default(SIGINT);
+                        lp_signal_default(SIGQUIT);
+                        run_logical_line(left);
+                        lp_exit(last_status);
+                    }
+                    lp_close(fds[1]);
+                    if (feeder > 0) {
+                        saved_in = (int)lp_dup(STDIN_FILENO);
+                        lp_dup2(fds[0], STDIN_FILENO);
+                        lp_close(fds[0]);
+                        /* The block now starts at the keyword. */
+                        strlcpy(lines[i], kw, MAX_LINE);
+                    } else {
+                        lp_close(fds[0]);
+                    }
+                }
+            }
+        }
+
         char w[32];
         first_word(lines[i], w, sizeof(w));
+
+        /* `done > file`, `done | cmd`, `fi > file`.
+         *
+         * The block executors find their end by the terminator word and
+         * ignore anything after it, so a redirection there was silently
+         * dropped: `while ... ; done > out` ran the loop and printed to
+         * the terminal, leaving an empty out and no complaint. Silently
+         * doing something other than what was written is the worst of
+         * the three possible behaviours, so the whole block gets the
+         * redirection, which is what it means everywhere else. */
+        pid_t drain    = -1;
+        int   saved_out = -1;
+        if (strcmp(w, "while") == 0 || strcmp(w, "for") == 0 ||
+            strcmp(w, "if") == 0) {
+            const char *term = (strcmp(w, "if") == 0) ? "fi" : "done";
+            int e = find_at_depth(lines, n, i + 1, term, NULL, NULL);
+            if (e >= 0) {
+                char *rest = lines[e] + strlen(term);
+                while (*rest == ' ' || *rest == '\t') rest++;
+
+                if (*rest == '|' && rest[1] != '|') {
+                    char right[MAX_LINE];
+                    strlcpy(right, rest + 1, sizeof right);
+                    int fds[2];
+                    if (right[0] && lp_pipe(fds) == 0) {
+                        drain = lp_fork();
+                        if (drain == 0) {
+                            lp_close(fds[1]);
+                            lp_dup2(fds[0], STDIN_FILENO);
+                            lp_close(fds[0]);
+                            lp_signal_default(SIGINT);
+                            lp_signal_default(SIGQUIT);
+                            run_logical_line(right);
+                            lp_exit(last_status);
+                        }
+                        lp_close(fds[0]);
+                        if (drain > 0) {
+                            saved_out = (int)lp_dup(STDOUT_FILENO);
+                            lp_dup2(fds[1], STDOUT_FILENO);
+                            lp_close(fds[1]);
+                            strlcpy(lines[e], term, MAX_LINE);
+                        } else {
+                            lp_close(fds[1]);
+                        }
+                    }
+                } else if (*rest == '>') {
+                    bool append = (rest[1] == '>');
+                    const char *fn = rest + (append ? 2 : 1);
+                    while (*fn == ' ' || *fn == '\t') fn++;
+                    if (*fn) {
+                        long f = lp_open(fn, O_WRONLY | O_CREAT |
+                                         (append ? O_APPEND : O_TRUNC), 0644);
+                        if (f < 0) {
+                            dprintf(STDERR_FILENO,
+                                    "sh: %s: cannot write to it\n", fn);
+                        } else {
+                            saved_out = (int)lp_dup(STDOUT_FILENO);
+                            lp_dup2((int)f, STDOUT_FILENO);
+                            lp_close((int)f);
+                            strlcpy(lines[e], term, MAX_LINE);
+                        }
+                    }
+                }
+            }
+        }
 
         char fname[64];
         if (is_func_def(lines[i], fname, sizeof fname))
@@ -2734,6 +2899,28 @@ static int exec_block(block_line_t *lines, int n)
         else {
             run_logical_line(lines[i]);
             i++;
+        }
+
+        if (saved_out >= 0) {
+            lp_dup2(saved_out, STDOUT_FILENO);
+            lp_close(saved_out);
+        }
+        if (drain > 0) {
+            int st = 0;
+            lp_waitpid(drain, &st, 0);
+        }
+
+        if (feeder > 0) {
+            /* Put stdin back before anything else reads it, then collect
+             * the writer. A loop that stopped early leaves it writing
+             * into a pipe nobody reads; closing our end first is what
+             * makes it get SIGPIPE and finish rather than block. */
+            if (saved_in >= 0) {
+                lp_dup2(saved_in, STDIN_FILENO);
+                lp_close(saved_in);
+            }
+            int st = 0;
+            lp_waitpid(feeder, &st, 0);
         }
 
         /* A pending break or continue stops the rest of this block.

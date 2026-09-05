@@ -175,6 +175,14 @@ if echo "a+b" | grep -q "a+b" ; then echo "PASS  grep without -E treats + as an 
 if echo "aab" | grep -qE "a+b" ; then echo "PASS  grep -E treats + as a repeat" ; else echo "FAIL  grep -E" ; fi
 if echo "dog" | grep -qE "cat|dog" ; then echo "PASS  grep -E does alternation" ; else echo "FAIL  grep -E alternation" ; fi
 if echo "" | read v ; then echo "PASS  read succeeds on a line" ; else echo "FAIL  read returned failure on a real line" ; fi
+if false ; then echo x ; fi ; false ; if test $? -eq 1 ; then echo "PASS  \$? is the status of the command just before it" ; else echo "FAIL  \$? on one line is stale - it was `false ; echo $?`" ; fi
+if seq 3 | while read n ; do echo v$n ; done | grep -c v | grep -q 3 ; then echo "PASS  a pipeline can feed a while loop" ; else echo "FAIL  cmd | while read - the loop got nothing" ; fi
+for i in 1 2 ; do echo $i ; done > /tmp/blk1
+if wc -l < /tmp/blk1 | grep -q 2 ; then echo "PASS  a redirect on done applies to the whole loop" ; else echo "FAIL  done > file was dropped" ; fi
+if printf "a\nb\n" | while read v ; do echo $v ; done | tr a-z A-Z | grep -q "^A$" ; then echo "PASS  and a pipe after done carries the loop output on" ; else echo "FAIL  done | cmd was dropped" ; fi
+rm -f /tmp/blk1
+if echo "x ; y" | grep -q "x ; y" ; then echo "PASS  a semicolon inside quotes is not a separator" ; else echo "FAIL  quoted semicolon was split" ; fi
+if test "`echo $(echo a ; echo b)`" = "a b" ; then echo "PASS  a semicolon inside \$( ) is not a separator either" ; else echo "FAIL  \$(a ; b) was split" ; fi
 export LPTEST=works
 if env | grep -q "LPTEST=works" ; then echo "PASS  export assigns and the value is in the environment" ; else echo "FAIL  export" ; fi
 
