@@ -1,6 +1,7 @@
 /* wget - download a file.
  *
  *   wget <url> [file]
+ *   wget -O <file> <url>
  *
  * http:// is fetched here. https:// is handed to python3 on /data,
  * which has a real TLS stack with OpenSSL inside it - there is none in
@@ -21,14 +22,41 @@ int main(int argc, char **argv)
 {
     if (argc < 2 || strcmp(argv[1], "-h") == 0) {
         printf("usage: wget <url> [file]\n");
+        printf("       wget -O <file> <url>\n");
         printf("  https:// works too, by way of python3 on /data -\n");
         printf("  a few seconds slower to start, and it checks the\n");
         printf("  certificate against /data/ssl/cert.pem\n");
         return argc < 2 ? 2 : 0;
     }
 
-    const char *url  = argv[1];
-    const char *dest = (argc > 2) ? argv[2] : NULL;
+    const char *url  = NULL;
+    const char *dest = NULL;
+
+    /* -O is accepted because it is what everybody types.
+     *
+     * This only ever took its arguments positionally, and `wget -O out
+     * url` therefore treated "-O" as the URL and printed "-O: this is
+     * not an http:// or https:// URL" - which reads as the URL being
+     * rejected rather than the option not existing. Every other wget on
+     * earth spells it this way; refusing it taught nobody anything. */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-O") == 0) {
+            if (i + 1 >= argc) {
+                dprintf(STDERR_FILENO, "wget: -O needs a file name after it\n");
+                return 2;
+            }
+            dest = argv[++i];
+        } else if (!url) {
+            url = argv[i];
+        } else if (!dest) {
+            dest = argv[i];
+        }
+    }
+
+    if (!url) {
+        dprintf(STDERR_FILENO, "wget: no URL given\n");
+        return 2;
+    }
 
     char name[256];
     if (!dest) {

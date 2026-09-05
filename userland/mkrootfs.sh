@@ -84,7 +84,10 @@ ln -sf chown   "${ROOT_DIR}/bin/chgrp"
 ln -sf id      "${ROOT_DIR}/bin/groups"
 ln -sf useradd "${ROOT_DIR}/bin/userdel"
 ln -sf su      "${ROOT_DIR}/bin/sudo"
-log "bin/: ${PROGRAMS[*]} umount lsattr chgrp groups userdel sudo"
+# `less` is what people type. `more` here already scrolls both ways and
+# quits on q, so the name is the only thing that was missing.
+ln -sf more    "${ROOT_DIR}/bin/less"
+log "bin/: ${PROGRAMS[*]} umount lsattr chgrp groups userdel sudo less"
 
 # 커널은 initramfs 의 /init 을 PID 1 로 실행한다
 ln -sf bin/init "${ROOT_DIR}/init"

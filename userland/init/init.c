@@ -20,8 +20,27 @@
 #define SHELL_PATH   "/bin/sh"
 #define RC_SCRIPT    "/etc/rc"
 #define SERVICES     "/etc/services"
+
+/* Services somebody added on this machine.
+ *
+ * /etc/services is in the kernel image, so it is read-only in every
+ * sense that matters: editing it lasts until the next boot. That left
+ * no way at all to have init supervise a program of your own - the only
+ * writable thing that ran at boot was /data/rc.local, which starts
+ * something once and never looks at it again. A web server started that
+ * way stays dead the first time it crashes, on a board nobody is
+ * watching, which is the whole reason init supervises anything.
+ *
+ * So this file is read too, right after the built-in one and after
+ * /etc/rc has mounted /data. Same format, same supervision, same
+ * protection from guard - a service init names is one guard will not
+ * kill under memory pressure. `service add` writes it. */
+#define USER_SERVICES "/data/services"
 #define RESPAWN_MS   1000   /* pause before a respawn, to stop a busy loop */
-#define MAX_SERVICES 16
+/* Nine of these are the system's own. The rest is room for what
+ * somebody adds with `service add`; past that init says so rather than
+ * silently dropping the last line. */
+#define MAX_SERVICES 24
 #define SERVICE_PIDS "/var/service.pids"
 #define MAX_SVC_ARGS 16
 
@@ -179,7 +198,10 @@ static void banner(void)
  * watching them here is the natural place. */
 
 typedef struct {
-    char   line[256];               /* the original; argv points into it */
+    char   line[256];               /* split in place; argv points into it */
+    char   orig[256];               /* the same line before splitting, so a
+                                       rescan can tell "already running" from
+                                       "new" without rebuilding the argv */
     char  *argv[MAX_SVC_ARGS + 1];
     pid_t  pid;
     int    fails;                   /* consecutive failures */
@@ -293,6 +315,7 @@ static bool service_wanted_here(const char *line, const char **rest)
 static bool parse_service(const char *line, service_t *svc)
 {
     strlcpy(svc->line, line, sizeof(svc->line));
+    strlcpy(svc->orig, line, sizeof(svc->orig));
 
     int n = 0;
     char *p = svc->line;
@@ -374,7 +397,7 @@ static bool wanted_in_safe_mode(const char *program)
     return strcmp(program, "dropbear") == 0;
 }
 
-static void load_services(void)
+static void load_services_from(const char *path)
 {
     /* Big enough for the file plus the comments explaining it. When this
      * was 2048 the file grew past it and the last service - the watchdog -
@@ -382,14 +405,14 @@ static void load_services(void)
      * service quietly missing is the worst way for this to fail, so the
      * truncation is now reported. */
     char buf[8192];
-    long n = proc_read(SERVICES, buf, sizeof(buf));
+    long n = proc_read(path, buf, sizeof(buf));
     if (n <= 0)
         return;
 
     if (n >= (long)sizeof(buf) - 1)
         dprintf(STDERR_FILENO,
                 "init: %s is larger than %d bytes - the end was cut off\n",
-                SERVICES, (int)sizeof(buf));
+                path, (int)sizeof(buf));
 
     char *p = buf;
     while (*p && nservices < MAX_SERVICES) {
@@ -438,7 +461,81 @@ static void load_services(void)
     if (nservices >= MAX_SERVICES)
         dprintf(STDERR_FILENO,
                 "init: ** %s has more than %d services."
-                " The rest were not started.\n", SERVICES, MAX_SERVICES);
+                " The rest were not started.\n", path, MAX_SERVICES);
+}
+
+/* The system's services first, then whatever this machine added.
+ *
+ * That order matters. The system's own - guard, dropbear, the watchdog -
+ * are what get the machine back if something else goes wrong, so they
+ * take the table's places before anything a person wrote can fill it. */
+static void load_services(void)
+{
+    load_services_from(SERVICES);
+    load_services_from(USER_SERVICES);
+}
+
+/* Pick up a service added since boot.
+ *
+ * `service add` writes /data/services, and the first question anybody
+ * asks after that is whether they have to reboot. Answering no costs
+ * one small file read every few seconds inside a loop that is otherwise
+ * asleep, and it is the difference between a supervisor people use and
+ * one they work around with rc.local - which starts a program once and
+ * never looks at it again.
+ *
+ * Only additions are acted on. A line taken OUT of the file is left
+ * running until it dies or `service stop` says so: init killing a
+ * process because a file changed underneath it is not a surprise
+ * anybody wants at three in the morning. */
+static void rescan_user_services(void)
+{
+    static s64 next_look = 0;
+    s64 now = lp_monotonic_ms();
+    if (now < next_look)
+        return;
+    next_look = now + 5000;
+
+    if (safe_mode())
+        return;                     /* rescue mode runs SSH and nothing else */
+
+    char buf[8192];
+    long n = proc_read(USER_SERVICES, buf, sizeof buf);
+    if (n <= 0)
+        return;
+
+    char *p = buf;
+    while (*p && nservices < MAX_SERVICES) {
+        char *eol = strchr(p, '\n');
+        if (eol) *eol = '\0';
+
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p && *p != '#') {
+            const char *cmd = p;
+            if (service_wanted_here(p, &cmd)) {
+                bool known = false;
+                for (int i = 0; i < nservices; i++)
+                    if (strcmp(services[i].orig, cmd) == 0) { known = true; break; }
+
+                if (!known && parse_service(cmd, &services[nservices])) {
+                    start_service(&services[nservices]);
+                    services[nservices].started_at = lp_monotonic_ms();
+                    printf("init: started service %s (pid %d) - added since"
+                           " boot\n", services[nservices].argv[0],
+                           (int)services[nservices].pid);
+                    nservices++;
+                }
+            }
+        }
+
+        if (!eol) break;
+        p = eol + 1;
+    }
+
+    if (pids_dirty) {
+        publish_service_pids();
+        pids_dirty = false;
+    }
 }
 
 #define DISABLED_FILE  "/data/services.disabled"
@@ -1249,18 +1346,27 @@ int main(int argc, char **argv)
             do_shutdown(shutdown_wanted);
 
         restart_due_services();
+        rescan_user_services();
 
         int status = 0;
+
+        /* Always a non-blocking wait, then a second's sleep.
+         *
+         * This used to park in wait() whenever every service was healthy,
+         * which costs nothing at all - but it also meant pid 1 noticed
+         * nothing until a child died. A service added with `service add`
+         * would then not start until the next reboot, and `service start`
+         * on a healthy machine felt broken. One wakeup a second on a
+         * 1GHz core is not a cost worth that. */
         bool pending = services_pending();
-        pid_t pid = pending ? lp_waitpid(-1, &status, WNOHANG)
-                            : lp_wait(&status);
+        pid_t pid = lp_waitpid(-1, &status, WNOHANG);
 
         if (pid == 0) {
-            /* Children, but none of them finished, and something is not
-             * running. Look again shortly - a second is soon enough for
-             * `service start` to feel immediate and rare enough to cost
-             * nothing. */
-            lp_sleep_ms(1000);
+            /* Children, but none of them finished. A quarter second when
+             * something is waiting to be restarted, so a service comes
+             * back promptly; a second otherwise, which is soon enough
+             * for `service add` to feel immediate. */
+            lp_sleep_ms(pending ? 250 : 1000);
             continue;
         }
 

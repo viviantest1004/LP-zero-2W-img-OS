@@ -33,20 +33,34 @@
 #define SERVICES  "/etc/services"
 #define DISABLED  "/data/services.disabled"
 
+/* Services added on this machine.
+ *
+ * /etc/services is inside the kernel image and is rebuilt from it at
+ * every boot, so there was no way at all to have init supervise a
+ * program of your own. The only writable thing that ran at boot was
+ * /data/rc.local, which starts something once and never looks at it
+ * again - so a web server started that way stays dead the first time it
+ * crashes, on a board nobody is watching. That is precisely what init
+ * exists to prevent.
+ *
+ * init reads this file alongside the built-in one, and looks at it again
+ * every few seconds, so `service add` takes effect without a reboot. */
+#define USER_SVC  "/data/services"
+
 /* dirent, as getdents64 lays it out */
 #define DIRENT_RECLEN 16
 #define DIRENT_NAME   19
 
 /* ── which services there are ────────────────────────────────────── */
 
-#define MAX_SERVICES 16
+#define MAX_SERVICES 24
 static char names[MAX_SERVICES][32];
 static char lines[MAX_SERVICES][160];
 static int  nservices = 0;
 
-static void load(void)
+static void load_from(const char *path)
 {
-    long fd = lp_open(SERVICES, O_RDONLY, 0);
+    long fd = lp_open(path, O_RDONLY, 0);
     if (fd < 0)
         return;
 
@@ -83,6 +97,14 @@ static void load(void)
         nservices++;
     }
     lp_close((int)fd);
+}
+
+/* The system's own list, then this machine's. Same order init uses, so
+ * what `service` shows is what init is actually holding. */
+static void load(void)
+{
+    load_from(SERVICES);
+    load_from(USER_SVC);
 }
 
 static int index_of(const char *name)
@@ -372,6 +394,165 @@ static int do_start(const char *name)
     return 0;
 }
 
+/* ── adding one ───────────────────────────────────────────────────── */
+
+static bool user_line_matches(const char *line, const char *name)
+{
+    /* Match on the program, not the whole line: somebody removing
+     * "httpd" means the httpd service, arguments and all. */
+    while (*line == ' ' || *line == '\t') line++;
+    size_t n = strlen(name);
+    if (strncmp(line, name, n) != 0)
+        return false;
+    return line[n] == '\0' || line[n] == ' ' || line[n] == '\t';
+}
+
+/* Rewrite /data/services with one line added or removed.
+ *
+ * Through a temporary and a rename, so a power cut leaves either the old
+ * list or the new one. A truncated services file is a board that comes
+ * back with half its services missing and nothing saying why. */
+static int rewrite_user(const char *drop_name, const char *add_line)
+{
+    char buf[8192];
+    long n = proc_read(USER_SVC, buf, sizeof buf);
+    if (n < 0) n = 0;
+    buf[n] = '\0';
+
+    char out[8192];
+    int  len = 0;
+    bool removed = false;
+
+    len += snprintf(out + len, sizeof out - len,
+                    "# Services added on this machine, supervised by init\n"
+                    "# exactly like the built-in ones. `service add` writes\n"
+                    "# this; `service remove` takes a line out.\n");
+
+    char *p = buf;
+    while (*p) {
+        char *eol = strchr(p, '\n');
+        if (eol) *eol = '\0';
+
+        char *line = p;
+        while (*line == ' ' || *line == '\t') line++;
+        if (*line && *line != '#') {
+            if (drop_name && user_line_matches(line, drop_name)) {
+                removed = true;
+            } else if (len < (int)sizeof out - 300) {
+                len += snprintf(out + len, sizeof out - len, "%s\n", line);
+            }
+        }
+
+        if (!eol) break;
+        p = eol + 1;
+    }
+
+    if (add_line && len < (int)sizeof out - 300)
+        len += snprintf(out + len, sizeof out - len, "%s\n", add_line);
+
+    if (drop_name && !removed) {
+        dprintf(STDERR_FILENO,
+                "service: %s was not added here.\n"
+                "service:   `service` lists everything; the ones from the\n"
+                "service:   system image cannot be removed, only stopped.\n",
+                drop_name);
+        return 1;
+    }
+
+    char tmp[] = USER_SVC ".new";
+    long fd = lp_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        dprintf(STDERR_FILENO,
+                "service: cannot write %s - is /data mounted and writable?\n",
+                USER_SVC);
+        return 1;
+    }
+    bool ok = lp_write((int)fd, out, (size_t)len) == len;
+    lp_close((int)fd);
+    if (!ok || lp_rename(tmp, USER_SVC) != 0) {
+        lp_unlink(tmp);
+        dprintf(STDERR_FILENO, "service: could not replace %s\n", USER_SVC);
+        return 1;
+    }
+    return 0;
+}
+
+static int do_add(int argc, char **argv)
+{
+    if (argc < 3) {
+        dprintf(STDERR_FILENO,
+                "usage: service add <command> [arguments]\n"
+                "  e.g. service add httpd -d /data/www -p 8080\n");
+        return 2;
+    }
+
+    /* Build the line, and check the program exists before writing it.
+     * A service that cannot start is a line init retries twenty times
+     * and then gives up on, with the reason buried in the boot log. */
+    char line[512];
+    line[0] = '\0';
+    for (int i = 2; i < argc; i++) {
+        if (i > 2) strlcat(line, " ", sizeof line);
+        strlcat(line, argv[i], sizeof line);
+    }
+
+    const char *prog = argv[2];
+    char full[512];
+    bool found = false;
+    if (strchr(prog, '/')) {
+        found = lp_access(prog, X_OK) == 0;
+        strlcpy(full, prog, sizeof full);
+    } else {
+        static const char *dirs[] = { "/bin", "/sbin", "/usr/bin",
+                                      "/usr/sbin", "/data/bin", NULL };
+        for (int i = 0; dirs[i] && !found; i++) {
+            snprintf(full, sizeof full, "%s/%s", dirs[i], prog);
+            found = lp_access(full, X_OK) == 0;
+        }
+    }
+    if (!found) {
+        dprintf(STDERR_FILENO,
+                "service: there is no %s to run.\n"
+                "service:   `which %s` says where it would come from;"
+                " give a full path\n"
+                "service:   if it is somewhere else.\n", prog, prog);
+        return 1;
+    }
+
+    /* Refuse a name the system already supervises, rather than starting
+     * a second copy of it. */
+    for (int i = 0; i < nservices; i++)
+        if (strcmp(names[i], prog) == 0) {
+            dprintf(STDERR_FILENO,
+                    "service: %s is already supervised.\n"
+                    "service:   `service status %s` shows it.\n", prog, prog);
+            return 1;
+        }
+
+    if (rewrite_user(NULL, line) != 0)
+        return 1;
+
+    printf("service: %s added. init starts it within a few seconds, and\n"
+           "service:   restarts it whenever it dies - including after a\n"
+           "service:   reboot. `service status %s` to watch.\n", prog, prog);
+    printf("service:   guard will not kill it under memory pressure either;\n"
+           "service:   that protection follows the list init is holding.\n");
+    return 0;
+}
+
+static int do_remove(const char *name)
+{
+    if (rewrite_user(name, NULL) != 0)
+        return 1;
+    printf("service: %s removed from %s.\n", name, USER_SVC);
+    printf("service:   it is left running until it stops on its own -"
+           " init does not\n"
+           "service:   kill a process because a file changed. `service stop"
+           " %s`\n"
+           "service:   ends it now.\n", name);
+    return 0;
+}
+
 static void usage(void)
 {
     printf("service - what init is keeping alive\n\n");
@@ -379,8 +560,14 @@ static void usage(void)
     printf("  service status <name>\n");
     printf("  service restart <name>\n");
     printf("  service stop <name>        and keep it stopped\n");
-    printf("  service start <name>\n\n");
-    printf("init reads %s at boot and restarts anything in it\n", SERVICES);
+    printf("  service start <name>\n");
+    printf("  service add <command> [args]   supervise something of"
+           " your own\n");
+    printf("  service remove <name>          stop supervising it\n\n");
+    printf("init reads %s at boot, and %s\n", SERVICES, USER_SVC);
+    printf("as well - that second file is on the data partition, which is\n");
+    printf("why anything you add there is still supervised tomorrow. It\n");
+    printf("restarts whatever is in either one when it dies\n");
     printf("that dies. There are no units, dependencies or targets - it is\n");
     printf("a list of commands and a supervisor.\n\n");
     printf("'restart' kills it and lets init do its job. 'stop' writes the\n");
@@ -395,8 +582,9 @@ int main(int argc, char **argv)
 
     if (nservices == 0) {
         dprintf(STDERR_FILENO,
-                "service: %s is empty or missing, so init is\n"
-                "service:   supervising nothing.\n", SERVICES);
+                "service: neither %s nor %s\n"
+                "service:   has anything in it, so init is supervising"
+                " nothing.\n", SERVICES, USER_SVC);
         return 1;
     }
 
@@ -408,6 +596,7 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "-h") == 0 || strcmp(cmd, "--help") == 0 ||
         strcmp(cmd, "help") == 0) { usage(); return 0; }
     if (strcmp(cmd, "list") == 0) return list_all();
+    if (strcmp(cmd, "add") == 0)  return do_add(argc, argv);
 
     if (argc < 3) {
         dprintf(STDERR_FILENO, "usage: service %s <name>\n", cmd);
@@ -424,6 +613,7 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "restart") == 0) return do_restart(name);
     if (strcmp(cmd, "stop") == 0)    return do_stop(name, force);
     if (strcmp(cmd, "start") == 0)   return do_start(name);
+    if (strcmp(cmd, "remove") == 0)  return do_remove(name);
 
     dprintf(STDERR_FILENO, "service: no idea what \"%s\" means\n", cmd);
     usage();

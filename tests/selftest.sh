@@ -160,6 +160,51 @@ if test $ELAPSED -ge 11 ; then echo "PASS  sleep 12 waited at least 11s" ; else 
 if test $ELAPSED -le 20 ; then echo "PASS  and not much more (${ELAPSED}s)" ; else echo "FAIL  sleep 12 waited ${ELAPSED}s - the parser is scaling wrongly" ; fi
 if test 12 -gt 9 ; then echo "PASS  test compares two-digit numbers" ; else echo "FAIL  test -gt is wrong above nine" ; fi
 
+echo "=== THE EVERYDAY COMMANDS ==="
+# These are the ones a script needs to exist at all. Each check is the
+# smallest thing that would catch the command being absent or wrong,
+# because a hundred cases here would push the run past the point where
+# anybody reads the output.
+if seq 3 | tr "\n" " " | grep -q "1 2 3" ; then echo "PASS  seq counts" ; else echo "FAIL  seq: `seq 3 | tr '\n' ' '`" ; fi
+if seq -w 8 10 | head -1 | grep -q "08" ; then echo "PASS  seq -w pads (so %*d works in our printf)" ; else echo "FAIL  seq -w: `seq -w 8 10 | head -1`" ; fi
+if echo abc | tr a-z A-Z | grep -q ABC ; then echo "PASS  tr changes case" ; else echo "FAIL  tr a-z A-Z" ; fi
+if echo aaab | tr -s a | grep -q "^ab" ; then echo "PASS  tr -s squeezes" ; else echo "FAIL  tr -s: `echo aaab | tr -s a`" ; fi
+if basename /a/b/c.txt .txt | grep -q "^c$" ; then echo "PASS  basename strips a suffix" ; else echo "FAIL  basename" ; fi
+if dirname /a/b/c.txt | grep -q "^/a/b$" ; then echo "PASS  dirname" ; else echo "FAIL  dirname: `dirname /a/b/c.txt`" ; fi
+if which sh | grep -q "/sh$" ; then echo "PASS  which finds a command on PATH" ; else echo "FAIL  which sh: `which sh`" ; fi
+if printf "%-6s|" ab | grep -q "ab    |" ; then echo "PASS  printf pads a column" ; else echo "FAIL  printf %-6s" ; fi
+if echo abc | rev | grep -q cba ; then echo "PASS  rev" ; else echo "FAIL  rev" ; fi
+if printf "x\ny\n" > /tmp/t30 && nl /tmp/t30 | grep -q "1.*x" ; then echo "PASS  nl numbers lines" ; else echo "FAIL  nl" ; fi
+echo same > /tmp/t31
+echo same > /tmp/t32
+echo diff > /tmp/t33
+if cmp -s /tmp/t31 /tmp/t32 ; then echo "PASS  cmp says two equal files are equal" ; else echo "FAIL  cmp on equal files" ; fi
+if cmp -s /tmp/t31 /tmp/t33 ; then echo "FAIL  cmp said two different files match" ; else echo "PASS  cmp notices a difference" ; fi
+if printf "a\nb\n" | xargs echo | grep -q "a b" ; then echo "PASS  xargs joins lines into arguments" ; else echo "FAIL  xargs" ; fi
+if printf "a\nb\n" | xargs -I {} echo "[{}]" | grep -q "\[b\]" ; then echo "PASS  xargs -I substitutes" ; else echo "FAIL  xargs -I" ; fi
+if grep -A 1 root /etc/passwd | wc -l | grep -q "[2-9]" ; then echo "PASS  grep -A prints trailing context" ; else echo "FAIL  grep -A" ; fi
+
+echo "=== SETTINGS THAT SURVIVE A REBOOT ==="
+# The RAM root means /etc is rebuilt every boot. These check the two
+# ways out of that: a profile on /data, and named /etc files kept.
+if test -f /etc/profile ; then echo "PASS  /etc/profile ships in the image" ; else echo "FAIL  no /etc/profile" ; fi
+echo "LPSELFTEST=yes" > /root/.profile
+if sh -c ". /dev/null ; echo started" > /dev/null 2>&1 ; then echo "PASS  a shell starts with a profile present" ; else echo "FAIL  a profile stopped the shell starting" ; fi
+rm -f /root/.profile
+if persist etc keep /etc/hosts > /tmp/t34 2>&1 ; then echo "PASS  persist etc keeps a file" ; else echo "FAIL  persist etc keep: `head -1 /tmp/t34`" ; fi
+if test -f /data/etc/hosts ; then echo "PASS  and the copy is on the card" ; else echo "FAIL  nothing landed in /data/etc" ; fi
+if persist etc keep /etc/rc > /tmp/t35 2>&1 ; then echo "FAIL  persist etc kept /etc/rc - that can stop the board booting" ; else echo "PASS  persist etc refuses /etc/rc" ; fi
+if grep -q "before /data" /tmp/t35 ; then echo "PASS  and says why" ; else echo "FAIL  and did not say why: `head -1 /tmp/t35`" ; fi
+persist etc forget /etc/hosts > /dev/null 2>&1
+
+echo "=== THE FIREWALL OPENS FROM HERE ==="
+# Opening a port used to need a card reader. If this breaks, the answer
+# people reach for is `firewall off`, which is worse than any port.
+if firewall allow 8099 > /tmp/t36 2>&1 ; then echo "PASS  firewall allow accepted a port" ; else echo "FAIL  firewall allow: `head -1 /tmp/t36`" ; fi
+if firewall ports | grep -q 8099 ; then echo "PASS  and firewall ports lists it" ; else echo "FAIL  firewall ports does not show 8099" ; fi
+if firewall deny 8099 > /dev/null 2>&1 ; then echo "PASS  firewall deny closes it again" ; else echo "FAIL  firewall deny" ; fi
+if firewall ports | grep -q 8099 ; then echo "FAIL  8099 is still listed after deny" ; else echo "PASS  and it is gone from the list" ; fi
+
 # The slow one goes last on purpose.
 #
 # It has to let a process hold a core for thirty seconds before guard is

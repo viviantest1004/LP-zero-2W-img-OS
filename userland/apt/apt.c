@@ -50,7 +50,30 @@
  * alone for months, and the point of a stable release is that its
  * package versions stop moving. */
 #define SUITE       "bookworm"
-#define MIRROR      "https://deb.debian.org/debian"
+
+/* http, not https, and deliberately.
+ *
+ * What protects a package here is its signature: apt checks the Release
+ * file against the Debian archive keys that came with the base
+ * filesystem, in /etc/apt/trusted.gpg.d, and refuses anything that does
+ * not verify. TLS adds nothing to that - it is why Debian's own
+ * sources.list has always been http, and why every official container
+ * image ships it that way.
+ *
+ * What TLS does add here is failure. This board has no real-time clock:
+ * the time comes from ntp, and until that answers every certificate on
+ * earth looks expired or not yet valid. Behind a network that inspects
+ * TLS - a school, an office - the certificate is signed by a CA the
+ * Debian tree has never heard of, and every line of sources.list fails
+ * with "the certificate issuer is unknown". Both of those are a board
+ * that cannot install anything, for no gain in what an attacker could
+ * actually do.
+ *
+ * The cost is that whoever carries the packets can see which packages
+ * are being fetched. Anybody who minds can change the two lines in
+ * /data/debian/etc/apt/sources.list to https - the base image carries a
+ * CA store, so it works - and the file itself says so. */
+#define MIRROR      "http://deb.debian.org/debian"
 
 /* The base tarball. debuerreotype builds these - they are what the
  * official Debian container images are made from, one per architecture,
@@ -297,6 +320,16 @@ static int cmd_setup(bool quiet)
     mkdirs(ROOT "/etc/apt");
     if (!write_file(SOURCES,
         "# Written by `apt setup` on linux-LP.\n"
+        "#\n"
+        "# http, not https: what makes a package trustworthy here is its\n"
+        "# signature, checked against the Debian archive keys in\n"
+        "# /etc/apt/trusted.gpg.d. TLS would add a second thing that can\n"
+        "# fail - a board with no clock, or a network that inspects TLS -\n"
+        "# without adding anything an attacker could otherwise do.\n"
+        "#\n"
+        "# Change http to https below if you would rather the network could\n"
+        "# not see which packages you install. It works; the base image\n"
+        "# carries a CA store.\n"
         "deb " MIRROR " " SUITE " main contrib non-free-firmware\n"
         "deb " MIRROR "-security " SUITE "-security main contrib non-free-firmware\n"
         "deb " MIRROR " " SUITE "-updates main contrib non-free-firmware\n")) {
