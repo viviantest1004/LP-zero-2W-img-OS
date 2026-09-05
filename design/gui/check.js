@@ -70,6 +70,11 @@ async function run() {
                   { waitUntil: 'load' });
   await page.waitForTimeout(400);
 
+  /* Read from the page rather than hard-coded here, so that changing the
+   * default block list in lp-core.js does not silently break a test that
+   * was only ever asserting a copy of it. */
+  const LP_BLOCKED = await page.evaluate(() => LP.blockedApps.slice());
+
   /* ── it loaded at all ─────────────────────────────────────────── */
   head('창');
   const panes = await page.$$eval('.pane', e => e.length);
@@ -202,6 +207,61 @@ async function run() {
      /지워지는|지워집니다|삭제됩니다/.test(zoneText));
   ok('무엇이 남는지도 적혀 있다', /남는|남습니다|유지/.test(zoneText));
   ok('SSH 키가 남는다고 말한다', /SSH|인증 키|authorized/.test(zoneText));
+
+  /* ── accounts ─────────────────────────────────────────────────── */
+  head('사용자');
+  await page.evaluate(() => LP.go('s-user'));
+  await page.waitForTimeout(300);
+  const userText = await page.$eval('#s-user', e => e.textContent);
+  ok('계정 목록에 두 계정이 있다',
+     /cho/.test(userText) && /guest/.test(userText), userText.slice(0, 70));
+  ok('계정 유형이 표시된다',
+     /관리자/.test(userText) && /표준/.test(userText));
+  ok('권한 화면으로 가는 길이 있다', /권한/.test(userText));
+
+  /* ── permissions ──────────────────────────────────────────────── */
+  head('권한');
+  await page.evaluate(() => LP.go('s-perm'));
+  await page.waitForTimeout(300);
+  ok('권한 화면이 열린다',
+     await page.$eval('#s-perm', e => e.classList.contains('on')));
+
+  const permText = await page.$eval('#s-perm', e => e.textContent);
+  for (const area of ['네트워크', '화면', '소리', '키보드', '앱', '초기화']) {
+    ok('권한 목록에 ' + area + ' 가 있다', permText.includes(area));
+  }
+  ok('공장 초기화가 위임할 수 없는 것으로 나온다',
+     /공장 초기화/.test(permText) && /관리자만/.test(permText));
+
+  /* The screen has to be about the standard account, not about the
+   * administrator - an administrator can change everything and there is
+   * nothing here to set for one. */
+  ok('표준 계정에 대한 화면이라고 말한다',
+     /표준/.test(await page.$eval('#s-perm .sub', e => e.textContent).catch(() => '')),
+     'sub 가 없거나 표준을 언급하지 않습니다');
+
+  ok('기능 목록이 LP.features 를 따른다',
+     /터미널/.test(permText) && /USB/.test(permText));
+  ok('막힌 앱 목록이 있다',
+     LP_BLOCKED.every(a => permText.includes(a)),
+     '기대: ' + LP_BLOCKED.join(', '));
+
+  /* Flipping a permission must take effect at once, everywhere. This is
+   * the assertion the whole screen exists for: an administrator turning
+   * 네트워크 off and then looking at 네트워크 as the standard account
+   * has to see it locked, without a reload. */
+  const flipped = await page.evaluate(() => {
+    const before = LP.allow.display;
+    LP.allow.display = false;
+    LP.account = 'std';
+    LP.go('s-disp');
+    const locked = document.querySelectorAll('#s-disp .row.locked').length > 0;
+    LP.allow.display = before;
+    LP.account = 'admin';
+    LP.go('s-perm');
+    return locked;
+  });
+  ok('권한을 끄면 그 화면이 즉시 잠긴다', flipped);
 
   /* ── the standard account ─────────────────────────────────────── */
   head('표준 사용자');
