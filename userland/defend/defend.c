@@ -580,9 +580,8 @@ static int nl_wait(int fd, u32 last_seq, bool quiet)
                     failed = 1;
                     if (!quiet)
                         dprintf(STDERR_FILENO,
-                                "defend: the kernel refused a ban rule (%d)"
-                                " - is this kernel built with nftables?\n",
-                                -err);
+                                "defend: the kernel refused message %u:"
+                                " errno %d\n", h->nlmsg_seq, -err);
                 }
             }
             if (h->nlmsg_seq >= last_seq &&
