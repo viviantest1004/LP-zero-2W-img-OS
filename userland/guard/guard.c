@@ -1177,9 +1177,31 @@ static int kill_biggest_group(const proc_t *list, int n, pid_t self)
     } else {
         dprintf(STDERR_FILENO,
                 "guard:   group %d has a protected leader"
-                " - killing its %d children instead\n",
+                " - stopping the group and killing its %d children\n",
                 (int)target, target_count);
     }
+
+    /* Freeze the group before killing anything in it.
+     *
+     * Killing the children one at a time while the bomb keeps forking is
+     * a race the bomb wins: measured here, guard killed 9835 processes
+     * in one pass and 1002 were left, then 9398 and 378 were left, over
+     * and over, for as long as it was allowed to run. The board stayed
+     * up - init, SSH and the log survived, which is what matters - but
+     * it never got quiet again, and the person who had to notice and
+     * type `kill` was exactly the person who could not, because the
+     * shell was crawling.
+     *
+     * SIGSTOP to the whole group stops every member, including the ones
+     * created a moment ago, in one syscall. A stopped process cannot
+     * fork, so the sweep that follows converges: what is listed is what
+     * exists. Then the leader - the login shell, the one thing we are
+     * not allowed to kill - is continued, and it comes back to a prompt
+     * with its children gone.
+     *
+     * SIGSTOP is not blockable, which is the property this relies on. */
+    if (leader_protected)
+        lp_kill(-target, SIGSTOP);
 
     int hit = 0;
     for (int i = 0; i < n; i++) {
@@ -1190,6 +1212,29 @@ static int kill_biggest_group(const proc_t *list, int n, pid_t self)
         if (lp_kill(list[i].pid, SIGKILL) == 0)
             hit++;
     }
+
+    /* Anything that appeared between the scan and the stop is stopped
+     * now and not in the list. Sweep /proc once more for members of this
+     * group while they are all frozen - this is the pass that actually
+     * finishes the job. */
+    if (leader_protected) {
+        proc_t again[MAX_PROCS];
+        int m = scan_processes(again, MAX_PROCS, self);
+        for (int i = 0; i < m; i++) {
+            if (again[i].pgid != target)
+                continue;
+            if (is_protected(&again[i], self))
+                continue;
+            if (lp_kill(again[i].pid, SIGKILL) == 0)
+                hit++;
+        }
+
+        /* Let the shell run again, and make sure the killed ones are not
+         * left stopped-and-dead: SIGCONT to the group reaches any that
+         * survived being protected. */
+        lp_kill(-target, SIGCONT);
+    }
+
     return hit;
 }
 

@@ -239,6 +239,19 @@ if echo "a-b" | awk '{gsub(/-/,"+"); print}' | grep -qF "a+b" ; then echo "PASS 
 if awk '{print $1' /tmp/aw1 2>&1 | grep -q "line 1" ; then echo "PASS  awk names the line of a syntax error" ; else echo "FAIL  awk accepted a broken program" ; fi
 rm -f /tmp/aw1
 
+printf "one\ntwo\nthree\n" > /tmp/df1
+printf "one\n2\nthree\n" > /tmp/df2
+if diff /tmp/df1 /tmp/df1 ; then echo "PASS  diff says nothing about identical files" ; else echo "FAIL  diff found a difference that is not there" ; fi
+if diff /tmp/df1 /tmp/df2 > /tmp/df3 ; then echo "FAIL  diff returned success on files that differ" ; else echo "PASS  diff reports a difference in its status" ; fi
+if grep -q "^-two" /tmp/df3 ; then echo "PASS  and shows the removed line" ; else echo "FAIL  diff output has no -two: `head -6 /tmp/df3`" ; fi
+if grep -q "^+2" /tmp/df3 ; then echo "PASS  and the added one" ; else echo "FAIL  diff output has no +2" ; fi
+rm -f /tmp/df1 /tmp/df2 /tmp/df3
+if netstat -l > /tmp/ns1 2>&1 ; then echo "PASS  netstat lists listening sockets" ; else echo "FAIL  netstat -l" ; fi
+if grep -q "LISTEN" /tmp/ns1 ; then echo "PASS  and dropbear is one of them" ; else echo "FAIL  nothing is listening - dropbear should be: `head -3 /tmp/ns1`" ; fi
+if netstat -r | grep -q "destination" ; then echo "PASS  netstat -r shows the routing table" ; else echo "FAIL  netstat -r" ; fi
+if netstat -i | grep -q "lo" ; then echo "PASS  netstat -i shows the interfaces" ; else echo "FAIL  netstat -i" ; fi
+rm -f /tmp/ns1
+
 echo "=== SETTINGS THAT SURVIVE A REBOOT ==="
 # The RAM root means /etc is rebuilt every boot. These check the two
 # ways out of that: a profile on /data, and named /etc files kept.

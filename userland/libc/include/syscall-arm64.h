@@ -91,6 +91,12 @@
 #define SYS_shutdown        210
 #define SYS_accept4         242
 
+/* ppoll, not poll: the asm-generic table aarch64 uses never had a bare
+ * poll syscall, only the version that also takes a signal mask. x86-64
+ * has both, so we call ppoll on both machines and there is one path to
+ * reason about. */
+#define SYS_ppoll            73
+
 #define SYS_swapon          224
 #define SYS_swapoff         225
 

@@ -49,6 +49,47 @@ long lp_setsockopt(int fd, int level, int opt, const void *val, u32 len)
     return sys_call5(SYS_setsockopt, fd, level, opt, (long)val, (long)len);
 }
 
+long lp_listen(int fd, int backlog)
+{
+    return sys_call2(SYS_listen, fd, backlog);
+}
+
+/* accept4, not accept, on both machines.
+ *
+ * aarch64 uses the asm-generic system call table, and that table has no
+ * accept at all - only accept4, which is accept plus a flags word. So
+ * there is no shared "call accept" to write; one of the two machines
+ * has to use accept4 regardless. Both do, so the flags argument is
+ * available everywhere and there is a single code path to think about.
+ * Passing 0 for flags is exactly accept. */
+long lp_accept(int fd, void *addr, u32 *addrlen, int flags)
+{
+    return sys_call4(SYS_accept4, fd, (long)addr, (long)addrlen, flags);
+}
+
+/* ppoll, because arm64 has no bare poll - see syscall-arm64.h.
+ *
+ * ppoll takes a struct timespec rather than a count of milliseconds,
+ * and a NULL one means "wait forever", which is how a negative timeout
+ * is expressed here. The last two arguments are the signal mask and its
+ * size; passing NULL leaves the mask alone, which is what a caller that
+ * simply wants to wait wants.
+ *
+ * The kernel may update the timespec on some architectures, so it is a
+ * local rather than a caller's buffer. */
+long lp_poll(lp_pollfd_t *fds, unsigned n, int timeout_ms)
+{
+    s64 ts[2];
+    long tsp = 0;
+
+    if (timeout_ms >= 0) {
+        ts[0] = timeout_ms / 1000;
+        ts[1] = (s64)(timeout_ms % 1000) * 1000000;
+        tsp = (long)ts;
+    }
+    return sys_call5(SYS_ppoll, (long)fds, (long)n, tsp, 0, 0);
+}
+
 /* ── Interface ioctls ─────────────────────────────────────────────
  *
  * struct ifreq is a 16-byte name followed by a union. The union overlays

@@ -24,6 +24,7 @@
 #define SO_BROADCAST    6
 #define SO_BINDTODEVICE 25
 #define SO_RCVTIMEO_NEW 66
+#define SO_SNDTIMEO_NEW 67
 
 /* How many times to retransmit a SYN before connect() gives up.
  *
@@ -79,6 +80,51 @@ long lp_sendto(int fd, const void *buf, size_t n, int flags,
 long lp_recvfrom(int fd, void *buf, size_t n, int flags,
                  void *addr, u32 *addrlen);
 long lp_setsockopt(int fd, int level, int opt, const void *val, u32 len);
+
+/* ── Serving ──
+ *
+ * Nothing here listened for a connection until httpd, which is why
+ * these two arrived so late. `backlog` is how many finished handshakes
+ * the kernel will hold before it starts refusing; anything past a
+ * couple of dozen only makes a queue nobody gets to in time. */
+#define SOMAXCONN 128
+long lp_listen(int fd, int backlog);
+
+/* Take the next connection off the queue. `addr` may be NULL when the
+ * caller does not care who it is; when it is not, *addrlen must hold
+ * the size of the buffer going in and comes back with the size used.
+ *
+ * This is accept4 on both machines, never accept. aarch64 uses the
+ * asm-generic syscall table, which has no bare accept at all - accept4
+ * with flags 0 is the only accept it has. Rather than call one thing on
+ * one machine and another on the other, both go through accept4, and
+ * the flags argument is then there for free: LP_SOCK_CLOEXEC on a
+ * server that execs something is worth having. */
+#define LP_SOCK_NONBLOCK 04000
+#define LP_SOCK_CLOEXEC  02000000
+long lp_accept(int fd, void *addr, u32 *addrlen, int flags);
+
+/* ── Waiting on file descriptors ──
+ *
+ * Enough poll to wait on a handful of descriptors with a timeout.
+ * timeout_ms below zero waits forever. Returns how many are ready, 0 on
+ * timeout, or -errno; -EINTR when a signal arrived, which a caller in a
+ * loop should treat as "nothing happened yet" rather than as a failure.
+ *
+ * This is ppoll underneath - see the note in syscall-arm64.h. */
+#define LP_POLLIN   0x001
+#define LP_POLLOUT  0x004
+#define LP_POLLERR  0x008
+#define LP_POLLHUP  0x010
+#define LP_POLLNVAL 0x020
+
+typedef struct {
+    int fd;
+    s16 events;
+    s16 revents;
+} lp_pollfd_t;
+
+long lp_poll(lp_pollfd_t *fds, unsigned n, int timeout_ms);
 
 /* ── Interface configuration ── */
 long net_if_up(const char *ifname);

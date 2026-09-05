@@ -95,6 +95,9 @@
 #define SYS_fchmodat         268
 #define SYS_faccessat        269
 #define SYS_accept4          288
+/* See the note in syscall-arm64.h: arm64 has no bare poll, so both
+ * machines use ppoll and the C above this header stays identical. */
+#define SYS_ppoll            271
 #define SYS_dup3             292
 #define SYS_pipe2            293
 #define SYS_prlimit64        302

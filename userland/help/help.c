@@ -106,6 +106,7 @@ static const entry_t KNOWN[] = {
     { "rev",      "text",    "reverse each line",           "rev [file]..." },
     { "nl",       "text",    "number the lines",            "nl [-b a] [-w n] [-s sep] [file]..." },
     { "cmp",      "text",    "where two files start to differ", "cmp [-s] [-l] a b" },
+    { "diff",     "text",    "what changed between two files", "diff [-uqiw] [-U n] a b   |   diff -r dir1 dir2" },
 
     { "seq",      "text",    "print a run of numbers",      "seq [-s sep] [-w] [first [step]] last" },
     { "printf",   "text",    "print with a format, from a script", "printf FORMAT [argument]..." },
@@ -169,6 +170,7 @@ static const entry_t KNOWN[] = {
     { "dropbear", "network", "the SSH server",              "(started by init)" },
     { "dropbearkey", "network", "make an SSH host key",     "dropbearkey -t ed25519 -f <file>" },
     { "authkey",  "network", "keep a way in over SSH",      "authkey [-l]" },
+    { "netstat",  "network", "what is listening, and connected", "netstat [-latunp] [-r] [-i] [-s]" },
     { "firewall", "network", "which ports are open",        "firewall [on|strict|off]" },
 
     { "python",   "python",  "CPython 3.12",                "python [file]" },
