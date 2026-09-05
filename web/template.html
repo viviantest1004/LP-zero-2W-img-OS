@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>linux-LP — 다운로드</title>
+<meta name="description" content="Claude Code가 처음부터 만든 초경량 리눅스 배포판. 라즈베리파이 제로 2 W, arm64 가상머신, amd64 PC용 이미지.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>💾</text></svg>">
+<style>
+  :root {
+    --bg: #fbfbf9;
+    --panel: #ffffff;
+    --ink: #1b1b19;
+    --muted: #6b6b64;
+    --line: #e4e2dc;
+    --accent: #8a5a2b;
+    --accent-soft: #f3ece3;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a;
+      --panel: #1d1d22;
+      --ink: #eceae5;
+      --muted: #9b978e;
+      --line: #2e2e35;
+      --accent: #d9a066;
+      --accent-soft: #2a2018;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "Apple SD Gothic Neo", "Noto Sans KR", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 0 20px 96px; }
+
+  header { padding: 72px 0 40px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 2.1rem; margin: 0 0 6px; letter-spacing: -0.02em; }
+  .tag { color: var(--muted); margin: 0; font-size: 1.05rem; }
+  .by {
+    margin-top: 22px; padding: 12px 16px;
+    background: var(--accent-soft); border-radius: 8px;
+    font-size: 0.9rem; color: var(--ink);
+  }
+  .by a { color: var(--accent); }
+
+  h2 { font-size: 1.25rem; margin: 44px 0 14px; letter-spacing: -0.01em; }
+  p { margin: 0 0 14px; }
+  a { color: var(--accent); }
+  .muted { color: var(--muted); }
+
+  .grid { display: grid; gap: 16px; margin-top: 20px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px 22px;
+  }
+  .card h3 { margin: 0 0 4px; font-size: 1.05rem; }
+  .card .for { color: var(--muted); font-size: 0.92rem; margin: 0 0 16px; }
+  .row {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  }
+  .dl {
+    display: inline-block;
+    background: var(--accent); color: #fff;
+    text-decoration: none; font-weight: 600;
+    padding: 9px 18px; border-radius: 7px;
+    font-size: 0.95rem;
+  }
+  .dl:hover { filter: brightness(1.08); }
+  .size { color: var(--muted); font-size: 0.9rem; }
+
+  .hash {
+    margin-top: 14px; padding-top: 14px;
+    border-top: 1px solid var(--line);
+    font-size: 0.78rem; color: var(--muted);
+    font-family: var(--mono);
+    word-break: break-all; line-height: 1.5;
+  }
+  .hash b { color: var(--ink); font-weight: 600; font-family: inherit; }
+
+  pre {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 14px 16px;
+    overflow-x: auto; font-family: var(--mono);
+    font-size: 0.84rem; line-height: 1.6;
+  }
+  code { font-family: var(--mono); font-size: 0.88em; }
+
+  .warn {
+    border-left: 3px solid var(--accent);
+    padding: 2px 0 2px 16px; margin: 18px 0;
+    color: var(--muted); font-size: 0.94rem;
+  }
+  .warn b { color: var(--ink); }
+
+  ul { padding-left: 20px; margin: 0 0 14px; }
+  li { margin-bottom: 6px; }
+
+  footer {
+    margin-top: 64px; padding-top: 24px;
+    border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 0.88rem;
+  }
+  .lang { margin-top: 40px; }
+  .lang h2 { border-top: 2px solid var(--line); padding-top: 36px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>linux-LP</h1>
+  <p class="tag">처음부터 직접 만든 초경량 리눅스 배포판<br>
+     <span class="muted">A Linux distribution written from scratch</span></p>
+  <div class="by">
+    커널 설정부터 C 라이브러리, init, 셸, 107개 명령어까지
+    <strong>전부 <a href="https://claude.com/claude-code">Claude Code</a>가 썼습니다.</strong>
+    시스템 전체가 파일 하나, 11~23MB입니다.
+  </div>
+</header>
+
+<h2>다운로드</h2>
+
+<div class="grid">
+  <div class="card">
+    <h3>라즈베리파이 제로 2 W</h3>
+    <p class="for">실기와 arm64 가상머신 둘 다. SD카드에 굽거나 UTM/QEMU에 붙이면 됩니다.</p>
+    <div class="row">
+      <a class="dl" href="files/@PI_NAME@">내려받기</a>
+      <span class="size">@PI_SIZE@ · xz 압축</span>
+    </div>
+    <div class="hash"><b>sha256</b><br>@PI_HASH@</div>
+  </div>
+
+  <div class="card">
+    <h3>일반 PC / 데스크톱 가상머신</h3>
+    <p class="for">VMware, VirtualBox, QEMU/KVM, Hyper-V. UEFI 부팅입니다.</p>
+    <div class="row">
+      <a class="dl" href="files/@AMD_NAME@">내려받기</a>
+      <span class="size">@AMD_SIZE@ · xz 압축</span>
+    </div>
+    <div class="hash"><b>sha256</b><br>@AMD_HASH@</div>
+  </div>
+
+  <div class="card">
+    <h3>arm64 가상머신 전용</h3>
+    <p class="for">UTM, UTM SE, QEMU. GPU 펌웨어가 없어 더 작습니다. 실기에서는 안 뜹니다.</p>
+    <div class="row">
+      <a class="dl" href="files/@UTM_NAME@">내려받기</a>
+      <span class="size">@UTM_SIZE@ · zip</span>
+    </div>
+    <div class="hash"><b>sha256</b><br>@UTM_HASH@</div>
+  </div>
+</div>
+
+<p class="muted" style="margin-top:18px;font-size:0.9rem">
+  체크섬 목록: <a href="files/SHA256SUMS.txt">SHA256SUMS.txt</a>
+</p>
+
+<h2>받은 뒤에</h2>
+
+<p>먼저 파일이 온전한지 확인하세요.</p>
+<pre>sha256sum -c SHA256SUMS.txt</pre>
+
+<p><strong>SD카드에 굽기</strong> — <code>/dev/sdX</code>를 꼭 확인하세요. 틀리면 그 디스크가 사라집니다.</p>
+<pre>xz -d &lt; @PI_NAME@ | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress</pre>
+
+<p><strong>가상머신</strong> — 압축을 풀고 디스크로 붙인 뒤 <strong>UEFI 부팅</strong>으로 설정하세요.
+   MBR 부트스트랩은 비어 있어서 legacy BIOS로는 뜨지 않습니다.</p>
+
+<p><strong>SSH</strong> — 비밀번호 로그인은 아예 컴파일하지 않았습니다. 카드의 첫 번째 파티션(FAT32,
+   어느 PC에서나 열립니다)의 <code>authorized_keys</code>에 공개키를 넣으세요. 사용자는 root 하나입니다.</p>
+
+<h2>쓰기 전에 알아둘 것</h2>
+
+<div class="warn">
+  <b>지원되는 제품이 아니라 취미로 만든 운영체제입니다.</b>
+  보안팀도, CVE 절차도, 대기하는 사람도 없습니다.
+  계속 돌아가야만 하는 일에는 Raspberry Pi OS Lite나 데비안을 쓰세요.
+</div>
+
+<ul>
+  <li><strong>실기기 검증이 아직입니다.</strong> 전부 QEMU에서 시험했습니다. 라즈베리파이 실물에서의
+      WiFi, 온도 센서, 하드웨어 워치독은 확인하지 못했습니다.</li>
+  <li><strong>보안 부분은 외부 감사를 받지 않았습니다.</strong> 업데이트 서명 검증, 방화벽,
+      DNS·NTP 위조 방지가 구현돼 있지만 다른 사람이 검토한 적은 없습니다.</li>
+  <li><strong>재부팅을 넘겨 남는 곳은 <code>/data</code> 하나</strong>이고, 그건 카드 한 장의
+      파티션 하나입니다. 아까운 것은 따로 받아두세요.</li>
+  <li><strong>GUI 없음, 패키지 적음, 컨테이너 안 됨.</strong></li>
+</ul>
+
+<p class="muted">확인된 것: amd64 이미지가 QEMU 실제 부팅에서 셀프테스트 51개 검사를 전부
+   통과합니다.</p>
+
+<h2>소스</h2>
+<p>전부 공개되어 있습니다 —
+   <a href="@REPO_URL@">@REPO_SHORT@</a>.
+   자세한 설명은 저장소의 <code>README.md</code>와 <code>GUIDE/</code> 폴더에 한국어와 영어로
+   같이 있습니다. 라이선스는 MIT입니다.</p>
+
+
+<div class="lang">
+<h2>English</h2>
+
+<p>A Linux distribution written from scratch — kernel configuration, C library, init, shell and
+   107 commands, <strong>all of it written by <a href="https://claude.com/claude-code">Claude
+   Code</a></strong>. The whole system is one file, 11–23MB.</p>
+
+<p><strong>Which image:</strong> the first is a Raspberry Pi Zero 2 W image that also runs in arm64
+   virtual machines; the second is for ordinary PCs and desktop VMs; the third is arm64 VMs only,
+   and will not boot on the board.</p>
+
+<p><strong>Check what you downloaded</strong> with <code>sha256sum -c SHA256SUMS.txt</code>. Burn a
+   card with <code>xz -d &lt; image.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync</code>, checking
+   <code>/dev/sdX</code> twice — that is the one mistake here a reboot cannot undo. In a VM, set
+   UEFI boot; the MBR bootstrap is empty on purpose.</p>
+
+<p><strong>SSH has no passwords</strong> — password authentication is not compiled in. Put your
+   public key in <code>authorized_keys</code> on the card's first partition, which is FAT32 and
+   opens on any PC. There is one user, root.</p>
+
+<div class="warn">
+  <b>This is a hobby operating system, not a supported product.</b>
+  No security team, no CVE process, nobody on call. Real Pi hardware is not verified — everything
+  was tested in QEMU. The security work has not been audited. For anything that has to keep
+  working, use Raspberry Pi OS Lite or Debian.
+</div>
+
+<p>What is verified: the amd64 image passes all 51 checks in the project's self-test on real QEMU
+   boots. Full source, in English and Korean, at
+   <a href="@REPO_URL@">@REPO_SHORT@</a>. MIT licensed.</p>
+</div>
+
+<footer>
+  이미지 빌드: @BUILD_DATE@ · 이 페이지는 배포할 때 실제 파일에서 만들어집니다<br>
+  <span class="muted">Images built @BUILD_DATE@ · this page is generated from the files themselves
+  at deploy time, so the sizes and checksums cannot drift</span>
+</footer>
+
+</div>
+</body>
+</html>
