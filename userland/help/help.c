@@ -97,6 +97,7 @@ static const entry_t KNOWN[] = {
     { "uniq",     "text",    "collapse repeated lines",     "uniq [-c] [-d] [file]" },
     { "cut",      "text",    "take columns out of lines",   "cut -f 1,3 [-d :|-w] [file]" },
     { "tee",      "text",    "write to a file and pass on", "... | tee [-a] <file>..." },
+    { "awk",      "text",    "a program per line, over columns", "awk [-F sep] [-v x=1] '<program>' [file]..." },
     { "sed",      "text",    "edit a stream of text",       "sed [-nEi] [-e script] [-f file] '<script>' [file]..." },
     { "tr",       "text",    "replace, squeeze or delete characters", "tr [-cds] set1 [set2]" },
     { "rev",      "text",    "reverse each line",           "rev [file]..." },

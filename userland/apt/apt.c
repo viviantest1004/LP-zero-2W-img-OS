@@ -385,10 +385,34 @@ static int in_debian(char *const argv[])
         NULL
     };
 
-    lp_execve(argv[0], argv, envp);
+    /* execve takes a path, and `apt run rg` gives a name.
+     *
+     * This used to hand argv[0] straight to execve, so anything without
+     * a slash in it failed - and failed with "rg is not in the Debian
+     * tree", which is the wrong sentence entirely when the package is
+     * installed and the binary is sitting in /usr/bin. The PATH in envp
+     * above is for whatever gets run, not for this call; the walk has to
+     * happen here. Same directories, same order. */
+    if (strchr(argv[0], '/')) {
+        lp_execve(argv[0], argv, envp);
+    } else {
+        static const char *dirs[] = {
+            "/usr/sbin", "/usr/bin", "/sbin", "/bin", "/usr/local/bin", NULL
+        };
+        for (int i = 0; dirs[i]; i++) {
+            char full[512];
+            snprintf(full, sizeof full, "%s/%s", dirs[i], argv[0]);
+            lp_execve(full, argv, envp);      /* returns only on failure */
+        }
+    }
 
     dprintf(STDERR_FILENO,
-            "%s: %s is not in the Debian tree\n", me, argv[0]);
+            "%s: there is no %s in the Debian tree.\n"
+            "%s:   `apt install <package>` puts one there;"
+            " `apt shell` then\n"
+            "%s:   `which %s` says where it landed if the package used a\n"
+            "%s:   different name for it.\n",
+            me, argv[0], me, me, argv[0], me);
     lp_exit(127);
 }
 

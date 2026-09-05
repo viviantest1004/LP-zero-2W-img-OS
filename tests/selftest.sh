@@ -195,6 +195,17 @@ if printf "one\ntwo\n" > /tmp/sd1 && sed -i 's/one/1/' /tmp/sd1 && grep -q "^1$"
 if sed 'k' /tmp/sd1 2>&1 | grep -q position ; then echo "PASS  sed names the position of a bad command" ; else echo "FAIL  sed accepted a broken script" ; fi
 rm -f /tmp/sd1
 
+printf "alice 30 seoul\nbob 25 busan\ncarol 41 seoul\n" > /tmp/aw1
+if awk '{print $1}' /tmp/aw1 | head -1 | grep -q alice ; then echo "PASS  awk splits into fields" ; else echo "FAIL  awk fields" ; fi
+if awk '$2 > 28 {print $1}' /tmp/aw1 | wc -l | grep -q 2 ; then echo "PASS  awk compares numbers in a pattern" ; else echo "FAIL  awk numeric pattern" ; fi
+if awk 'BEGIN{s=0} {s+=$2} END{print s}' /tmp/aw1 | grep -q 96 ; then echo "PASS  awk adds a column up in END" ; else echo "FAIL  awk BEGIN/END" ; fi
+if awk '{c[$3]++} END{for (k in c) print k, c[k]}' /tmp/aw1 | grep -q "seoul 2" ; then echo "PASS  awk counts with an array" ; else echo "FAIL  awk arrays" ; fi
+if printf "a:b\n" | awk -F: '{print $2}' | grep -q "^b$" ; then echo "PASS  awk -F sets the separator" ; else echo "FAIL  awk -F" ; fi
+if awk 'BEGIN{printf "%-6s|", "ab"}' | grep -q "ab    |" ; then echo "PASS  awk printf pads" ; else echo "FAIL  awk printf" ; fi
+if echo "a-b" | awk '{gsub(/-/,"+"); print}' | grep -q "a+b" ; then echo "PASS  awk gsub" ; else echo "FAIL  awk gsub" ; fi
+if awk '{print $1' /tmp/aw1 2>&1 | grep -q "line 1" ; then echo "PASS  awk names the line of a syntax error" ; else echo "FAIL  awk accepted a broken program" ; fi
+rm -f /tmp/aw1
+
 echo "=== SETTINGS THAT SURVIVE A REBOOT ==="
 # The RAM root means /etc is rebuilt every boot. These check the two
 # ways out of that: a profile on /data, and named /etc files kept.
