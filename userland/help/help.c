@@ -41,7 +41,7 @@ static const entry_t KNOWN[] = {
     /* shell builtins - these live in sh, not on disk */
     { "cd",       "shell",   "change directory",            "cd [dir]" },
     { "pwd",      "shell",   "print the current directory", "pwd" },
-    { "echo",     "shell",   "print the arguments",         "echo ..." },
+    { "echo",     "shell",   "print the arguments",         "echo [-n] [-e] ..." },
     { "env",      "shell",   "list environment variables",  "env" },
     { "exit",     "shell",   "leave the shell",             "exit [code]" },
     { "reboot",   "shell",   "restart the machine",         "reboot" },
@@ -55,6 +55,9 @@ static const entry_t KNOWN[] = {
     { "break",    "shell",   "leave a loop",                "break [n]" },
     { "continue", "shell",   "go to the next round of a loop", "continue [n]" },
     { "for",      "shell",   "repeat over a list",          "for x in a b c ; do ... ; done" },
+    { "read",     "shell",   "read a line into a variable", "read [-p prompt] name..." },
+    { "shift",    "shell",   "drop the first argument",     "shift [n]" },
+    { "export",   "shell",   "assign; everything here is already exported", "export NAME=value" },
 
     { "ls",       "files",   "list a directory",            "ls [-lahtSrRd1] [path]..." },
     { "cp",       "files",   "copy files",                  "cp [-r] [-n] [-q] <src>... <dst>" },
@@ -89,7 +92,7 @@ static const entry_t KNOWN[] = {
     { "cat",      "text",    "print a file",                "cat [file]..." },
     { "edit",     "text",    "edit a file on screen",       "edit <file>" },
     { "more",     "text",    "read it a screen at a time",  "more [file]..." },
-    { "grep",     "text",    "print the lines that match",  "grep [-invclqr] [-A n] [-B n] [-C n] <pattern> [file|dir]..." },
+    { "grep",     "text",    "print the lines that match",  "grep [-invclqrEF] [-A n] [-B n] [-C n] <pattern> [file|dir]..." },
     { "head",     "text",    "the first lines",             "head [-n count] [file]..." },
     { "tail",     "text",    "the last lines",              "tail [-n count] [-f] [file]" },
     { "wc",       "text",    "count lines, words, characters", "wc [-l] [-w] [-c] [file]..." },

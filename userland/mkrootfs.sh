@@ -41,6 +41,27 @@ read -r -a PROGRAMS <<< "$(sed -n 's/^PROGS[[:space:]]*:*=[[:space:]]*//p' "${HE
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 log() { printf '  %s\n' "$*"; }
 
+# ── 소스보다 오래된 바이너리를 이미지에 넣지 않는다 ──
+#
+# 실제로 겪은 사고: persist.c 를 고치고 arm64 만 빌드한 뒤 amd64 이미지를
+# 만들었더니, 이미지 안의 persist 는 고치기 전 것이었다. 셀프테스트가
+# "usage: persist" 를 뱉었고, 원인을 찾는 데 한참 걸렸다 - 코드는 맞는데
+# 실행되는 물건이 달랐기 때문이다.
+#
+# 빌드가 조용히 건너뛴 파일 하나가 이미지 전체를 거짓말로 만든다. 그래서
+# 여기서 멈춘다. check_tree_arch 가 아키텍처를 대조하는 것과 같은 이유다.
+stale=0
+for p in "${PROGRAMS[@]}"; do
+    src="${HERE}/${p}/${p}.c"
+    bin="${BIN_DIR}/${p}"
+    [[ -f "$src" && -f "$bin" ]] || continue
+    if [[ "$src" -nt "$bin" ]]; then
+        echo "  ** ${bin} 이 ${p}/${p}.c 보다 오래되었습니다" >&2
+        stale=$((stale + 1))
+    fi
+done
+[[ $stale -eq 0 ]] || die "${stale}개의 바이너리가 소스보다 오래되었습니다. 'make' 를 다시 실행하세요."
+
 for p in "${PROGRAMS[@]}"; do
     [[ -f "${BIN_DIR}/${p}" ]] || die "bin/${p} 가 없습니다. 'make' 를 먼저 실행하세요."
 done

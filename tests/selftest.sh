@@ -160,6 +160,24 @@ if test $ELAPSED -ge 11 ; then echo "PASS  sleep 12 waited at least 11s" ; else 
 if test $ELAPSED -le 20 ; then echo "PASS  and not much more (${ELAPSED}s)" ; else echo "FAIL  sleep 12 waited ${ELAPSED}s - the parser is scaling wrongly" ; fi
 if test 12 -gt 9 ; then echo "PASS  test compares two-digit numbers" ; else echo "FAIL  test -gt is wrong above nine" ; fi
 
+echo "=== THE SHELL ITSELF ==="
+# `echo x | grep x` answered "sh: echo: command not found" until today:
+# a pipeline forked and exec'd every stage, and echo is a builtin with
+# no file behind it. It is one of the two or three most typed shapes in
+# any shell, so it gets a check of its own.
+if echo hello | grep -q hello ; then echo "PASS  a builtin works as a pipeline stage" ; else echo "FAIL  echo | grep - builtins still do not run in a pipeline" ; fi
+if pwd | grep -q "/" ; then echo "PASS  and so does pwd" ; else echo "FAIL  pwd | grep" ; fi
+if echo one two | cut -d " " -f 2 | grep -q two ; then echo "PASS  echo into a three-stage pipeline" ; else echo "FAIL  echo | cut | grep" ; fi
+if printf "a b c\n" | while read x y z ; do echo $z ; done | grep -q "^c$" ; then echo "PASS  read splits a line into variables" ; else echo "FAIL  read" ; fi
+if test -x /bin/echo ; then echo "PASS  echo exists as a real program, not only a builtin" ; else echo "FAIL  no /bin/echo - xargs echo and find -exec echo cannot work" ; fi
+if grep -qF "a+b" /etc/profile ; then echo "FAIL  grep -F matched something that is not there" ; else echo "PASS  grep -F treats the pattern as a plain string" ; fi
+if echo "a+b" | grep -q "a+b" ; then echo "PASS  grep without -E treats + as an ordinary character (POSIX)" ; else echo "FAIL  grep still reads + as a repeat in a basic expression" ; fi
+if echo "aab" | grep -qE "a+b" ; then echo "PASS  grep -E treats + as a repeat" ; else echo "FAIL  grep -E" ; fi
+if echo "dog" | grep -qE "cat|dog" ; then echo "PASS  grep -E does alternation" ; else echo "FAIL  grep -E alternation" ; fi
+if echo "" | read v ; then echo "PASS  read succeeds on a line" ; else echo "FAIL  read returned failure on a real line" ; fi
+export LPTEST=works
+if env | grep -q "LPTEST=works" ; then echo "PASS  export assigns and the value is in the environment" ; else echo "FAIL  export" ; fi
+
 echo "=== THE EVERYDAY COMMANDS ==="
 # These are the ones a script needs to exist at all. Each check is the
 # smallest thing that would catch the command being absent or wrong,
@@ -202,7 +220,7 @@ if awk 'BEGIN{s=0} {s+=$2} END{print s}' /tmp/aw1 | grep -q 96 ; then echo "PASS
 if awk '{c[$3]++} END{for (k in c) print k, c[k]}' /tmp/aw1 | grep -q "seoul 2" ; then echo "PASS  awk counts with an array" ; else echo "FAIL  awk arrays" ; fi
 if printf "a:b\n" | awk -F: '{print $2}' | grep -q "^b$" ; then echo "PASS  awk -F sets the separator" ; else echo "FAIL  awk -F" ; fi
 if awk 'BEGIN{printf "%-6s|", "ab"}' | grep -q "ab    |" ; then echo "PASS  awk printf pads" ; else echo "FAIL  awk printf" ; fi
-if echo "a-b" | awk '{gsub(/-/,"+"); print}' | grep -q "a+b" ; then echo "PASS  awk gsub" ; else echo "FAIL  awk gsub" ; fi
+if echo "a-b" | awk '{gsub(/-/,"+"); print}' | grep -qF "a+b" ; then echo "PASS  awk gsub" ; else echo "FAIL  awk gsub" ; fi
 if awk '{print $1' /tmp/aw1 2>&1 | grep -q "line 1" ; then echo "PASS  awk names the line of a syntax error" ; else echo "FAIL  awk accepted a broken program" ; fi
 rm -f /tmp/aw1
 

@@ -1,146 +1,73 @@
 /* grep - print the lines that match.
  *
- *   grep [-i] [-v] [-n] [-c] [-l] [-q] <pattern> [file]...
+ *   grep [-invclqrEF] [-A n] [-B n] [-C n] <pattern> [file|dir]...
  *
- * The pattern is a regular expression, but a small one:
+ *   -i  ignore case          -v  the lines that do NOT match
+ *   -n  line numbers         -c  how many, not which
+ *   -l  just the filenames   -q  say nothing, set the status
+ *   -r  walk directories     -E  extended regular expressions
+ *   -F  a plain string, no pattern at all
+ *   -A n -B n -C n           lines of context after, before, both
  *
- *   .        any single character
- *   *        none or more of what came before
- *   +        one or more
- *   ?        none or one
- *   [abc]    any of these, [a-z] a range, [^a] anything but
- *   ^ $      the start and the end of the line
+ * The pattern is a POSIX basic regular expression, the same engine sed
+ * and awk use - libc/include/regex.h. -E switches it to extended, where
+ * ( ) | + ? { } mean what they mean without a backslash.
  *
- * No groups, no alternation, no backreferences. Those need a compiled
- * automaton and a stack, and this fits in a page of code by walking the
- * pattern and the text together. Everything else is a literal character,
- * so an ordinary search still reads like an ordinary search.
+ * This used to have a matcher of its own, written when grep was the
+ * only thing here that needed one. It treated + and ? as operators in a
+ * basic expression, which POSIX grep does not: `grep "a+b"` looked for
+ * one-or-more a's rather than for the three characters a, +, b, and
+ * anybody who had used grep before got the wrong answer with no hint
+ * why. It also had no groups and no alternation, so `grep "cat\|dog"`
+ * was not expressible at all. One engine for the three commands means
+ * one answer to "what does this pattern mean", and it is the answer
+ * every other system gives.
  */
 #include "types.h"
 #include "string.h"
 #include "stdio.h"
 #include "stdlib.h"
 #include "unistd.h"
+#include "regex.h"
 
 static bool fold;                     /* -i */
+static bool extended;                 /* -E */
+static bool fixed;                    /* -F */
+static lpre *program;                 /* the compiled pattern */
 
-static char lower(char c)
-{
-    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
-}
+/* -F means the pattern is a plain string. Escaping it into a regular
+ * expression would work, but a straight search is both faster and
+ * impossible to get subtly wrong - and -F exists precisely for the
+ * times when the thing being searched for is full of dots and stars. */
+static char fixed_pat[1024];
 
-/* Does one pattern item match this character? Returns the item's length
- * in the pattern, or 0 when the item itself is malformed. */
-static int item_len(const char *p)
+static bool fold_eq(const char *hay, const char *needle, size_t n)
 {
-    if (*p == '[') {
-        const char *q = p + 1;
-        if (*q == '^') q++;
-        if (*q == ']') q++;           /* a ] right after [ is a literal */
-        while (*q && *q != ']') q++;
-        return *q == ']' ? (int)(q - p) + 1 : 0;
+    for (size_t i = 0; i < n; i++) {
+        char a = hay[i], b = needle[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return false;
     }
-    if (*p == '\\' && p[1])
-        return 2;
-    return *p ? 1 : 0;
+    return true;
 }
 
-static bool item_match(const char *p, char c)
+static bool match_line(const char *line)
 {
-    if (*p == '[') {
-        const char *q = p + 1;
-        bool negate = false;
-        if (*q == '^') { negate = true; q++; }
-
-        bool hit = false;
-        while (*q && *q != ']') {
-            if (q[1] == '-' && q[2] && q[2] != ']') {
-                char lo = fold ? lower(q[0]) : q[0];
-                char hi = fold ? lower(q[2]) : q[2];
-                char ch = fold ? lower(c) : c;
-                if (ch >= lo && ch <= hi) hit = true;
-                q += 3;
-            } else {
-                char ch = fold ? lower(c) : c;
-                char pc = fold ? lower(*q) : *q;
-                if (ch == pc) hit = true;
-                q++;
-            }
-        }
-        return negate ? !hit : hit;
-    }
-
-    if (*p == '\\' && p[1])
-        return fold ? lower(p[1]) == lower(c) : p[1] == c;
-
-    if (*p == '.')
-        return true;
-
-    return fold ? lower(*p) == lower(c) : *p == c;
-}
-
-/* Match the pattern against the text from here on. */
-static bool match_here(const char *pat, const char *text)
-{
-    for (;;) {
-        if (*pat == '\0')
+    if (fixed) {
+        size_t n = strlen(fixed_pat);
+        if (n == 0)
             return true;
-        if (*pat == '$' && pat[1] == '\0')
-            return *text == '\0';
-
-        int ilen = item_len(pat);
-        if (ilen == 0)
-            return false;
-
-        char rep = pat[ilen];
-        if (rep == '*' || rep == '+' || rep == '?') {
-            const char *rest = pat + ilen + 1;
-
-            /* + has to match once before the loop below takes over. */
-            if (rep == '+') {
-                if (!*text || !item_match(pat, *text))
-                    return false;
-                text++;
-            }
-
-            if (rep == '?') {
-                if (*text && item_match(pat, *text) && match_here(rest, text + 1))
-                    return true;
-                pat = rest;
-                continue;
-            }
-
-            /* Greedy, but backing off one character at a time: run
-             * forward as far as the item matches, then try the rest of
-             * the pattern from the furthest point backwards. */
-            const char *end = text;
-            while (*end && item_match(pat, *end))
-                end++;
-            for (const char *t = end; t >= text; t--)
-                if (match_here(rest, t))
-                    return true;
-            return false;
-        }
-
-        if (!*text || !item_match(pat, *text))
-            return false;
-        pat += ilen;
-        text++;
+        if (!fold)
+            return strstr(line, fixed_pat) != NULL;
+        for (const char *t = line; *t; t++)
+            if (fold_eq(t, fixed_pat, n))
+                return true;
+        return false;
     }
-}
 
-static bool match_line(const char *pat, const char *line)
-{
-    if (*pat == '^')
-        return match_here(pat + 1, line);
-
-    /* Unanchored: try every starting point. */
-    for (const char *t = line; ; t++) {
-        if (match_here(pat, t))
-            return true;
-        if (!*t)
-            return false;
-    }
+    int caps[RE_MAX_CAPS];
+    return re_search(program, line, 0, false, caps);
 }
 
 typedef struct {
@@ -171,7 +98,7 @@ static void emit(const char *name, bool show_name, long lineno,
     printf("%s\n", text);
 }
 
-static long grep_fd(int fd, const char *pat, const opts_t *o,
+static long grep_fd(int fd, const opts_t *o,
                     const char *name, bool show_name)
 {
     char line[8192];
@@ -189,7 +116,7 @@ static long grep_fd(int fd, const char *pat, const opts_t *o,
 
     while (readline(fd, line, sizeof(line)) >= 0) {
         lineno++;
-        bool hit = match_line(pat, line);
+        bool hit = match_line(line);
         if (o->invert)
             hit = !hit;
 
@@ -256,7 +183,7 @@ static bool any_match = false;
  * parent makes an infinite tree, and a grep that never returns on a
  * machine reached only over SSH is worse than one that stops early and
  * says so. */
-static void grep_tree(const char *path, const char *pat, opts_t *o, int depth)
+static void grep_tree(const char *path, opts_t *o, int depth)
 {
     if (depth > 24) {
         dprintf(STDERR_FILENO,
@@ -274,7 +201,7 @@ static void grep_tree(const char *path, const char *pat, opts_t *o, int depth)
             dprintf(STDERR_FILENO, "grep: %s: cannot open\n", path);
             return;
         }
-        long n = grep_fd((int)f, pat, o, path, true);
+        long n = grep_fd((int)f, o, path, true);
         lp_close((int)f);
         recurse_total += n;
         if (n > 0) any_match = true;
@@ -311,9 +238,9 @@ static void grep_tree(const char *path, const char *pat, opts_t *o, int depth)
         char child[768];
         snprintf(child, sizeof child, "%s/%s", path, names[i]);
         if (types[i] == DT_DIR)
-            grep_tree(child, pat, o, depth + 1);
+            grep_tree(child, o, depth + 1);
         else if (types[i] == DT_REG || types[i] == 0)
-            grep_tree(child, pat, o, depth + 1);
+            grep_tree(child, o, depth + 1);
     }
 }
 
@@ -368,15 +295,21 @@ int main(int argc, char **argv)
                 case 'l': o.names_only = true; break;
                 case 'q': o.quiet = true; break;
                 case 'r': case 'R': recursive = true; break;
+                case 'E': extended = true; break;
+                case 'F': fixed = true; break;
                 case 'h':
-                    printf("usage: grep [-invclqr] [-A n] [-B n] [-C n] <pattern> [file|dir]...\n");
+                    printf("usage: grep [-invclqrEF] [-A n] [-B n] [-C n] <pattern> [file|dir]...\n");
                     printf("  -i ignore case   -v show the lines that do not match\n");
                     printf("  -n line numbers  -c count only\n");
                     printf("  -l name the files  -q say nothing, just the exit code\n");
                     printf("  -r walk into directories\n");
+                    printf("  -E extended expressions   -F a plain string, not a pattern\n");
                     printf("  -A n lines after a match   -B n before   -C n both\n");
-                    printf("\npattern: . any character, * + ? repeats,\n");
-                    printf("         [abc] [a-z] [^a] sets, ^ $ the line ends\n");
+                    printf("\npattern: . any character, * a repeat, [abc] [a-z] [^a] sets,\n");
+                    printf("         ^ $ the line ends, \\\\(...\\\\) groups, \\\\| alternation.\n");
+                    printf("  With -E: ( ) | + ? { } mean those things without a backslash.\n");
+                    printf("  Without it + and ? are ordinary characters, as POSIX grep has\n");
+                    printf("  them - `grep a+b` looks for a, plus, b.\n");
                     return 0;
                 default:
                     dprintf(STDERR_FILENO, "grep: unknown option -%c\n", *f);
@@ -391,8 +324,31 @@ int main(int argc, char **argv)
 
     if (!pat) {
         dprintf(STDERR_FILENO,
-                "usage: grep [-invclqr] <pattern> [file|dir]...\n");
+                "usage: grep [-invclqrEF] <pattern> [file|dir]...\n");
         return 2;
+    }
+
+    if (fixed) {
+        if (strlcpy(fixed_pat, pat, sizeof fixed_pat) >= sizeof fixed_pat) {
+            dprintf(STDERR_FILENO,
+                    "grep: the -F string is longer than %d characters\n",
+                    (int)sizeof fixed_pat - 1);
+            return 2;
+        }
+    } else {
+        const char *err = NULL;
+        program = re_compile(pat, extended, fold, &err);
+        if (!program) {
+            dprintf(STDERR_FILENO, "grep: %s\n",
+                    err ? err : "that pattern makes no sense");
+            /* The commonest reason, and it is not obvious from the
+             * message alone if you are used to another grep. */
+            if (!extended && (strchr(pat, '(') || strchr(pat, '|')))
+                dprintf(STDERR_FILENO,
+                        "grep:   ( and | are ordinary characters without -E."
+                        " Try grep -E.\n");
+            return 2;
+        }
     }
 
     if (recursive) {
@@ -404,11 +360,11 @@ int main(int argc, char **argv)
             if (!argv[i][0]) continue;
             if (argv[i][0] == '-' && argv[i][1]) continue;
             if (!seen && strcmp(argv[i], pat) == 0) { seen = true; continue; }
-            grep_tree(argv[i], pat, &o, 0);
+            grep_tree(argv[i], &o, 0);
             searched = true;
         }
         if (!searched)
-            grep_tree(".", pat, &o, 0);
+            grep_tree(".", &o, 0);
         if (o.count_only)
             printf("%ld\n", recurse_total);
         return any_match ? 0 : 1;
@@ -417,7 +373,7 @@ int main(int argc, char **argv)
     long total = 0;
 
     if (files == 0) {
-        total = grep_fd(STDIN_FILENO, pat, &o, "(stdin)", false);
+        total = grep_fd(STDIN_FILENO, &o, "(stdin)", false);
         if (o.count_only)
             printf("%ld\n", total);
         return total > 0 ? 0 : 1;
@@ -437,7 +393,7 @@ int main(int argc, char **argv)
             dprintf(STDERR_FILENO, "grep: %s: cannot open\n", argv[i]);
             continue;
         }
-        long n = grep_fd((int)fd, pat, &o, argv[i], files > 1);
+        long n = grep_fd((int)fd, &o, argv[i], files > 1);
         lp_close((int)fd);
 
         if (o.count_only)

@@ -879,7 +879,8 @@ static const char *BUILTINS[] = {
      * so it can scan PATH and list what is actually installed - a
      * builtin would only ever know what was hardcoded into the shell. */
     "exit", "cd", "pwd", "echo", "env", "reboot", "poweroff", "halt",
-    "test", "[", "true", "false", ":", NULL
+    "test", "[", "true", "false", ":",
+    "read", "shift", "export", NULL
 };
 
 /* ── test ─────────────────────────────────────────────────────────────
@@ -1051,6 +1052,115 @@ static bool run_builtin(cmd_t *c)
 
     if (strcmp(cmd, "test") == 0 || strcmp(cmd, "[") == 0) {
         last_status = run_test(c->argv, c->argc);
+        return true;
+    }
+
+    /* read - the only way a script can ask a question.
+     *
+     *   read name              one line into $name
+     *   read -p "Sure? " ans   with a prompt first
+     *   read -r line           backslashes stay backslashes
+     *   read a b rest          split on spaces; the last one takes the rest
+     *
+     * Without this a script could print a question and had no way to
+     * hear the answer, so every confirmation on this machine had to be
+     * compiled into a C program. Returns 1 at end of input, which is
+     * what makes `while read line ; do ... ; done` stop. */
+    if (strcmp(cmd, "read") == 0) {
+        const char *prompt = NULL;
+        bool raw = false;
+        int  first = 1;
+        for (; first < c->argc; first++) {
+            if (strcmp(c->argv[first], "-r") == 0) raw = true;
+            else if (strcmp(c->argv[first], "-p") == 0 && first + 1 < c->argc)
+                prompt = c->argv[++first];
+            else break;
+        }
+        (void)raw;                 /* nothing here interprets backslashes */
+
+        if (prompt)
+            fputs(prompt, STDOUT_FILENO);
+
+        char buf[MAX_LINE];
+        long n = readline(STDIN_FILENO, buf, sizeof buf);
+        if (n < 0) { last_status = 1; return true; }
+
+        if (first >= c->argc) {
+            /* No variable named: POSIX puts the line in REPLY. */
+            setenv("REPLY", buf, 1);
+            last_status = 0;
+            return true;
+        }
+
+        char *p = buf;
+        for (int i = first; i < c->argc; i++) {
+            while (*p == ' ' || *p == '\t') p++;
+
+            if (i == c->argc - 1) {
+                /* The last variable takes everything left, trailing
+                 * spaces trimmed - that is what makes `read cmd rest`
+                 * useful for parsing a line. */
+                char *end = p + strlen(p);
+                while (end > p && (end[-1] == ' ' || end[-1] == '\t')) *--end = 0;
+                setenv(c->argv[i], p, 1);
+                break;
+            }
+
+            char *word = p;
+            while (*p && *p != ' ' && *p != '\t') p++;
+            if (*p) *p++ = '\0';
+            setenv(c->argv[i], word, 1);
+        }
+        last_status = 0;
+        return true;
+    }
+
+    /* shift - drop the first positional argument.
+     *
+     * `while test $# -gt 0 ; do ... ; shift ; done` is how a script
+     * walks its own arguments, and without shift there was no way to
+     * write that loop at all. */
+    if (strcmp(cmd, "shift") == 0) {
+        int by = (c->argc > 1) ? atoi(c->argv[1]) : 1;
+        if (by < 0) {
+            dprintf(STDERR_FILENO, "shift: %s is not a count\n", c->argv[1]);
+            last_status = 2;
+            return true;
+        }
+        if (by > pos_count) {
+            /* Nothing left to shift is an error, not a silent no-op:
+             * a loop that relies on shift to end would otherwise spin. */
+            last_status = 1;
+            return true;
+        }
+        for (int i = 0; i + by < pos_count; i++)
+            strlcpy(pos_args[i], pos_args[i + by], sizeof pos_args[0]);
+        pos_count -= by;
+        last_status = 0;
+        return true;
+    }
+
+    /* export - accepted, because every script written elsewhere says it.
+     *
+     * There is nothing for it to do here: an assignment in this shell
+     * calls setenv, so a variable is in the environment from the moment
+     * it exists and every child already sees it. `export NAME=value`
+     * still has to assign, though, or the script silently loses the
+     * value. Refusing the word outright would break scripts for no
+     * reason; doing nothing quietly would lose data. */
+    if (strcmp(cmd, "export") == 0) {
+        for (int i = 1; i < c->argc; i++) {
+            char *eq = strchr(c->argv[i], '=');
+            if (!eq)
+                continue;           /* already exported; nothing to do */
+            char name[128];
+            size_t len = (size_t)(eq - c->argv[i]);
+            if (len >= sizeof name) len = sizeof name - 1;
+            memcpy(name, c->argv[i], len);
+            name[len] = '\0';
+            setenv(name, eq + 1, 1);
+        }
+        last_status = 0;
         return true;
     }
 
@@ -1358,6 +1468,31 @@ static void run_pipeline(cmd_t *cmds, int n, bool background)
             }
 
             apply_redirects(&cmds[i]);           /* redirection beats the pipe */
+
+            /* A builtin or a function is a perfectly good stage.
+             *
+             * This used to go straight to the PATH search, so
+             * `echo x | grep x` answered "sh: echo: command not found" -
+             * echo is a builtin and there is no /bin/echo on this
+             * system. The same for pwd, env, test and every function the
+             * person had defined. That is one of the two or three most
+             * typed shapes in any shell, and it has never worked here.
+             *
+             * We are already in the forked child with the pipe wired up,
+             * so running it here is right in the other sense too: a `cd`
+             * or an assignment in a pipeline stage must not reach back
+             * into the shell that started it, and it cannot from here. */
+            {
+                func_t *pf = func_find(cmds[i].argv[0]);
+                if (pf) {
+                    call_func(pf, cmds[i].argv, cmds[i].argc);
+                    lp_exit(last_status);
+                }
+                if (is_builtin(cmds[i].argv[0])) {
+                    run_builtin(&cmds[i]);
+                    lp_exit(last_status);
+                }
+            }
 
             char path[512];
             if (!resolve_path(cmds[i].argv[0], path, sizeof(path))) {
