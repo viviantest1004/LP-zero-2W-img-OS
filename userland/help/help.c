@@ -172,7 +172,7 @@ static const entry_t KNOWN[] = {
     { "wpa_cli",  "network", "talk to wpa_supplicant",      "wpa_cli" },
     { "dropbear", "network", "the SSH server",              "(started by init)" },
     { "dropbearkey", "network", "make an SSH host key",     "dropbearkey -t ed25519 -f <file>" },
-    { "authkey",  "network", "keep a way in over SSH",      "authkey [-l]" },
+    { "authkey",  "network", "make and keep a way in over SSH", "authkey new | add [file] | -l" },
     { "netstat",  "network", "what is listening, and connected", "netstat [-latunp] [-r] [-i] [-s]" },
     { "httpd",    "network", "serve a directory over http",  "httpd [-p port] [-d dir] [-i addr] [-f]" },
     { "firewall", "network", "which ports are open",        "firewall [on|strict|off]" },

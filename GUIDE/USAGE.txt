@@ -13,7 +13,7 @@
 WHAT THIS IS
 ------------
 A Linux distribution written from nothing: its own C library, its
-own init, its own shell, its own bootloader, and about 130
+own init, its own shell, its own bootloader, and 130
 commands. No busybox, no glibc underneath it, no userland from
 anywhere else.
 
@@ -379,7 +379,7 @@ permitted), and the Linux kernel (GPL-2.0).
 이게 뭔가
 ---------
 아무것도 없는 데서 쓴 리눅스 배포판입니다. C 라이브러리도, init
-도, 셸도, 부트로더도 자체 구현이고 명령어가 130개쯤 됩니다.
+도, 셸도, 부트로더도 자체 구현이고 명령어가 130개입니다.
 busybox 도, 그 아래의 glibc 도, 다른 데서 가져온 유저랜드도
 없습니다.
 

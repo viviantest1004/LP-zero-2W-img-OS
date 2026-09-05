@@ -362,7 +362,7 @@ echo "[rc] SSH keys"
 #
 # authkey exits non-zero when the result is empty, which is the one state
 # worth shouting about.
-authkey || echo "[rc]   ** nobody can log in over SSH. See the message above."
+authkey || echo "[rc]   ** nobody can log in over SSH. Run `authkey new` here - it makes a key and prints how to connect."
 
 echo "[rc] WiFi configuration"
 # The boot partition wins, then the data partition, then the image.

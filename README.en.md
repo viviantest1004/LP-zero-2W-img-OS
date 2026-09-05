@@ -10,7 +10,7 @@ does not open, the same files are in [`dist/`](dist/).
 ---
 
 **A Linux distribution written from nothing.** Its own C library, its own
-init, its own shell, its own bootloader, and @NCMD@ commands. No busybox,
+init, its own shell, its own bootloader, and 130 commands. No busybox,
 no glibc underneath, no userland from anywhere else. The whole system is
 one kernel image file that unpacks into RAM at boot.
 
@@ -24,7 +24,7 @@ machines and ordinary amd64 PCs** as well.
 | Whole system | **one** kernel + userland file, 13–22MB |
 | RAM left after boot | about **480MB** on a 512MB board |
 | Boot time | roughly 10 seconds from power to a prompt |
-| Commands | **@NCMD@**, every one written here |
+| Commands | **130**, every one written here |
 | SSH | **built in**, public key only — `authkey new` makes one and prints the command to connect |
 | Text tools | `sed` `awk` `grep` `diff`, over one shared regular expression engine |
 | Packages | its own `pkg`, and `apt` — real Debian packages |

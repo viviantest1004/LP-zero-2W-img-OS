@@ -32,6 +32,16 @@ if test -f /data/dropbear_ed25519_host_key ; then echo "PASS  host key is on /da
 if mount | grep -q " /root " ; then echo "PASS  /root comes from /data" ; else echo "FAIL  /root is RAM - keys lost on reboot" ; fi
 if pidof dropbear > /dev/null ; then echo "PASS  dropbear running" ; else echo "FAIL  dropbear not running" ; fi
 if authkey -l | grep -q "no keys" ; then echo "SKIP  no SSH key authorized (a setup choice, not a fault)" ; else echo "PASS  an SSH key is authorized" ; fi
+if authkey -l | grep -q "authkey new" ; then echo "PASS  and it names the command that fixes that" ; else echo "PASS  a key is already there, so there is nothing to fix" ; fi
+if authkey new > /tmp/ak1 2>&1 ; then echo "PASS  authkey new makes a key on the machine" ; else echo "FAIL  authkey new: `head -2 /tmp/ak1`" ; fi
+if authkey -l | grep -q "ssh-" ; then echo "PASS  and it is authorized" ; else echo "FAIL  the new key is not in authorized_keys" ; fi
+if grep -q "ssh -i lp_ssh_key root@" /tmp/ak1 ; then echo "PASS  and it printed the command to connect" ; else echo "FAIL  authkey new did not print an ssh command: `tail -4 /tmp/ak1`" ; fi
+if test -f /boot/lp_ssh_key ; then echo "PASS  the private key is on the boot partition, readable from any PC" ; else if test -f /data/lp_ssh_key ; then echo "PASS  the private key is on /data (boot is read-only here)" ; else echo "FAIL  the private key was not left anywhere reachable" ; fi ; fi
+if echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyForTheSelfTestOnly test@selftest" | authkey add > /dev/null 2>&1 ; then echo "PASS  authkey add takes a key from a paste" ; else echo "FAIL  authkey add" ; fi
+if authkey -l | grep -q "test@selftest" ; then echo "PASS  and it is authorized too" ; else echo "FAIL  the pasted key was not added" ; fi
+if echo "this is not a key" | authkey add > /tmp/ak2 2>&1 ; then echo "FAIL  authkey add accepted something that is not a key" ; else echo "PASS  authkey add refuses what is not a key" ; fi
+if grep -q "not a public key" /tmp/ak2 ; then echo "PASS  and says what was wrong" ; else echo "FAIL  and did not say why" ; fi
+rm -f /tmp/ak1 /tmp/ak2
 
 echo "=== PYTHON ==="
 if test -x /data/python/bin/python3.12 ; then
