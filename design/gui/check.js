@@ -352,6 +352,34 @@ async function run() {
     typeof LPSpring === 'object' && Object.keys(LPSpring.PRESETS).length);
   ok('스프링이 실려 있다', springs === 9, springs + '개');
 
+  /* Every class actually on an element, against every class the
+   * stylesheet defines.
+   *
+   * Read from the DOM rather than grepped out of the source, because
+   * most of these screens build their markup in JavaScript and a class
+   * that only exists inside a template literal is invisible to a
+   * regex - which is how a typo'd class name survives review looking
+   * like a class that works. An undefined class is not a crash; it is a
+   * row that quietly renders unstyled. */
+  const undefinedClasses = await page.evaluate(() => {
+    const defined = new Set();
+    for (const sheet of document.styleSheets) {
+      let rules;
+      try { rules = sheet.cssRules; } catch (e) { continue; }
+      for (const r of rules) {
+        if (!r.selectorText) continue;
+        for (const m of r.selectorText.matchAll(/\.([A-Za-z][\w-]*)/g))
+          defined.add(m[1]);
+      }
+    }
+    const used = new Set();
+    document.querySelectorAll('*').forEach(el =>
+      el.classList.forEach(c => used.add(c)));
+    return [...used].filter(c => !defined.has(c)).sort();
+  });
+  ok('스타일시트에 없는 클래스가 없다', undefinedClasses.length === 0,
+     undefinedClasses.join(' '));
+
   head('오류');
   ok('콘솔 오류 없음', errors.length === 0, errors.slice(0, 3).join(' | '));
 

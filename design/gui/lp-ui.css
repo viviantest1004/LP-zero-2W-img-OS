@@ -261,3 +261,34 @@ h2{font-size:19px;font-weight:600;margin-bottom:3px;letter-spacing:-.02em}
 .inline.on{display:block}
 .inline.warn{color:var(--amber)}
 .inline.bad{color:var(--red)}
+
+/* ── carried over from the reference mockup ─────────────────────
+ *
+ * Four classes the owner's screens use that the design system did not
+ * have: the segmented bar and its key on 저장 공간, and the accent
+ * colour swatches on 모양.
+ *
+ * They were in that file's own <style> block. Assembling takes the
+ * panes and not the stylesheet, so without these two of the sixteen
+ * screens rendered unstyled - the storage bar as a row of bare divs and
+ * the colour choices as nothing at all. Nothing threw and nothing
+ * warned; an undefined class is silent, which is why the check for it
+ * reads the DOM rather than the source.
+ *
+ * They belong here rather than back in the pane markup: another screen
+ * showing how something is divided up will want the same bar. */
+.seg{display:flex;height:22px;border-radius:5px;overflow:hidden;margin:10px 0 8px}
+.seg div{height:22px}
+
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:var(--s-small);color:var(--t2)}
+.legend b{display:inline-block;width:9px;height:9px;border-radius:2px;
+  margin-right:6px;vertical-align:-1px}
+
+.swatch{display:flex;gap:7px;margin-top:8px}
+/* The reference drew this border as #5a5a5a. It is a token here
+ * instead - one step dimmer, invisibly so on a 22px square - because
+ * "no colour outside the tokens" stops being a rule the moment it has
+ * one exception nobody can justify. */
+.swatch i{width:22px;height:22px;border-radius:6px;display:block;
+  border:.5px solid var(--t4)}
+.swatch i.pick{outline:2px solid var(--t1);outline-offset:2px}
