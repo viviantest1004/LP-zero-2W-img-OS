@@ -5,14 +5,17 @@
  * not seen to bounce, it is seen to be put down. lp-ui.css has no class
  * that applies it: .appear is the sheet spring and belongs to dialogs.
  *
- * These six lines are now the third identical copy of that pair, after
- * s-kbd.css and s-keys.css. Three screens add and remove rows and the
- * reference sixteen never did, so the rule has outgrown the screens and
- * belongs in lp-ui.css beside .row. It is repeated rather than borrowed
- * from a sibling screen's stylesheet, because a screen that animates
- * only while another screen happens to be in the build is worse than a
- * duplicated declaration. Same names and same values as those two, so
- * merging the three is a delete rather than a decision.
+ * These four lines are now the fourth identical copy of that pair, after
+ * s-kbd.css, s-keys.css and s-user.css. Four screens add and remove rows
+ * and the reference sixteen never did, so the rule has outgrown the
+ * screens and belongs in lp-ui.css beside .row. It is repeated rather
+ * than borrowed from a sibling screen's stylesheet, because a screen
+ * that animates only while another screen happens to be in the build is
+ * worse than a duplicated declaration. Same names and same values as
+ * those three, so merging the four is a delete rather than a decision -
+ * and it is four, not three, which is worth stating because a count that
+ * is off by one leaves the fourth copy sitting there after the merge
+ * that was supposed to remove it.
  *
  * Leaving is the same spring at 0.7 of its time, and pointer-events go
  * with it: a row on its way out must not answer a second 해제. */

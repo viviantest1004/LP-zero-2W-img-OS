@@ -14,6 +14,7 @@
   'use strict';
 
   const PANE = 's-kbd';
+  const AREA = 'keyboard';
 
   /* Repeat speed and delay are the only state this screen adds, and they
    * go on LP with everything else. A screen holding its own copy looks
@@ -55,10 +56,14 @@
   function rateWord(v)  { return v < 34 ? '느리게' : v < 67 ? '보통' : '빠르게'; }
   function delayWord(v) { return v < 40 ? '짧게'   : v < 75 ? '보통' : '길게'; }
 
+  function speedText() {
+    return (delayMs() / 1000).toFixed(2) + '초 · 초당 ' + perSec() + '자';
+  }
+
   /* ── the pane ─────────────────────────────────────────────────── */
 
   LP.panes[PANE] = function (el) {
-    const may  = LP.can('keyboard');
+    const may  = LP.can(AREA);
     const src  = LP.sources;
     const solo = src.length <= 1;
 
@@ -71,7 +76,7 @@
       : '입력 소스 ' + src.length + '개 · 전환 키 ' + switchOf(LP.switchKey).name;
 
     const mark = may ? '' : '<span class="lock">자물쇠</span>';
-    const why  = may ? '' : '<div class="why">' + LP.whyLocked('keyboard') + '</div>';
+    const why  = may ? '' : '<div class="why">' + LP.whyLocked(AREA) + '</div>';
     const shut = may ? '' : ' locked';
     const dis  = may ? '' : ' disabled';
 
@@ -90,7 +95,7 @@
       /* The 삭제 button on the fixed source is deliberately not disabled.
        * A control that does nothing when pressed teaches nothing; this
        * one presses, refuses, and says what it is protecting. */
-      h += '<div class="row' + shut + (may ? '' : ' fixed') + '" data-id="' + LP.esc(s.id) + '">' +
+      h += '<div class="row' + shut + '" data-id="' + LP.esc(s.id) + '">' +
              '<span class="drag">⠿</span>' +
              '<div class="lb"><b>' + LP.esc(s.name) + pills + mark + '</b>' +
                '<i>' + LP.esc(s.desc) + '</i>' + why +
@@ -99,8 +104,12 @@
            '</div>';
     });
 
+    /* What "first" means is true for everybody; how to change it is not.
+     * A caption telling a standard account to drag the handle is an
+     * instruction for something the row above it has just refused. */
     h += '</div>' +
-         '<div class="caption">목록의 첫 번째가 새 창이 시작하는 입력 소스입니다. 손잡이를 끌어 순서를 바꿉니다.</div>' +
+         '<div class="caption">목록의 첫 번째가 새 창이 시작하는 입력 소스입니다.' +
+           (may ? ' 손잡이를 끌어 순서를 바꿉니다.' : '') + '</div>' +
          '<div class="btnrow"><button class="btn pressable" id="k-add-open"' + dis + '>입력 소스 추가</button></div>' +
          '<div class="inline" id="k-said"></div>';
 
@@ -138,7 +147,7 @@
          '<div class="row"><div class="lb"><b>시험 입력</b>' +
            '<i>키를 길게 누르면 위에서 정한 그대로 반복됩니다</i>' +
            '<input class="field mono" id="k-try" placeholder="여기에 입력">' +
-         '</div><div class="vl">' + (delayMs() / 1000).toFixed(2) + '초 · 초당 ' + perSec() + '자</div></div>' +
+         '</div><div class="vl" id="k-speed">' + speedText() + '</div></div>' +
          '</div>';
 
     /* ── 단축키, 초기화 ──
@@ -163,8 +172,6 @@
     const body = el.querySelector('#k-body');
     body.innerHTML = h;
 
-    /* The dialogs sit at the end of the window, outside this pane, so
-     * they survive the rebuild and must not be wired again with it. */
     wireDialogs();
 
     if (may) {
@@ -185,20 +192,27 @@
 
   function said() { return document.querySelector('#k-said'); }
 
+  function rowFor(id) {
+    return document.querySelector('#k-list .row[data-id="' + id + '"]');
+  }
+
   function remove(id) {
     const verdict = LP.canRemoveSource(id);
     if (!verdict.ok) { refuse(id, verdict); return; }
 
-    const row = document.querySelector('#k-list .row[data-id="' + id + '"]');
-    if (!row) return;
-    /* Taken out of LP only once the row has finished leaving, so the list
-     * is never a frame ahead of what is on the screen. */
-    row.classList.add('leave');
-    row.addEventListener('animationend', () => {
-      const i = LP.sources.findIndex(s => s.id === id);
-      if (i >= 0) LP.sources.splice(i, 1);
-      LP.render();
-    }, { once: true });
+    /* Taken out of LP first and drawn out afterwards. The other order
+     * reads better and loses deletions: it hangs the splice on the exit
+     * animation, and any render from somewhere else - the account
+     * switch, another row - replaces the animating node before it ends,
+     * so animationend never fires and the source quietly comes back. */
+    const i = LP.sources.findIndex(s => s.id === id);
+    if (i < 0) return;
+    LP.sources.splice(i, 1);
+
+    const row = rowFor(id);
+    if (!row) { LP.render(); return; }
+    row.classList.add('leaving');
+    row.addEventListener('animationend', () => LP.render(), { once: true });
   }
 
   /* The refusal. Everything it says comes from canRemoveSource - the
@@ -213,18 +227,36 @@
     detail.textContent = verdict.detail || '';
     detail.hidden = !verdict.detail;
 
-    /* Moving it down is only worth offering when there is somewhere to
-     * move it to. Offering it on a one-item list would be a button that
-     * changes nothing, which is the thing this dialog exists to avoid. */
-    const last = LP.sources[LP.sources.length - 1];
-    const worth = LP.sources.length > 1 && last.id !== id && LP.can('keyboard');
-    d.querySelector('#k-nodrop-offer').hidden = !worth;
-    d.querySelector('#k-nodrop-demote').hidden = !worth;
+    /* A refusal that stops at "no" leaves the reader holding the same
+     * intention and no way to act on it, so the last line always says
+     * what to do instead - and which sentence that is depends on why
+     * moving it would not help. Only the first case has anything to
+     * press, and it is gated on the same LP.can the rows are: a dialog
+     * that offers what the pane refuses is two answers to one question. */
+    const at   = LP.sources.findIndex(s => s.id === id);
+    const room = at > -1 && at < LP.sources.length - 1;
+    const move = room && LP.can(AREA);
+
+    let offer = '';
+    if (move)      offer = '지우는 대신 목록 맨 아래로 내리면 새 창은 첫 번째 입력 소스로 시작합니다. ' +
+                           '이 배열은 로그인 화면과 복구 콘솔에 그대로 남습니다.';
+    else if (room) offer = LP.whyLocked(AREA);
+    else if (at === 0 && LP.sources.length === 1)
+                   offer = '지금은 입력 소스가 이것 하나뿐입니다. 다른 입력 소스를 추가하면 ' +
+                           '새 창이 어느 입력 소스로 시작할지 정할 수 있습니다.';
+    else if (at > -1)
+                   offer = '이 입력 소스는 이미 목록 맨 아래에 있습니다. ' +
+                           '새 창은 목록의 첫 번째 입력 소스로 시작합니다.';
+
+    const line = d.querySelector('#k-nodrop-offer');
+    line.textContent = offer;
+    line.hidden = !offer;
+    d.querySelector('#k-nodrop-demote').hidden = !move;
 
     LP.open('k-nodrop');
   }
 
-  function move(fromId, toId, after) {
+  function reorder(fromId, toId, after) {
     const from = LP.sources.findIndex(s => s.id === fromId);
     let to = LP.sources.findIndex(s => s.id === toId);
     if (from < 0 || to < 0 || from === to) return;
@@ -238,8 +270,11 @@
     /* A reorder is its own feedback - the rows moved. The only part worth
      * a sentence is the first place changing, because that is the part
      * that changes what a new window does. */
-    if (LP.sources[0].id !== wasFirst)
-      LP.say(said(), '이제 목록의 첫 번째는 ' + LP.sources[0].name + ' 입니다.');
+    if (LP.sources[0].id !== wasFirst) sayFirst();
+  }
+
+  function sayFirst(lead) {
+    LP.say(said(), (lead || '') + '이제 목록의 첫 번째는 ' + LP.sources[0].name + '입니다.');
   }
 
   function wireDrag(root) {
@@ -253,8 +288,19 @@
 
     list.querySelectorAll('.row[data-id]').forEach(row => {
       /* Only the handle starts a drag. With the whole row draggable the
-       * name cannot be selected and a reach for 삭제 drags the row. */
-      row.querySelector('.drag').addEventListener('mousedown', () => { row.draggable = true; });
+       * name cannot be selected and a reach for 삭제 drags the row.
+       *
+       * The flag has to be given back on the release as well as on
+       * dragend: a press on the handle that never becomes a drag ends in
+       * a plain mouseup, and a row left draggable from that press is a
+       * row that picks itself up the next time anybody grabs its
+       * button - which is the case this whole arrangement exists to
+       * prevent. */
+      row.querySelector('.drag').addEventListener('mousedown', () => {
+        row.draggable = true;
+        document.addEventListener('mouseup',
+          () => { row.draggable = false; }, { once: true });
+      });
 
       row.addEventListener('dragstart', e => {
         held = row;
@@ -283,7 +329,7 @@
       row.addEventListener('drop', e => {
         e.preventDefault();
         if (!held || held === row) return;
-        move(held.dataset.id, row.dataset.id, row.classList.contains('dropafter'));
+        reorder(held.dataset.id, row.dataset.id, row.classList.contains('dropafter'));
       });
     });
   }
@@ -302,12 +348,16 @@
         const r = bar.getBoundingClientRect();
         const v = Math.max(0, Math.min(100, Math.round((e.clientX - r.left) / r.width * 100)));
         LP.typing[key] = v;
-        /* Mid-drag only these two nodes are touched. Re-rendering the
-         * pane every frame would replace the bar under the finger that
-         * is holding it. LP is still the value; this is painting ahead
-         * of the redraw, not a second copy of it. */
+        /* LP is the value; these three nodes are the same value painted
+         * early. Re-rendering the pane instead - during the drag or on
+         * the release - would replace the bar under the finger holding
+         * it and empty the 시험 입력 field the two sliders exist to be
+         * tried in, which is the one thing on this screen a person is
+         * part-way through when they reach for them. */
         fill.style.width = v + '%';
         val.textContent = word(v);
+        const speed = document.getElementById('k-speed');
+        if (speed) speed.textContent = speedText();
       }
 
       /* The bar is 5px tall, which is a fine thing to look at and a poor
@@ -324,9 +374,7 @@
         if (row.hasPointerCapture(e.pointerId)) setFrom(e);
       });
       row.addEventListener('pointerup', e => {
-        if (!row.hasPointerCapture(e.pointerId)) return;
-        row.releasePointerCapture(e.pointerId);
-        LP.render();
+        if (row.hasPointerCapture(e.pointerId)) row.releasePointerCapture(e.pointerId);
       });
     });
   }
@@ -396,6 +444,10 @@
   }
 
   function add(id) {
+    /* Asked again here rather than trusted from the button that opened
+     * the dialog: the pane and the dialog have to give one answer, and
+     * the pane's answer can change while the dialog is open. */
+    if (!LP.can(AREA)) return;
     const c = LP.catalogue.find(x => x.id === id);
     if (!c || LP.sources.some(s => s.id === id)) return;
     /* Written with the same shape as the seeded list, fixed included: an
@@ -404,8 +456,8 @@
     LP.sources.push({ id: c.id, name: c.name, desc: c.desc, fixed: false });
     LP.close('k-add');
     LP.render();
-    const row = document.querySelector('#k-list .row[data-id="' + c.id + '"]');
-    if (row) row.classList.add('arrive');
+    const row = rowFor(c.id);
+    if (row) row.classList.add('arriving');
   }
 
   function openSwitch() {
@@ -423,20 +475,18 @@
     LP.open('k-switch');
   }
 
-  /* Wired once. The dialogs are not rebuilt with the pane, so binding
-   * them from the render function would stack a handler per redraw. */
+  /* Wired once. The dialogs live at the end of the window rather than in
+   * the pane, so they outlive every rebuild and binding them from the
+   * render function would stack one handler per redraw.
+   *
+   * Closing is not here at all: lp-boot listens at the window for
+   * [data-close] and for a press on the backdrop itself, and Escape is
+   * lp-core's. A screen that also wires its own cancel is a second copy
+   * of a rule, and a rule with two copies is true only while both are
+   * remembered. */
   function wireDialogs() {
     const add_ = document.getElementById('k-add');
     if (add_._wired) return;
-
-    ['k-add', 'k-switch', 'k-nodrop'].forEach(id => {
-      const d = document.getElementById(id);
-      /* Three ways out of every dialog: the button, Escape (lp-core), and
-       * the dimmed window behind it. */
-      d.addEventListener('click', e => { if (e.target === d) LP.close(id); });
-      d.querySelectorAll('[data-close]').forEach(b =>
-        b.addEventListener('click', () => LP.close(id)));
-    });
 
     document.getElementById('k-add-q')
       .addEventListener('input', e => fillCatalogue(e.target.value));
@@ -448,13 +498,14 @@
 
     document.getElementById('k-switch-list').addEventListener('click', e => {
       const row = e.target.closest('[data-sw]');
-      if (!row) return;
+      if (!row || !LP.can(AREA)) return;
       LP.switchKey = row.dataset.sw;
       LP.close('k-switch');
       LP.render();
     });
 
     document.getElementById('k-nodrop-demote').addEventListener('click', () => {
+      if (!LP.can(AREA)) return;
       const id = document.getElementById('k-nodrop').dataset.id;
       const i = LP.sources.findIndex(s => s.id === id);
       if (i < 0) return;
@@ -464,7 +515,7 @@
       LP.render();
       /* Said out loud because the dialog has just closed over the list and
        * the pill that moved is not where the eye is. */
-      LP.say(said(), '맨 아래로 내렸습니다. 이제 목록의 첫 번째는 ' + LP.sources[0].name + ' 입니다.');
+      sayFirst('맨 아래로 내렸습니다. ');
     });
 
     add_._wired = true;

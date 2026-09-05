@@ -11,7 +11,13 @@
 
     <!-- 1. What goes, before any password. The facts come first: being
            asked to prove who you are before being told what you are
-           agreeing to is how people agree to the wrong thing. -->
+           agreeing to is how people agree to the wrong thing.
+
+           `tall` because this is the one dialog here that can outgrow
+           the window: eight rows under two heads comes to about 720px,
+           .body declares min-height:560px and .win clips at
+           overflow:hidden, so without a bound 취소 and 계속 can land
+           below an edge nothing scrolls past. -->
     <div class="backdrop" id="dlg-factory-what">
       <div class="modal wide tall appear">
         <h3>공장 초기화</h3>
@@ -47,7 +53,12 @@
 
         <!-- The second list is the one that decides whether this is a
              reset or a brick, and it is why the dialog is 460px wide
-             instead of ending at the caution. -->
+             instead of ending at the caution.
+
+             Every row keeps its value even though the head above it
+             already says 지워지는 / 남는, because the modal scrolls: the
+             head is the first thing to leave the top of it, and a row
+             read on its own still has to say which list it is in. -->
         <div class="sec">남는 것</div>
         <div class="list">
           <div class="row">

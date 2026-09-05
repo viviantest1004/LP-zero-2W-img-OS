@@ -18,6 +18,12 @@
  * difference that decides what actually happens when a switch goes off,
  * which is the only thing the person granting it came here to find out.
  *
+ * Two names land on more than one list - 터미널 is a feature and an app,
+ * 네트워크 is a settings area and 네트워크 설정 is a feature - and a
+ * screen that shows the same word switched on in one list and off in
+ * another, without saying they are different switches, reads as broken
+ * rather than as precise. Both places say so on the row.
+ *
  * ── Why every line says what stops ──
  *
  * "네트워크 — 네트워크 설정" is a row that has told the reader nothing.
@@ -29,9 +35,15 @@
  *
  * 공장 초기화 sits in the list and is the only row with no switch. A
  * switch that cannot move is a lie about what the control does; a value
- * reading 관리자만 is not. LP.can('factory') is false for a standard
- * account whatever LP.allow holds, so the row draws a rule that lives in
- * lp-core.js instead of one this screen invented.
+ * reading 관리자만 is not.
+ *
+ * The row does not ask LP.can('factory'), and that is deliberate rather
+ * than an omission: LP.can answers about the account looking at the
+ * screen, and for the administrator - who is the only person who ever
+ * sees this list - it answers true. Every other row here is about what
+ * the standard account gets, and so is this one. What it does take from
+ * lp-core.js is the sentence, through LP.whyLocked, so the wording of
+ * the refusal is not invented a second time here.
  */
 
 (function () {
@@ -43,9 +55,14 @@
 
   /* ── the settings a standard account may be given ───────────────
    *
-   * In LP.allow's own order, which is the order the settings list has
-   * them. The switch state is read from LP.allow on every render and
-   * never from here - this table is wording and sequence, not state.
+   * In LP.allow's own order. That is close to the sidebar's but not the
+   * same - the sidebar has 모양 above 소리, and 날짜와 시간 has no entry
+   * of its own at all because its rows live inside 일반 - so this table
+   * fixes the sequence rather than deriving it, and any screen that
+   * wants the sidebar's order has to read the sidebar.
+   *
+   * The switch state is read from LP.allow on every render and never
+   * from here: this table is wording and sequence, not state.
    *
    * 사용자 carries the sentence it does because it is the row that hands
    * over this screen: an account allowed 사용자 can open 권한 and grant
@@ -72,8 +89,12 @@
       off: '끄면 다른 계정을 만들거나 지우지 못합니다. 켜면 이 권한 화면도 함께 열립니다' },
     { key: 'privacy',  name: '개인 정보',
       off: '끄면 카메라와 마이크, 위치를 앱에 열어 주지 못합니다' },
+    /* The screen is named because these rows are not on one of their
+     * own: 시간대 and 24시간 형식 sit in the middle of 일반, beside 기기
+     * 이름 and 언어, which answer to other permissions. Somebody
+     * checking what this switch did needs to be told where to look. */
     { key: 'datetime', name: '날짜와 시간',
-      off: '끄면 시간대와 시계 형식을 바꾸지 못합니다. 시각은 계속 자동으로 맞춰집니다' },
+      off: '끄면 일반 화면의 시간대와 시계 형식을 바꾸지 못합니다. 시각은 계속 자동으로 맞춰집니다' },
     { key: 'reset',    name: '초기화',
       off: '끄면 설정을 항목별로 처음 값으로 되돌리지 못합니다' },
   ];
@@ -110,6 +131,18 @@
 
   function appByName(name) {
     return APPS.filter(function (a) { return a.name === name; })[0];
+  }
+
+  /* The feature of the same name, if LP.features has one. 터미널 is on
+   * both lists and the two switches cover different routes: blocking the
+   * app shuts the window, turning the feature off shuts the program. An
+   * administrator who blocked 터미널 to stop terminal use has not stopped
+   * it while the feature is still on, and the only place that fact can
+   * be said in time to be useful is on the row itself. */
+  function featureNamed(name) {
+    const key = Object.keys(LP.features)
+      .filter(function (k) { return LP.features[k].name === name; })[0];
+    return key ? LP.features[key] : null;
   }
 
   /* ── drawing ────────────────────────────────────────────────────
@@ -152,13 +185,26 @@
 
   function blockedRow(name) {
     const app = appByName(name);
+    const feat = featureNamed(name);
+    /* The clash first when there is one. A row reading 터미널 · 해제
+     * directly under a switch reading 터미널 · 켜짐 is the screen
+     * contradicting itself unless it says which is which. */
+    const line = feat && feat.on
+      ? '같은 이름의 기능이 켜져 있습니다. 앱으로는 열리지 않지만 다른 앱을 거쳐서는 실행됩니다'
+      : (app && app.desc) || '';
+
     return '<div class="row" data-app="' + LP.esc(name) + '">' +
         '<div class="lb"><b>' + LP.esc(name) + '</b>' +
-          (app && app.desc ? '<i>' + LP.esc(app.desc) + '</i>' : '') + '</div>' +
+          (line ? '<i>' + LP.esc(line) + '</i>' : '') + '</div>' +
         '<button class="btn quiet pressable" data-unblock>해제</button>' +
       '</div>';
   }
 
+  /* Written into textContent, so the name goes in raw. Sending it
+   * through LP.esc as well would put a literal &amp; on screen for
+   * anybody whose name has an ampersand in it - escaping belongs to the
+   * innerHTML path, and doing it on both paths is how the escape itself
+   * becomes the bug. */
   function subLine(may) {
     if (!may)
       return '표준 사용자가 무엇을 바꿀 수 있는지 관리자가 정하는 화면입니다';
@@ -167,9 +213,9 @@
     const areasOn = AREAS.filter(function (a) { return LP.allow[a.key]; }).length;
     const featsOn = feats.filter(function (k) { return LP.features[k].on; }).length;
 
-    return '표준 사용자 ' + LP.esc(LP.userName.std) + ' 가 바꿀 수 있는 것을 정합니다 · ' +
-      '설정 ' + AREAS.length + '개 중 ' + areasOn + '개, ' +
-      '기능 ' + feats.length + '개 중 ' + featsOn + '개 허용. ' +
+    return '표준 사용자 ' + LP.userName.std + ' 가 바꿀 수 있는 것을 정합니다 · ' +
+      '설정 ' + AREAS.length + '개 가운데 ' + areasOn + '개, ' +
+      '기능 ' + feats.length + '개 가운데 ' + featsOn + '개가 켜져 있습니다. ' +
       '관리자는 전부 바꿀 수 있어 여기서 정할 것이 없습니다.';
   }
 
@@ -205,6 +251,11 @@
     h += '<div class="caption">기능을 끄면 설정 화면이 잠기는 것이 아니라 ' +
       '그 프로그램이 시작되지 않습니다. 앱 하나를 막는 것과는 다릅니다 — ' +
       '앱을 막으면 그 창이 열리지 않고, 기능을 끄면 다른 앱을 거쳐 들어와도 막힙니다.</div>';
+    /* Named rather than left to be worked out. The two 네트워크 switches
+     * are eleven rows apart, and a reader who takes them for one control
+     * grants the opposite of what was intended. */
+    h += '<div class="caption">이름이 겹치는 자리가 있습니다 — 위쪽 목록의 네트워크는 ' +
+      '네트워크 설정 화면을 잠그고, 여기 있는 네트워크 설정은 연결을 바꾸는 일 자체를 막습니다.</div>';
 
     h += '<div class="sec">실행할 수 있는 앱</div>';
     h += blocked.length
@@ -236,10 +287,10 @@
    * sidebar lock on the section just withdrawn appears in the same
    * frame, which is the whole thing this screen is for. */
   function flipArea(key) {
-    /* The screen having no switches for a standard account is the
-     * drawing of the rule. This is the rule, asked again because a click
-     * can arrive another way - a focused row and a stray Enter, or a
-     * pane drawn before the account changed. */
+    /* Asked again although a standard account is never given switches to
+     * press: lp-boot re-renders every pane on an account switch, visible
+     * or not, so a click can land on a pane that was drawn for the
+     * previous account and has not been redrawn yet. */
     if (!LP.can(AREA)) return;
 
     const on = !LP.allow[key];
@@ -269,16 +320,21 @@
   function unblock(row) {
     if (!LP.can(AREA)) return;
     const name = row.dataset.app;
+    const i = LP.blockedApps.indexOf(name);
+    if (i < 0) return;
 
-    /* Taken off LP.blockedApps when the row has finished leaving, so the
-     * list and the screen are never a frame apart. .row.leave also stops
-     * the row answering a second press on its way out. */
+    /* Off the list first, then animated out - not the other way round.
+     * Hanging the splice on animationend loses it outright whenever
+     * anything redraws the pane inside those 154ms: flipping another
+     * switch here, or the account switch above the window, replaces the
+     * leaving row with a fresh one and the event never arrives. The app
+     * stays blocked, the row comes back, and nothing on screen says why.
+     * With the state changed first there is no window to interrupt: a
+     * redraw in the middle simply draws the list without it. */
+    LP.blockedApps.splice(i, 1);
     row.classList.add('leave');
-    row.addEventListener('animationend', function () {
-      const i = LP.blockedApps.indexOf(name);
-      if (i >= 0) LP.blockedApps.splice(i, 1);
-      LP.render();
-    }, { once: true });
+    row.addEventListener('animationend', function () { LP.render(); },
+                         { once: true });
   }
 
   function block(name) {
@@ -314,8 +370,13 @@
   function fillPicker(query) {
     const list = document.getElementById('perm-app-list');
     const term = query.trim().toLowerCase();
+    /* Everything the row puts on screen is searchable, `no` included.
+     * Matching only the fields that happen to be shown for most rows
+     * gives a list that answers "찾는 이름이 목록에 없습니다" while the
+     * word being searched for is visible three rows down. */
     const hits = APPS.filter(function (a) {
-      return (a.name + ' ' + (a.desc || '')).toLowerCase().indexOf(term) >= 0;
+      return (a.name + ' ' + (a.desc || '') + ' ' + (a.no || ''))
+        .toLowerCase().indexOf(term) >= 0;
     });
 
     list.innerHTML = hits.map(function (a) {
@@ -383,7 +444,14 @@
     };
   }
 
-  wire();
+  /* Registered before the dialog is wired, not after. wire() reaches into
+   * markup this file does not own; if that markup is ever missing it
+   * throws, and doing it first would take the screen down with it -
+   * LP.panes would have no entry, the pane would stay blank, and the
+   * failure would look like a missing screen rather than a missing
+   * dialog. This way the loss is the picker, which is what actually
+   * broke. */
   LP.panes[PANE] = render;
+  wire();
 
 })();

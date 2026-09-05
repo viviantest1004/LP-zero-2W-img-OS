@@ -5,7 +5,7 @@
     <div class="search"><span>찾기</span><input id="k-add-q" placeholder="언어나 배열 이름"></div>
     <div class="picker" id="k-add-list"></div>
     <div class="caption" id="k-add-none" hidden>찾는 이름이 목록에 없습니다</div>
-    <div class="foot"><button class="btn quiet pressable" data-close>닫기</button></div>
+    <div class="foot"><button class="btn quiet pressable" data-close="k-add">닫기</button></div>
   </div>
 </div>
 
@@ -15,17 +15,20 @@
     <p>누를 때마다 목록의 다음 입력 소스로 넘어갑니다.</p>
     <div class="list" id="k-switch-list"></div>
     <div class="caption">직접 지정한 조합은 키 지정 화면에서 바꿉니다.</div>
-    <div class="foot"><button class="btn quiet pressable" data-close>닫기</button></div>
+    <div class="foot"><button class="btn quiet pressable" data-close="k-switch">닫기</button></div>
   </div>
 </div>
 
+<!-- The refusal. Its three lines are filled from what canRemoveSource
+     returned and from where the source sits in the list, so the screen
+     never states a second reason of its own. -->
 <div class="backdrop" id="k-nodrop">
   <div class="modal appear">
     <h3 id="k-nodrop-why"></h3>
     <p id="k-nodrop-detail"></p>
-    <p id="k-nodrop-offer">지우는 대신 목록 맨 아래로 내리면 새 창은 첫 번째 입력 소스로 시작합니다. 이 배열은 로그인 화면과 복구 콘솔에 그대로 남습니다.</p>
+    <p id="k-nodrop-offer"></p>
     <div class="foot">
-      <button class="btn quiet pressable" data-close>닫기</button>
+      <button class="btn quiet pressable" data-close="k-nodrop">닫기</button>
       <button class="btn primary pressable" id="k-nodrop-demote">맨 아래로 내리기</button>
     </div>
   </div>

@@ -18,18 +18,36 @@
 .row.locked .key,
 .row.dim .key{color:var(--t3)}
 
+/* The same gap, one control over. lp-ui.css fades the switch on a locked
+ * row and says nothing about the bar, so a slider nobody may touch keeps
+ * the brightest fill on the screen. The amber fill is exempt: it is the
+ * one bar colour that carries a meaning, and dimming a caution because
+ * the row is locked would drop the caution. */
+.row.locked .bar div:not(.amber){background:var(--t3)}
+
 /* A row arriving in or leaving a list.
  *
- * The insert spring exists for exactly this (feel.md §2-2, "목록 항목
- * 추가·삭제") and lp-ui.css has no class that applies it - .appear is the
- * sheet spring and belongs to dialogs. The 4.5% overshoot over 7px is
- * under half a pixel: the row is not seen to bounce, it is seen to be
- * put down. Leaving is the same spring at 0.7 of the time, because the
- * decision is already made. */
-.row.arrive{animation:lp-row-in var(--t-insert) var(--e-insert) both}
-@keyframes lp-row-in{from{opacity:0;transform:translateY(-7px)}to{opacity:1;transform:none}}
-.row.leave{animation:lp-row-out var(--t-insert-out) var(--e-insert) both;pointer-events:none}
-@keyframes lp-row-out{from{opacity:1;transform:none}to{opacity:0;transform:translateY(-7px)}}
+ * feel.md §2-2 ("목록 항목 추가·삭제") gives this to the insert spring
+ * and lp-ui.css has no class that applies it - .appear is the sheet
+ * spring and belongs to dialogs. The 4.5% overshoot over 7px is under
+ * half a pixel: the row is not seen to bounce, it is seen to be put
+ * down. Leaving is the same spring at 0.7 of the time, because the
+ * decision is already made.
+ *
+ * The class names are s-keys.css's, which needed the same motion for a
+ * custom shortcut; one motion with two names would be two names to keep
+ * in step. The keyframes are this file's own and are deliberately not
+ * called lp-row-in/out: every screen stylesheet is concatenated into one
+ * sheet, @keyframes are global, and two screens owning one name means
+ * either can silently redefine the other's motion. The pair belongs in
+ * lp-ui.css once - until it moves there this is the safe duplicate. */
+.row.arriving{animation:lp-srcrow-in var(--t-insert) var(--e-insert) both}
+@keyframes lp-srcrow-in{from{opacity:0;transform:translateY(-7px)}to{opacity:1;transform:none}}
+/* pointer-events because a row on its way out is already gone from the
+ * list it was drawn from, and 삭제 pressed twice on one row would ask
+ * about a source that no longer exists. */
+.row.leaving{animation:lp-srcrow-out var(--t-insert-out) var(--e-insert) both;pointer-events:none}
+@keyframes lp-srcrow-out{from{opacity:1;transform:none}to{opacity:0;transform:translateY(-7px)}}
 
 /* Dropping at the very end of the list.
  *
@@ -38,6 +56,13 @@
  * offers to move English. A place a button can reach and a drag cannot
  * is a place people will try to drag to. */
 .row.dropafter{box-shadow:inset 0 -2px 0 var(--t2)}
+
+/* A locked row's handle. lp-ui.css says a row that may not be dragged
+ * draws its grip that way, under the name .row.fixed - which on this
+ * screen already means "this input source cannot be removed", and that
+ * source can be reordered. Two meanings on one class is how a later rule
+ * for one of them lands on the other. */
+.row.locked .drag{cursor:not-allowed;color:var(--line)}
 
 /* A text field sitting in a row under the description line. The .bar
  * carries its own 5px of clearance and .field does not, so a field
