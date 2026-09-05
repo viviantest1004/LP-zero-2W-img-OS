@@ -1,0 +1,25 @@
+/* Four rules, and why each could not come out of lp-ui.css.
+ *
+ * .stack — the reference dialogs hold one field, where the label's own
+ *   margin was the whole layout. 단축키 추가 holds two of them plus a
+ *   capture box, and nothing in the set puts air between one field and
+ *   the next label.
+ *
+ * .capture.arm — the same dialog is typed into and listened to. A
+ *   capture that takes every keydown on the document cannot be running
+ *   while somebody types a command into the field above it, so this box
+ *   is pressed before it listens. lp-ui.css draws the box but never says
+ *   it can be pressed.
+ *
+ * .row.arriving / .row.leaving — the reference screens change a row and
+ *   never add or remove one; a custom shortcut is added and deleted
+ *   here. feel.md §2-2 gives that to the insert spring, so the entrance
+ *   and the exit are that one spring's own pair — --t-insert and its 0.7
+ *   --t-insert-out — and never one spring's curve on another's clock.
+ */
+.stack{display:grid;gap:12px;margin-top:13px}
+.capture.arm{cursor:pointer}
+@keyframes lp-row-in {from{opacity:0;transform:translateY(-7px)}to{opacity:1;transform:none}}
+@keyframes lp-row-out{from{opacity:1;transform:none}to{opacity:0;transform:translateY(-7px)}}
+.row.arriving{animation:lp-row-in  var(--t-insert)     var(--e-insert) both}
+.row.leaving {animation:lp-row-out var(--t-insert-out) var(--e-insert) both}

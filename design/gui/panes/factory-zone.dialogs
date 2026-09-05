@@ -1,0 +1,138 @@
+    <!-- 공장 초기화 — 다섯 화면.
+         Written out rather than built in the module, unlike 초기화's one
+         shared dialog: these five say five different things, so there is
+         no wording to keep in step and the sentences that decide whether
+         somebody wipes their machine are better read in the markup.
+
+         Each can be left without answering: 취소, the backdrop, Escape.
+         The progress one has nothing to cancel and so carries no button
+         - it can still be left, and the module refuses to raise the
+         screen after it if somebody has. -->
+
+    <!-- 1. What goes, before any password. The facts come first: being
+           asked to prove who you are before being told what you are
+           agreeing to is how people agree to the wrong thing. -->
+    <div class="backdrop" id="dlg-factory-what">
+      <div class="modal wide appear">
+        <h3>공장 초기화</h3>
+        <p>이 컴퓨터를 처음 켠 상태로 되돌립니다.</p>
+
+        <div class="sec">지워지는 것</div>
+        <div class="list">
+          <div class="row">
+            <div class="lb"><b>모든 계정과 비밀번호</b></div>
+            <div class="vl">지워짐</div>
+          </div>
+          <div class="row">
+            <div class="lb"><b>홈 폴더의 파일</b><i>문서와 사진, 내려받은 파일</i></div>
+            <div class="vl">지워짐</div>
+          </div>
+          <div class="row">
+            <div class="lb"><b>설치한 앱과 패키지</b></div>
+            <div class="vl">지워짐</div>
+          </div>
+          <div class="row">
+            <div class="lb"><b>네트워크 설정</b><i>저장된 Wi-Fi 와 비밀번호</i></div>
+            <div class="vl">지워짐</div>
+          </div>
+          <div class="row">
+            <div class="lb"><b>모든 설정</b></div>
+            <div class="vl">지워짐</div>
+          </div>
+          <div class="row">
+            <div class="lb"><b>로그와 기록</b></div>
+            <div class="vl">지워짐</div>
+          </div>
+        </div>
+
+        <!-- The second list is the one that decides whether this is a
+             reset or a brick, and it is why the dialog is 460px wide
+             instead of ending at the caution. -->
+        <div class="sec">남는 것</div>
+        <div class="list">
+          <div class="row">
+            <div class="lb"><b>운영체제</b><i>초기화가 끝나면 이 컴퓨터는 그대로 켜집니다</i></div>
+            <div class="vl">남음</div>
+          </div>
+          <div class="row">
+            <div class="lb"><b>부팅 파티션의 SSH 인증 키</b><i>네트워크로만 닿는 컴퓨터에 다시 들어가는 길입니다</i></div>
+            <div class="vl">남음</div>
+          </div>
+        </div>
+
+        <!-- The operational fact first and the reason after it, because
+             the sentence somebody has to act on is the one about the
+             power. A caption rather than a paragraph: it is the class
+             the owner's own screens end a block with, and it carries
+             the gap that a bare <p> after a list does not. -->
+        <div class="caption">되돌리는 데 몇 분이 걸리고, 끝날 때까지 전원을 끄지 않아야 합니다. 이 컴퓨터의 루트는 디스크에 있는 ext4 파일 시스템이라 커널 안에 되돌릴 원본이 없고, 부팅 파티션에 둔 사본에서 시스템을 다시 쓰기 때문입니다.</div>
+
+        <div class="note bad">▲ 되돌릴 수 없습니다. 한 번 시작하면 도중에 멈출 수 없습니다.</div>
+
+        <div class="foot">
+          <button class="btn quiet pressable" data-close="dlg-factory-what">취소</button>
+          <button class="btn pressable" data-go>계속</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Who you are. Plain, not red: asking for a password is not
+           itself the destructive step. -->
+    <div class="backdrop" id="dlg-factory-who">
+      <div class="modal appear">
+        <h3>관리자 확인</h3>
+        <p>공장 초기화는 관리자만 할 수 있습니다. 관리자 비밀번호를 입력하면 마지막 확인으로 넘어갑니다.</p>
+        <div class="fieldlabel">관리자 비밀번호</div>
+        <input class="field" type="password" autocomplete="off" data-pw>
+        <div class="inline"></div>
+        <div class="foot">
+          <button class="btn quiet pressable" data-close="dlg-factory-who">취소</button>
+          <button class="btn pressable" data-go disabled>확인</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. Mean it. The standard pattern for something irreversible, and
+           the last place where reading the sentence above the field is
+           still cheaper than what follows. -->
+    <div class="backdrop" id="dlg-factory-sure">
+      <div class="modal appear">
+        <h3>마지막 확인</h3>
+        <p>시작하면 계정과 파일, 설치한 앱이 모두 지워집니다. 되돌릴 수 없습니다.</p>
+        <div class="fieldlabel">확인을 위해 초기화 라고 입력합니다</div>
+        <input class="field" autocomplete="off" placeholder="초기화" data-phrase>
+        <div class="foot">
+          <button class="btn quiet pressable" data-close="dlg-factory-sure">취소</button>
+          <button class="btn danger pressable" data-go disabled>시작</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. Doing it. No 취소 button, because by here there is nothing
+           left to cancel - and a button that says 취소 and cannot is
+           worse than none. Amber on the power line: it is a constraint
+           while the work runs, not a failure. -->
+    <div class="backdrop" id="dlg-factory-run">
+      <div class="modal appear">
+        <h3>공장 초기화</h3>
+        <p>초기화가 진행 중입니다.</p>
+        <div class="prog"></div>
+        <div class="caption" data-step></div>
+        <div class="note">▲ 끝날 때까지 전원을 끄지 않아야 합니다.</div>
+      </div>
+    </div>
+
+    <!-- 5. Done. The SSH line is repeated here rather than left in the
+           first dialog: this is the screen somebody reads while
+           wondering whether they have just locked themselves out of a
+           machine they cannot reach. -->
+    <div class="backdrop" id="dlg-factory-done">
+      <div class="modal appear">
+        <h3>초기화를 마쳤습니다</h3>
+        <p>이 컴퓨터가 곧 다시 시작합니다. 다시 켜지면 처음 켰을 때와 같은 첫 화면이 나옵니다.</p>
+        <p>부팅 파티션의 SSH 인증 키는 그대로 있습니다. 네트워크로 들어오던 방법은 초기화 뒤에도 같습니다.</p>
+        <div class="foot">
+          <button class="btn primary pressable" data-close="dlg-factory-done">확인</button>
+        </div>
+      </div>
+    </div>

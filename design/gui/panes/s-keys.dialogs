@@ -1,0 +1,38 @@
+<div class="backdrop" id="dlg-key">
+  <div class="modal appear">
+    <h3>단축키 지정</h3>
+    <p id="key-what"></p>
+    <div class="capture">
+      <span class="keys" id="key-caps"></span>
+      <div class="hint" id="key-hint"></div>
+    </div>
+    <div id="key-note"></div>
+    <div class="caption">Esc 는 취소하고, Backspace 는 없음으로 지웁니다.</div>
+    <div class="foot" id="key-foot"></div>
+  </div>
+</div>
+
+<div class="backdrop" id="dlg-new">
+  <div class="modal appear">
+    <h3>단축키 추가</h3>
+    <p>이름과 실행할 명령을 적고, 쓸 조합을 누르십시오.</p>
+    <div class="stack">
+      <div>
+        <div class="fieldlabel">이름</div>
+        <input class="field" id="new-name" placeholder="예: 메모 열기" autocomplete="off">
+      </div>
+      <div>
+        <div class="fieldlabel">명령</div>
+        <input class="field mono" id="new-cmd" placeholder="예: foot -e edit ~/memo.txt" autocomplete="off">
+      </div>
+    </div>
+    <div class="capture arm" id="new-box">
+      <span class="keys" id="new-caps"></span>
+      <div class="hint" id="new-hint"></div>
+    </div>
+    <div id="new-note"></div>
+    <div class="caption">Esc 는 취소하고, Backspace 는 없음으로 지웁니다.</div>
+    <div class="inline" id="new-say"></div>
+    <div class="foot" id="new-foot"></div>
+  </div>
+</div>

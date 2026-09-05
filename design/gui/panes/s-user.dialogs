@@ -1,0 +1,15 @@
+    <!-- 사용자 화면의 대화상자.
+         Six backdrops and six empty shells. Every one of them is written
+         when it opens, from the same table the rows are drawn from, so
+         that a row and the dialog it raises cannot drift into saying
+         different things about the same account - and so that a dialog
+         reopened after an account changed cannot show what was true the
+         last time it was open.
+         All six can be left without answering: 취소 or 닫기, the
+         backdrop, and Escape. -->
+    <div class="backdrop" id="dlg-user-info"><div class="modal appear"></div></div>
+    <div class="backdrop" id="dlg-user-pw"><div class="modal appear"></div></div>
+    <div class="backdrop" id="dlg-user-photo"><div class="modal appear"></div></div>
+    <div class="backdrop" id="dlg-user-add"><div class="modal wide appear"></div></div>
+    <div class="backdrop" id="dlg-user-type"><div class="modal wide appear"></div></div>
+    <div class="backdrop" id="dlg-user-del"><div class="modal wide appear"></div></div>

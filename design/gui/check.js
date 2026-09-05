@@ -221,12 +221,21 @@ async function run() {
 
   /* ── permissions ──────────────────────────────────────────────── */
   head('권한');
+  const hasPerm = await page.evaluate(() => !!document.getElementById('s-perm'));
+  ok('권한 화면이 있다', hasPerm);
   await page.evaluate(() => LP.go('s-perm'));
   await page.waitForTimeout(300);
+
+  /* Everything below reads that pane. Without it the assertions are not
+   * failing, they are unanswerable - and printing thirty falsehoods
+   * about a screen that does not exist buries the one fact that
+   * matters, which is that it does not exist. */
+  const permText = hasPerm
+    ? await page.$eval('#s-perm', e => e.textContent) : '';
+  if (!hasPerm) console.log('  ...  아래 권한 검사는 건너뜁니다');
+  if (hasPerm) {
   ok('권한 화면이 열린다',
      await page.$eval('#s-perm', e => e.classList.contains('on')));
-
-  const permText = await page.$eval('#s-perm', e => e.textContent);
   for (const area of ['네트워크', '화면', '소리', '키보드', '앱', '초기화']) {
     ok('권한 목록에 ' + area + ' 가 있다', permText.includes(area));
   }
@@ -237,7 +246,8 @@ async function run() {
    * administrator - an administrator can change everything and there is
    * nothing here to set for one. */
   ok('표준 계정에 대한 화면이라고 말한다',
-     /표준/.test(await page.$eval('#s-perm .sub', e => e.textContent).catch(() => '')),
+     /표준/.test(await page.$eval('#s-perm .sub', e => e.textContent)
+                  .catch(function () { return ''; })),
      'sub 가 없거나 표준을 언급하지 않습니다');
 
   ok('기능 목록이 LP.features 를 따른다',
@@ -262,6 +272,7 @@ async function run() {
     return locked;
   });
   ok('권한을 끄면 그 화면이 즉시 잠긴다', flipped);
+  }
 
   /* ── the standard account ─────────────────────────────────────── */
   head('표준 사용자');

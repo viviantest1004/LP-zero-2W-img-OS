@@ -12,3 +12,7 @@ shot-*.png
 # every run of the assembler - including the ones the design agents do
 # to check their own work - showed up as a change to review.
 settings.html
+
+# The workflow script that designs the screens, kept here only because
+# the Workflow tool can resume from a path it can read. Not source.
+.wf-screens.js

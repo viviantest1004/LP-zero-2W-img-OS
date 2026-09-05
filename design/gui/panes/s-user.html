@@ -1,0 +1,29 @@
+<div class="pane" id="s-user">
+  <h2>사용자</h2>
+  <!-- The subtitle carries the current state, the way §2-1 asks every
+       settings screen to: how many accounts this machine has, and which
+       one is sitting at it. Both change, so the renderer writes it. -->
+  <div class="sub" id="user-sub"></div>
+
+  <!-- Every list on this screen is drawn by LP.panes['s-user'] rather
+       than written here, and for one reason each: the account list gains
+       and loses rows, 내 계정 is about whoever is signed in, and 관리 is
+       locked or not depending on that same account. Markup here would be
+       one account's view of the screen, frozen. -->
+  <div class="rows" id="user-list"></div>
+
+  <!-- 내 계정 stays live for a standard account. It is that account's own
+       business - its password, its picture - and a machine that makes
+       somebody ask an administrator to change their own password is a
+       machine where everybody ends up knowing the administrator's. -->
+  <div class="sec">내 계정</div>
+  <div class="rows" id="user-mine"></div>
+
+  <!-- 관리 is about everybody else, so it locks. It keeps its place in
+       the list rather than disappearing: a section that is not there at
+       all sends somebody hunting for a screen that exists on every other
+       machine, and they go on hunting because nothing said no. -->
+  <div class="sec">관리</div>
+  <div class="rows" id="user-admin"></div>
+  <div class="caption" id="user-admin-why"></div>
+</div>

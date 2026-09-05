@@ -1,0 +1,19 @@
+/* 공장 초기화 - two spacing rules the existing set did not have.
+ *
+ * No new component and no new colour: the zone, the modal, the field and
+ * the label were all already there. What was missing is that both of
+ * them are used here in a position nothing had used them in before. */
+
+/* The zone gains a second paragraph for a standard account - the
+ * description, and then the line naming who can do this. .modal already
+ * spaces stacked paragraphs and .zone never needed to, and without the
+ * gap the sentence about the administrator reads as the tail of the
+ * sentence above it rather than as the answer to "then who". */
+.zone p + p{margin-top:8px}
+
+/* .fieldlabel was drawn for a field that begins a block. In these
+ * dialogs it follows a sentence, and with no margin above it the label
+ * sits directly on the paragraph. Scoped to a modal so it stays a fix
+ * to the dialog case rather than a change to the class everywhere; it
+ * probably belongs in lp-ui.css next to .fieldlabel itself. */
+.modal .fieldlabel{margin-top:14px}

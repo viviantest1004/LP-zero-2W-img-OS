@@ -1,0 +1,23 @@
+<!-- 공장 초기화 - the block at the bottom of 초기화.
+     The assembler drops this into #factory-slot, and the wrapper it
+     lands in is the element LP.panes['factory-zone'] is handed.
+
+     Everything a person needs in order to decide is written here rather
+     than built in the module, because it reads the same to both
+     accounts and words that never change belong where they can be
+     read. What changes with the account - the lock, the line naming who
+     can, the button - is drawn by the renderer. -->
+<div class="zone">
+  <h3>공장 초기화</h3>
+  <p>이 컴퓨터를 처음 켠 상태로 되돌립니다. 계정과 비밀번호, 홈 폴더의 파일, 설치한 앱, 네트워크 설정과 기록이 모두 지워집니다. 운영체제와 부팅 파티션의 SSH 인증 키는 남습니다.</p>
+  <!-- Left empty on purpose. The button is the one part of this block
+       that depends on who is signed in, and a button written here would
+       be a second answer to that question sitting next to the
+       renderer's. -->
+  <div class="btnrow" data-act></div>
+</div>
+
+<!-- Under the zone rather than inside it. It is not a warning about the
+     factory reset, it is the way out of needing one, and most people
+     who scroll this far wanted it instead. -->
+<div class="caption">대부분은 위의 모든 설정 초기화로 충분합니다. 그쪽은 설정만 처음 값으로 되돌리고 계정과 파일, 설치한 앱은 건드리지 않습니다.</div>
