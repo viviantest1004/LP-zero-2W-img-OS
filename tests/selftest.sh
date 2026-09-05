@@ -168,7 +168,12 @@ echo "=== THE SHELL ITSELF ==="
 if echo hello | grep -q hello ; then echo "PASS  a builtin works as a pipeline stage" ; else echo "FAIL  echo | grep - builtins still do not run in a pipeline" ; fi
 if pwd | grep -q "/" ; then echo "PASS  and so does pwd" ; else echo "FAIL  pwd | grep" ; fi
 if echo one two | cut -d " " -f 2 | grep -q two ; then echo "PASS  echo into a three-stage pipeline" ; else echo "FAIL  echo | cut | grep" ; fi
-if printf "a b c\n" | while read x y z ; do echo $z ; done | grep -q "^c$" ; then echo "PASS  read splits a line into variables" ; else echo "FAIL  read" ; fi
+# A loop cannot be the condition of an if here - the parser splits the
+# line into statements before it sees the block, so `if cmd | while ... ;
+# done ; then` is not a shape this shell has. Run it, keep the answer,
+# then test the answer.
+printf "a b c\n" | while read x y z ; do echo $z ; done > /tmp/rd1
+if grep -q "^c$" /tmp/rd1 ; then echo "PASS  read splits a line into variables" ; else echo "FAIL  read: `cat /tmp/rd1`" ; fi
 if test -x /bin/echo ; then echo "PASS  echo exists as a real program, not only a builtin" ; else echo "FAIL  no /bin/echo - xargs echo and find -exec echo cannot work" ; fi
 if grep -qF "a+b" /etc/profile ; then echo "FAIL  grep -F matched something that is not there" ; else echo "PASS  grep -F treats the pattern as a plain string" ; fi
 if echo "a+b" | grep -q "a+b" ; then echo "PASS  grep without -E treats + as an ordinary character (POSIX)" ; else echo "FAIL  grep still reads + as a repeat in a basic expression" ; fi
@@ -176,11 +181,13 @@ if echo "aab" | grep -qE "a+b" ; then echo "PASS  grep -E treats + as a repeat" 
 if echo "dog" | grep -qE "cat|dog" ; then echo "PASS  grep -E does alternation" ; else echo "FAIL  grep -E alternation" ; fi
 if echo "" | read v ; then echo "PASS  read succeeds on a line" ; else echo "FAIL  read returned failure on a real line" ; fi
 if false ; then echo x ; fi ; false ; if test $? -eq 1 ; then echo "PASS  \$? is the status of the command just before it" ; else echo "FAIL  \$? on one line is stale - it was `false ; echo $?`" ; fi
-if seq 3 | while read n ; do echo v$n ; done | grep -c v | grep -q 3 ; then echo "PASS  a pipeline can feed a while loop" ; else echo "FAIL  cmd | while read - the loop got nothing" ; fi
+seq 3 | while read n ; do echo v$n ; done > /tmp/rd2
+if wc -l < /tmp/rd2 | grep -q 3 ; then echo "PASS  a pipeline can feed a while loop" ; else echo "FAIL  cmd | while read - the loop got `wc -l < /tmp/rd2` lines" ; fi
 for i in 1 2 ; do echo $i ; done > /tmp/blk1
 if wc -l < /tmp/blk1 | grep -q 2 ; then echo "PASS  a redirect on done applies to the whole loop" ; else echo "FAIL  done > file was dropped" ; fi
-if printf "a\nb\n" | while read v ; do echo $v ; done | tr a-z A-Z | grep -q "^A$" ; then echo "PASS  and a pipe after done carries the loop output on" ; else echo "FAIL  done | cmd was dropped" ; fi
-rm -f /tmp/blk1
+printf "a\nb\n" | while read v ; do echo $v ; done | tr a-z A-Z > /tmp/rd3
+if grep -q "^A$" /tmp/rd3 ; then echo "PASS  and a pipe after done carries the loop output on" ; else echo "FAIL  done | cmd was dropped: `cat /tmp/rd3`" ; fi
+rm -f /tmp/blk1 /tmp/rd1 /tmp/rd2 /tmp/rd3
 if echo "x ; y" | grep -q "x ; y" ; then echo "PASS  a semicolon inside quotes is not a separator" ; else echo "FAIL  quoted semicolon was split" ; fi
 if test "`echo $(echo a ; echo b)`" = "a b" ; then echo "PASS  a semicolon inside \$( ) is not a separator either" ; else echo "FAIL  \$(a ; b) was split" ; fi
 export LPTEST=works

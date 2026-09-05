@@ -2734,7 +2734,13 @@ static void call_func(func_t *f, char **argv, int argc)
  * control.
  *
  * Returns the position of the keyword inside the line, having cut the
- * line short at the |, or NULL when this is not that shape. */
+ * line short at the |, or NULL when this is not that shape.
+ *
+ * What this does NOT reach: a loop used as the CONDITION of an if, as in
+ * `if cmd | while read x ; do ... ; done ; then`. The line is split into
+ * statements before any of this runs, so by then the loop is four
+ * separate lines and the if has only the first of them. Run the loop,
+ * keep its answer, and test that instead. */
 static char *pipe_into_block(char *line)
 {
     char quote = 0;
