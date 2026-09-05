@@ -1,0 +1,17 @@
+<div class="pane" id="s-perm">
+  <!-- A sub-screen, reached from a row on 사용자 and never from the
+       sidebar. The way back is the first thing on it, and it is outside
+       everything the renderer writes: a screen this account may not use
+       is still one it has to be able to leave. -->
+  <div class="back"><span>‹</span><span>사용자</span></div>
+  <h2>권한</h2>
+
+  <!-- Both are written by LP.panes['s-perm']. Nothing here is markup for
+       one account's view of the screen: the subtitle counts what is
+       currently allowed, and the body is either the controls or the one
+       line saying who may use them. A drawing of either, frozen into the
+       file, is the version that stays on screen after the account
+       changes. -->
+  <div class="sub" id="perm-sub"></div>
+  <div id="perm-body"></div>
+</div>

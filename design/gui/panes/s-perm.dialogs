@@ -1,0 +1,19 @@
+    <!-- 권한 화면의 대화상자. One, because only one thing on this screen
+         needs a question asked: which app to block. Turning a switch off
+         is undone by turning it back on, and a confirmation in front of
+         something reversible only teaches people to click past
+         confirmations.
+         Left without answering three ways: 닫기, the dimmed window, and
+         Escape. -->
+    <div class="backdrop" id="dlg-perm-app">
+      <div class="modal wide appear">
+        <h3>앱 막기</h3>
+        <p>고른 앱은 표준 사용자 계정에서 실행되지 않습니다. 관리자 계정에서는 그대로 열립니다.</p>
+        <div class="search"><span>찾기</span><input id="perm-app-q" placeholder="앱 이름"></div>
+        <div class="picker" id="perm-app-list"></div>
+        <div class="caption" id="perm-app-none" hidden>찾는 이름이 목록에 없습니다</div>
+        <div class="foot">
+          <button class="btn quiet pressable" data-close="dlg-perm-app">닫기</button>
+        </div>
+      </div>
+    </div>

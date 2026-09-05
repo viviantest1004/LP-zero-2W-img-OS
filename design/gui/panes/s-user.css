@@ -1,0 +1,46 @@
+/* Two springs the existing set names but does not apply. No new
+ * component and no new colour: both of these are lp-motion.css being
+ * connected to controls that lp-ui.css drew before it existed. */
+
+/* The switch knob.
+ *
+ * lp-ui.css is copied from the owner's mockup, which predates the spring
+ * table, so .sw still moves on a flat .16s - and feel.md §2-2 has a
+ * spring whose entire subject is this control. The 6.7% overshoot is
+ * 1px over the 15px the knob travels: not a bounce anybody watches, the
+ * difference between a switch a person flipped and a switch a machine
+ * moved. 사용자 is the first screen this branch gives a switch to, which
+ * is why the gap shows here first; it belongs in lp-ui.css beside .sw. */
+.sw{transition:background var(--t-knob) var(--e-knob)}
+.sw::after{transition:left var(--t-knob) var(--e-knob),
+                     background var(--t-knob) var(--e-knob)}
+
+/* A row arriving in or leaving the account list.
+ *
+ * The insert spring exists for exactly this (feel.md §2-2, "목록 항목
+ * 추가·삭제") and lp-ui.css has no class that applies it - .appear is the
+ * sheet spring and belongs to dialogs. 키보드 needed the same two
+ * classes and carries its own copy; a second screen needing them is the
+ * sign they belong in lp-ui.css, and they are written out here rather
+ * than borrowed so that this screen does not stop animating on the day
+ * 키보드 is dropped from the build. Identical on purpose: two
+ * definitions of one motion that differ are worse than either. */
+.row.arrive{animation:lp-row-in var(--t-insert) var(--e-insert) both}
+@keyframes lp-row-in{from{opacity:0;transform:translateY(-7px)}to{opacity:1;transform:none}}
+.row.leave{animation:lp-row-out var(--t-insert-out) var(--e-insert) both;pointer-events:none}
+@keyframes lp-row-out{from{opacity:1;transform:none}to{opacity:0;transform:translateY(-7px)}}
+
+/* .fieldlabel was drawn for a field that begins a block. In 비밀번호
+ * 변경 and 사용자 추가 it follows a sentence or another field, and with
+ * no margin above it the label sits on the line before it. 공장 초기화
+ * carries the same rule for the same reason; both are scoped to a modal
+ * so it stays a fix to the dialog case, and it probably belongs in
+ * lp-ui.css next to .fieldlabel itself. */
+.modal .fieldlabel{margin-top:14px}
+
+/* The section head inside a dialog. .sec was drawn for a settings pane,
+ * where the gap above it separates two groups of rows; in a dialog it
+ * follows a field and the 22px reads as the field having been abandoned.
+ * 계정 유형 is a group head in 사용자 추가 and nothing else in this
+ * mockup puts one there. */
+.modal .sec{margin-top:16px}

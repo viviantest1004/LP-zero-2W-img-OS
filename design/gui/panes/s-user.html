@@ -11,6 +11,7 @@
        locked or not depending on that same account. Markup here would be
        one account's view of the screen, frozen. -->
   <div class="rows" id="user-list"></div>
+  <div class="inline" id="user-said"></div>
 
   <!-- 내 계정 stays live for a standard account. It is that account's own
        business - its password, its picture - and a machine that makes
@@ -18,6 +19,11 @@
        machine where everybody ends up knowing the administrator's. -->
   <div class="sec">내 계정</div>
   <div class="rows" id="user-mine"></div>
+  <!-- 자동 로그인 is the one row here that is everybody's business, so
+       what it costs is said under the section while it is on rather than
+       in a description that is there whether it matters or not. -->
+  <div id="user-mine-note"></div>
+  <div class="inline" id="user-mine-said"></div>
 
   <!-- 관리 is about everybody else, so it locks. It keeps its place in
        the list rather than disappearing: a section that is not there at
