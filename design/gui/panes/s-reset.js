@@ -20,9 +20,9 @@
  * that is a surprise exactly once per person.
  *
  * 모든 설정 is the six of them at once and is not the factory reset. It
- * says so in the row, in the dialog, and above the button - not in a
- * note somewhere below, because the person deciding is looking at the
- * button.
+ * says so twice before anything happens - once in the row and once in
+ * the confirmation - rather than in a note under the button, because by
+ * the time somebody is under the button they have decided.
  */
 
 (function () {
@@ -64,6 +64,10 @@
     });
   }
 
+  /* Held for the life of the page rather than re-read per render, and
+   * that is correct rather than stale: these are what the machine
+   * shipped with, which is the one thing on this screen that does not
+   * depend on who is signed in. */
   const DEFAULT = Object.freeze({
     shortcuts:    frozen(LP.shortcuts),
     sources:      frozen(LP.sources),
@@ -132,7 +136,7 @@
       desc: '출력·입력 볼륨과 앱별 볼륨, 알림음을 되돌립니다',
       title: '소리 설정을 초기화합니다',
       back: '출력 볼륨과 입력 볼륨, 앱마다 따로 맞춰 둔 볼륨, 알림음이 처음 값으로 돌아갑니다.',
-      keep: '출력 장치와 입력 장치를 고른 것은 그대로 있습니다.',
+      keep: '골라 둔 출력 장치와 입력 장치는 그대로 있습니다.',
       done: '소리 설정을 처음 값으로 되돌렸습니다',
     },
     {
@@ -142,9 +146,10 @@
       title: '네트워크 설정을 초기화합니다',
       back: '저장된 Wi-Fi 네트워크와 비밀번호, 직접 넣은 고정 주소와 DNS, 프록시, 등록한 VPN 이 모두 지워집니다.',
       keep: '파일과 계정, 다른 설정은 그대로 있습니다.',
-      /* Amber, and the only two rows that get it: this is a limit on
-       * what the machine can do the moment the button is pressed, which
-       * is what the colour is for. Red would say the reset failed. */
+      /* Amber. This row and 모든 설정 are the only two that carry a
+       * warn, and what it describes is a limit on what the machine can
+       * do the moment the button is pressed - which is what the colour
+       * is for. Red would say the reset failed. */
       warn: '초기화하면 이 컴퓨터가 네트워크에서 떨어집니다. 다시 연결하려면 Wi-Fi 비밀번호를 한 번 더 입력해야 합니다.',
       done: '네트워크 설정을 지웠습니다. 연결이 끊어졌습니다',
     },
@@ -166,6 +171,9 @@
       keep: '공장 초기화가 아닙니다. 계정과 로그인 비밀번호, 문서와 사진, 내려받은 파일, 설치한 앱은 그대로 있습니다.',
       warn: '초기화하면 네트워크 연결이 끊어집니다. 다시 연결하려면 Wi-Fi 비밀번호를 한 번 더 입력해야 합니다.',
       done: '모든 설정을 처음 값으로 되돌렸습니다',
+      /* Runs the six rather than repeating what they do. Two lists of
+       * what 모든 설정 covers would be two lists to keep in step, and
+       * the one that fell behind would be the one nobody was reading. */
       apply: function () {
         KINDS.forEach(function (k) { if (k.key !== 'all' && k.apply) k.apply(); });
       },
@@ -175,7 +183,7 @@
   function isAll(k)  { return k.key === 'all'; }
   function notAll(k) { return k.key !== 'all'; }
   function byKey(key) {
-    return KINDS.filter(function (k) { return k.key === key; })[0];
+    return KINDS.find(function (k) { return k.key === key; });
   }
 
   /* Which rows have a bar still filling.
@@ -193,9 +201,9 @@
    * would take the 14px in one frame and then spring the 4 that are
    * left, which is a jump with an animation after it. overflow makes
    * the wrapper a formatting context, so the gap is measured with the
-   * bar and the whole thing travels together. The spring writes this
-   * property itself while it runs; setting it here only puts it in
-   * place before the measurement rather than after. */
+   * bar and the whole thing travels together. Set on both directions
+   * because the spring clears it again when it settles open, and the
+   * collapse has to measure the same height the expansion did. */
   function slide(slot, open) {
     slot.style.overflow = 'hidden';
     LPSpring.height(slot, open);
@@ -206,24 +214,35 @@
    * The buttons are disabled rather than dropped. A standard account
    * needs to see that the reset exists and that somebody has it -
    * a screen that hides what it will not do sends people looking for a
-   * setting that is right in front of them. */
+   * setting that is right in front of them.
+   *
+   * A row therefore ends one of two ways: somewhere to report progress
+   * and say it is done, or the line naming who can. It never needs
+   * both, and building the empty bar for a row that can never run it
+   * costs a forced layout each, on the account this screen is most
+   * often looked at as. */
   function rowHtml(kind, may) {
     return '' +
       '<div class="row' + (may ? '' : ' locked') + '" data-kind="' + kind.key + '">' +
         '<div class="lb">' +
           '<b>' + kind.name + (may ? '' : '<span class="lock">자물쇠</span>') + '</b>' +
           '<i>' + kind.desc + '</i>' +
-          (may ? '' : '<div class="why">' + LP.whyLocked(AREA) + '</div>') +
-          '<div data-prog></div>' +
-          '<div class="inline"></div>' +
+          (may ? '<div data-prog></div><div class="inline"></div>'
+               : '<div class="why">' + LP.whyLocked(AREA) + '</div>') +
         '</div>' +
         '<button class="btn' + (may ? ' pressable' : '') + '"' +
           (may ? '' : ' disabled') + '>초기화</button>' +
       '</div>';
   }
 
-  function fillRows(pane, box, kinds, may) {
+  function fillRows(box, kinds, may) {
     box.innerHTML = kinds.map(function (k) { return rowHtml(k, may); }).join('');
+
+    /* A locked row has no handler at all rather than one that refuses:
+     * the refusal is the disabled button and the line under the name,
+     * and a second one that only appeared after a click would be
+     * telling somebody off for clicking. */
+    if (!may) return;
 
     box.querySelectorAll('.row').forEach(function (row) {
       const kind = byKey(row.dataset.kind);
@@ -244,19 +263,14 @@
       slide(slot, false);
 
       /* Bound to a button this render has just made, so nothing is left
-       * over from the drawing before it. A locked row has no handler at
-       * all rather than one that refuses: the refusal is the disabled
-       * button and the line under the name, and a second one that only
-       * appears after a click would be telling somebody off for
-       * clicking. */
-      if (may)
-        row.querySelector('button')
-           .addEventListener('click', function () { ask(pane, kind); });
+       * over from the drawing before it. */
+      row.querySelector('button')
+         .addEventListener('click', function () { ask(kind); });
     });
   }
 
   /* ── the confirmation ───────────────────────────────────────────── */
-  function ask(pane, kind) {
+  function ask(kind) {
     /* The disabled button is a drawing of the permission. This is the
      * permission. Asked again here so that a click arriving another way
      * - a focused button and a stray Enter, a row drawn before the
@@ -274,16 +288,21 @@
         '<button class="btn danger pressable" data-confirm>초기화</button>' +
       '</div>';
 
+    /* Rewriting the modal threw the previous confirm button away with
+     * its listener, so seven rows sharing one dialog cannot end up with
+     * seven handlers on it. 취소 and the backdrop are not wired here at
+     * all - lp-boot answers data-close and a click on the backdrop for
+     * every dialog in the window. */
     modal.querySelector('[data-confirm]').addEventListener('click', function () {
       LP.close(DIALOG);
-      run(pane, kind);
+      run(kind);
     });
 
     LP.open(DIALOG);
   }
 
   /* ── doing it ───────────────────────────────────────────────────── */
-  function run(pane, kind) {
+  function run(kind) {
     if (!LP.can(AREA)) return;
     if (running[kind.key]) return;      /* the bar from the last press is still filling */
     running[kind.key] = true;
@@ -295,7 +314,12 @@
      * away mid-fill and finds the reset half done. */
     if (kind.apply) kind.apply();
 
-    const row  = pane.querySelector('[data-kind="' + kind.key + '"]');
+    /* Looked up now rather than captured when the row was drawn. The
+     * confirmation sits between the click and this, and a render can
+     * land in that gap - the row this writes into has to be the one on
+     * screen, not the one the button was made in. */
+    const row  = document.getElementById(PANE)
+                         .querySelector('[data-kind="' + kind.key + '"]');
     const slot = row.querySelector('[data-prog]');
     const line = row.querySelector('.inline');
 
@@ -306,15 +330,23 @@
     slot.innerHTML = '<div class="prog"><div></div></div>';
     const fill = slot.querySelector('.prog div');
 
-    /* Opening it also lays the bar out, which is what gives the width
-     * below something to travel from. */
     slide(slot, true);
+
+    /* And the bar has to be laid out at zero before it is told to go to
+     * 100%, or the browser only ever sees the final value: no
+     * transition, no transitionend, a bar that snaps full and a row
+     * that never says it is done. Reading offsetWidth is that layout.
+     * It is asked for here rather than taken from the scrollHeight
+     * LPSpring.height happens to read one line above, because a
+     * completion path resting on another module's internals breaks the
+     * day that module stops measuring. */
+    void fill.offsetWidth;
     fill.style.width = '100%';
 
-    /* Nothing here picks a duration. The bar's rate is the one thing on
-     * this screen that is a readout rather than an object arriving
-     * somewhere, and lp-motion.css keeps it linear for that reason; when
-     * it lands, the block collapses on the expand spring and the line
+    /* Nothing here picks a duration. lp-ui.css gives .prog div a linear
+     * 0.4s on width - linear because a bar filling at a known rate is a
+     * readout, and easing it would make it lie about the rate. When it
+     * lands the block collapses on the expand spring and the line
      * appears under the row that caused it. */
     fill.addEventListener('transitionend', function () {
       running[kind.key] = false;
@@ -328,20 +360,16 @@
    * Rebuilt from LP on every call, because it is called again every time
    * the account changes. Only the two lists are rewritten - never the
    * pane - because the block the assembler drops into the slot at the
-   * bottom belongs to 공장 초기화, and an innerHTML on the pane would
-   * take it away every time somebody switched account. */
+   * bottom belongs to 공장 초기화, which registers under the id of that
+   * block and redraws itself. An innerHTML on the pane would take it
+   * away every time somebody switched account. */
   function render(el) {
     running = {};
     const may = LP.can(AREA);
-    fillRows(el, el.querySelector('#reset-rows'), KINDS.filter(notAll), may);
-    fillRows(el, el.querySelector('#reset-all'),  KINDS.filter(isAll),  may);
+    fillRows(el.querySelector('#reset-rows'), KINDS.filter(notAll), may);
+    fillRows(el.querySelector('#reset-all'),  KINDS.filter(isAll),  may);
   }
 
-  /* 공장 초기화 sits at the bottom of this pane and draws itself: it
-   * registers under the id of its own block rather than under this
-   * pane, and LP.render calls it after this one. So the rows are
-   * rewritten here on every render and the slot below them is never
-   * touched. */
   LP.panes[PANE] = render;
 
 })();

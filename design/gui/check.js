@@ -172,6 +172,100 @@ async function run() {
   ok('자기 자신은 충돌이 아니다',
      await page.evaluate(() => !LP.heldBy(['Super', 'L'], 'lock')));
 
+  /* ── the flows somebody actually clicks first ─────────────────
+   *
+   * Everything above asserts a rule. These walk a path: open the
+   * picker and add a language, press real keys into the capture
+   * dialog, collide with a combination that is taken. A screen can
+   * satisfy every rule in the file and still be impossible to use, and
+   * the only way to find that out is to use it. */
+  head('직접 밟아 보기');
+
+  await page.evaluate(() => LP.go('s-kbd'));
+  await page.waitForTimeout(250);
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('#s-kbd button')]
+      .find(x => /추가/.test(x.textContent));
+    if (b) b.click();
+  });
+  await page.waitForTimeout(350);
+  ok('입력 소스 추가 대화상자가 열린다',
+     await page.evaluate(() => !!document.querySelector('.backdrop.on')));
+  ok('언어를 찾을 수 있다',
+     await page.evaluate(() => !!document.querySelector('.backdrop.on input')));
+
+  const nBefore = await page.evaluate(() => LP.sources.length);
+  await page.evaluate(() => {
+    const r = [...document.querySelectorAll('.backdrop.on .row')]
+      .find(x => /日本語/.test(x.textContent));
+    if (r) r.click();
+  });
+  await page.waitForTimeout(350);
+  ok('고른 언어가 목록에 들어온다',
+     await page.evaluate(() => LP.sources.some(s => s.id === 'ja')));
+  ok('목록이 하나 늘었다',
+     (await page.evaluate(() => LP.sources.length)) === nBefore + 1);
+  await page.evaluate(() => {
+    LP.sources = LP.sources.filter(s => s.id !== 'ja');
+    LP.closeAll(); LP.render();
+  });
+
+  /* Real keydown events, not a simulated value. The capture dialog
+   * reads the keyboard, and the only way to know it reads it correctly
+   * is to press keys. */
+  await page.evaluate(() => LP.go('s-keys'));
+  await page.waitForTimeout(250);
+  await page.evaluate(() => {
+    const r = [...document.querySelectorAll('#s-keys .row')]
+      .find(x => /화면 잠금/.test(x.textContent));
+    if (r) r.click();
+  });
+  await page.waitForTimeout(300);
+  ok('캡처하는 동안 Esc 가 대화상자를 닫지 않는다',
+     await page.evaluate(() => window.LP_CAPTURING === true));
+
+  await page.keyboard.down('Control');
+  await page.keyboard.down('Alt');
+  await page.keyboard.press('KeyJ');
+  await page.keyboard.up('Alt');
+  await page.keyboard.up('Control');
+  await page.waitForTimeout(450);
+  ok('누른 조합이 실제로 지정된다',
+     await page.evaluate(() =>
+       LP.sameKeys(LP.shortcuts.find(s => s.id === 'lock').keys,
+                   ['Ctrl', 'Alt', 'J'])),
+     await page.evaluate(() =>
+       LP.shortcuts.find(s => s.id === 'lock').keys.join('+')));
+  /* A free combination needs no confirming - it is taken and the dialog
+   * is done. Asking "are you sure" about a keystroke somebody just
+   * chose is a dialog that gets dismissed without reading. */
+  ok('비어 있는 조합이면 바로 끝난다',
+     await page.evaluate(() => !document.querySelector('.backdrop.on')));
+
+  await page.evaluate(() => {
+    LP.shortcuts.find(s => s.id === 'lock').keys = ['Super', 'L'];
+    LP.render();
+  });
+
+  /* And a taken one has to say what took it. */
+  await page.evaluate(() => {
+    const r = [...document.querySelectorAll('#s-keys .row')]
+      .find(x => /터미널 열기/.test(x.textContent));
+    if (r) r.click();
+  });
+  await page.waitForTimeout(300);
+  await page.keyboard.down('Meta');
+  await page.keyboard.press('KeyQ');
+  await page.keyboard.up('Meta');
+  await page.waitForTimeout(450);
+  const clash = await page.evaluate(() => {
+    const d = document.querySelector('.backdrop.on');
+    return d ? d.textContent.replace(/\s+/g, ' ') : '';
+  });
+  ok('이미 쓰이는 조합은 무엇이 잡고 있는지 이름을 댄다',
+     /창 닫기/.test(clash), clash.slice(0, 80));
+  await page.evaluate(() => LP.closeAll());
+
   /* ── reset ────────────────────────────────────────────────────── */
   head('초기화');
   await page.evaluate(() => LP.go('s-reset'));
@@ -273,6 +367,76 @@ async function run() {
   });
   ok('권한을 끄면 그 화면이 즉시 잠긴다', flipped);
   }
+
+  /* The three gates, walked in order. This is the most destructive
+   * thing the machine can be asked to do, and the gates are the whole
+   * design - a confirmation that can be clicked through without reading
+   * is not one. */
+  head('공장 초기화 — 세 단계');
+  await page.evaluate(() => { LP.closeAll(); LP.go('s-reset'); });
+  await page.waitForTimeout(300);
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('#factory-zone button')]
+      .find(x => !x.disabled);
+    if (b) b.click();
+  });
+  await page.waitForTimeout(350);
+  const dlgText = () => page.evaluate(() => {
+    const d = document.querySelector('.backdrop.on');
+    return d ? d.textContent.replace(/\s+/g, ' ').trim() : '';
+  });
+  /* Advance past the dialog on screen by pressing its last button that
+   * is not the cancel - written this way rather than by id so that a
+   * screen which renames its buttons still gets walked. */
+  const advance = () => page.evaluate(() => {
+    const d = document.querySelector('.backdrop.on');
+    if (!d) return false;
+    const b = [...d.querySelectorAll('button')]
+      .filter(x => !/취소|닫기/.test(x.textContent));
+    if (!b.length) return false;
+    b[b.length - 1].click();
+    return true;
+  });
+
+  let step = await dlgText();
+  ok('1단계는 무엇이 지워지는지부터 보여준다', /지워|삭제/.test(step),
+     step.slice(0, 70));
+  ok('  남는 것도 같이 말한다', /남습니다|남는|유지/.test(step));
+  ok('  되돌릴 수 없다고 말한다', /되돌릴 수 없|취소할 수 없/.test(step));
+  /* The word appears in step one - "계정과 비밀번호가 지워집니다" is
+   * part of what is being erased - so what matters is whether it is
+   * being ASKED for, which is a field, not a word. Order is the design
+   * decision being checked here: the facts before the identity, because
+   * somebody deciding needs to know what happens before being asked to
+   * prove they may do it. */
+  ok('  비밀번호를 아직 묻지 않는다',
+     await page.evaluate(() =>
+       !document.querySelector('.backdrop.on input[type=password]') &&
+       !document.querySelector('.backdrop.on input')),
+     '사실을 먼저 보여주고 나서 신원을 묻습니다');
+
+  await advance();
+  await page.waitForTimeout(350);
+  step = await dlgText();
+  ok('2단계는 관리자 비밀번호', /비밀번호/.test(step), step.slice(0, 60));
+
+  await page.evaluate(() => {
+    const i = document.querySelector('.backdrop.on input');
+    if (i) { i.value = 'hunter2'; i.dispatchEvent(new Event('input', { bubbles: true })); }
+  });
+  await advance();
+  await page.waitForTimeout(350);
+  step = await dlgText();
+  ok('3단계는 문구를 직접 치게 한다',
+     /초기화/.test(step) && /입력|정확히|그대로/.test(step), step.slice(0, 70));
+  ok('  치기 전에는 시작 버튼이 잠겨 있다',
+     await page.evaluate(() => {
+       const d = document.querySelector('.backdrop.on');
+       const b = [...d.querySelectorAll('button')]
+         .filter(x => !/취소|닫기/.test(x.textContent));
+       return b.length ? b[b.length - 1].disabled === true : false;
+     }));
+  await page.evaluate(() => LP.closeAll());
 
   /* ── the standard account ─────────────────────────────────────── */
   head('표준 사용자');

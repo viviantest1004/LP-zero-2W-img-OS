@@ -7,7 +7,12 @@
  *   screen. Ctrl+W closes the window the mockup runs in, Super hands the
  *   key to the host, F5 reloads and takes the state the screen is drawn
  *   from with it — so every event is taken, and lp-core.js's Escape
- *   handler is held off with window.LP_CAPTURING while it is.
+ *   handler is held off with window.LP_CAPTURING while it is. A grab
+ *   that broad has to end when the dialog does, including when somebody
+ *   else ends it: lp-boot.js hides every dialog on an account switch and
+ *   tells no screen it did. So the capture checks its own dialog is
+ *   still on screen before it takes another key, rather than trusting
+ *   that whoever closed the dialog also came here.
  *
  *   A combination is never refused with a bare no. Either something
  *   holds it and can be made to let go, or something holds it that
@@ -17,8 +22,14 @@
 (function () {
   'use strict';
 
+  const AREA = 'keyboard';
+
   const $ = function (id) { return document.getElementById(id); };
   const pane = function () { return document.getElementById('s-keys'); };
+  /* Looked up on use. The line lives outside #keys-list so it survives a
+   * render, but the pane itself is rebuilt by the assembler and cached
+   * elements are how a screen ends up writing into a detached node. */
+  const said = function () { return document.getElementById('keys-say'); };
 
   /* ── naming a key ───────────────────────────────────────────────
    *
@@ -82,12 +93,17 @@
 
   /* ── drawing ────────────────────────────────────────────────── */
 
+  /* kind is '' for caps that are simply what the combination is, 'wait'
+   * while the hand is still on the keys, 'bad' for a combination that
+   * would cost somebody their way back into the machine. Nothing else:
+   * a combination that is merely spoken for is drawn plain, and the note
+   * under the box carries why. */
   function caps(box, keys, kind) {
     if (!keys || !keys.length) {
       box.innerHTML = '<span class="key free">없음</span>';
       return;
     }
-    box.innerHTML = LP.keyText(keys);        /* the caps the rows draw */
+    box.innerHTML = LP.keyText(keys);
     if (kind) box.querySelectorAll('.key').forEach(function (k) { k.classList.add(kind); });
   }
 
@@ -130,6 +146,23 @@
    */
   let live = null;
 
+  /* The dialog the running capture belongs to, still on screen.
+   *
+   * LP.closeAll() hides every backdrop, and lp-boot.js calls it whenever
+   * the account switches. It does not know this module exists, so the
+   * listeners below outlive the dialog they were opened for — and they
+   * do not merely sit there. The next key pressed anywhere on the page
+   * is a keydown with no combination in front of it, which the capture
+   * reads as an answer: switch account with 단축키 지정 open, press a
+   * letter, and 검색 열기 quietly becomes that letter with no dialog on
+   * screen and nothing said. Asking the DOM whether the dialog is still
+   * up is cheaper than asking every caller of closeAll to remember. */
+  function alive() {
+    if (!live) return false;
+    const dlg = document.getElementById(live.dlg);
+    return !!dlg && dlg.classList.contains('on');
+  }
+
   function start(cap) {
     stop();
     live = cap;
@@ -150,17 +183,23 @@
   }
 
   function onDown(e) {
+    /* Before preventDefault, never after: a key pressed once the dialog
+     * has gone belongs to whatever is on screen now. */
+    if (!alive()) { stop(); return; }
+
     /* Everything, with no exception worth making: Ctrl+W closes the
      * window this is running in, Super hands the key to the host, F5
      * reloads. Each of those ends the capture by ending the page. */
     e.preventDefault();
     e.stopPropagation();
-    if (!live || e.repeat) return;      /* a held key is one combination, not forty */
+    if (e.repeat) return;              /* a held key is one combination, not forty */
 
     if (e.key === 'Escape') { live.cancel(); return; }
 
     const m = mods(e);
-    if (MOD.indexOf(e.key) >= 0) { live.holding(m); return; }   /* 조합 키 하나는 단축키가 아닙니다 */
+    /* A modifier on its own is not a shortcut, so it is shown and waited
+     * on rather than proposed. */
+    if (MOD.indexOf(e.key) >= 0) { live.holding(m); return; }
     if (e.key === 'Backspace' && !m.length) { live.propose([]); return; }
 
     const k = keyName(e);
@@ -168,7 +207,7 @@
   }
 
   function onUp(e) {
-    if (!live) return;
+    if (!alive()) { stop(); return; }
     e.preventDefault();
     /* Let go without having pressed anything else and the box goes back
      * to what the shortcut is now, rather than leaving half a
@@ -178,6 +217,7 @@
 
   function capture(p) {
     const cap = {
+      dlg: p.dlg,
       phase: 'idle',
       offer: null,
 
@@ -215,11 +255,12 @@
         const v = judge(keys, p.except());
 
         if (v.kind === 'reserved') {
-          /* The only red in the capture, and it is not about tidiness.
+          /* The only red on this screen, and it is not about tidiness.
            * Ctrl+Alt+F1 and the rest are how somebody gets back into a
            * machine whose session has stopped answering; an editor that
            * hands one of them to a shortcut is an editor that can leave
-           * a machine with no way in from its own keyboard. */
+           * a machine with no way in from its own keyboard. That is the
+           * loss red is for. */
           cap.phase = 'note';
           caps(p.caps, keys, 'bad');
           note(p.note, 'bad', plain(keys) + ' 조합은 ' + v.why +
@@ -230,11 +271,13 @@
         }
 
         if (v.kind === 'system') {
-          /* Amber: a limit, not a loss. The caps still go red, because
-           * the caps answer "can this be had" and the note answers
-           * "why not". */
+          /* Drawn exactly like a combination that is spoken for, because
+           * that is what it is: a limit, not a failure and nothing lost.
+           * The amber note says who has it and why it cannot be had, and
+           * red caps here would spend the one colour that means somebody
+           * is about to lose something. */
           cap.phase = 'note';
-          caps(p.caps, keys, 'bad');
+          caps(p.caps, keys, '');
           note(p.note, '', '「' + v.name + '」 단축키가 이 조합을 쓰고 있습니다. ' +
             '컴포지터가 창보다 먼저 받는 조합이라 가져올 수 없습니다.');
           p.hint.textContent = '다른 조합을 누르십시오';
@@ -283,7 +326,7 @@
     /* The row is not clickable when any of these is true. Asked again
      * here because a refusal that lives only in the drawing is one that
      * disappears the first time the drawing is wrong. */
-    if (!sc || sc.reserved || !LP.can('keyboard')) return;
+    if (!sc || sc.reserved || !LP.can(AREA)) return;
 
     $('key-what').textContent = '「' + sc.name + '」 단축키에 쓸 조합을 누르십시오.';
 
@@ -296,6 +339,7 @@
     const shut = function () { stop(); LP.close('dlg-key'); };
 
     const cap = capture({
+      dlg: 'dlg-key',
       caps: $('key-caps'), hint: $('key-hint'), note: $('key-note'), foot: foot,
       idle: function () {
         return (sc.keys && sc.keys.length) ? '지금 지정된 조합입니다' : '아직 지정되지 않았습니다';
@@ -304,6 +348,13 @@
       except: function () { return sc.id; },
       cancel: shut,
       accept: function (keys, from) {
+        /* Asked again at the moment of the write. The row asked before
+         * it opened this, and an administrator can take 키보드 away from
+         * a standard account while the dialog is still up — lp-boot
+         * hides it when that happens, but hiding a dialog does not
+         * un-press the button somebody had already pressed. */
+        if (!LP.can(AREA)) { shut(); return; }
+
         sc.keys = keys;
         const lost = from ? LP.shortcuts.find(function (s) { return s.id === from; }) : null;
         if (lost) lost.keys = [];
@@ -312,7 +363,7 @@
         /* A row that gained a combination says so by showing it. This
          * line is for the shortcut elsewhere in the list that quietly
          * lost one, which is the only change nobody watched happen. */
-        if (lost) LP.say($('keys-say'),
+        if (lost) LP.say(said(),
           '조합을 가져왔습니다. 「' + lost.name + '」 단축키는 없음이 되었습니다.', 'warn');
       }
     });
@@ -334,28 +385,34 @@
 
   function removeCustom(id) {
     const sc = LP.shortcuts.find(function (s) { return s.id === id; });
-    if (!sc || !sc.custom || !LP.can('keyboard')) return;
+    if (!sc || !sc.custom || !LP.can(AREA)) return;
 
     const drop = function () {
+      /* The row spent 154ms leaving. Asked again on the far side of it
+       * for the same reason accept asks: the account can have changed
+       * in between. */
+      if (!LP.can(AREA)) { LP.render(); return; }
       const i = LP.shortcuts.indexOf(sc);
       if (i >= 0) LP.shortcuts.splice(i, 1);
       LP.render();
-      LP.say($('keys-say'), '「' + sc.name + '」 단축키를 지웠습니다.');
+      LP.say(said(), '「' + sc.name + '」 단축키를 지웠습니다.');
     };
 
     /* The row leaves on the insert spring before the list is rebuilt, so
      * what disappears is the row somebody just deleted rather than the
-     * whole list blinking and coming back one shorter. */
+     * whole list blinking and coming back one shorter. .row.leave takes
+     * pointer-events with it, so the row cannot be clicked open again on
+     * its way out. */
     const row = pane().querySelector('.row[data-id="' + id + '"]');
     if (!row) { drop(); return; }
-    row.classList.add('leaving');
+    row.classList.add('leave');
     row.addEventListener('animationend', drop, { once: true });
   }
 
   /* ── a shortcut of one's own ────────────────────────────────── */
 
   function openAdd() {
-    if (!LP.can('keyboard')) return;
+    if (!LP.can(AREA)) return;
 
     const draft = { keys: [], from: null };
     const name = $('new-name'), cmd = $('new-cmd'), box = $('new-box');
@@ -378,7 +435,10 @@
      * once: a capture that swallows every keydown on the document would
      * swallow the command being typed into the field above it. So the
      * box is pressed before it listens, and stops listening the moment a
-     * field is focused or a combination lands. */
+     * field is focused or a combination lands. Pressing the box takes
+     * focus off the field by itself - it is not focusable - so reaching
+     * back for the field really does raise the focus event this hangs
+     * on. */
     const disarm = function () {
       stop();
       box.classList.add('arm');
@@ -390,6 +450,7 @@
     const shut = function () { stop(); LP.close('dlg-new'); };
 
     const cap = capture({
+      dlg: 'dlg-new',
       caps: $('new-caps'), hint: $('new-hint'), note: $('new-note'), foot: foot,
       idle: function () { return '키 조합을 누르십시오'; },
       current: function () { return draft.keys; },
@@ -412,6 +473,7 @@
     });
 
     const add = function () {
+      if (!LP.can(AREA)) { shut(); return; }
       const n = name.value.trim(), c = cmd.value.trim();
       name.classList.toggle('bad', !n);
       cmd.classList.toggle('bad', !c);
@@ -428,8 +490,8 @@
       shut();
       LP.render();
       const row = pane().querySelector('.row[data-id="' + id + '"]');
-      if (row) row.classList.add('arriving');
-      if (lost) LP.say($('keys-say'),
+      if (row) row.classList.add('arrive');
+      if (lost) LP.say(said(),
         '조합을 가져왔습니다. 「' + lost.name + '」 단축키는 없음이 되었습니다.', 'warn');
     };
 
@@ -462,20 +524,23 @@
     let why = '';
 
     if (fixed) {
-      /* The pill rather than the lock, and it is on the row in both
-       * accounts. A lock says an administrator could grant this; nobody
-       * can grant a combination the compositor answers before any window
-       * sees it, so it is a limit and wears the amber. The reason sits
-       * on the row instead of waiting inside a dialog because, unlike a
+      /* 고정 and never the lock, in either account.
+       *
+       * A lock says an administrator could grant this. Nobody can grant
+       * a combination the compositor answers before any window sees it,
+       * so this is a limit and wears the amber; putting a lock here as
+       * well would print "go and ask an administrator" beside a sentence
+       * saying an administrator cannot either. The reason sits on the
+       * row rather than waiting inside a dialog because, unlike a
        * refusal that can only be found by trying, this one never
-       * changes — and it names the administrator, since the person
-       * reading it is otherwise about to go and ask one. */
+       * changes. */
       nm += '<span class="pill hold">고정</span>';
-      why = '컴포지터가 창보다 먼저 받는 조합이라 ' + (can ? '바꿀 수 없습니다' : '관리자도 바꿀 수 없습니다');
+      why = '컴포지터가 창보다 먼저 받는 조합이라 ' +
+            (can ? '바꿀 수 없습니다' : '관리자도 바꿀 수 없습니다');
     } else if (!can) {
-      why = LP.whyLocked('keyboard');
+      nm += '<span class="lock">자물쇠</span>';
+      why = LP.whyLocked(AREA);
     }
-    if (!can) nm += '<span class="lock">자물쇠</span>';
     if (why) why = '<div class="why">' + LP.esc(why) + '</div>';
 
     return '<div class="row ' + (can && !fixed ? 'click pressable' : 'locked') +
@@ -490,15 +555,18 @@
   }
 
   LP.panes['s-keys'] = function (el) {
-    const can = LP.can('keyboard');
+    const can = LP.can(AREA);
     const list = LP.shortcuts;
     const mine = list.filter(function (s) { return s.custom; });
     const blank = list.filter(function (s) { return !s.keys || !s.keys.length; }).length;
 
+    /* Counts only. Who may change this is said once on every row that
+     * will not answer and once beside the one control that has no row of
+     * its own, which is where 키보드 says it too; a fourth copy in the
+     * subtitle is the sentence starting to sound like an excuse. */
     el.querySelector('#keys-sub').textContent =
       '단축키 ' + list.length + '개' +
-      (blank ? ' · 지정되지 않은 것 ' + blank + '개' : '') +
-      (can ? '' : ' · ' + LP.whyLocked('keyboard'));
+      (blank ? ' · 지정되지 않은 것 ' + blank + '개' : '');
 
     let html = '', grp = null;
     list.forEach(function (s) {
@@ -512,24 +580,26 @@
     });
     if (grp !== null) html += '</div>';
 
-    html += '<div class="inline" id="keys-say"></div>';
-
     html += '<div class="sec">사용자 지정 단축키</div>';
     html += mine.length
       ? '<div class="rows">' + mine.map(function (s) { return rowHtml(s, can); }).join('') + '</div>'
       : '<div class="caption">직접 만든 단축키가 없습니다.</div>';
     html += '<div class="btnrow"><button class="btn pressable" id="keys-add"' +
       (can ? '' : ' disabled') + '>단축키 추가</button></div>';
-    if (!can) html += '<div class="caption">' + LP.esc(LP.whyLocked('keyboard')) + '</div>';
+    if (!can) html += '<div class="caption">' + LP.esc(LP.whyLocked(AREA)) + '</div>';
 
-    /* 초기화 is navigation and not an action taken here, so it stays open
-     * to a standard account for the same reason the sidebar keeps a
+    /* 초기화 is navigation and not an action taken here, so the row stays
+     * open to a standard account for the same reason the sidebar keeps a
      * locked section in the list: the screen it leads to decides who may
      * press what, and two screens deciding one thing is how the two
-     * answers drift apart. */
+     * answers drift apart. It carries the lock that renderSidebar puts
+     * on 초기화 for that account, so the two ways to the same screen do
+     * not disagree about what is waiting there. */
     html += '<div class="sec">되돌리기</div><div class="rows">' +
       '<div class="row click pressable" data-go="s-reset">' +
-        '<div class="lb"><b>단축키 전체 초기화</b></div><div class="vl">›</div>' +
+        '<div class="lb"><b>단축키 전체 초기화' +
+          (LP.can('reset') ? '' : '<span class="lock">자물쇠</span>') +
+        '</b></div><div class="vl">›</div>' +
       '</div></div>';
 
     el.querySelector('#keys-list').innerHTML = html;

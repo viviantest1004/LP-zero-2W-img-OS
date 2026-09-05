@@ -1,25 +1,46 @@
-/* Four rules, and why each could not come out of lp-ui.css.
+/* 키 지정 - what this screen needed and lp-ui.css did not have.
  *
- * .stack — the reference dialogs hold one field, where the label's own
- *   margin was the whole layout. 단축키 추가 holds two of them plus a
+ * .stack - the reference dialogs hold one field, where the label's own
+ *   margin was the whole layout. 단축키 추가 holds two of them above a
  *   capture box, and nothing in the set puts air between one field and
  *   the next label.
  *
- * .capture.arm — the same dialog is typed into and listened to. A
- *   capture that takes every keydown on the document cannot be running
- *   while somebody types a command into the field above it, so this box
- *   is pressed before it listens. lp-ui.css draws the box but never says
- *   it can be pressed.
+ * .capture - the same dialog is typed into and listened to, and it
+ *   cannot be both at once: a capture that takes every keydown on the
+ *   document would take the command being typed into the field above
+ *   it. So the box is pressed before it listens, and the two states have
+ *   to be told apart by looking. Brightness, not colour: the box that is
+ *   listening has the brighter edge, the one waiting to be pressed keeps
+ *   the dim one and offers a cursor. 단축키 지정 has no armed state - it
+ *   listens from the moment it opens - and gets the bright edge from the
+ *   same rule.
  *
- * .row.arriving / .row.leaving — the reference screens change a row and
- *   never add or remove one; a custom shortcut is added and deleted
- *   here. feel.md §2-2 gives that to the insert spring, so the entrance
- *   and the exit are that one spring's own pair — --t-insert and its 0.7
- *   --t-insert-out — and never one spring's curve on another's clock.
+ * .row.arrive / .row.leave - a custom shortcut is added to a list and
+ *   taken off it, which feel.md §2-2 gives to the insert spring
+ *   ("목록 항목 추가·삭제"): 4.5% of overshoot over 7px is under half a
+ *   pixel, so the row is not seen to bounce, it is seen to be put down.
+ *   Leaving is the same spring at 0.7 of its time (§2-5 - the decision
+ *   is already made) and takes pointer-events with it, because a row on
+ *   its way out must not answer a second click and open the dialog for a
+ *   shortcut that is about to leave LP.shortcuts.
+ *
+ * The names and values are the ones s-kbd.css and s-perm.css already
+ * use, so merging the three copies into lp-ui.css is a delete rather
+ * than a decision. Repeated rather than borrowed from a sibling screen's
+ * stylesheet: a screen that animates only while another screen happens
+ * to be in the build is worse than a duplicated declaration.
  */
 .stack{display:grid;gap:12px;margin-top:13px}
 .capture.arm{cursor:pointer}
+.modal .capture:not(.arm){border-color:var(--t4)}
+
+/* Key caps in a row that has gone quiet. .row.locked dims the name and
+ * the value, but .key carries its own colour and stays bright through
+ * both - and this screen is nothing but rows with caps in them. Same
+ * declaration as s-kbd.css, for the same reason as the pair below. */
+.row.locked .key{color:var(--t3)}
+
 @keyframes lp-row-in {from{opacity:0;transform:translateY(-7px)}to{opacity:1;transform:none}}
 @keyframes lp-row-out{from{opacity:1;transform:none}to{opacity:0;transform:translateY(-7px)}}
-.row.arriving{animation:lp-row-in  var(--t-insert)     var(--e-insert) both}
-.row.leaving {animation:lp-row-out var(--t-insert-out) var(--e-insert) both}
+.row.arrive{animation:lp-row-in  var(--t-insert)     var(--e-insert) both}
+.row.leave {animation:lp-row-out var(--t-insert-out) var(--e-insert) both;pointer-events:none}
