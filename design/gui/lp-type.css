@@ -1,0 +1,253 @@
+/* lp-type.css - the type system, and the materials it sits on.
+ *
+ * shell-design-spec.md §1-1 and §1-2 pick the faces and a five-row size
+ * scale. This is what has to be true underneath them for the result to
+ * look settled rather than merely correct.
+ *
+ * ── Why per-size tracking ──
+ *
+ * The reference mockup sets letter-spacing: -.015em on the body and
+ * leaves it there for every size on the page. That is one value doing
+ * the work of eight, and it is the single largest reason a screen can
+ * follow a type scale exactly and still look slightly wrong.
+ *
+ * Letterforms need more room between them at small sizes and less at
+ * large ones. A face designed for it carries an optical size axis and
+ * does this itself; SF does, which is a real part of why macOS type
+ * looks the way it does. Pretendard Variable has weight but no optical
+ * size axis, so the correction has to be applied by hand - a tracking
+ * value per step of the scale, tightening as the size grows.
+ *
+ * The numbers below are the Latin values shifted about 0.005em tighter,
+ * because Hangul syllable blocks are already square and evenly spaced
+ * and take a little more tightening before they look crowded. §1-1 puts
+ * the Korean range at -0.01 to -0.02em and this stays inside it.
+ *
+ * ── Why tabular numerals matter more than they sound like they do ──
+ *
+ * Proportional digits give 1 a narrower advance than 8. In running text
+ * that is right. In a column that updates - the task manager's CPU
+ * percentage, a battery figure, a clock - it means the column reflows
+ * every time the number changes, and a table of live figures jitters
+ * sideways all day. font-variant-numeric: tabular-nums fixes every
+ * digit to one width. It is applied to every number that sits in a
+ * column or updates on its own, and deliberately not to numbers inside
+ * a sentence, where even spacing looks stilted.
+ */
+
+:root{
+  /* The faces. Each has a real fallback rather than a hopeful one: a
+   * machine that has not installed the fonts yet still gets something
+   * with the right proportions instead of dropping to Times. */
+  --ui:"Pretendard Variable",Pretendard,-apple-system,BlinkMacSystemFont,
+       "Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",
+       "Helvetica Neue",Arial,sans-serif;
+  --mono:"D2Coding","JetBrains Mono",ui-monospace,"SF Mono","SFMono-Regular",
+       Menlo,Consolas,"Noto Sans Mono CJK KR",monospace;
+
+  /* The scale from §1-2, with its tracking. The pair is the unit - a
+   * size used with another size's tracking is the mistake this file
+   * exists to prevent, so they are never published apart. */
+  --s-label:13px;   --tr-label:-.008em;   /* 상단바, 라벨 */
+  --s-body:14px;    --tr-body:-.011em;    /* 본문, 버튼 */
+  --s-item:15px;    --tr-item:-.014em;    /* 목록 제목 */
+  --s-title:16px;   --tr-title:-.017em;   /* 창 제목 */
+  --s-sec:20px;     --tr-sec:-.022em;     /* 설정 섹션 제목 */
+  --s-big:24px;     --tr-big:-.026em;     /* 큰 수치 */
+  --s-huge:34px;    --tr-huge:-.030em;    /* 검색 인라인 답 */
+  --s-small:12px;   --tr-small:-.004em;   /* 설명 줄, 캡션 */
+  --s-tiny:11px;    --tr-tiny:0;          /* 그룹 머리말, 배지 */
+
+  /* Line height. §1-1: Latin 1.4, Korean 1.5 to 1.6. Korean is the
+   * default because this is a Korean interface and the exception should
+   * be the rarer one. --lh-tight is for a line that will not wrap. */
+  --lh:1.55;
+  --lh-latin:1.42;
+  --lh-tight:1.3;
+
+  /* Three weights and no more, from §1-1. A fourth is how a design
+   * system starts having six. */
+  --w-normal:400;
+  --w-medium:500;
+  --w-semi:600;
+}
+
+/* ── the materials ──────────────────────────────────────────────
+ *
+ * Three things make a window look like it is above the desktop rather
+ * than drawn on it, and only one of them is the drop shadow.
+ *
+ *   the contact line   a half-pixel dark edge right at the boundary.
+ *                      Without it the window's own background bleeds
+ *                      into whatever is behind and the corner radius
+ *                      goes soft.
+ *   the near shadow    small, tight, fairly opaque. This is the one
+ *                      that reads as height.
+ *   the far shadow     large, wide, faint. This is the one that reads
+ *                      as the room the window is in.
+ *
+ * §1-4 asks for two layers. Two is enough for a card. A window wants
+ * the third, because a card sits on a surface and a window floats over
+ * a whole desktop, and the difference is exactly the far shadow.
+ *
+ * The unfocused variant is not the focused one at lower opacity. It
+ * loses the far shadow almost entirely and keeps the contact line, so
+ * an inactive window settles toward the desktop instead of dimming. */
+:root{
+  --shadow-card:
+    0 1px 2px rgba(0,0,0,.08),
+    0 8px 24px rgba(0,0,0,.12);
+
+  --shadow-win:
+    0 0 0 .5px rgba(0,0,0,.55),
+    0 2px 8px rgba(0,0,0,.28),
+    0 18px 52px rgba(0,0,0,.46);
+
+  --shadow-win-idle:
+    0 0 0 .5px rgba(0,0,0,.45),
+    0 1px 3px rgba(0,0,0,.18),
+    0 6px 16px rgba(0,0,0,.20);
+
+  --shadow-menu:
+    0 0 0 .5px rgba(0,0,0,.5),
+    0 1px 3px rgba(0,0,0,.22),
+    0 10px 30px rgba(0,0,0,.40);
+
+  /* Translucency.
+   *
+   * The blur is the obvious half and the saturate is the half people
+   * leave out. Blurring alone averages the colours behind toward grey,
+   * and a grey panel over a colourful desktop looks like frosted
+   * plastic. Pushing saturation back up afterwards is what makes the
+   * colour behind still read as colour through the panel - it is the
+   * difference between translucency and fog.
+   *
+   * amd64 only. This never runs on the Pi, which keeps the console
+   * shell, so there is no reduced path to maintain and no reason to
+   * hold the radius down. */
+  --blur-panel:saturate(180%) blur(30px);
+  --blur-menu:saturate(180%) blur(20px);
+  --blur-sheet:saturate(150%) blur(40px);
+
+  /* The panel colours that go under the blur. They have to be partly
+   * transparent or the blur has nothing to show, and dark enough that
+   * white text on them clears contrast over a bright wallpaper. */
+  --glass-panel:rgba(26,26,26,.72);
+  --glass-menu:rgba(34,34,34,.76);
+  --glass-sheet:rgba(22,22,22,.82);
+
+  /* Corners, from §1-4. */
+  --r-win:11px;
+  --r-card:8px;
+  --r-ctl:6px;
+  --r-pill:11px;
+
+  /* The 8px grid. Named so a stylesheet stops containing the number 24
+   * three hundred times with no way to tell which ones meant the same
+   * thing. */
+  --g1:4px; --g2:8px; --g3:12px; --g4:16px; --g5:24px; --g6:32px;
+}
+
+/* The hairline.
+ *
+ * 0.5px is a real width on a 2x display and a lie on a 1x one, where
+ * the browser rounds it to either 1px or nothing at all depending on
+ * where the element lands. A hairline that disappears on some rows and
+ * not others is worse than a 1px border everywhere.
+ *
+ * So: 1px of a dimmer colour at 1x, a true half pixel at 2x. The colour
+ * change is what keeps the weight looking the same across both. */
+:root{ --hair:#2e2e2e; --hair-w:1px; }
+@media (min-resolution:2dppx){
+  :root{ --hair:#383838; --hair-w:.5px; }
+}
+
+/* ── applying it ────────────────────────────────────────────────── */
+
+body{
+  font-family:var(--ui);
+  font-size:var(--s-body);
+  letter-spacing:var(--tr-body);
+  line-height:var(--lh);
+  font-weight:var(--w-normal);
+  /* Both of these are on for the same reason: the shapes were drawn to
+   * be seen this way and the browser's default is a compromise for
+   * documents rather than for an interface. */
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+  text-rendering:optimizeLegibility;
+  /* If the face ever gains an optical size axis, use it and let this
+   * whole tracking table become a fallback. */
+  font-optical-sizing:auto;
+}
+
+/* Every size in the scale, with the tracking that belongs to it. */
+.t-tiny  {font-size:var(--s-tiny); letter-spacing:var(--tr-tiny)}
+.t-small {font-size:var(--s-small);letter-spacing:var(--tr-small)}
+.t-label {font-size:var(--s-label);letter-spacing:var(--tr-label)}
+.t-body  {font-size:var(--s-body); letter-spacing:var(--tr-body)}
+.t-item  {font-size:var(--s-item); letter-spacing:var(--tr-item); font-weight:var(--w-medium)}
+.t-title {font-size:var(--s-title);letter-spacing:var(--tr-title);font-weight:var(--w-semi)}
+.t-sec   {font-size:var(--s-sec);  letter-spacing:var(--tr-sec);  font-weight:var(--w-semi)}
+.t-big   {font-size:var(--s-big);  letter-spacing:var(--tr-big);  font-weight:var(--w-semi)}
+.t-huge  {font-size:var(--s-huge); letter-spacing:var(--tr-huge); font-weight:var(--w-semi)}
+
+/* Numbers that live in a column or change on their own.
+ *
+ * Also slashed-zero where the face has it, because a settings screen
+ * shows IP addresses and a zero that can be read as an O in 192.168.0.1
+ * is a support call. */
+.num, td, .kv dd, .stat .v, .graph .head strong, .vl{
+  font-variant-numeric:tabular-nums slashed-zero;
+  font-feature-settings:"tnum" 1,"zero" 1;
+}
+/* A number inside a sentence is not in a column and evenly spaced
+ * digits there look stilted. This is the exception, and it is narrow on
+ * purpose. */
+.prose .num, .caption, .modal p, .why{
+  font-variant-numeric:normal;
+  font-feature-settings:normal;
+}
+
+/* Latin-only runs - a command, a file path, a key name - get the
+ * tighter Latin line height, because 1.55 was chosen for Hangul and
+ * leaves Latin looking airy. */
+.latin, code, .key, .field.mono{
+  line-height:var(--lh-latin);
+}
+
+code,.mono{font-family:var(--mono);letter-spacing:0}
+
+/* Press feedback.
+ *
+ * A control that only changes colour when pressed reads as a picture
+ * that changed. One that also moves reads as a thing that was pushed.
+ * 0.97 is small enough that it is felt rather than watched, and the
+ * spring is the fastest in the table so it finishes before the finger
+ * lifts. */
+.pressable{transition:transform var(--t-press) var(--e-press)}
+.pressable:active{transform:scale(.97)}
+
+/* Anything that appears: never from zero.
+ *
+ * Scaling up from 0 is a genie effect, and a genie effect on a dialog
+ * reads as a special occasion. 0.96 with opacity is the whole trick -
+ * near enough to its final size that it arrives rather than grows. */
+.appear{
+  animation:lp-appear var(--t-sheet) var(--e-sheet) both;
+  transform-origin:center;
+}
+@keyframes lp-appear{
+  from{opacity:0;transform:scale(.96)}
+  to  {opacity:1;transform:none}
+}
+/* From an anchor - a menu growing out of the thing that opened it.
+ * transform-origin is set inline by whatever opened it. */
+.appear-anchored{
+  animation:lp-appear var(--t-menu) var(--e-menu) both;
+}
+
+@media (prefers-reduced-motion:reduce){
+  .pressable:active{transform:none}
+  .appear,.appear-anchored{animation-duration:1ms}
+}

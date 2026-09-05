@@ -1,0 +1,488 @@
+<meta charset="utf-8">
+<title>감각 — 모션·타이포·재질·소리</title>
+<link rel="stylesheet" href="lp-motion.css">
+<link rel="stylesheet" href="lp-type.css">
+<link rel="stylesheet" href="lp-ui.css">
+<style>
+/* This page is a workbench, not a screen of the OS. It uses the design
+ * system to show the design system, and the few classes below exist
+ * only here - a bench needs rulers on it that the thing being measured
+ * must not have. */
+body{padding:32px 20px 80px}
+.wrap{max-width:920px}
+h1{font-size:var(--s-sec);letter-spacing:var(--tr-sec);font-weight:var(--w-semi);margin-bottom:4px}
+.lede{font-size:var(--s-small);letter-spacing:var(--tr-small);color:var(--t3);margin-bottom:28px;max-width:62ch;line-height:1.6}
+.block{background:var(--canvas);border:var(--hair-w) solid var(--line);border-radius:var(--r-win);padding:18px 20px 20px;margin-bottom:18px}
+.block > h2{font-size:var(--s-title);letter-spacing:var(--tr-title);font-weight:var(--w-semi);margin-bottom:3px}
+.block > .sub{margin-bottom:var(--g4)}
+
+/* one spring per row: name, track, curve, numbers */
+.spring{display:grid;grid-template-columns:88px 1fr 132px 96px;gap:var(--g3);
+  align-items:center;padding:11px 0;border-bottom:var(--hair-w) solid var(--line-soft)}
+.spring:last-of-type{border-bottom:0}
+.spring .nm{font-size:var(--s-label);letter-spacing:var(--tr-label)}
+.spring .nm i{display:block;font-style:normal;font-size:var(--s-tiny);color:var(--t4)}
+.track{position:relative;height:30px;background:var(--card);border-radius:var(--r-ctl);overflow:hidden;cursor:pointer}
+.track .dot{position:absolute;top:5px;left:0;width:20px;height:20px;border-radius:5px;background:var(--t1)}
+.track .goal{position:absolute;top:0;bottom:0;right:0;width:20px;border-left:var(--hair-w) dashed var(--line)}
+.plot{background:var(--card);border-radius:var(--r-ctl);height:44px}
+.plot polyline{fill:none;stroke-width:1.4}
+.nums{font-size:var(--s-tiny);color:var(--t3);text-align:right;font-variant-numeric:tabular-nums}
+.nums b{display:block;color:var(--t2);font-weight:var(--w-normal);font-size:var(--s-small)}
+
+/* the spring-versus-bezier demonstration */
+.vs{display:grid;grid-template-columns:88px 1fr;gap:var(--g3);align-items:center;padding:11px 0}
+.vs .track{height:34px}
+.vs .track .dot{top:7px}
+
+.scale-row{display:flex;align-items:baseline;gap:var(--g4);padding:7px 0;border-bottom:var(--hair-w) solid var(--line-soft)}
+.scale-row .meta{font-size:var(--s-tiny);color:var(--t4);width:132px;flex:0 0 132px;font-variant-numeric:tabular-nums}
+
+.mat{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--g5);margin-top:var(--g3);
+  /* A shadow on a near-black panel is a shadow nobody can see, and a
+   * demonstration that demonstrates nothing is worse than no
+   * demonstration - it says the difference does not matter. These sit
+   * on a mid grey for the same reason a print sample is not shown on
+   * black paper. */
+  background:#8e8e8e;border-radius:var(--r-win);padding:26px 22px}
+.chip{height:92px;border-radius:var(--r-win);background:#f2f2f2;display:flex;
+  align-items:flex-end;padding:9px 11px;font-size:var(--s-tiny);color:#5a5a5a}
+.stage{background:
+  radial-gradient(120% 120% at 18% 12%,#2b4a7a 0%,transparent 55%),
+  radial-gradient(120% 120% at 82% 78%,#7a3a5a 0%,transparent 55%),
+  linear-gradient(160deg,#14161c,#1c1a16);
+  border-radius:var(--r-win);padding:34px;margin-top:var(--g3)}
+.glass{background:var(--glass-panel);border:var(--hair-w) solid rgba(255,255,255,.09);
+  border-radius:var(--r-win);padding:16px 18px;box-shadow:var(--shadow-win);max-width:340px}
+.glass.blurred{backdrop-filter:var(--blur-panel);-webkit-backdrop-filter:var(--blur-panel)}
+.glass h3{font-size:var(--s-item);letter-spacing:var(--tr-item);font-weight:var(--w-medium);margin-bottom:3px}
+.glass p{font-size:var(--s-small);letter-spacing:var(--tr-small);color:var(--t2)}
+
+.sounds{display:flex;flex-wrap:wrap;gap:7px;margin-top:var(--g3)}
+.sounds .btn{display:flex;flex-direction:column;align-items:flex-start;gap:2px;min-width:104px}
+.sounds .btn small{color:var(--t4);font-size:var(--s-tiny);letter-spacing:0}
+.sounds .btn.playing{background:var(--raised);color:#fff}
+
+.sliders{display:grid;grid-template-columns:auto 1fr auto;gap:9px var(--g3);align-items:center;
+  margin-top:var(--g3);font-size:var(--s-small);color:var(--t3)}
+.sliders input{width:100%;accent-color:var(--t1)}
+.sliders output{font-variant-numeric:tabular-nums;color:var(--t2);min-width:52px;text-align:right}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:var(--g5)}
+@media (max-width:760px){.two,.mat{grid-template-columns:1fr}
+  .spring{grid-template-columns:74px 1fr;grid-template-areas:"nm track" "plot nums"}}
+</style>
+
+<div class="wrap">
+
+<h1>감각</h1>
+<div class="lede">
+  모션·타이포그래피·재질·소리는 글로 읽어서는 맞는지 알 수 없습니다.
+  이 페이지는 읽는 것이 아니라 눌러 보는 것입니다. 아래의 모든 값은
+  실제 시스템이 쓰는 값 그대로이고, 여기서 만져 본 결과가 마음에 들지
+  않으면 고쳐야 하는 것은 <code>gen-springs.py</code> 의 표입니다.
+</div>
+
+<!-- ── 스프링 ────────────────────────────────────────────────── -->
+<div class="block">
+  <h2>스프링</h2>
+  <div class="sub">막대를 누르면 그 스프링으로 움직입니다. 오른쪽 곡선이 실제로 풀린 해입니다.</div>
+  <div id="springs"></div>
+  <div class="caption">
+    강성과 감쇠는 <code>gen-springs.py</code> 가 "몇 ms 에, 얼마나 튀며"
+    로부터 역산한 값입니다. 명세서가 적어 둔 강성 170·감쇠 26 을 그대로
+    풀면 596ms 가 나와 같은 명세서의 시간 예산(큰 동작 350ms)을 넘기므로,
+    예산 쪽을 지켰습니다.
+  </div>
+</div>
+
+<!-- ── 중단 ──────────────────────────────────────────────────── -->
+<div class="block">
+  <h2>중단할 수 있다는 것</h2>
+  <div class="sub">명세서가 베지어 대신 스프링을 고른 이유는 이것 하나입니다.</div>
+  <div class="vs">
+    <div class="nm t-label">스프링</div>
+    <div class="track" id="t-spring"><div class="goal"></div><div class="dot"></div></div>
+  </div>
+  <div class="vs">
+    <div class="nm t-label">베지어</div>
+    <div class="track" id="t-bezier"><div class="goal"></div><div class="dot"></div></div>
+  </div>
+  <div class="btnrow">
+    <button class="btn pressable" id="go-far">끝으로</button>
+    <button class="btn pressable" id="go-mid">가는 도중에 방향 바꾸기</button>
+    <button class="btn quiet pressable" id="go-home">처음으로</button>
+  </div>
+  <div class="caption">
+    "끝으로" 를 누르고 도착하기 전에 "방향 바꾸기" 를 누르십시오.
+    스프링은 가지고 있던 속도를 그대로 안고 휘어 돌아옵니다. 베지어는
+    그 자리에서 속도가 0 이 되었다가 다시 출발합니다 — 움직이던 것이
+    한 번 멈추는 것이 보입니다.
+  </div>
+</div>
+
+<!-- ── 직접 맞춰 보기 ────────────────────────────────────────── -->
+<div class="block">
+  <h2>직접 맞춰 보기</h2>
+  <div class="sub">감쇠비가 1 아래로 내려가는 순간을 눈으로 확인할 수 있습니다.</div>
+  <div class="two">
+    <div>
+      <div class="track" id="t-play" style="height:38px"><div class="goal"></div><div class="dot" style="top:9px"></div></div>
+      <div class="sliders">
+        <label for="k">강성</label>
+        <input type="range" id="k" min="60" max="6000" step="10" value="602">
+        <output id="k-o">602</output>
+        <label for="z">감쇠비</label>
+        <input type="range" id="z" min="0.30" max="1.40" step="0.01" value="1.00">
+        <output id="z-o">1.00</output>
+      </div>
+    </div>
+    <div>
+      <svg class="plot" id="play-plot" style="height:120px" viewBox="0 0 300 120" preserveAspectRatio="none"></svg>
+      <div class="nums" style="text-align:left;margin-top:8px" id="play-nums"></div>
+    </div>
+  </div>
+  <div class="caption">
+    감쇠 <code>c = 2ζ√k</code>. ζ 가 1 이면 넘어가지 않고 딱 멈추고, 0.6
+    아래로 내려가면 눈에 보이게 튑니다 — 한 번은 경쾌하고 사백 번째에는
+    거슬립니다. 시스템에서 가장 낮은 값은 스위치 손잡이의 0.65 입니다.
+  </div>
+</div>
+
+<!-- ── 타이포그래피 ──────────────────────────────────────────── -->
+<div class="block">
+  <h2>크기별 자간</h2>
+  <div class="sub">한 값을 여덟 크기에 쓰면, 척도를 정확히 지켜도 어딘가 어색해 보입니다.</div>
+  <div class="btnrow" style="margin-top:0;margin-bottom:14px">
+    <button class="btn pressable" id="tr-on">크기별 자간</button>
+    <button class="btn quiet pressable" id="tr-off">전부 -0.015em</button>
+  </div>
+  <div id="scale"></div>
+  <div class="caption">
+    글자는 작을수록 사이가 더 필요하고 클수록 덜 필요합니다. SF 처럼
+    optical size 축이 있는 서체는 스스로 하지만 Pretendard 에는 없으므로
+    손으로 넣습니다. 두 버튼을 번갈아 누르면 20px 이상에서 차이가
+    분명하게 보입니다.
+  </div>
+</div>
+
+<!-- ── 숫자 ──────────────────────────────────────────────────── -->
+<div class="block">
+  <h2>표 안의 숫자</h2>
+  <div class="sub">작업 관리자의 CPU 열은 1초에 한 번 바뀝니다.</div>
+  <div class="two">
+    <div>
+      <div class="t-tiny" style="color:var(--t4);margin-bottom:6px">비례 폭 — 숫자가 바뀔 때마다 열이 흔들립니다</div>
+      <table style="width:100%"><tbody id="prop"></tbody></table>
+    </div>
+    <div>
+      <div class="t-tiny" style="color:var(--t4);margin-bottom:6px">고정 폭 (tabular-nums) — 흔들리지 않습니다</div>
+      <table style="width:100%"><tbody id="tab" class="num"></tbody></table>
+    </div>
+  </div>
+  <div class="caption">
+    <code>slashed-zero</code> 도 같이 켭니다. 설정 화면은 IP 주소를 보여주고,
+    <code>192.168.0.1</code> 의 0 이 O 로 읽히면 전화가 옵니다.
+  </div>
+</div>
+
+<!-- ── 재질 ──────────────────────────────────────────────────── -->
+<div class="block">
+  <h2>그림자 세 겹</h2>
+  <div class="sub">창이 떠 있어 보이게 하는 것 중 드롭 섀도는 하나뿐입니다.</div>
+  <div class="mat">
+    <div class="chip" style="box-shadow:0 0 0 .5px rgba(0,0,0,.55)">접촉선만</div>
+    <div class="chip" style="box-shadow:0 0 0 .5px rgba(0,0,0,.55),0 2px 8px rgba(0,0,0,.28)">＋ 가까운 그림자</div>
+    <div class="chip" style="box-shadow:var(--shadow-win)">＋ 먼 그림자</div>
+  </div>
+  <div class="caption">
+    접촉선이 없으면 창의 배경이 뒤로 번지고 모서리 곡선이 뭉갭니다.
+    가까운 그림자는 높이로 읽히고, 먼 그림자는 그 창이 놓인 공간으로
+    읽힙니다. 포커스를 잃은 창은 흐려지는 것이 아니라 먼 그림자를 잃고
+    바탕에 가라앉습니다.
+  </div>
+</div>
+
+<div class="block">
+  <h2>반투명</h2>
+  <div class="sub">블러가 절반이고, 채도를 되올리는 것이 나머지 절반입니다.</div>
+  <div class="stage">
+    <div class="glass blurred" id="glass">
+      <h3>블러 ＋ 채도 180%</h3>
+      <p>뒤의 색이 색으로 남습니다. 블러만 걸면 뒤의 색이 회색 쪽으로
+         평균되어, 화려한 배경 위의 서리 낀 플라스틱처럼 보입니다.</p>
+    </div>
+  </div>
+  <div class="btnrow">
+    <button class="btn pressable" id="b-full">블러 ＋ 채도</button>
+    <button class="btn quiet pressable" id="b-plain">블러만</button>
+    <button class="btn quiet pressable" id="b-none">없음</button>
+  </div>
+  <div class="caption">
+    amd64 전용입니다. 파이는 지금의 콘솔 셸을 그대로 쓰므로 여기서
+    참을 것이 없습니다.
+  </div>
+</div>
+
+<!-- ── 소리 ──────────────────────────────────────────────────── -->
+<div class="block">
+  <h2>소리</h2>
+  <div class="sub">보고 있지 않을 수도 있는 일, 또는 되돌릴 수 없는 일에만 납니다.</div>
+  <div class="sounds" id="sounds"></div>
+  <div class="caption">
+    전부 C 장조 5음계에서만 나옵니다 — 반음도 트라이톤도 없으므로 두
+    소리가 겹쳐도 화음이 됩니다. 알림이 오는 동안 내려받기가 끝나는 일은
+    실제로 일어납니다. 올라가면 좋은 일, 내려가면 나쁜 일이거나 끝난
+    일입니다.
+  </div>
+  <div class="note plain" style="margin-top:16px">
+    <b>소리가 나지 않는 것:</b>&nbsp;타이핑, 창 열기·닫기, 앱과 작업공간
+    전환, 성공한 버튼, 스크롤과 호버. 분당 몇 번을 넘게 나는 소리는
+    꺼지는 소리이고, 시스템 소리를 꺼 버린 사람은 배터리 경고도 함께
+    잃습니다.
+  </div>
+</div>
+
+</div>
+
+<script src="lp-spring.js"></script>
+<script>
+/* ── the spring rows ─────────────────────────────────────────────
+ *
+ * The curve drawn beside each track is integrated here rather than read
+ * out of the CSS. Drawing the generated linear() would only prove that
+ * the string was copied correctly; solving it again proves the constants
+ * in lp-spring.js and the ones in lp-motion.css describe the same
+ * spring, which is the thing that actually goes wrong when the table
+ * is edited and only one of the two is regenerated. */
+const WHAT = {
+  window: '창', sheet: '대화상자', menu: '메뉴', press: '누름',
+  insert: '목록 항목', expand: '펼침', knob: '스위치',
+  slide: '작업공간', rubber: '스크롤 끝',
+};
+
+function solve(k, c, seconds) {
+  const dt = 1 / 2000, pts = [];
+  let x = 0, v = 0, settle = seconds;
+  for (let t = 0; t <= seconds; t += dt) {
+    v += (-k * (x - 1) - c * v) * dt;
+    x += v * dt;
+    pts.push(x);
+    /* Exactly the generator's test, both halves of it. Dropping the
+     * velocity term looks like a simplification and is not: a spring
+     * passing through its target at speed satisfies the position test
+     * for a moment on the way past, and would be declared finished
+     * mid-overshoot. That is how this page ends up reporting a shorter
+     * time than the stylesheet it is meant to be showing. */
+    if (settle === seconds && Math.abs(x - 1) < 0.005 && Math.abs(v) < 0.05)
+      settle = t;
+  }
+  pts.settle = settle;
+  return pts;
+}
+
+/* The plot is 300px wide. Eighteen hundred points into a polyline that
+ * wide is six samples per pixel, all of which the browser has to parse
+ * and none of which can be seen. */
+function thin(pts, n) {
+  const out = [];
+  for (let i = 0; i <= n; i++) out.push(pts[Math.round(i / n * (pts.length - 1))]);
+  return out;
+}
+
+function plot(svg, pts, colour, H) {
+  const W = 300, pad = 6;
+  H = H || 44;
+  let lo = 0, hi = 1;
+  for (const p of pts) { if (p < lo) lo = p; if (p > hi) hi = p; }
+  const span = (hi - lo) || 1;
+  const d = pts.map((p, i) =>
+    (i / (pts.length - 1) * W).toFixed(1) + ',' +
+    (H - pad - (p - lo) / span * (H - pad * 2)).toFixed(1)).join(' ');
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  svg.innerHTML =
+    '<line x1="0" y1="' + (H - pad - (1 - lo) / span * (H - pad * 2)) +
+    '" x2="' + W + '" y2="' + (H - pad - (1 - lo) / span * (H - pad * 2)) +
+    '" stroke="#3a3a3a" stroke-width="1" stroke-dasharray="2 3"/>' +
+    '<polyline points="' + d + '" stroke="' + (colour || '#e8e8e8') + '"/>';
+}
+
+const host = document.getElementById('springs');
+for (const [name, p] of Object.entries(LPSpring.PRESETS)) {
+  const zeta = p.c / (2 * Math.sqrt(p.k));
+  const pts = solve(p.k, p.c, 0.9);
+  let peak = 0;
+  for (const v of pts) if (v > peak) peak = v;
+
+  const row = document.createElement('div');
+  row.className = 'spring';
+  row.innerHTML =
+    '<div class="nm">' + name + '<i>' + WHAT[name] + '</i></div>' +
+    '<div class="track"><div class="goal"></div><div class="dot"></div></div>' +
+    '<svg class="plot"></svg>' +
+    '<div class="nums"><b>' + Math.round(
+        getComputedStyle(document.documentElement)
+          .getPropertyValue('--t-' + name).trim().replace('ms', '')) + 'ms</b>' +
+      'k ' + p.k + ' · ζ ' + zeta.toFixed(2) +
+      (peak > 1.004 ? '<br>오버슛 ' + ((peak - 1) * 100).toFixed(1) + '%' : '<br>임계 감쇠') +
+    '</div>';
+  host.appendChild(row);
+
+  plot(row.querySelector('svg'), thin(pts, 200),
+       zeta < 0.9 ? '#f0b350' : '#e8e8e8');
+
+  /* Each track runs its own spring, retargeted on click. Two clicks in
+   * quick succession therefore reverse it mid-flight rather than
+   * restarting it, which is the behaviour the whole file is about. */
+  const track = row.querySelector('.track');
+  const dot = track.querySelector('.dot');
+  const s = new LPSpring.Spring(name, 0);
+  s.onChange(t => { dot.style.transform =
+    'translateX(' + (t * (track.clientWidth - 20)) + 'px)'; });
+  let at = 0;
+  track.addEventListener('click', () => { at = at ? 0 : 1; s.to(at); });
+}
+
+/* ── spring against bezier ─────────────────────────────────────── */
+const sTrack = document.getElementById('t-spring');
+const bTrack = document.getElementById('t-bezier');
+const sDot = sTrack.querySelector('.dot');
+const bDot = bTrack.querySelector('.dot');
+const demo = new LPSpring.Spring('window', 0);
+demo.onChange(t => { sDot.style.transform =
+  'translateX(' + (t * (sTrack.clientWidth - 20)) + 'px)'; });
+
+/* The bezier gets the same duration and a curve chosen to flatter it -
+ * ease-in-out is the fairest comparison, not a linear ramp. What it
+ * cannot be given is a velocity to carry into the turn. */
+bDot.style.transition = 'transform 340ms cubic-bezier(.4,0,.2,1)';
+function bezierTo(t) {
+  bDot.style.transform = 'translateX(' + (t * (bTrack.clientWidth - 20)) + 'px)';
+}
+document.getElementById('go-far').onclick  = () => { demo.to(1); bezierTo(1); };
+document.getElementById('go-mid').onclick  = () => { demo.to(0.15); bezierTo(0.15); };
+document.getElementById('go-home').onclick = () => { demo.to(0); bezierTo(0); };
+
+/* ── the tunable one ───────────────────────────────────────────── */
+const pTrack = document.getElementById('t-play');
+const pDot = pTrack.querySelector('.dot');
+const kEl = document.getElementById('k'), zEl = document.getElementById('z');
+const kO = document.getElementById('k-o'), zO = document.getElementById('z-o');
+let play = null, playAt = 0;
+
+function rebuild(fire) {
+  const k = +kEl.value, z = +zEl.value;
+  const c = 2 * z * Math.sqrt(k);
+  kO.textContent = k;
+  zO.textContent = z.toFixed(2);
+
+  const pts = solve(k, c, 1.6);
+  let peak = 0;
+  for (const v of pts) if (v > peak) peak = v;
+  const settle = pts.settle;
+
+  plot(document.getElementById('play-plot'), thin(pts, 240),
+       z < 0.9 ? '#f0b350' : '#e8e8e8', 120);
+  document.getElementById('play-nums').innerHTML =
+    '<b>' + Math.round(settle * 1000) + 'ms</b>' +
+    'c = ' + c.toFixed(1) +
+    (peak > 1.004 ? ' · 오버슛 ' + ((peak - 1) * 100).toFixed(1) + '%'
+                  : ' · 넘어가지 않음') +
+    (settle > 0.4 ? '<br><span style="color:var(--amber)">예산(350ms)을 넘겼습니다</span>' : '');
+
+  const x = play ? play.x : 0, v = play ? play.v : 0;
+  play = new LPSpring.Spring({ k: k, c: c }, x);
+  play.v = v;
+  play.onChange(t => { pDot.style.transform =
+    'translateX(' + (t * (pTrack.clientWidth - 20)) + 'px)'; });
+  if (fire) { playAt = playAt ? 0 : 1; }
+  play.to(playAt);
+}
+kEl.oninput = () => rebuild(false);
+zEl.oninput = () => rebuild(false);
+pTrack.onclick = () => rebuild(true);
+rebuild(false);
+
+/* ── the type scale ────────────────────────────────────────────── */
+const SCALE = [
+  ['tiny',  '그룹 머리말·배지',  11], ['small', '설명 줄·캡션',   12],
+  ['label', '상단바·라벨',       13], ['body',  '본문·버튼',      14],
+  ['item',  '목록 제목',         15], ['title', '창 제목',        16],
+  ['sec',   '설정 섹션 제목',    20], ['big',   '큰 수치',        24],
+  ['huge',  '검색 인라인 답',    34],
+];
+const scaleHost = document.getElementById('scale');
+scaleHost.innerHTML = SCALE.map(([cls, use, px]) => {
+  const tr = getComputedStyle(document.documentElement)
+    .getPropertyValue('--tr-' + cls).trim();
+  return '<div class="scale-row"><div class="meta">' + px + 'px · ' + tr +
+    '<br>' + use + '</div>' +
+    '<div class="t-' + cls + ' sample">설정 화면 Settings 1234</div></div>';
+}).join('');
+
+document.getElementById('tr-off').onclick = () => {
+  document.querySelectorAll('.sample').forEach(
+    e => e.style.letterSpacing = '-.015em');
+};
+document.getElementById('tr-on').onclick = () => {
+  document.querySelectorAll('.sample').forEach(
+    e => e.style.letterSpacing = '');
+};
+
+/* ── the jitter demonstration ──────────────────────────────────── */
+const ROWS = ['웹 브라우저', '코드 편집기', '터미널', '파일 관리자'];
+function tick() {
+  const cells = ROWS.map(n => [n,
+    (Math.random() * 40).toFixed(1) + '%',
+    (Math.random() * 3000).toFixed(0) + 'MB']);
+  const html = cells.map(([n, c, m]) =>
+    '<tr><td>' + n + '</td><td>' + c + '</td><td>' + m + '</td></tr>').join('');
+  document.getElementById('prop').innerHTML = html;
+  document.getElementById('tab').innerHTML = html;
+}
+tick();
+setInterval(tick, 900);
+
+/* ── materials ─────────────────────────────────────────────────── */
+const glass = document.getElementById('glass');
+document.getElementById('b-full').onclick = () => {
+  glass.classList.add('blurred');
+  glass.style.backdropFilter = glass.style.webkitBackdropFilter = '';
+  glass.querySelector('h3').textContent = '블러 ＋ 채도 180%';
+};
+document.getElementById('b-plain').onclick = () => {
+  glass.classList.add('blurred');
+  glass.style.backdropFilter = glass.style.webkitBackdropFilter = 'blur(30px)';
+  glass.querySelector('h3').textContent = '블러만 — 뒤가 회색이 됩니다';
+};
+document.getElementById('b-none').onclick = () => {
+  glass.classList.remove('blurred');
+  glass.style.backdropFilter = glass.style.webkitBackdropFilter = 'none';
+  glass.querySelector('h3').textContent = '불투명';
+};
+
+/* ── sounds ────────────────────────────────────────────────────── */
+const SOUNDS = [
+  ['error',    '거부·실패'],       ['alert',    '주의'],
+  ['notify',   '알림'],            ['complete', '완료'],
+  ['volume',   '볼륨 한 칸'],      ['shutter',  '스크린샷'],
+  ['trash',    '휴지통 비우기'],   ['plug',     '장치 연결'],
+  ['unplug',   '장치 분리'],       ['boot',     '부팅'],
+];
+const soundHost = document.getElementById('sounds');
+soundHost.innerHTML = SOUNDS.map(([f, label]) =>
+  '<button class="btn pressable" data-s="' + f + '">' + label +
+  '<small>' + f + '.wav</small></button>').join('');
+
+soundHost.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-s]');
+  if (!btn) return;
+  const a = new Audio('sounds/' + btn.dataset.s + '.wav');
+  /* Half volume, because a review page played through headphones at a
+   * desk is not a laptop speaker across a room, and these were levelled
+   * for the second one. */
+  a.volume = 0.5;
+  a.play().catch(() => {});
+  btn.classList.add('playing');
+  a.onended = () => btn.classList.remove('playing');
+});
+</script>

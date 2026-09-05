@@ -1,0 +1,263 @@
+/* lp-ui.css - the design system the settings screens are drawn with.
+ *
+ * The tokens down to the switch come from the owner's own mockup
+ * (design/reference/task-manager-settings-mockup.html) and are copied
+ * unchanged, deliberately: a second screen that invents its own greys is
+ * how a design language stops being one. Everything below the "── new"
+ * line is what the keyboard, key-assignment, reset and permission
+ * screens needed and the reference set did not have.
+ *
+ * The rules those additions follow, from shell-design-spec.md §1-3:
+ *
+ *   - colour has roles. Amber is a limit or a caution, red is failure or
+ *     the loss of data, the accent is an active state, and everything
+ *     else is one of five greys. There is no sixth colour in this file.
+ *   - on and off are told apart by text brightness, not by colour. A
+ *     restricted row is dimmer, not red.
+ *   - 8px grid, hairline borders, 6-8px radius on controls and 10-12px
+ *     on windows.
+ */
+
+:root{
+  --canvas:#0e0e0e; --panel:#1a1a1a; --card:#232323; --raised:#2c2c2c;
+  --line:#333; --line-soft:#2a2a2a;
+  --t1:#e8e8e8; --t2:#a8a8a8; --t3:#6a6a6a; --t4:#4a4a4a;
+  --amber:#f0b350; --amber-bg:#4a3510; --amber-surf:#2a2113;
+  --red:#f08585; --red-bg:#4a2020; --red-surf:#2a1616;
+  --accent:#4a90d9;
+  --mono:"D2Coding","JetBrains Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+
+body{
+  font-family:"Pretendard Variable",Pretendard,-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  background:#000;color:var(--t1);font-size:14px;letter-spacing:-.015em;
+  line-height:1.55;padding:28px 20px;-webkit-font-smoothing:antialiased;
+}
+
+.wrap{max-width:1020px;margin:0 auto}
+
+/* ── the window ─────────────────────────────────────────────── */
+.win{background:var(--canvas);border:.5px solid var(--line);border-radius:11px;overflow:hidden;position:relative}
+.wintop{display:flex;align-items:center;gap:9px;padding:9px 13px;background:var(--panel);border-bottom:.5px solid var(--line)}
+.dots{display:flex;gap:6px}
+.dots i{width:9px;height:9px;border-radius:50%;background:var(--line);display:block}
+.wintitle{font-size:13px;font-weight:500}
+.wintop .who{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12px;color:var(--t3)}
+.body{display:flex;min-height:560px}
+
+/* ── sidebar ────────────────────────────────────────────────── */
+.side{width:168px;flex:0 0 168px;border-right:.5px solid var(--line);padding:9px 7px;background:var(--panel);max-height:720px;overflow-y:auto}
+.side::-webkit-scrollbar{width:6px}
+.side::-webkit-scrollbar-thumb{background:#3a3a3a;border-radius:3px}
+.side .grp{font-size:11px;color:var(--t4);padding:11px 9px 5px}
+.side a{display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:6px;color:var(--t2);font-size:13px;cursor:pointer;user-select:none}
+.side a:hover{background:#242424}
+.side a.on{background:var(--raised);color:var(--t1);font-weight:500}
+.side a b{width:15px;text-align:center;font-weight:400;font-size:12px;color:var(--t3)}
+.side a.on b{color:var(--t1)}
+/* A section a standard account may look at but not change keeps its
+ * place in the list. Hiding it would leave somebody hunting for a
+ * screen that exists on every other machine. */
+.side a .sidelock{margin-left:auto;font-size:10px;color:var(--t4)}
+
+/* ── panes ──────────────────────────────────────────────────── */
+.main{flex:1;padding:16px 18px;min-width:0}
+.pane{display:none}
+.pane.on{display:block}
+
+h2{font-size:19px;font-weight:600;margin-bottom:3px;letter-spacing:-.02em}
+.sub{font-size:13px;color:var(--t3);margin-bottom:16px}
+.sec{font-size:12px;color:var(--t4);margin:22px 0 3px}
+.caption{font-size:12px;color:var(--t3);margin-top:10px}
+
+/* Back link on a sub-screen. The spec says the quick menu never goes to
+ * a sub-screen, but settings does, and a way back has to be visible. */
+.back{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--t3);cursor:pointer;margin-bottom:10px}
+.back:hover{color:var(--t2)}
+
+/* ── rows ───────────────────────────────────────────────────── */
+.rows{border-top:.5px solid var(--line)}
+.row{display:flex;align-items:center;gap:11px;padding:10px 0;border-bottom:.5px solid var(--line-soft)}
+.row .lb{flex:1;min-width:0}
+.row .lb b{display:block;font-size:13px;font-weight:400}
+.row .lb i{font-style:normal;font-size:12px;color:var(--t3)}
+.row .vl{font-size:13px;color:var(--t2);white-space:nowrap}
+.row .vl.off{color:var(--t4)}
+.row .vl.hot{color:var(--amber)}
+.row .vl.bad{color:var(--red)}
+.row.click{cursor:pointer}
+.row.click:hover .lb b{color:#fff}
+
+.bar{height:5px;background:#3a3a3a;border-radius:3px;overflow:hidden;margin-top:5px}
+.bar div{height:5px;background:var(--t1);border-radius:3px}
+.bar div.amber{background:var(--amber)}
+
+.sw{width:34px;height:19px;border-radius:11px;background:#3a3a3a;position:relative;flex:0 0 34px;cursor:pointer;transition:background .16s}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#8a8a8a;transition:left .16s,background .16s}
+.sw.on{background:var(--t1)}
+.sw.on::after{left:17px;background:#1a1a1a}
+
+.kv{display:grid;grid-template-columns:auto 1fr;gap:7px 22px;font-size:13px;margin-top:14px}
+.kv dt{color:var(--t3)}
+.kv dd{text-align:right;color:var(--t2)}
+
+.note{display:flex;align-items:flex-start;gap:8px;background:var(--amber-surf);border:.5px solid var(--amber-bg);border-radius:6px;padding:8px 11px;font-size:12px;color:#e0c090;margin-top:14px;line-height:1.5}
+.note.bad{background:var(--red-surf);border-color:var(--red-bg);color:#e0a0a0}
+.note.plain{background:var(--card);border-color:var(--line);color:var(--t2)}
+.note b{font-weight:500}
+
+/* ────────────────────────────────────────────────────────────────
+ * ── new ── everything past here is for the screens this branch adds
+ * ──────────────────────────────────────────────────────────────── */
+
+/* Buttons.
+ *
+ * The reference mockup had none: every row ended in a switch, a value or
+ * a chevron. Reset and factory reset are neither settings nor
+ * navigation - they are actions that happen once and cannot be undone by
+ * flipping the same control back - so they need to look like something
+ * you press, and the destructive ones need to not look like the rest. */
+.btn{font:inherit;font-size:13px;color:var(--t1);background:var(--raised);
+  border:.5px solid var(--line);border-radius:6px;padding:6px 13px;
+  cursor:pointer;white-space:nowrap;letter-spacing:-.015em}
+.btn:hover{background:#343434}
+.btn:active{background:#282828}
+.btn.quiet{background:transparent;color:var(--t2)}
+.btn.quiet:hover{background:var(--card);color:var(--t1)}
+.btn.danger{color:var(--red);background:var(--red-surf);border-color:var(--red-bg)}
+.btn.danger:hover{background:#3a1e1e}
+.btn.primary{background:var(--t1);color:#151515;border-color:var(--t1);font-weight:500}
+.btn.primary:hover{background:#fff}
+/* Disabled is grey, not red. Red means something went wrong; a control a
+ * standard account may not use has not gone wrong. */
+.btn[disabled]{color:var(--t4);background:var(--card);border-color:var(--line-soft);cursor:not-allowed}
+.btn[disabled]:hover{background:var(--card)}
+.btnrow{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}
+
+/* Key caps.
+ *
+ * Monospace, because a shortcut is typed rather than read, and with a
+ * heavier bottom border so it reads as a key without a drawn keyboard.
+ * min-width keeps a single letter the same size as Tab. */
+.key{display:inline-block;font-family:var(--mono);font-size:12px;color:var(--t1);
+  background:var(--raised);border:.5px solid var(--line);border-bottom-width:2px;
+  border-radius:5px;padding:1px 7px;min-width:24px;text-align:center;line-height:1.5}
+.keys{display:inline-flex;align-items:center;gap:4px}
+.keys em{font-style:normal;color:var(--t4);font-size:11px}
+.key.free{color:var(--t4);background:transparent;border-style:dashed;border-bottom-width:.5px}
+.key.bad{color:var(--red);border-color:var(--red-bg);background:var(--red-surf)}
+.key.wait{color:var(--amber);border-color:var(--amber-bg);background:var(--amber-surf)}
+
+/* The lock on a restricted row.
+ *
+ * Deliberately a glyph and not a colour. shell-design-spec.md keeps
+ * amber for limits, and a settings list where a third of the rows are
+ * amber is a list where amber has stopped meaning anything. The row goes
+ * dim and gains a lock; the reason is one line under the name. */
+.row.locked .lb b{color:var(--t3)}
+.row.locked .vl{color:var(--t4)}
+.row.locked .sw{opacity:.45}
+.row.locked{cursor:default}
+.lock{display:inline-block;font-size:10px;color:var(--t4);margin-left:6px;vertical-align:1px}
+.why{font-size:12px;color:var(--t4);margin-top:1px}
+
+/* Pills - 기본, 보조, 고정, 관리자. A short noun beside a name. */
+.pill{display:inline-block;font-size:11px;color:var(--t3);background:var(--card);
+  border:.5px solid var(--line-soft);border-radius:4px;padding:1px 6px;margin-left:7px;
+  vertical-align:1px;letter-spacing:0}
+.pill.hold{color:var(--amber);background:var(--amber-surf);border-color:var(--amber-bg)}
+.pill.now{color:var(--t1);background:var(--raised);border-color:var(--line)}
+
+/* A reorderable list. The handle is the only part that drags, so a click
+ * on the name still opens the row. */
+.drag{color:var(--t4);cursor:grab;font-size:13px;flex:0 0 14px;user-select:none;text-align:center}
+.drag:active{cursor:grabbing}
+.row.dragging{opacity:.4}
+.row.dropinto{box-shadow:inset 0 2px 0 var(--t2)}
+.row.fixed .drag{cursor:not-allowed;color:var(--line)}
+
+/* Text fields. One shape for the password, the confirmation phrase and
+ * the command of a custom shortcut. */
+.field{font:inherit;font-size:13px;color:var(--t1);background:var(--card);
+  border:.5px solid var(--line);border-radius:6px;padding:7px 10px;width:100%;
+  letter-spacing:-.015em;outline:none}
+.field:focus{border-color:#4a4a4a;background:#262626}
+.field::placeholder{color:var(--t4)}
+.field.mono{font-family:var(--mono);letter-spacing:0}
+.field.bad{border-color:var(--red-bg)}
+.fieldlabel{font-size:12px;color:var(--t3);margin-bottom:5px}
+
+/* The danger zone.
+ *
+ * A bordered block at the bottom of the reset screen, with the one
+ * action that cannot be taken back inside it. The border is the point:
+ * it takes a deliberate scroll to reach and it does not look like the
+ * rows above it. */
+.zone{border:.5px solid var(--red-bg);border-radius:8px;padding:13px 14px;margin-top:26px;background:var(--red-surf)}
+.zone h3{font-size:14px;font-weight:600;color:#e8b0b0;margin-bottom:3px;letter-spacing:-.02em}
+.zone p{font-size:12px;color:#c09090;line-height:1.55}
+.zone .btnrow{margin-top:11px}
+.zone.locked{border-color:var(--line);background:var(--card)}
+.zone.locked h3{color:var(--t2)}
+.zone.locked p{color:var(--t3)}
+
+/* Dialogs.
+ *
+ * Positioned inside the window rather than over the whole page: this is
+ * a mockup of one app, and a sheet that covers the browser would be
+ * showing something the compositor does not do. The backdrop dims the
+ * window only. */
+.backdrop{position:absolute;inset:0;background:rgba(0,0,0,.55);display:none;
+  align-items:center;justify-content:center;z-index:20;padding:20px}
+.backdrop.on{display:flex}
+.modal{background:var(--panel);border:.5px solid var(--line);border-radius:11px;
+  width:100%;max-width:380px;padding:18px 19px 16px;
+  box-shadow:0 1px 2px rgba(0,0,0,.08),0 8px 24px rgba(0,0,0,.45)}
+.modal.wide{max-width:460px}
+.modal h3{font-size:16px;font-weight:600;margin-bottom:5px;letter-spacing:-.02em}
+.modal p{font-size:13px;color:var(--t2);line-height:1.6}
+.modal p+p{margin-top:8px}
+.modal .foot{display:flex;gap:7px;justify-content:flex-end;margin-top:16px}
+.modal .list{margin:12px 0 0;border-top:.5px solid var(--line-soft)}
+.modal .list .row{padding:8px 0}
+.modal .capture{border:.5px dashed var(--line);border-radius:8px;padding:22px 0;
+  text-align:center;margin-top:13px;background:var(--card)}
+.modal .capture .hint{font-size:12px;color:var(--t3);margin-top:9px}
+
+/* A scrolling picker - the language list, the app list. */
+.picker{max-height:230px;overflow-y:auto;margin-top:11px;border-top:.5px solid var(--line-soft)}
+.picker::-webkit-scrollbar{width:6px}
+.picker::-webkit-scrollbar-thumb{background:#3a3a3a;border-radius:3px}
+.picker .row{padding:8px 0}
+.picker .row.on .lb b{color:var(--t1);font-weight:500}
+.picker .row.taken .lb b{color:var(--t4)}
+
+/* Search inside a picker. */
+.search{display:flex;align-items:center;gap:8px;background:var(--card);
+  border:.5px solid var(--line);border-radius:6px;padding:6px 10px;margin-top:12px}
+.search span{color:var(--t4);font-size:12px}
+.search input{font:inherit;font-size:13px;color:var(--t1);background:transparent;
+  border:0;outline:none;width:100%;letter-spacing:-.015em}
+.search input::placeholder{color:var(--t4)}
+
+/* Progress on something that takes a moment - the reset itself. */
+.prog{height:4px;background:#3a3a3a;border-radius:2px;overflow:hidden;margin-top:14px}
+.prog div{height:4px;background:var(--t1);border-radius:2px;width:0;transition:width .4s linear}
+
+/* The account switch above the window. Not part of the OS: it is how a
+ * reviewer sees the same screen as both kinds of user without logging
+ * out and back in. */
+.appswitch{display:flex;gap:6px;margin-bottom:16px;align-items:center;flex-wrap:wrap}
+.appswitch button{font:inherit;font-size:13px;color:var(--t2);background:var(--panel);
+  border:.5px solid var(--line);border-radius:7px;padding:7px 16px;cursor:pointer}
+.appswitch button.on{background:var(--raised);color:var(--t1);font-weight:500}
+.appswitch .as-note{font-size:12px;color:var(--t4);margin-left:4px}
+
+/* An inline result under the control that caused it - the spec's
+ * "인라인 피드백": next to the thing you pressed, short, self-clearing. */
+.inline{font-size:12px;color:var(--t3);margin-top:9px;display:none}
+.inline.on{display:block}
+.inline.warn{color:var(--amber)}
+.inline.bad{color:var(--red)}

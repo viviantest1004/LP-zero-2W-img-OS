@@ -1,0 +1,758 @@
+<meta charset="utf-8">
+<title>작업 관리자 · 설정 목업</title>
+<style>
+:root{
+  --canvas:#0e0e0e; --panel:#1a1a1a; --card:#232323; --raised:#2c2c2c;
+  --line:#333; --line-soft:#2a2a2a;
+  --t1:#e8e8e8; --t2:#a8a8a8; --t3:#6a6a6a; --t4:#4a4a4a;
+  --amber:#f0b350; --amber-bg:#4a3510; --amber-surf:#2a2113;
+  --red:#f08585; --teal:#7fb8a0;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  font-family:"Pretendard Variable",Pretendard,-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  background:#000;color:var(--t1);font-size:14px;letter-spacing:-.015em;
+  line-height:1.55;padding:28px 20px;-webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1020px;margin:0 auto}
+.appswitch{display:flex;gap:6px;margin-bottom:16px}
+.appswitch button{
+  font:inherit;font-size:13px;color:var(--t2);background:var(--panel);
+  border:.5px solid var(--line);border-radius:7px;padding:7px 16px;cursor:pointer;
+}
+.appswitch button.on{background:var(--raised);color:var(--t1);font-weight:500}
+
+.win{background:var(--canvas);border:.5px solid var(--line);border-radius:11px;overflow:hidden}
+.wintop{display:flex;align-items:center;gap:9px;padding:9px 13px;background:var(--panel);border-bottom:.5px solid var(--line)}
+.dots{display:flex;gap:6px}
+.dots i{width:9px;height:9px;border-radius:50%;background:var(--line);display:block}
+.wintitle{font-size:13px;font-weight:500}
+.body{display:flex;min-height:470px}
+
+.side{width:168px;flex:0 0 168px;border-right:.5px solid var(--line);padding:9px 7px;background:var(--panel);max-height:620px;overflow-y:auto}
+.side::-webkit-scrollbar{width:6px}
+.side::-webkit-scrollbar-thumb{background:#3a3a3a;border-radius:3px}
+.side .grp{font-size:11px;color:var(--t4);padding:11px 9px 5px}
+.side a{display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:6px;color:var(--t2);font-size:13px;cursor:pointer}
+.side a:hover{background:#242424}
+.side a.on{background:var(--raised);color:var(--t1);font-weight:500}
+.side a b{width:15px;text-align:center;font-weight:400;font-size:12px;color:var(--t3)}
+.side a.on b{color:var(--t1)}
+
+.main{flex:1;padding:16px 18px;min-width:0}
+.pane{display:none}
+.pane.on{display:block}
+
+h2{font-size:19px;font-weight:600;margin-bottom:3px;letter-spacing:-.02em}
+.sub{font-size:13px;color:var(--t3);margin-bottom:16px}
+.sec{font-size:12px;color:var(--t4);margin:22px 0 3px}
+
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-bottom:18px}
+.stat{background:var(--card);border-radius:8px;padding:10px 12px}
+.stat .k{font-size:12px;color:var(--t3);margin-bottom:3px}
+.stat .v{font-size:20px;font-weight:600;letter-spacing:-.03em}
+.stat .v small{font-size:12px;font-weight:400;color:var(--t3);margin-left:3px;letter-spacing:0}
+.stat.warn .v{color:var(--amber)}
+
+.graph{background:var(--card);border-radius:8px;padding:12px;margin-bottom:16px}
+.graph .head{display:flex;align-items:baseline;gap:9px;margin-bottom:9px}
+.graph .head span{font-size:12px;color:var(--t3)}
+.graph .head strong{font-size:24px;font-weight:600;letter-spacing:-.03em}
+svg{display:block;width:100%}
+
+table{width:100%;border-collapse:collapse}
+th{text-align:right;font-size:12px;font-weight:400;color:var(--t3);padding:0 0 7px;border-bottom:.5px solid var(--line);white-space:nowrap}
+th:first-child{text-align:left}
+th.on{color:var(--t1)}
+td{padding:8px 0;font-size:13px;text-align:right;border-bottom:.5px solid var(--line-soft);white-space:nowrap}
+td:first-child{text-align:left;width:100%}
+td.dim{color:var(--t3)}
+td.hot{color:var(--amber)}
+.nm{display:flex;align-items:center;gap:9px;min-width:0}
+.ic{width:19px;height:19px;border-radius:5px;background:var(--raised);flex:0 0 19px}
+.nm span{overflow:hidden;text-overflow:ellipsis}
+.nm em{font-style:normal;font-size:12px;color:var(--t3);margin-left:7px}
+
+.rows{border-top:.5px solid var(--line)}
+.row{display:flex;align-items:center;gap:11px;padding:10px 0;border-bottom:.5px solid var(--line-soft)}
+.row .lb{flex:1;min-width:0}
+.row .lb b{display:block;font-size:13px;font-weight:400}
+.row .lb i{font-style:normal;font-size:12px;color:var(--t3)}
+.row .vl{font-size:13px;color:var(--t2);white-space:nowrap}
+.row .vl.off{color:var(--t4)}
+.row .vl.hot{color:var(--amber)}
+
+.bar{height:5px;background:#3a3a3a;border-radius:3px;overflow:hidden;margin-top:5px}
+.bar div{height:5px;background:var(--t1);border-radius:3px}
+.bar div.amber{background:var(--amber)}
+
+.seg{display:flex;height:22px;border-radius:5px;overflow:hidden;margin:10px 0 8px}
+.seg div{height:22px}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--t2)}
+.legend b{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+
+.kv{display:grid;grid-template-columns:auto 1fr;gap:7px 22px;font-size:13px;margin-top:14px}
+.kv dt{color:var(--t3)}
+.kv dd{text-align:right;color:var(--t2)}
+
+.note{display:inline-flex;align-items:center;gap:7px;background:var(--amber-surf);border:.5px solid var(--amber-bg);border-radius:6px;padding:6px 11px;font-size:12px;color:#e0c090;margin-top:14px}
+
+.sw{width:34px;height:19px;border-radius:11px;background:#3a3a3a;position:relative;flex:0 0 34px}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#8a8a8a}
+.sw.on{background:var(--t1)}
+.sw.on::after{left:17px;background:#1a1a1a}
+
+.swatch{display:flex;gap:7px;margin-top:8px}
+.swatch i{width:22px;height:22px;border-radius:6px;display:block;border:.5px solid #5a5a5a}
+.swatch i.pick{outline:2px solid var(--t1);outline-offset:2px}
+
+.tabs{display:flex;gap:5px;margin-bottom:14px}
+.tabs b{font-size:12px;font-weight:400;color:var(--t3);background:var(--card);border-radius:5px;padding:4px 10px}
+.tabs b.on{background:var(--raised);color:var(--t1)}
+.caption{font-size:12px;color:var(--t3);margin-top:10px}
+</style>
+
+<div class="wrap">
+
+<div class="appswitch">
+  <button class="on" onclick="app('tm',this)">작업 관리자</button>
+  <button onclick="app('st',this)">설정</button>
+</div>
+
+<div class="win" id="tm">
+  <div class="wintop"><div class="dots"><i></i><i></i><i></i></div><div class="wintitle">작업 관리자</div></div>
+  <div class="body">
+    <div class="side">
+      <a class="on" onclick="go('tm','p-app',this)"><b>▤</b>앱</a>
+      <a onclick="go('tm','p-proc',this)"><b>≣</b>프로세스</a>
+      <div class="grp">자원</div>
+      <a onclick="go('tm','p-cpu',this)"><b>◧</b>CPU</a>
+      <a onclick="go('tm','p-ram',this)"><b>▥</b>메모리</a>
+      <a onclick="go('tm','p-gpu',this)"><b>◨</b>GPU</a>
+      <a onclick="go('tm','p-ssd',this)"><b>▤</b>드라이브</a>
+      <a onclick="go('tm','p-net',this)"><b>◈</b>네트워크</a>
+      <a onclick="go('tm','p-bat',this)"><b>▮</b>배터리</a>
+    </div>
+    <div class="main">
+
+      <div class="pane on" id="p-app">
+        <h2>앱</h2>
+        <div class="sub">창을 띄우고 실행 중인 프로그램입니다</div>
+        <table>
+          <tr><th>이름</th><th>CPU</th><th>메모리</th><th>GPU</th><th>전력</th></tr>
+          <tr><td><div class="nm"><div class="ic"></div><span>웹 브라우저<em>탭 12개</em></span></div></td><td class="hot">31.2%</td><td>2.8GB</td><td>6%</td><td class="hot">높음</td></tr>
+          <tr><td><div class="nm"><div class="ic"></div><span>코드 편집기</span></div></td><td>8.4%</td><td>1.1GB</td><td class="dim">—</td><td>보통</td></tr>
+          <tr><td><div class="nm"><div class="ic"></div><span>터미널<em>창 3개</em></span></div></td><td>1.2%</td><td>184MB</td><td class="dim">—</td><td>낮음</td></tr>
+          <tr><td><div class="nm"><div class="ic"></div><span>파일 관리자</span></div></td><td>0.3%</td><td>96MB</td><td class="dim">—</td><td>낮음</td></tr>
+          <tr><td><div class="nm"><div class="ic"></div><span>이미지 뷰어</span></div></td><td class="dim">0.0%</td><td>62MB</td><td class="dim">—</td><td class="dim">없음</td></tr>
+        </table>
+        <div class="note">▲ 웹 브라우저가 CPU를 가장 많이 쓰고 있습니다</div>
+        <div class="caption">앱 탭은 창이 있는 프로그램만 보여줍니다. 시스템 서비스는 프로세스 탭에 있습니다.</div>
+      </div>
+
+      <div class="pane" id="p-proc">
+        <h2>프로세스</h2>
+        <div class="sub">실행 중인 모든 프로세스 187개</div>
+        <div class="tabs"><b>전체</b><b class="on">CPU 순</b><b>메모리 순</b><b>GPU 순</b><b>전력 순</b></div>
+        <table>
+          <tr><th>이름</th><th class="on">CPU ↓</th><th>메모리</th><th>GPU</th><th>디스크</th><th>전력</th></tr>
+          <tr><td><div class="nm"><div class="ic"></div><span>chromium<em>렌더러</em></span></div></td><td class="hot">18.7%</td><td>1.4GB</td><td>4%</td><td>0.2MB/s</td><td class="hot">높음</td></tr>
+          <tr><td><div class="nm"><div class="ic"></div><span>chromium<em>주 프로세스</em></span></div></td><td>12.5%</td><td>1.4GB</td><td>2%</td><td class="dim">0</td><td>보통</td></tr>
+          <tr><td><div class="nm"><div class="ic"></div><span>node</span></div></td><td>8.4%</td><td>1.1GB</td><td class="dim">—</td><td>1.8MB/s</td><td>보통</td></tr>
+          <tr><td><div class="nm"><div class="ic"></div><span>compositor<em>셸</em></span></div></td><td>3.1%</td><td>142MB</td><td class="hot">11%</td><td class="dim">0</td><td>낮음</td></tr>
+          <tr><td><div class="nm"><div class="ic"></div><span>pipewire</span></div></td><td>1.8%</td><td>38MB</td><td class="dim">—</td><td class="dim">0</td><td>낮음</td></tr>
+          <tr><td><div class="nm"><div class="ic"></div><span>foot</span></div></td><td>1.2%</td><td>61MB</td><td class="dim">—</td><td class="dim">0</td><td>낮음</td></tr>
+          <tr><td><div class="nm"><div class="ic"></div><span>NetworkManager</span></div></td><td>0.4%</td><td>24MB</td><td class="dim">—</td><td class="dim">0</td><td>낮음</td></tr>
+          <tr><td><div class="nm"><div class="ic"></div><span>systemd</span></div></td><td class="dim">0.1%</td><td>12MB</td><td class="dim">—</td><td class="dim">0</td><td class="dim">없음</td></tr>
+        </table>
+        <div class="caption">열 제목을 누르면 그 자원을 많이 쓰는 순으로 정렬됩니다.</div>
+      </div>
+
+      <div class="pane" id="p-cpu">
+        <h2>CPU</h2>
+        <div class="sub">AMD Ryzen 5 PRO 4650G · 6코어 12스레드</div>
+        <div class="graph">
+          <div class="head"><strong>42%</strong><span>3.84GHz · 58°C</span></div>
+          <svg viewBox="0 0 600 90" preserveAspectRatio="none" height="90"><polyline fill="none" stroke="#e8e8e8" stroke-width="1.5" points="0,74 30,68 60,71 90,52 120,58 150,40 180,46 210,30 240,38 270,25 300,34 330,20 360,29 390,44 420,36 450,48 480,41 510,52 540,45 570,50 600,47"/></svg>
+          <div class="caption">최근 60초</div>
+        </div>
+        <div class="stats">
+          <div class="stat"><div class="k">프로세스</div><div class="v">187</div></div>
+          <div class="stat"><div class="k">스레드</div><div class="v">1,204</div></div>
+          <div class="stat"><div class="k">가동 시간</div><div class="v">6<small>시간 12분</small></div></div>
+          <div class="stat warn"><div class="k">온도</div><div class="v">58<small>°C</small></div></div>
+        </div>
+        <div class="sec">코어별 사용률</div>
+        <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:7px;margin-top:8px">
+          <div><div class="bar"><div style="width:62%"></div></div><div class="caption">1</div></div>
+          <div><div class="bar"><div style="width:38%"></div></div><div class="caption">2</div></div>
+          <div><div class="bar"><div class="amber" style="width:88%"></div></div><div class="caption">3</div></div>
+          <div><div class="bar"><div style="width:24%"></div></div><div class="caption">4</div></div>
+          <div><div class="bar"><div style="width:51%"></div></div><div class="caption">5</div></div>
+          <div><div class="bar"><div style="width:19%"></div></div><div class="caption">6</div></div>
+        </div>
+        <dl class="kv"><dt>기본 클럭</dt><dd>3.70GHz</dd><dt>최대 클럭</dt><dd>4.20GHz</dd><dt>L3 캐시</dt><dd>8MB</dd><dt>가상화</dt><dd>사용 가능</dd></dl>
+      </div>
+
+      <div class="pane" id="p-ram">
+        <h2>메모리</h2>
+        <div class="sub">16GB DDR4-3200 · 2슬롯 중 2개 사용</div>
+        <div class="graph">
+          <div class="head"><strong>9.4GB</strong><span>16GB 중 · 59%</span></div>
+          <svg viewBox="0 0 600 90" preserveAspectRatio="none" height="90"><polyline fill="none" stroke="#e8e8e8" stroke-width="1.5" points="0,58 60,56 120,54 180,50 240,48 300,44 360,42 420,40 480,38 540,37 600,36"/></svg>
+          <div class="caption">최근 60초</div>
+        </div>
+        <div class="seg"><div style="width:38%;background:#e8e8e8"></div><div style="width:21%;background:#8a8a8a"></div><div style="width:14%;background:#4a4a4a"></div><div style="width:27%;background:#2a2a2a"></div></div>
+        <div class="legend"><span><b style="background:#e8e8e8"></b>앱 6.1GB</span><span><b style="background:#8a8a8a"></b>캐시 3.4GB</span><span><b style="background:#4a4a4a"></b>시스템 2.2GB</span><span><b style="background:#2a2a2a"></b>여유 4.3GB</span></div>
+        <div class="sec">많이 쓰는 앱</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>chromium</b><i>탭 12개 합계</i></div><div class="vl">2.8GB</div></div>
+          <div class="row"><div class="lb"><b>node</b></div><div class="vl">1.1GB</div></div>
+          <div class="row"><div class="lb"><b>compositor</b></div><div class="vl">142MB</div></div>
+        </div>
+        <dl class="kv"><dt>스왑</dt><dd>0GB / 4GB</dd><dt>압축됨</dt><dd>0MB</dd></dl>
+        <div class="caption">캐시는 필요할 때 자동으로 비워집니다. 여유 메모리가 적어 보여도 정상입니다.</div>
+      </div>
+
+      <div class="pane" id="p-gpu">
+        <h2>GPU</h2>
+        <div class="sub">AMD Radeon RX 580 · amdgpu 드라이버</div>
+        <div class="graph">
+          <div class="head"><strong>23%</strong><span>1,340MHz · 61°C</span></div>
+          <svg viewBox="0 0 600 90" preserveAspectRatio="none" height="90"><polyline fill="none" stroke="#e8e8e8" stroke-width="1.5" points="0,80 40,76 80,64 120,70 160,52 200,60 240,44 280,58 320,66 360,48 400,62 440,70 480,56 520,68 560,72 600,66"/></svg>
+          <div class="caption">최근 60초</div>
+        </div>
+        <div class="stats">
+          <div class="stat"><div class="k">VRAM</div><div class="v">1.9<small>/8GB</small></div></div>
+          <div class="stat"><div class="k">인코더</div><div class="v">0<small>%</small></div></div>
+          <div class="stat"><div class="k">디코더</div><div class="v">12<small>%</small></div></div>
+          <div class="stat"><div class="k">소비 전력</div><div class="v">64<small>W</small></div></div>
+        </div>
+        <div class="sec">사용 중인 프로세스</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>compositor</b><i>화면 합성</i></div><div class="vl">11%</div></div>
+          <div class="row"><div class="lb"><b>chromium</b><i>영상 디코딩</i></div><div class="vl">6%</div></div>
+          <div class="row"><div class="lb"><b>이미지 뷰어</b></div><div class="vl off">0%</div></div>
+        </div>
+        <dl class="kv"><dt>드라이버</dt><dd>amdgpu · Mesa 24.2</dd><dt>연결된 화면</dt><dd>2대</dd></dl>
+      </div>
+
+      <div class="pane" id="p-ssd">
+        <h2>드라이브</h2>
+        <div class="sub">NVMe SSD 240GB</div>
+        <div class="stats">
+          <div class="stat"><div class="k">읽기</div><div class="v">14<small>MB/s</small></div></div>
+          <div class="stat"><div class="k">쓰기</div><div class="v">2.1<small>MB/s</small></div></div>
+          <div class="stat"><div class="k">응답 시간</div><div class="v">0.4<small>ms</small></div></div>
+          <div class="stat warn"><div class="k">남은 공간</div><div class="v">31<small>GB</small></div></div>
+        </div>
+        <div class="graph">
+          <div class="head"><span>읽기·쓰기 속도</span></div>
+          <svg viewBox="0 0 600 70" preserveAspectRatio="none" height="70"><polyline fill="none" stroke="#e8e8e8" stroke-width="1.5" points="0,60 50,58 100,40 150,55 200,30 250,50 300,20 350,48 400,56 450,38 500,58 550,52 600,56"/><polyline fill="none" stroke="#7fb8a0" stroke-width="1.5" points="0,66 50,64 100,62 150,65 200,58 250,64 300,60 350,66 400,63 450,61 500,66 550,64 600,65"/></svg>
+          <div class="legend" style="margin-top:8px"><span><b style="background:#e8e8e8"></b>읽기</span><span><b style="background:#7fb8a0"></b>쓰기</span></div>
+        </div>
+        <div class="seg"><div style="width:34%;background:#e8e8e8"></div><div style="width:22%;background:#8a8a8a"></div><div style="width:31%;background:#4a4a4a"></div><div style="width:13%;background:#2a2a2a"></div></div>
+        <div class="legend"><span><b style="background:#e8e8e8"></b>시스템 78GB</span><span><b style="background:#8a8a8a"></b>사용자 파일 51GB</span><span><b style="background:#4a4a4a"></b>앱 72GB</span><span><b style="background:#2a2a2a"></b>여유 31GB</span></div>
+        <div class="note">▲ 남은 공간이 15% 미만입니다</div>
+        <dl class="kv"><dt>파일 시스템</dt><dd>ext4</dd><dt>수명 (SMART)</dt><dd>양호 · 94%</dd><dt>총 기록량</dt><dd>18.2TB</dd></dl>
+      </div>
+
+      <div class="pane" id="p-net">
+        <h2>네트워크</h2>
+        <div class="sub">Wi-Fi · iptime_ring</div>
+        <div class="stats">
+          <div class="stat"><div class="k">받는 중</div><div class="v">4.2<small>MB/s</small></div></div>
+          <div class="stat"><div class="k">보내는 중</div><div class="v">0.3<small>MB/s</small></div></div>
+          <div class="stat"><div class="k">신호</div><div class="v">−48<small>dBm</small></div></div>
+          <div class="stat"><div class="k">연결 시간</div><div class="v">6<small>시간</small></div></div>
+        </div>
+        <div class="graph">
+          <div class="head"><span>실시간 속도</span></div>
+          <svg viewBox="0 0 600 70" preserveAspectRatio="none" height="70"><polyline fill="none" stroke="#e8e8e8" stroke-width="1.5" points="0,62 40,48 80,55 120,28 160,40 200,18 240,34 280,25 320,44 360,30 400,52 440,38 480,46 520,32 560,50 600,42"/><polyline fill="none" stroke="#7fb8a0" stroke-width="1.5" points="0,66 40,64 80,65 120,60 160,63 200,58 240,64 280,62 320,66 360,61 400,65 440,63 480,64 520,60 560,66 600,64"/></svg>
+          <div class="legend" style="margin-top:8px"><span><b style="background:#e8e8e8"></b>받기</span><span><b style="background:#7fb8a0"></b>보내기</span></div>
+        </div>
+        <div class="sec">앱별 사용량</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>chromium</b></div><div class="vl">3.9MB/s</div></div>
+          <div class="row"><div class="lb"><b>apt</b><i>패키지 내려받기</i></div><div class="vl">0.3MB/s</div></div>
+          <div class="row"><div class="lb"><b>그 외</b></div><div class="vl off">0.1MB/s</div></div>
+        </div>
+        <dl class="kv"><dt>IP 주소</dt><dd>192.168.0.14</dd><dt>게이트웨이</dt><dd>192.168.0.1</dd><dt>대역</dt><dd>5GHz · 866Mbps</dd><dt>오늘 사용량</dt><dd>받기 8.4GB · 보내기 1.1GB</dd></dl>
+      </div>
+
+      <div class="pane" id="p-bat">
+        <h2>배터리</h2>
+        <div class="sub">Dell XPS 15 9550 · 84Wh</div>
+        <div class="stats">
+          <div class="stat"><div class="k">잔량</div><div class="v">38<small>%</small></div></div>
+          <div class="stat"><div class="k">남은 시간</div><div class="v">1<small>시간 24분</small></div></div>
+          <div class="stat"><div class="k">현재 소비</div><div class="v">21<small>W</small></div></div>
+          <div class="stat warn"><div class="k">수명</div><div class="v">81<small>%</small></div></div>
+        </div>
+        <div class="graph">
+          <div class="head"><span>최근 3시간 잔량</span></div>
+          <svg viewBox="0 0 600 70" preserveAspectRatio="none" height="70"><polyline fill="none" stroke="#e8e8e8" stroke-width="1.5" points="0,10 100,18 200,26 300,33 400,41 500,50 600,58"/></svg>
+        </div>
+        <div class="sec">전력을 많이 쓰는 것</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>웹 브라우저</b><i>탭 12개</i></div><div class="vl hot">9.4W</div></div>
+          <div class="row"><div class="lb"><b>화면</b><i>밝기 88%</i></div><div class="vl">6.2W</div></div>
+          <div class="row"><div class="lb"><b>코드 편집기</b></div><div class="vl">2.8W</div></div>
+          <div class="row"><div class="lb"><b>그 외</b></div><div class="vl off">2.6W</div></div>
+        </div>
+        <div class="note">▲ 화면 밝기를 낮추면 약 40분을 더 쓸 수 있습니다</div>
+        <dl class="kv"><dt>전원 모드</dt><dd>성능</dd><dt>충전 횟수</dt><dd>412회</dd><dt>설계 용량</dt><dd>84Wh → 현재 68Wh</dd></dl>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="win" id="st" style="display:none">
+  <div class="wintop"><div class="dots"><i></i><i></i><i></i></div><div class="wintitle">설정</div></div>
+  <div class="body">
+    <div class="side">
+      <a class="on" onclick="go('st','s-gen',this)"><b>◇</b>일반</a>
+      <div class="grp">연결</div>
+      <a onclick="go('st','s-net',this)"><b>◈</b>네트워크</a>
+      <a onclick="go('st','s-bt',this)"><b>✳</b>블루투스</a>
+      <div class="grp">화면과 소리</div>
+      <a onclick="go('st','s-disp',this)"><b>▭</b>화면</a>
+      <a onclick="go('st','s-look',this)"><b>◐</b>모양</a>
+      <a onclick="go('st','s-snd',this)"><b>◑</b>소리</a>
+      <a onclick="go('st','s-noti',this)"><b>◔</b>알림</a>
+      <div class="grp">동작</div>
+      <a onclick="go('st','s-pow',this)"><b>▮</b>전원</a>
+      <a onclick="go('st','s-ws',this)"><b>⊞</b>작업공간</a>
+      <a onclick="go('st','s-kbd',this)"><b>▤</b>키보드</a>
+      <a onclick="go('st','s-mouse',this)"><b>◉</b>마우스</a>
+      <a onclick="go('st','s-a11y',this)"><b>◍</b>접근성</a>
+      <div class="grp">시스템</div>
+      <a onclick="go('st','s-apps',this)"><b>▦</b>앱</a>
+      <a onclick="go('st','s-store',this)"><b>▧</b>저장 공간</a>
+      <a onclick="go('st','s-print',this)"><b>▬</b>프린터</a>
+      <a onclick="go('st','s-user',this)"><b>◎</b>사용자</a>
+      <a onclick="go('st','s-priv',this)"><b>⊙</b>개인 정보</a>
+      <a onclick="go('st','s-about',this)"><b>◇</b>정보</a>
+    </div>
+    <div class="main">
+
+      <div class="pane on" id="s-gen">
+        <h2>일반</h2>
+        <div class="sub">자주 바꾸는 설정을 모았습니다</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>기기 이름</b></div><div class="vl">cho-desktop</div></div>
+          <div class="row"><div class="lb"><b>언어</b></div><div class="vl">한국어</div></div>
+          <div class="row"><div class="lb"><b>형식</b><i>날짜와 숫자 표기</i></div><div class="vl">대한민국</div></div>
+        </div>
+        <div class="sec">시간</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>자동으로 맞추기</b><i>네트워크 시간 서버 사용</i></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>시간대</b></div><div class="vl">서울 (UTC+9)</div></div>
+          <div class="row"><div class="lb"><b>24시간 형식</b></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>상단바 표시</b></div><div class="vl">날짜와 시간</div></div>
+        </div>
+        <div class="sec">화면 끄기와 잠금</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>화면 끄기</b><i>배터리 사용 중</i></div><div class="vl">5분 후</div></div>
+          <div class="row"><div class="lb"><b>화면 끄기</b><i>전원에 연결됨</i></div><div class="vl">15분 후</div></div>
+          <div class="row"><div class="lb"><b>절전 대기</b><i>배터리 사용 중</i></div><div class="vl">15분 후</div></div>
+          <div class="row"><div class="lb"><b>절전 대기</b><i>전원에 연결됨</i></div><div class="vl off">사용 안 함</div></div>
+          <div class="row"><div class="lb"><b>화면 잠금</b><i>화면이 꺼진 뒤</i></div><div class="vl">30초 후</div></div>
+        </div>
+        <div class="sec">그 외</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>시작 프로그램</b><i>3개</i></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>자동 업데이트</b></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>설정 검색</b><i>상단바 검색에서 설정 항목 찾기</i></div><div class="sw on"></div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-net">
+        <h2>네트워크</h2>
+        <div class="sub">Wi-Fi · iptime_ring · 5GHz</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>Wi-Fi</b><i>iptime_ring</i></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>유선</b><i>케이블이 연결되지 않았습니다</i></div><div class="vl off">사용 안 함</div></div>
+          <div class="row"><div class="lb"><b>VPN</b><i>seoul</i></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>비행기 모드</b><i>모든 무선 연결을 끕니다</i></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>프록시</b></div><div class="vl off">사용 안 함</div></div>
+        </div>
+        <div class="sec">연결 정보</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>IP 주소</b></div><div class="vl">192.168.0.14</div></div>
+          <div class="row"><div class="lb"><b>게이트웨이</b></div><div class="vl">192.168.0.1</div></div>
+          <div class="row"><div class="lb"><b>DNS</b></div><div class="vl">자동</div></div>
+          <div class="row"><div class="lb"><b>속도</b></div><div class="vl">866Mbps</div></div>
+        </div>
+        <div class="sec">관리</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>저장된 네트워크</b><i>7개</i></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>숨겨진 네트워크 연결</b></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>핫스팟 만들기</b></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>데이터 사용량</b><i>이번 달 142GB</i></div><div class="vl">›</div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-bt">
+        <h2>블루투스</h2>
+        <div class="sub">기기 2대가 등록되어 있습니다</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>블루투스</b></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>다른 기기에 보이기</b><i>cho-desktop 으로 표시됩니다</i></div><div class="sw"></div></div>
+        </div>
+        <div class="sec">내 기기</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>AirPods</b><i>연결됨 · 배터리 72%</i></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>Galaxy Watch4</b><i>연결되지 않음</i></div><div class="vl off">›</div></div>
+        </div>
+        <div class="sec">주변 기기</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>새 기기 찾기</b><i>검색 중…</i></div><div class="vl">›</div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-disp">
+        <h2>화면</h2>
+        <div class="sub">Dell XPS 15 내장 · 3840 × 2160</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>해상도</b></div><div class="vl">3840 × 2160</div></div>
+          <div class="row"><div class="lb"><b>주사율</b></div><div class="vl">60Hz</div></div>
+          <div class="row"><div class="lb"><b>배율</b><i>글자와 아이콘 크기</i></div><div class="vl">200%</div></div>
+          <div class="row"><div class="lb"><b>방향</b></div><div class="vl">가로</div></div>
+        </div>
+        <div class="sec">밝기</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>화면 밝기</b><div class="bar" style="width:190px"><div style="width:88%"></div></div></div><div class="vl">88%</div></div>
+          <div class="row"><div class="lb"><b>자동 밝기</b><i>주변 밝기에 맞춰 조절합니다</i></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>야간 모드</b><i>일몰부터 일출까지</i></div><div class="sw"></div></div>
+        </div>
+        <div class="sec">여러 화면</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>표시 방식</b></div><div class="vl">화면 확장</div></div>
+          <div class="row"><div class="lb"><b>주 화면</b></div><div class="vl">내장 화면</div></div>
+          <div class="row"><div class="lb"><b>화면 배치</b><i>끌어서 위치를 맞춥니다</i></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>색상 프로파일</b></div><div class="vl">기본</div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-look">
+        <h2>모양</h2>
+        <div class="sub">화면의 색과 배경을 정합니다</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>어두운 화면</b></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>배경 화면</b></div><div class="vl">›</div></div>
+        </div>
+        <div class="sec">강조색</div>
+        <div style="padding:10px 0 12px;border-bottom:.5px solid var(--line-soft)">
+          <div class="swatch">
+            <i class="pick" style="background:#4a90d9"></i>
+            <i style="background:#1d9e75"></i>
+            <i style="background:#7f77dd"></i>
+            <i style="background:#d4537e"></i>
+            <i style="background:#d85a30"></i>
+            <i style="background:#888780"></i>
+          </div>
+        </div>
+        <div class="sec">그 외</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>아이콘 테마</b></div><div class="vl">기본</div></div>
+          <div class="row"><div class="lb"><b>커서 크기</b></div><div class="vl">보통</div></div>
+          <div class="row"><div class="lb"><b>창 버튼</b><i>제목 표시줄에 표시할 버튼</i></div><div class="vl">닫기만</div></div>
+          <div class="row"><div class="lb"><b>애니메이션</b><i>창과 화면 전환 효과</i></div><div class="sw on"></div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-snd">
+        <h2>소리</h2>
+        <div class="sub">출력 AirPods · 입력 내장 마이크</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>출력 볼륨</b><div class="bar" style="width:190px"><div style="width:62%"></div></div></div><div class="vl">62%</div></div>
+          <div class="row"><div class="lb"><b>출력 장치</b></div><div class="vl">AirPods</div></div>
+          <div class="row"><div class="lb"><b>좌우 균형</b></div><div class="vl">가운데</div></div>
+          <div class="row"><div class="lb"><b>입력 볼륨</b><div class="bar" style="width:190px"><div style="width:74%"></div></div></div><div class="vl">74%</div></div>
+          <div class="row"><div class="lb"><b>입력 장치</b></div><div class="vl">내장 마이크</div></div>
+        </div>
+        <div class="sec">앱별 볼륨</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>웹 브라우저</b><div class="bar" style="width:190px"><div style="width:100%"></div></div></div><div class="vl">100%</div></div>
+          <div class="row"><div class="lb"><b>음악</b><div class="bar" style="width:190px"><div style="width:45%"></div></div></div><div class="vl">45%</div></div>
+        </div>
+        <div class="sec">시스템 소리</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>알림음</b></div><div class="vl">기본</div></div>
+          <div class="row"><div class="lb"><b>볼륨 조절할 때 소리 내기</b></div><div class="sw"></div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-noti">
+        <h2>알림</h2>
+        <div class="sub">알림을 받는 방식을 설정합니다</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>알림 받기</b></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>잠금 화면에 표시</b></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>잠금 화면에서 내용 가리기</b><i>보낸 사람만 표시합니다</i></div><div class="sw"></div></div>
+        </div>
+        <div class="sec">방해 금지</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>방해 금지</b></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>자동 예약</b><i>평일 23:00 – 08:00</i></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>전체 화면일 때 자동으로 켜기</b><i>게임이나 영상을 볼 때</i></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>예외 허용 앱</b><i>2개</i></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>방해 금지 중 알림</b></div><div class="vl">쌓아 두기</div></div>
+        </div>
+        <div class="sec">앱별</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>앱별 알림 설정</b><i>14개 앱</i></div><div class="vl">›</div></div>
+        </div>
+        <div class="caption">배터리 부족이나 디스크 부족 같은 긴급 알림은 방해 금지 중에도 표시됩니다.</div>
+      </div>
+
+      <div class="pane" id="s-pow">
+        <h2>전원</h2>
+        <div class="sub">배터리 38% · 1시간 24분 남음</div>
+        <div class="sec">전원 모드</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>절전</b><i>배터리를 오래 씁니다</i></div><div class="vl off">선택 안 함</div></div>
+          <div class="row"><div class="lb"><b>균형</b><i>성능과 전력을 함께 맞춥니다</i></div><div class="vl off">선택 안 함</div></div>
+          <div class="row"><div class="lb"><b>성능</b><i>최대 속도로 동작합니다</i></div><div class="vl">사용 중</div></div>
+        </div>
+        <div class="sec">동작</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>덮개를 닫을 때</b></div><div class="vl">절전 대기</div></div>
+          <div class="row"><div class="lb"><b>전원 버튼을 누를 때</b></div><div class="vl">전원 메뉴 열기</div></div>
+        </div>
+        <div class="sec">배터리</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>잔량을 % 로 표시</b></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>배터리가 적을 때 알리기</b><i>20% 이하</i></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>80%까지만 충전</b><i>배터리 수명을 늘립니다</i></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>배터리 정보</b><i>수명 81% · 412회 충전</i></div><div class="vl">›</div></div>
+        </div>
+        <div class="caption">화면 꺼짐과 절전 대기 시간은 일반에서 설정합니다.</div>
+      </div>
+
+      <div class="pane" id="s-ws">
+        <h2>작업공간</h2>
+        <div class="sub">현재 4개를 쓰고 있습니다</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>개수 관리</b><i>필요할 때 자동으로 늘리고 줄입니다</i></div><div class="vl">동적</div></div>
+          <div class="row"><div class="lb"><b>최대 개수</b></div><div class="vl">20개</div></div>
+          <div class="row"><div class="lb"><b>이름 붙이기</b><i>검색으로 바로 이동할 수 있습니다</i></div><div class="sw on"></div></div>
+        </div>
+        <div class="sec">동작</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>여러 화면에서</b></div><div class="vl">주 화면만</div></div>
+          <div class="row"><div class="lb"><b>창 스냅</b><i>화면 가장자리로 끌면 반쪽 배치</i></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>창 전환 범위</b></div><div class="vl">현재 작업공간</div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-kbd">
+        <h2>키보드</h2>
+        <div class="sub">입력 방식과 단축키를 설정합니다</div>
+        <div class="sec">입력 소스</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>한국어</b><i>두벌식</i></div><div class="vl">기본</div></div>
+          <div class="row"><div class="lb"><b>English (US)</b></div><div class="vl off">보조</div></div>
+          <div class="row"><div class="lb"><b>입력 전환</b></div><div class="vl">한/영 키</div></div>
+        </div>
+        <div class="sec">단축키</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>검색 열기</b></div><div class="vl">Ctrl + Space</div></div>
+          <div class="row"><div class="lb"><b>작업공간 전환</b></div><div class="vl">Super + 1–9</div></div>
+          <div class="row"><div class="lb"><b>창 전환</b></div><div class="vl">Alt + Tab</div></div>
+          <div class="row"><div class="lb"><b>창 닫기</b></div><div class="vl">Super + Q</div></div>
+          <div class="row"><div class="lb"><b>화면 잠금</b></div><div class="vl">Super + L</div></div>
+          <div class="row"><div class="lb"><b>터미널 열기</b></div><div class="vl">Super + T</div></div>
+          <div class="row"><div class="lb"><b>전체 스크린샷</b></div><div class="vl">Print</div></div>
+          <div class="row"><div class="lb"><b>영역 스크린샷</b></div><div class="vl">Shift + Print</div></div>
+          <div class="row"><div class="lb"><b>화면 녹화</b></div><div class="vl">Ctrl + Shift + R</div></div>
+          <div class="row"><div class="lb"><b>단축키 직접 만들기</b></div><div class="vl">›</div></div>
+        </div>
+        <div class="sec">타이핑</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>키 반복 속도</b><div class="bar" style="width:190px"><div style="width:60%"></div></div></div><div class="vl">보통</div></div>
+          <div class="row"><div class="lb"><b>반복 시작 지연</b><div class="bar" style="width:190px"><div style="width:35%"></div></div></div><div class="vl">짧게</div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-mouse">
+        <h2>마우스와 터치패드</h2>
+        <div class="sub">포인터 동작을 설정합니다</div>
+        <div class="sec">마우스</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>포인터 속도</b><div class="bar" style="width:190px"><div style="width:55%"></div></div></div><div class="vl">보통</div></div>
+          <div class="row"><div class="lb"><b>포인터 가속</b></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>주 버튼</b></div><div class="vl">왼쪽</div></div>
+          <div class="row"><div class="lb"><b>자연스러운 스크롤</b><i>내용이 손가락을 따라갑니다</i></div><div class="sw"></div></div>
+        </div>
+        <div class="sec">터치패드</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>터치패드 사용</b></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>타이핑 중 잠시 끄기</b></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>탭으로 클릭</b></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>두 손가락 스크롤</b></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>세 손가락 제스처</b><i>작업공간 전환</i></div><div class="sw on"></div></div>
+          <div class="row"><div class="lb"><b>동작 확인</b><i>여기서 눌러 보세요</i></div><div class="vl">›</div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-a11y">
+        <h2>접근성</h2>
+        <div class="sub">쓰기 편하도록 조정합니다</div>
+        <div class="sec">보기</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>고대비</b></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>큰 글자</b></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>화면 돋보기</b></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>화면 낭독기</b></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>애니메이션 줄이기</b></div><div class="sw"></div></div>
+        </div>
+        <div class="sec">듣기</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>소리를 화면 깜박임으로</b></div><div class="sw"></div></div>
+        </div>
+        <div class="sec">입력</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>화상 키보드</b></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>고정 키</b><i>조합 키를 하나씩 누릅니다</i></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>느린 키</b></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>튕김 키</b><i>같은 키를 여러 번 눌러도 한 번만</i></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>이중 클릭 간격</b></div><div class="vl">보통</div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-apps">
+        <h2>앱</h2>
+        <div class="sub">설치된 앱 34개</div>
+        <div class="sec">기본 앱</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>웹 브라우저</b></div><div class="vl">Firefox</div></div>
+          <div class="row"><div class="lb"><b>메일</b></div><div class="vl off">없음</div></div>
+          <div class="row"><div class="lb"><b>사진</b></div><div class="vl">이미지 뷰어</div></div>
+          <div class="row"><div class="lb"><b>동영상</b></div><div class="vl">mpv</div></div>
+          <div class="row"><div class="lb"><b>문서</b></div><div class="vl">문서 뷰어</div></div>
+          <div class="row"><div class="lb"><b>터미널</b></div><div class="vl">foot</div></div>
+        </div>
+        <div class="sec">관리</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>설치된 앱</b><i>권한, 저장 공간, 삭제</i></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>파일 형식 연결</b></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>시작 프로그램</b><i>3개</i></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>저장소 관리</b><i>패키지를 받아오는 곳</i></div><div class="vl">›</div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-store">
+        <h2>저장 공간</h2>
+        <div class="sub">NVMe SSD 240GB · 31GB 남음</div>
+        <div class="seg"><div style="width:34%;background:#e8e8e8"></div><div style="width:22%;background:#8a8a8a"></div><div style="width:31%;background:#4a4a4a"></div><div style="width:13%;background:#2a2a2a"></div></div>
+        <div class="legend"><span><b style="background:#e8e8e8"></b>시스템 78GB</span><span><b style="background:#8a8a8a"></b>사용자 파일 51GB</span><span><b style="background:#4a4a4a"></b>앱 72GB</span><span><b style="background:#2a2a2a"></b>여유 31GB</span></div>
+        <div class="note">▲ 남은 공간이 15% 미만입니다</div>
+        <div class="sec">정리</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>휴지통 비우기</b><i>2.4GB</i></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>캐시 지우기</b><i>1.8GB</i></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>큰 파일 찾기</b></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>휴지통 자동 비우기</b></div><div class="vl">30일</div></div>
+        </div>
+        <div class="sec">장치</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>NVMe SSD</b><i>ext4 · 240GB</i></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>USB 드라이브</b><i>연결되지 않음</i></div><div class="vl off">—</div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-print">
+        <h2>프린터</h2>
+        <div class="sub">등록된 프린터가 없습니다</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>프린터 추가</b><i>네트워크와 USB에서 찾습니다</i></div><div class="vl">›</div></div>
+        </div>
+        <div class="caption">프린터를 켜고 같은 네트워크에 연결하면 자동으로 나타납니다.</div>
+      </div>
+
+      <div class="pane" id="s-user">
+        <h2>사용자</h2>
+        <div class="sub">이 컴퓨터를 쓰는 계정입니다</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>cho</b><i>관리자 · 현재 로그인</i></div><div class="vl">›</div></div>
+        </div>
+        <div class="sec">내 계정</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>비밀번호 변경</b></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>프로필 사진</b></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>지문 인증</b><i>이 기기는 지원하지 않습니다</i></div><div class="vl off">사용 불가</div></div>
+          <div class="row"><div class="lb"><b>자동 로그인</b></div><div class="sw"></div></div>
+        </div>
+        <div class="sec">관리</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>사용자 추가</b></div><div class="vl">›</div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-priv">
+        <h2>개인 정보</h2>
+        <div class="sub">앱이 접근할 수 있는 범위를 정합니다</div>
+        <div class="sec">기기 접근</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>카메라</b><i>1개 앱이 사용 중</i></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>마이크</b><i>2개 앱이 사용 중</i></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>위치</b></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>화면 공유</b></div><div class="sw"></div></div>
+        </div>
+        <div class="sec">기록</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>최근 파일 기록</b></div><div class="vl">30일</div></div>
+          <div class="row"><div class="lb"><b>임시 파일 자동 삭제</b></div><div class="vl">7일</div></div>
+          <div class="row"><div class="lb"><b>기록 지금 지우기</b></div><div class="vl">›</div></div>
+        </div>
+        <div class="sec">보내는 정보</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>오류 보고 보내기</b></div><div class="sw"></div></div>
+          <div class="row"><div class="lb"><b>인터넷 연결 확인 요청</b><i>연결 상태를 확인하기 위해 보냅니다</i></div><div class="sw on"></div></div>
+        </div>
+      </div>
+
+      <div class="pane" id="s-about">
+        <h2>정보</h2>
+        <div class="sub">이 컴퓨터에 대한 정보입니다</div>
+        <dl class="kv" style="margin-top:0">
+          <dt>기기 이름</dt><dd>cho-desktop</dd>
+          <dt>프로세서</dt><dd>AMD Ryzen 5 PRO 4650G</dd>
+          <dt>메모리</dt><dd>16GB DDR4-3200</dd>
+          <dt>그래픽</dt><dd>AMD Radeon RX 580 8GB</dd>
+          <dt>저장 공간</dt><dd>240GB NVMe SSD</dd>
+        </dl>
+        <div class="sec">소프트웨어</div>
+        <div class="rows">
+          <div class="row"><div class="lb"><b>운영체제</b></div><div class="vl">1.0</div></div>
+          <div class="row"><div class="lb"><b>커널</b></div><div class="vl">Linux 6.12</div></div>
+          <div class="row"><div class="lb"><b>화면 서버</b></div><div class="vl">Wayland</div></div>
+          <div class="row"><div class="lb"><b>업데이트 확인</b><i>마지막 확인 2시간 전</i></div><div class="vl">›</div></div>
+          <div class="row"><div class="lb"><b>라이선스</b></div><div class="vl">›</div></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script>
+function app(id,btn){
+  document.getElementById('tm').style.display = id==='tm'?'':'none';
+  document.getElementById('st').style.display = id==='st'?'':'none';
+  document.querySelectorAll('.appswitch button').forEach(function(b){b.classList.remove('on')});
+  btn.classList.add('on');
+}
+function go(win,pane,el){
+  var root=document.getElementById(win);
+  root.querySelectorAll('.pane').forEach(function(p){p.classList.remove('on')});
+  document.getElementById(pane).classList.add('on');
+  el.parentNode.querySelectorAll('a').forEach(function(a){a.classList.remove('on')});
+  el.classList.add('on');
+}
+</script>
