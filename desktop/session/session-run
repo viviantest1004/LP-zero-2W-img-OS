@@ -1,10 +1,24 @@
 #!/bin/sh
 # The session itself, already running as uid 1000.
+#
+# ── 계정 이름이 lp 에서 user 로 바뀐 이유 ──
+#
+# 데비안 베이스에는 lp 라는 시스템 계정이 이미 있다. uid 7, 프린터
+# 스풀의 주인이고 base-passwd 가 만든다. 데스크탑 계정을 lp 라고
+# 부르면 /etc/passwd 에 같은 이름이 두 줄 생기고, getpwnam("lp") 은
+# 먼저 나오는 uid 7 을 돌려준다 - 세션이 홈도 셸도 잘못된 계정으로
+# 뜨는데 오류는 한 줄도 나지 않는다.
 export XDG_RUNTIME_DIR=/run/user/1000
-export HOME=/home/lp
-export XDG_CONFIG_HOME=/home/lp/.config
+export HOME=/home/user
+export XDG_CONFIG_HOME=/home/user/.config
+export XDG_DATA_HOME=/home/user/.local/share
+# 런처가 앱 목록을 여기서 읽는다. 비워 두면 fuzzel 이 아무것도 찾지
+# 못하고 빈 창이 뜬다.
+export XDG_DATA_DIRS=/usr/local/share:/usr/share
+export XDG_CONFIG_DIRS=/etc/xdg
 export GTK_THEME=LP
 export XDG_CURRENT_DESKTOP=sway
+export XDG_SESSION_TYPE=wayland
 export XKB_DEFAULT_LAYOUT=us
 # Software rendering, deliberately. A virtual machine has no GPU: wlroots
 # would pick the GLES renderer, fail to bring EGL up against a virtio_gpu
@@ -22,12 +36,32 @@ export GDK_BACKEND=wayland
 # foot reads the login shell out of /etc/passwd and got /bin/false.
 # Saying it plainly costs nothing and removes a whole class of question.
 export SHELL=/bin/sh
-# Nothing here runs a session bus. GTK works without one; what it does
-# without this is print a paragraph about autolaunching D-Bus at every
-# start, which reads like a fault and is not one.
+# 로케일.
+#
+# LANG 만으로는 부족했다. fuzzel 과 GTK 는 .desktop 파일에서 Name[ko]
+# 를 고르기 위해 LC_MESSAGES 를 보는데, 그 값이 비어 있으면 LANG 으로
+# 떨어지기 전에 C 로 확정되는 경로가 있어서 앱 이름이 전부 영어로
+# 나왔다 - 계산기가 Calculator 로. 세 개를 다 적어 두면 그 경로가
+# 어느 것을 보든 같은 답이 나온다.
+export LANG=ko_KR.UTF-8
+export LC_ALL=ko_KR.UTF-8
+export LC_MESSAGES=ko_KR.UTF-8
+export LANGUAGE=ko:en
+export EDITOR=edit
+# 접근성 버스는 이 기계에 없다. 없다고 말해 두지 않으면 앱마다
+# 한 문단씩 경고를 찍는데, 그건 고장이 아니다.
 export NO_AT_BRIDGE=1
-cd /home/lp
-# Straight to the console. A compositor that fails to start is the one
-# thing on this machine nobody can read a log file about - there is no
-# screen to read it on.
-/usr/bin/sway
+export GTK_A11Y=none
+cd /home/user
+
+# dbus-run-session 으로 감싸는 이유.
+#
+# GTK 앱은 세션 버스 없이도 뜨지만, 세션 버스가 없으면 파일 선택
+# 대화상자(portal), 알림, 클립보드 관리자, 그리고 gnome-* 앱들의
+# 설정 저장(dconf)이 전부 조용히 실패한다. 앱은 뜨는데 저장이 안 되는
+# 상태가 제일 나쁘다.
+#
+# dbus-run-session 은 버스를 하나 띄우고 DBUS_SESSION_BUS_ADDRESS 를
+# 넣은 채로 아래 명령을 돌린 뒤, 그 명령이 끝나면 버스도 같이 정리한다.
+# 별도로 데몬을 관리할 것이 없다.
+dbus-run-session -- /usr/bin/sway

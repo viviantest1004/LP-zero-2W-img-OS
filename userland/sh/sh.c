@@ -143,6 +143,26 @@ static void run_logical_line(char *line);
 #define MAX_POSITIONAL 32
 static char pos_args[MAX_POSITIONAL][256];
 static int  pos_count = 0;
+
+/* ── set -e / set -x ──────────────────────────────────────────────────
+ *
+ * These are here for the same reason case is: every Debian maintainer
+ * script starts with `set -e`, and a shell that answers
+ * `sh: set: command not found` to that line has told the script it is
+ * not going to stop on failure - and then does not stop on failure,
+ * which is exactly the situation `set -e` exists to prevent. A postinst
+ * that half-fails and reports success leaves a package marked installed
+ * that is not.
+ *
+ * errexit_off is a depth rather than a flag because the places it has to
+ * be suspended nest: the condition of an `if` inside the condition of a
+ * `while`. POSIX exempts those - a failing test is how a conditional
+ * says "no", not a failure - along with anything on the left of && or
+ * ||, which run_logical_line already collapses into one status. */
+static bool opt_errexit = false;
+static bool opt_xtrace  = false;
+static int  errexit_off = 0;
+static bool shell_interactive = true;
 static char script_name[128] = "sh";
 
 /* ── Shell functions ──────────────────────────────────────────────────
@@ -880,7 +900,7 @@ static const char *BUILTINS[] = {
      * builtin would only ever know what was hardcoded into the shell. */
     "exit", "cd", "pwd", "echo", "env", "reboot", "poweroff", "halt",
     "test", "[", "true", "false", ":",
-    "read", "shift", "export", NULL
+    "read", "shift", "export", "set", NULL
 };
 
 /* ── test ─────────────────────────────────────────────────────────────
@@ -1137,6 +1157,62 @@ static bool run_builtin(cmd_t *c)
             strlcpy(pos_args[i], pos_args[i + by], sizeof pos_args[0]);
         pos_count -= by;
         last_status = 0;
+        return true;
+    }
+
+    /* set - the shell's own options, and the positional parameters.
+     *
+     *   set -e / set +e     stop on a failing command, or do not
+     *   set -x / set +x     print each line before running it
+     *   set -- a b c        replace $1 $2 $3
+     *   set                 print the variables (POSIX; here, nothing
+     *                       useful is available, so it says so)
+     *
+     * Unknown options are reported rather than swallowed. A script that
+     * asked for something this shell does not do should hear about it
+     * once, at the line that asked, instead of behaving oddly later. */
+    if (strcmp(cmd, "set") == 0) {
+        last_status = 0;
+
+        if (c->argc == 1) {
+            dprintf(STDERR_FILENO,
+                    "set: 이 셸은 변수 목록을 내놓지 못합니다."
+                    " `env` 를 쓰십시오\n");
+            last_status = 1;
+            return true;
+        }
+
+        int i = 1;
+        for (; i < c->argc; i++) {
+            const char *a = c->argv[i];
+
+            if (strcmp(a, "--") == 0) { i++; break; }
+
+            if (a[0] != '-' && a[0] != '+') break;
+
+            bool on = (a[0] == '-');
+            for (const char *f = a + 1; *f; f++) {
+                switch (*f) {
+                case 'e': opt_errexit = on; break;
+                case 'x': opt_xtrace  = on; break;
+                default:
+                    dprintf(STDERR_FILENO,
+                            "set: -%c 는 이 셸에 없습니다\n", *f);
+                    last_status = 2;
+                    break;
+                }
+            }
+        }
+
+        /* Anything left is the new positional parameters. `set -e` on
+         * its own must not wipe them, so this only runs when there
+         * really are words after the options. */
+        if (i < c->argc) {
+            pos_count = 0;
+            for (; i < c->argc && pos_count < MAX_POSITIONAL; i++)
+                strlcpy(pos_args[pos_count++], c->argv[i],
+                        sizeof pos_args[0]);
+        }
         return true;
     }
 
@@ -2264,16 +2340,17 @@ static bool is_func_def(const char *line, char *out, size_t size)
     return line[0] == '{';
 }
 
-/* Does this line open a block that needs a matching fi, done or }? */
+/* Does this line open a block that needs a matching fi, done, esac or }? */
 static bool opens_block(const char *w)
 {
     return strcmp(w, "if") == 0 || strcmp(w, "while") == 0 ||
-           strcmp(w, "for") == 0;
+           strcmp(w, "for") == 0 || strcmp(w, "case") == 0;
 }
 
 static bool closes_block(const char *w)
 {
-    return strcmp(w, "fi") == 0 || strcmp(w, "done") == 0;
+    return strcmp(w, "fi") == 0 || strcmp(w, "done") == 0 ||
+           strcmp(w, "esac") == 0;
 }
 
 /* Split a line on ';' into logical lines, but only where a keyword is
@@ -2328,6 +2405,44 @@ static const char *unquoted_semicolon(const char *p)
 }
 
 
+/* Just past the `in` that ends a case header, or NULL.
+ *
+ * The word has to be found rather than searched for: `case $in in` and
+ * `case "a in b" in` both contain the letters, and only the last one
+ * standing alone as a word is the keyword. */
+static char *case_header_end(char *s)
+{
+    char quote = 0;
+    bool at_word_start = true;
+    char *found = NULL;
+
+    for (char *p = s; *p; p++) {
+        if (quote) {
+            if (*p == quote) quote = 0;
+            at_word_start = false;
+            continue;
+        }
+        if (*p == '\'' || *p == '"') {
+            quote = *p;
+            at_word_start = false;
+            continue;
+        }
+        if (*p == ' ' || *p == '\t') {
+            at_word_start = true;
+            continue;
+        }
+        if (at_word_start && p[0] == 'i' && p[1] == 'n' &&
+            (p[2] == ' ' || p[2] == '\t')) {
+            found = p + 2;
+        }
+        at_word_start = false;
+    }
+
+    if (!found) return NULL;
+    while (*found == ' ' || *found == '\t') found++;
+    return found;
+}
+
 static int split_statements(const char *line, block_line_t *out, int max)
 {
     /* Every line is split on its unquoted semicolons, keyword or not.
@@ -2376,6 +2491,38 @@ static int split_statements(const char *line, block_line_t *out, int max)
                                strcmp(kw, "do")   == 0 ||
                                strcmp(kw, "else") == 0);
 
+            /* `case x in y) echo yes ;; esac` on one line.
+             *
+             * The others above split after the keyword itself, but case
+             * has a second keyword: everything up to and including `in`
+             * is the header and the first clause begins after it. Left
+             * whole, the header reads as `case x in y) echo yes`, whose
+             * last word is not `in`, and exec_case rejects the line it
+             * was given rather than the line that was written. */
+            if (strcmp(kw, "case") == 0 && n + 1 < max) {
+                char *rest = case_header_end(out[n]);
+                if (rest && *rest) {
+                    char tail[MAX_LINE];
+                    strlcpy(tail, rest, sizeof tail);
+                    *rest = '\0';
+                    /* Trim back to `... in`. */
+                    for (size_t i = strlen(out[n]);
+                         i > 0 && (out[n][i-1] == ' ' || out[n][i-1] == '\t');
+                         i--)
+                        out[n][i-1] = '\0';
+                    strlcpy(out[n + 1], tail, MAX_LINE);
+                    n += 2;
+                    if (semi && semi[1] == ';') {
+                        if (n < max) { strlcpy(out[n], ";;", MAX_LINE); n++; }
+                        p = semi + 2;
+                        continue;
+                    }
+                    if (!semi) break;
+                    p = semi + 1;
+                    continue;
+                }
+            }
+
             if (splittable && n + 1 < max) {
                 char *rest = strstr(out[n], kw) + strlen(kw);
                 while (*rest == ' ' || *rest == '\t') rest++;
@@ -2390,6 +2537,23 @@ static int split_statements(const char *line, block_line_t *out, int max)
             } else {
                 n++;
             }
+        }
+
+        /* `;;` is not two separators, it is the one thing that ends a
+         * case clause, and the loop above would drop it: the first ';'
+         * ends the statement before it and the second produces an empty
+         * one, which is discarded. A case would then run every clause
+         * from the first match to the esac.
+         *
+         * So it is emitted as a statement of its own, and exec_block
+         * knows to run nothing for it. */
+        if (semi && semi[1] == ';') {
+            if (n < max) {
+                strlcpy(out[n], ";;", MAX_LINE);
+                n++;
+            }
+            p = semi + 2;
+            continue;
         }
 
         if (!semi) break;
@@ -2454,6 +2618,7 @@ static int exec_if(block_line_t *lines, int n, int start)
         const char *rest = strstr(lines[cursor], w) + strlen(w);
         strlcpy(cond, rest, sizeof(cond));
 
+        errexit_off++;
         if (cond[0])
             run_logical_line(cond);
 
@@ -2461,6 +2626,7 @@ static int exec_if(block_line_t *lines, int n, int start)
          * and the last one decides. */
         for (int i = cursor + 1; i < then_at; i++)
             run_logical_line(lines[i]);
+        errexit_off--;
 
         int body_end = find_at_depth(lines, n, then_at + 1,
                                      "elif", "else", "fi");
@@ -2510,10 +2676,12 @@ static int exec_while(block_line_t *lines, int n, int start)
         const char *rest = strstr(lines[start], w) + strlen(w);
         strlcpy(cond, rest, sizeof(cond));
 
+        errexit_off++;
         if (cond[0])
             run_logical_line(cond);
         for (int i = start + 1; i < do_at; i++)
             run_logical_line(lines[i]);
+        errexit_off--;
 
         if (last_status != 0)
             break;
@@ -2561,6 +2729,214 @@ static int exec_while(block_line_t *lines, int n, int start)
             rounds = 1000001;       /* stop counting; do not overflow */
     }
 
+    last_status = 0;
+    return end + 1;
+}
+
+/* ── case ─────────────────────────────────────────────────────────────
+ *
+ * case WORD in  PATTERN[|PATTERN...]) BODY ;;  ... esac
+ *
+ * This is here because of dpkg, not because of style. Every Debian
+ * package runs a maintainer script through /bin/sh, /bin/sh on this
+ * machine is this shell, and the first thing those scripts do is
+ *
+ *     case "$1" in configure) ... ;; abort-upgrade|abort-remove) ... ;; esac
+ *
+ * A shell without case answers `sh: case: command not found`, dpkg
+ * records the package as half-configured, and apt refuses to do anything
+ * further until a human runs `dpkg --configure -a` - which fails the same
+ * way. So the package manager the machine ships with does not work at
+ * all. `case` is the difference between an OS you can install software on
+ * and one you cannot.
+ *
+ * The patterns are matched with glob_match - the same matcher the shell
+ * uses for filenames - and deliberately not run through the tokenizer.
+ * The tokenizer expands globs against the directory, so `*)` would become
+ * a list of the files in the current directory and the default clause
+ * would match nothing. A case pattern is a pattern, not a word to expand.
+ */
+
+/* The patterns at the head of a clause, and where the body begins.
+ *
+ * Returns a pointer to whatever followed the ')' - which is the body when
+ * it was written on the same line, and "" when it was not - or NULL when
+ * this line is not the head of a clause at all. */
+static const char *case_clause_head(const char *line, char *pat, size_t patsz)
+{
+    const char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+
+    /* `(pattern)` is the other form POSIX allows. */
+    if (*p == '(') p++;
+
+    const char *s = p;
+    char quote = 0;
+
+    for (; *p; p++) {
+        if (quote) {
+            if (*p == quote) quote = 0;
+            continue;
+        }
+        if (*p == '\'' || *p == '"') { quote = *p; continue; }
+        /* An open paren here means a function definition or a subshell,
+         * not a pattern - `foo() {` would otherwise read as the pattern
+         * `foo` with an empty body. */
+        if (*p == '(') return NULL;
+        if (*p == ')') break;
+    }
+
+    if (*p != ')') return NULL;
+
+    size_t len = (size_t)(p - s);
+    while (len && (s[len - 1] == ' ' || s[len - 1] == '\t')) len--;
+    if (len == 0 || len >= patsz) return NULL;
+
+    memcpy(pat, s, len);
+    pat[len] = '\0';
+
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    return p;
+}
+
+/* Does any of `a|b|c` match the word? */
+static bool case_matches(const char *pats, const char *word)
+{
+    const char *p = pats;
+
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+
+        const char *s = p;
+        char quote = 0;
+        while (*p && (quote || *p != '|')) {
+            if (quote) {
+                if (*p == quote) quote = 0;
+            } else if (*p == '\'' || *p == '"') {
+                quote = *p;
+            }
+            p++;
+        }
+
+        size_t len = (size_t)(p - s);
+        while (len && (s[len - 1] == ' ' || s[len - 1] == '\t')) len--;
+
+        /* The quotes come off, and what they quoted stops being a
+         * pattern: `"*"` matches a literal asterisk. glob_match has no
+         * way to be told that, so a quoted run is escaped by being
+         * compared as itself - which for these patterns means the only
+         * case that matters, a quoted metacharacter, still behaves. */
+        char one[256];
+        size_t k = 0;
+        char q = 0;
+        for (size_t j = 0; j < len && k + 1 < sizeof one; j++) {
+            char c = s[j];
+            if (q) {
+                if (c == q) { q = 0; continue; }
+            } else if (c == '\'' || c == '"') {
+                q = c;
+                continue;
+            }
+            one[k++] = c;
+        }
+        one[k] = '\0';
+
+        /* k == 0 is the pattern `""`, which is how a script asks about an
+         * unset or empty variable. glob_match("", "") is true and
+         * glob_match("", anything) is false, which is exactly right, so
+         * the empty pattern is passed through rather than skipped. */
+        if (glob_match(one, word))
+            return true;
+
+        if (*p == '|') p++;
+        else break;
+    }
+    return false;
+}
+
+/* The `;;` that ends this clause, or `end` when the clause runs to the
+ * esac - which POSIX allows for the last one. */
+static int case_clause_end(block_line_t *lines, int end, int from)
+{
+    int depth = 0;
+    char w[32];
+
+    for (int i = from; i < end; i++) {
+        first_word(lines[i], w, sizeof w);
+
+        if (depth == 0 && strcmp(w, ";;") == 0)
+            return i;
+
+        if (opens_block(w))  depth++;
+        if (closes_block(w)) depth--;
+    }
+    return end;
+}
+
+static int exec_case(block_line_t *lines, int n, int start)
+{
+    int end = find_at_depth(lines, n, start + 1, "esac", NULL, NULL);
+    if (end < 0) {
+        dprintf(STDERR_FILENO, "sh: case without esac\n");
+        return n;
+    }
+
+    /* The subject goes through the ordinary tokenizer so that "$1" and
+     * ${x} are expanded the way they are anywhere else. */
+    char header[MAX_LINE];
+    strlcpy(header, lines[start], sizeof header);
+
+    static pipeline_t hp[MAX_PIPES];
+    int hn = parse_line(header, hp, MAX_PIPES);
+    if (hn <= 0) {
+        dprintf(STDERR_FILENO, "sh: case WORD in ... esac\n");
+        return end + 1;
+    }
+
+    cmd_t *c = &hp[0].cmds[0];
+    if (c->argc < 2 || strcmp(c->argv[c->argc - 1], "in") != 0) {
+        dprintf(STDERR_FILENO, "sh: case WORD in ... esac\n");
+        return end + 1;
+    }
+
+    /* argc == 2 is `case $x in` where x was empty or unset. The word is
+     * the empty string, and a clause of `"") ...` or `*)` is supposed to
+     * match it. */
+    char subject[MAX_LINE];
+    strlcpy(subject, c->argc >= 3 ? c->argv[1] : "", sizeof subject);
+
+    for (int i = start + 1; i < end; ) {
+        char pat[MAX_LINE];
+        const char *body = case_clause_head(lines[i], pat, sizeof pat);
+
+        if (!body) {          /* a blank line, or something we do not read */
+            i++;
+            continue;
+        }
+
+        int term = case_clause_end(lines, end, i + 1);
+
+        if (case_matches(pat, subject)) {
+            /* `configure) echo hi` put the body on the head line. The
+             * head is overwritten with what followed the ')' so the
+             * block below is exactly the clause and nothing else; the
+             * array is scratch by this point, the same way the
+             * redirection handling in exec_block rewrites its own
+             * terminator line. */
+            if (*body) {
+                strlcpy(lines[i], body, MAX_LINE);
+                exec_block(lines + i, term - i);
+            } else {
+                exec_block(lines + i + 1, term - i - 1);
+            }
+            return end + 1;
+        }
+
+        i = term + 1;
+    }
+
+    /* Nothing matched. POSIX says the status is zero. */
     last_status = 0;
     return end + 1;
 }
@@ -2902,9 +3278,24 @@ static int exec_block(block_line_t *lines, int n)
         else if (strcmp(w, "if") == 0)    i = exec_if(lines, n, i);
         else if (strcmp(w, "while") == 0) i = exec_while(lines, n, i);
         else if (strcmp(w, "for") == 0)   i = exec_for(lines, n, i);
+        else if (strcmp(w, "case") == 0)  i = exec_case(lines, n, i);
+        /* A `;;` that reached here is the end of a clause whose body
+         * already ran, or of one that was skipped. Either way it is
+         * punctuation, not a command. */
+        else if (strcmp(w, ";;") == 0)    i++;
         else {
+            if (opt_xtrace)
+                dprintf(STDERR_FILENO, "+ %s\n", lines[i]);
+
             run_logical_line(lines[i]);
             i++;
+
+            /* set -e. POSIX says an interactive shell ignores it, and
+             * that is not a convenience: -e in a login shell means one
+             * mistyped command closes the terminal. */
+            if (opt_errexit && !shell_interactive && !errexit_off &&
+                last_status != 0)
+                lp_exit(last_status);
         }
 
         if (saved_out >= 0) {
@@ -2959,6 +3350,41 @@ static void read_hostname(void)
  * The width is not the length: the directory may have Hangul in it, and
  * the line editor has to know which column the typed line starts at or
  * every redraw lands in the wrong place. */
+/* The login name for a uid, out of /etc/passwd. Returns false when
+ * there is no line for it - a machine can perfectly well be running as
+ * a uid that /etc/passwd has never heard of. */
+static bool user_name_of(long uid, char *out, size_t size)
+{
+    char buf[8192];
+    long n = proc_read("/etc/passwd", buf, sizeof buf - 1);
+    if (n <= 0) return false;
+    buf[n] = '\0';
+
+    for (char *line = buf; line && *line; ) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+
+        /* name:passwd:uid:... - the name is up to the first colon and
+         * the uid is the third field. */
+        char *c1 = strchr(line, ':');
+        if (c1) {
+            char *c2 = strchr(c1 + 1, ':');
+            if (c2) {
+                long u = strtol(c2 + 1, NULL, 10);
+                if (u == uid) {
+                    size_t len = (size_t)(c1 - line);
+                    if (len >= size) len = size - 1;
+                    memcpy(out, line, len);
+                    out[len] = '\0';
+                    return true;
+                }
+            }
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+    return false;
+}
+
 static int build_prompt(char *out, size_t size)
 {
     char cwd[256];
@@ -2975,13 +3401,30 @@ static int build_prompt(char *out, size_t size)
         shown = collapsed;
     }
 
-    /* A failed command leaves its exit code in front of the prompt. It is
-     * the one piece of state that is easy to miss and annoying to ask
-     * for after the fact. */
+    /* Who this is, from the kernel rather than from a string.
+     *
+     * The name and the '#' were both literal "root" until the desktop
+     * arrived and a terminal opened as uid 1000 - which then sat there
+     * saying root@lpzero with a root's # in front of it. A prompt that
+     * claims to be root when it is not is the one lie a shell must not
+     * tell: it is what a person checks before typing something they
+     * would only type as root.
+     *
+     * The name comes from /etc/passwd through the uid; if that lookup
+     * fails the uid itself is printed, because a number nobody
+     * recognises is still true. */
+    long uid = lp_getuid();
+    char who[64];
+    if (!user_name_of(uid, who, sizeof who))
+        snprintf(who, sizeof who, "%ld", uid);
+
+    const char *mark = (uid == 0) ? "#" : "$";
+
     if (last_status)
-        snprintf(out, size, "[%d] root@%s:%s# ", last_status, hostname, shown);
+        snprintf(out, size, "[%d] %s@%s:%s%s ", last_status, who,
+                 hostname, shown, mark);
     else
-        snprintf(out, size, "root@%s:%s# ", hostname, shown);
+        snprintf(out, size, "%s@%s:%s%s ", who, hostname, shown, mark);
 
     return (int)utf8_str_width(out, strlen(out));
 }
@@ -3100,6 +3543,7 @@ int main(int argc, char **argv)
         }
 
         strlcpy(script_name, "sh", sizeof script_name);
+        shell_interactive = false;
         for (int i = first + 2; i < argc && pos_count < MAX_POSITIONAL; i++)
             strlcpy(pos_args[pos_count++], argv[i], 256);
 
@@ -3170,6 +3614,7 @@ int main(int argc, char **argv)
         }
         input_fd    = (int)fd;
         interactive = false;
+        shell_interactive = false;
 
         /* Anything after the script name is $1, $2, ... and the script
          * itself is $0, which is what every shell does and what makes a

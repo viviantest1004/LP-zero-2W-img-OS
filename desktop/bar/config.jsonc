@@ -1,0 +1,93 @@
+// The top bar, laid out the way shell-design-spec.md §2-1 lays it out.
+//
+//   [작업공간 레일] [검색]  ·····빈 공간·····  [트레이] │ [모드] [한] [시계] [하드웨어]
+//
+// The centre is empty on purpose and stays empty. The spec gives two
+// reasons and both are still true: an empty middle sends the eye to the
+// two ends so the bar goes quiet, and it is the space notifications and
+// the media readout will need. Putting the clock there - which is what
+// every other desktop does - spends it.
+{
+  "layer": "top",
+  "position": "top",
+  "height": 30,
+  "spacing": 0,
+  "modules-left":   ["sway/workspaces", "custom/search"],
+  "modules-center": [],
+  "modules-right":  ["wlr/taskbar", "tray", "custom/mode", "custom/ime",
+                     "clock", "network", "pulseaudio", "battery"],
+
+  // The rail. A fixed 32px whatever the count, which is the whole point
+  // of the design: dots grow sideways with the number of workspaces and
+  // push everything to their right along with them.
+  "sway/workspaces": {
+    "format": "{index}",
+    "disable-scroll": false,
+    "all-outputs": true
+  },
+
+  // Ctrl+Space opens it, as the shortcut list already promises. The bar
+  // entry is here so the entry point is visible - the one thing Windows
+  // 8 got wrong that Spotlight and Activities get right.
+  "custom/search": {
+    "format": "검색",
+    "tooltip": false,
+    "on-click": "fuzzel"
+  },
+
+  // Amber, and only amber, and only when something is limited. The spec
+  // reserves that colour for a constraint; a bar that is amber for
+  // decoration has nowhere left to go when something really is limited.
+  "custom/mode": {
+    "exec": "echo ''",
+    "interval": 30,
+    "tooltip": false
+  },
+
+  // 한 or A. One glyph however many input sources exist - see
+  // design/gui/topbar-input.html for why the width is fixed.
+  "custom/ime": {
+    "format": "한",
+    "tooltip": false,
+    "on-click": "swaymsg input type:keyboard xkb_switch_layout next"
+  },
+
+  "clock": {
+    "format": "{:%a %H:%M}",
+    "format-alt": "{:%m월 %d일 %a %H:%M}",
+    "tooltip": false
+  },
+  "network": {
+    "format-wifi": "◈",
+    "format-ethernet": "◈",
+    "format-disconnected": "◇",
+    "tooltip-format": "{ifname} {ipaddr}"
+  },
+  "pulseaudio": {
+    "format": "◑",
+    "format-muted": "◔",
+    "tooltip": false
+  },
+  "battery": {
+    "format": "▮",
+    "format-charging": "▮",
+    "states": { "warning": 20 },
+    "tooltip": false
+  },
+  "tray": { "spacing": 8, "icon-size": 14 },
+
+  // 열려 있는 창들. 명세서 2-3 의 '백그라운드 앱' 자리이고, 이것이
+  // 없으면 창을 최소화한 순간 다시 부를 방법이 사라진다 - 떠 있는
+  // 창만 있는 데스크탑에서는 그것이 곧 창을 잃는 일이다.
+  //
+  // 아이콘만 쓴다. 제목까지 넣으면 창을 열 때마다 바의 오른쪽 절반이
+  // 밀려서, 시계와 배터리가 자리를 지키지 못한다.
+  "wlr/taskbar": {
+    "format": "{icon}",
+    "icon-size": 16,
+    "tooltip-format": "{title}",
+    "on-click": "activate",
+    "on-click-middle": "close",
+    "ignore-list": ["fuzzel"]
+  }
+}

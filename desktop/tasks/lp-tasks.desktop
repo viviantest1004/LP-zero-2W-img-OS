@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=작업 관리자
+Name[en]=Task Manager
+GenericName=시스템 감시
+Comment=무엇이 자원을 쓰는지 봅니다
+Comment[en]=See what is using CPU, memory and disk
+Exec=lp-tasks
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;GTK;
+Keywords=작업;프로세스;CPU;메모리;성능;감시;
+Keywords[en]=task;process;cpu;memory;performance;monitor;
+StartupNotify=true
+StartupWMClass=org.lpzero.Tasks

@@ -67,6 +67,22 @@ for p in "${PROGRAMS[@]}"; do
 done
 
 echo "rootfs 조립 중..."
+# 외부 프로그램은 지우기 전에 챙겨 둔다.
+#
+# dropbear 와 wpa_supplicant 는 .build/thirdparty 에서 오는데, 그
+# 디렉터리는 빌드 산출물이라 없을 수 있다 (컨테이너를 새로 받았거나,
+# 자리를 비우려고 지웠거나). 그때 이 스크립트는 경고 한 줄을 찍고
+# 계속 진행했고, 나온 이미지에는 SSH 도 WiFi 도 없었다 - 부팅은
+# 멀쩡히 되므로 켜 보기 전에는 알 수가 없다.
+#
+# 그래서 지우기 전에 이미 있던 것을 옮겨 두고, 새로 복사할 것이
+# 없으면 그것을 도로 넣는다. 저장소에 커밋되어 있는 바이너리가
+# 그대로 쓰이는 셈이고, 빌드 디렉터리가 있으면 그쪽이 이긴다.
+KEEP="$(mktemp -d)"
+for f in dropbear dropbearkey wpa_supplicant wpa_cli ; do
+    [[ -f "${ROOT_DIR}/bin/$f" ]] && cp -a "${ROOT_DIR}/bin/$f" "$KEEP/$f"
+done
+
 rm -rf "$ROOT_DIR"
 # /media 는 automount 가 꽂힌 드라이브를 붙이는 자리다. 미리 만들어
 # 두는 이유는, 없으면 automount 가 첫 드라이브에서 디렉터리를 만들어야
@@ -121,9 +137,18 @@ copy_third() {
         printf "  %-16s %8s bytes\n" "$name" "$(stat -c%s "$src")"
         return 0
     fi
+    # 빌드해 둔 것이 없으면 지우기 전에 챙겨 둔 것을 쓴다.
+    if [[ -f "$KEEP/$name" ]]; then
+        cp -a "$KEEP/$name" "${ROOT_DIR}/bin/${name}"
+        printf "  %-16s %8s bytes  (저장소에 있던 것)\n" \
+            "$name" "$(stat -c%s "$KEEP/$name")"
+        return 0
+    fi
     printf "  경고: %s 가 없습니다 (%s)\n" "$name" "$src"
+    MISSING_THIRD="${MISSING_THIRD}${MISSING_THIRD:+, }$name"
     return 1
 }
+MISSING_THIRD=""
 
 echo ""
 echo "외부 프로그램:"
@@ -300,6 +325,16 @@ check_tree_arch "$ROOT_DIR" "${LP_ARCH:-arm64}" "initramfs"
 TOTAL=$(du -sb "$ROOT_DIR" | cut -f1)
 echo ""
 printf "rootfs: %s  (%.2f MB)\n" "$ROOT_DIR" "$(echo "scale=2; $TOTAL/1048576" | bc)"
+
+# 빠진 것이 있으면 크게 말한다. 경고 한 줄은 스무 줄의 정상 출력
+# 사이에서 눈에 띄지 않고, 그 결과가 SSH 없는 이미지다.
+if [[ -n "$MISSING_THIRD" ]]; then
+    echo ""
+    echo "  ⚠ 이 rootfs 에는 다음이 없습니다: $MISSING_THIRD"
+    echo "    ./tools/build-thirdparty.sh 로 빌드하거나,"
+    echo "    저장소에 커밋된 바이너리를 git checkout 으로 되살리십시오."
+fi
+rm -rf "$KEEP"
 
 # ── initramfs cpio ──────────────────────────────────────────────
 if [[ "${1:-}" == "--cpio" ]]; then

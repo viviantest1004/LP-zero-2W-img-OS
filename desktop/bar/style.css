@@ -1,0 +1,101 @@
+/* The top bar, in the design system's own values.
+ *
+ * Two rules from shell-design-spec.md §2-1 that the CSS has to carry
+ * rather than merely not break:
+ *
+ * No pill behind the status icons. That rounded tinted capsule is
+ * Windows 11's visual signature and putting one here would make this
+ * bar look like that bar. The icons sit side by side with no background
+ * at all, and only gain a 2px underline when their panel is open.
+ *
+ * Amber means a limit. It is on the mode indicator and on a battery
+ * that is nearly flat, and on nothing else - a bar that uses it for
+ * decoration has no colour left for the one case that matters.
+ */
+
+* {
+  font-family: "NanumGothic", "Nanum Gothic", sans-serif;
+  font-size: 13px;
+  border: none;
+  border-radius: 0;
+  /* Zero on the modules so their padding decides their size, and never
+   * on the bar itself - the universal selector reaches window#waybar
+   * too, and a bar with no minimum height collapses to whatever its
+   * tallest child happens to be. It came out three pixels tall. */
+  min-height: 0;
+}
+
+window#waybar {
+  min-height: 30px;
+  /* Translucent over the desktop rather than a solid strip. The
+   * saturate is the half people leave out: blur alone averages what is
+   * behind toward grey, and grey over a colourful wallpaper reads as
+   * frosted plastic instead of glass. */
+  background: rgba(26, 26, 26, 0.72);
+  color: #a8a8a8;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+/* The workspace rail. Fixed width, and the marker slides inside it. */
+#workspaces {
+  padding: 0 4px 0 11px;
+}
+#workspaces button {
+  padding: 0 5px;
+  margin: 9px 1px;
+  min-width: 12px;
+  color: transparent;
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 2px;
+}
+#workspaces button.focused,
+#workspaces button.visible {
+  background: #e8e8e8;
+}
+#workspaces button.urgent {
+  background: #f0b350;
+}
+
+#custom-search {
+  color: #6a6a6a;
+  padding: 0 10px;
+}
+#custom-search:hover { color: #a8a8a8; }
+
+#tray { padding: 0 6px; }
+
+/* Amber is the mode group and nothing else. */
+#custom-mode {
+  color: #f0b350;
+  padding: 0 6px;
+}
+
+#custom-ime {
+  color: #e8e8e8;
+  font-weight: 500;
+  padding: 0 7px;
+  border-bottom: 2px solid transparent;
+}
+#custom-ime:hover { border-bottom-color: #e8e8e8; }
+
+#clock {
+  color: #a8a8a8;
+  padding: 0 10px;
+  /* Tabular figures. A clock whose column width changes as the minute
+   * ticks over is a clock that nudges everything beside it once a
+   * minute, all day.
+   *
+   * GTK's CSS parser wants the value unquoted and without the 1; the
+   * CSS-standard spelling is a syntax error here and takes the rest of
+   * the rule with it. */
+  font-feature-settings: "tnum";
+}
+
+#network, #pulseaudio, #battery {
+  color: #6a6a6a;
+  padding: 0 5px;
+}
+#network:first-child { padding-left: 8px; }
+#battery { padding-right: 11px; }
+#battery.warning { color: #f0b350; }
+#battery.critical { color: #f08585; }

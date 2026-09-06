@@ -300,14 +300,25 @@ headerbar:backdrop windowcontrols.end:not(.empty),
  * separator is excluded because .sidebar really does land on separator nodes -
  * GTK's own theme styles `separator.sidebar` and writes `separator:not(.sidebar)`
  * where it means the other kind. A separator handed a sidebar's min-width is an
- * 82px bar down the middle of the window.
+ * 158px bar down the middle of the window.
  *
- * The mockup gives 82-96px. GTK CSS has min-width and no max-width, so the
- * floor is stated here and the ceiling belongs to whoever sizes the pane. */
+ * 158px is apps-and-settings.md 4-2, the width every GTK application's sidebar
+ * is supposed to come out at so that the ones apt installed and the ones
+ * written here look like the same system. GTK CSS has min-width and no
+ * max-width, so the floor is stated here and the ceiling belongs to whoever
+ * sizes the pane. */
 .sidebar:not(separator), .navigation-sidebar {
-  min-width: 82px;
+  min-width: 158px;
   padding: 8px 5px;
   background-color: @lp_sidebar;
+}
+
+/* The file manager is the exception, and it is an exception on purpose: its
+ * own mockup draws the sidebar at 96px, narrow enough that the icon and one
+ * short word are the whole row. 158px is the rule for a window that has not
+ * been drawn yet, not an override of one that has. */
+.sidebar:not(separator).lp-sidebar {
+  min-width: 96px;
 }
 
 .sidebar:not(separator):dir(ltr), .navigation-sidebar:dir(ltr) {
@@ -376,4 +387,138 @@ headerbar:backdrop windowcontrols.end:not(.empty),
 .sidebar .heading, .navigation-sidebar .heading {
   font-size: 10px;
   color: @lp_group;
+}
+
+/* ── 앱 공통 규칙 (apps-and-settings.md 4-2) ───────────────────────────── */
+
+/* Everything above this line is the file manager's mockup - one window, drawn
+ * exactly. Everything below is the rule that applies to the applications apt
+ * installed, which have no mockup of their own and would otherwise arrive
+ * looking like stock Adwaita sitting on a dark background.
+ *
+ * These are deliberately the four things a theme can actually reach: the
+ * typeface, the height of a list row, and the two radii. Trying to restyle
+ * gedit's or evince's internals from here is the thing 4-3 says not to spend
+ * time on. */
+
+/* Pretendard is the UI face. It is not in Debian, so it is installed into
+ * /usr/share/fonts by mkdesktop.sh; if that ever fails the list below is what
+ * the machine falls back to, in the order that keeps Korean rendering. The
+ * size is the spec's 14px body, and Korean sits a point larger than Latin at
+ * the same nominal size, which is 1-1's "+1px" already accounted for by the
+ * face rather than by a second rule. */
+* {
+  font-family: "Pretendard Variable", "Pretendard", "Noto Sans CJK KR",
+               "NanumGothic", "Noto Sans KR", sans-serif;
+}
+
+window, dialog {
+  font-size: 14px;
+}
+
+/* 목록 행 높이 36px. row is GtkListBoxRow, and columnview and listview build
+ * their rows from `row` too, so one selector covers all three.
+ *
+ * The sidebar's own rows are not excluded here and do not need to be. The rule
+ * above them - `.navigation-sidebar > row` - carries a class and an element
+ * where this one carries only an element, so it wins on specificity no matter
+ * which comes later in the file. A 36px row in a 96px sidebar would push the
+ * last two entries off the bottom. */
+row, listview > row, columnview listview > row {
+  min-height: 36px;
+}
+
+/* 버튼·입력 6px, 카드 8px. entry covers text, search and password fields;
+ * .card is GTK 4's own class for a boxed group, which is what the settings
+ * rows sit in. */
+button, entry, spinbutton, .toggle, dropdown > button {
+  border-radius: 6px;
+}
+
+.card, .osd, popover > contents, frame > border {
+  border-radius: 8px;
+}
+
+/* The header's close button is the only window button (4-1). GTK draws
+ * whatever the application asked for, so this is stated as a rule the
+ * decoration honours rather than a hope. */
+windowcontrols > button:not(.close) {
+  /* min-width 0 rather than display:none - GTK CSS has no display, and a
+   * button with no size and no padding takes no room in the header. */
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  opacity: 0;
+}
+
+/* ── 시스템 앱이 쓰는 클래스 ──────────────────────────────────────── */
+
+/* 설정과 작업 관리자가 붙이는 이름들. 타입 스케일(1-2)의 값이고,
+ * 이 다섯 줄이 없으면 두 앱의 제목이 본문과 같은 크기로 나온다.
+ *
+ * GTK 에는 문단 스타일 같은 것이 없어서, 크기를 정하려면 앱이 클래스를
+ * 붙이고 테마가 그 클래스에 값을 준다. 값을 앱 안에 적어 두면 테마를
+ * 바꿔도 글자 크기는 그대로인 앱이 되므로, 이름만 앱에 있고 값은
+ * 여기에 있다. */
+
+/* 1-2 의 '설정 섹션 제목' 20px 600. */
+.lp-title {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* 부제. 제목 바로 아래에서 현재 상태를 말한다. */
+.lp-subtitle {
+  font-size: 13px;
+}
+
+/* 행의 두 번째 줄. 설명이 필요한 항목에만 붙으므로, 본문보다 작고
+ * 조용해야 제목 줄이 먼저 읽힌다. */
+.lp-detail {
+  font-size: 12px;
+}
+
+/* 작업 관리자의 큰 숫자. 이 화면에서 유일하게 멀리서 읽혀야 하는
+ * 값이다. tnum 은 1 과 7 의 폭을 같게 만들어, 값이 1.5초마다 바뀌어도
+ * 숫자가 좌우로 흔들리지 않게 한다. */
+.lp-big {
+  font-size: 34px;
+  font-weight: 600;
+  font-feature-settings: "tnum";
+}
+
+/* 1-3: 앰버는 한도와 제약에만. 남은 공간 15% 미만이 그것이다. */
+.lp-warning {
+  color: #f0b350;
+  font-size: 12px;
+}
+
+/* 표의 숫자 열도 tnum 이어야 한다. 작업 관리자가 라벨을 고정폭
+ * 자리로 잡아 두었지만, 자리가 고정이어도 글리프 폭이 다르면
+ * 오른쪽 정렬한 숫자가 자릿수가 바뀔 때 튄다. */
+grid > label {
+  font-feature-settings: "tnum";
+}
+
+/* 탭. 작업 관리자의 탭 여섯 개가 붙어서 "앱프로세스CPU메모리..." 한
+ * 덩어리로 읽혔다. 이 파일이 위에서 min-height 와 padding 을 0 으로
+ * 눌러 둔 규칙들이 notebook 의 탭에도 닿기 때문이고, 스톡 테마의 값을
+ * 여기서 다시 세워 준다. */
+notebook > header > tabs > tab {
+  min-height: 32px;
+  min-width: 0;
+  padding: 6px 14px;
+  color: @lp_row;
+}
+
+notebook > header > tabs > tab:checked {
+  color: @lp_text;
+  box-shadow: inset 0 -2px @lp_text;
+}
+
+notebook > header {
+  background-color: @lp_header;
+  border-bottom: 0.5px solid @lp_edge;
 }

@@ -123,6 +123,57 @@ mount -t tmpfs -o size=64M,nosuid,nodev tmpfs /tmp || echo "[rc]   /tmp is unbou
 mkdir -p /dev/shm
 mount -t tmpfs -o size=64M,nosuid,nodev tmpfs /dev/shm || echo "[rc]   no /dev/shm - a graphical session will not draw"
 
+# udev, and the reason is the keyboard.
+#
+# devtmpfs already made /dev/input/event0 and /dev/dri/card0 - the kernel
+# does that on its own and nothing here is needed for the nodes to exist.
+# What is missing without udev is the other half: the properties. libinput
+# does not open /dev/input/event* by looking in the directory; it asks udev
+# for the devices on seat0 that carry ID_INPUT, and udev only sets that tag
+# by running its rules over each device as it appears.
+#
+# With no udevd, that query returns nothing. wlroots then starts a
+# compositor with zero input devices - it draws the desktop, the bar comes
+# up, and not one keystroke or click reaches it. Nothing in any log says
+# so, because from the compositor's point of view this machine simply has
+# no keyboard.
+#
+# It is also what makes a USB stick plugged in later turn into
+# /dev/sdb1 with a label, and what gives the video card group ownership
+# the session can use.
+#
+# --daemon rather than a service entry: everything below this line may
+# want a device that only exists once the rules have run, so this has to
+# finish here rather than start alongside.
+if test -x /bin/udevadm ; then
+    echo "[rc] devices"
+    # /lib/systemd/systemd-udevd is a symlink to udevadm, and udevadm
+    # decides what it is from argv[0]. Calling the symlink is what makes
+    # it the daemon; calling /bin/udevadm --daemon is a usage error.
+    /lib/systemd/systemd-udevd --daemon 2>/dev/null || echo "[rc]   udevd did not start - input devices will not be found"
+    /bin/udevadm trigger --action=add > /dev/null 2>&1
+    /bin/udevadm settle --timeout=10 > /dev/null 2>&1
+    echo "[rc]   $(ls /dev/input 2>/dev/null | wc -l) input, $(ls /dev/dri 2>/dev/null | wc -l) graphics"
+fi
+
+# The system bus.
+#
+# Not the same thing as the session bus - the session's own bus is
+# started by dbus-run-session inside start-desktop, and it dies with the
+# session. This one is the machine's, and it is what polkit, udisks and
+# pipewire's realtime module talk to. Without it a USB stick cannot be
+# mounted from the file manager, and every one of those programs logs a
+# connection error at start that reads like a fault in itself.
+if test -x /usr/bin/dbus-daemon ; then
+    mkdir -p /run/dbus /var/lib/dbus
+    # The machine id. dbus refuses to start without one, and a machine
+    # that makes a new one every boot looks like a different machine to
+    # everything that remembers it - so it is written once and kept.
+    test -s /etc/machine-id || dbus-uuidgen > /etc/machine-id
+    cp /etc/machine-id /var/lib/dbus/machine-id
+    dbus-daemon --system --fork || echo "[rc]   the system bus did not start"
+fi
+
 echo "[rc] the boot partition"
 # Mounted before the data partition, and read-only.
 #
@@ -583,5 +634,19 @@ echo "[rc] checking what survived the reboot"
 # change the record beside it. It is aimed at automated malware and at
 # mistakes, which is what actually happens.
 integrity || echo "[rc]   run 'integrity -u' if that change was yours"
+
+# 데스크탑.
+#
+# 있으면 띄우고 없으면 아무 일도 하지 않는다. 파이(램 루트) 이미지에는
+# 컴포지터가 들어가지 않으므로 /bin/start-desktop 자체가 없고, 그때
+# 이 블록은 통째로 건너뛴다 - 아키텍처마다 다른 rc 를 두는 것보다
+# 있는지 물어보는 편이 낫다.
+#
+# & 로 띄우는 이유: 세션은 로그아웃할 때까지 끝나지 않는다. 앞에서
+# 기다리면 rc 가 여기서 멈추고, 마지막 줄과 콘솔 셸이 영영 오지 않는다.
+if test -x /bin/start-desktop ; then
+    echo "[rc] 데스크탑"
+    start-desktop &
+fi
 
 echo "[rc] done (init starts SSH from /etc/services)"

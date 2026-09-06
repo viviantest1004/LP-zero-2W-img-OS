@@ -60,6 +60,17 @@ static const struct {
     /* An SSH session needs a pseudo terminal. Without devpts, dropbear
      * cannot start a shell. This has to come after /dev. */
     { "devpts",   "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC },
+    /* /run holds what is true only while the machine is running: udev's
+     * device database, the D-Bus socket, the session's XDG_RUNTIME_DIR,
+     * pid files.
+     *
+     * On the RAM root this was already a tmpfs by accident - the whole
+     * root was one. On a disk root it is a real directory, and then a
+     * socket from the last boot is still sitting there at the next one.
+     * A stale /run/dbus/system_bus_socket is worse than a missing one:
+     * a client connects, finds nothing at the other end, and reports a
+     * connection error rather than "no bus here". */
+    { "tmpfs",    "/run",  "tmpfs",    MS_NOSUID | MS_NODEV },
 };
 
 static void mount_filesystems(void)

@@ -18,4 +18,10 @@ chmod 0666 /dev/dri/card0 /dev/dri/renderD128 2>/dev/null
 chmod 0666 /dev/input/event0 /dev/input/event1 /dev/input/event2 2>/dev/null
 chmod 0666 /dev/input/event3 /dev/input/event4 /dev/input/event5 2>/dev/null
 chmod 0666 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
+
+# 홈이 root 소유로 남아 있으면 세션이 설정 하나 저장하지 못한다.
+# 이미지를 만들 때 맞춰 두지만, 첫 부팅에서 expandfs 가 파티션을
+# 늘리고 나면 새로 생기는 것들이 있어 여기서 한 번 더 맞춘다.
+chown -R 1000:1000 /home/user 2>/dev/null
+
 dropprivs 1000:1000 /bin/session-run
