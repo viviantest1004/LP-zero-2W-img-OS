@@ -12,6 +12,10 @@ export XDG_RUNTIME_DIR=/run/user/1000
 export HOME=/home/user
 export XDG_CONFIG_HOME=/home/user/.config
 export XDG_DATA_HOME=/home/user/.local/share
+# wireplumber 는 여기에 마지막 볼륨과 기본 장치를 적는다. 없으면
+# 만들지 못하고, 어떤 판에서는 그것으로 그냥 나가 버린다.
+export XDG_STATE_HOME=/home/user/.local/state
+export XDG_CACHE_HOME=/home/user/.cache
 # 런처가 앱 목록을 여기서 읽는다. 비워 두면 fuzzel 이 아무것도 찾지
 # 못하고 빈 창이 뜬다.
 export XDG_DATA_DIRS=/usr/local/share:/usr/share

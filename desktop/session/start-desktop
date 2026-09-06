@@ -19,6 +19,18 @@ chmod 0666 /dev/input/event0 /dev/input/event1 /dev/input/event2 2>/dev/null
 chmod 0666 /dev/input/event3 /dev/input/event4 /dev/input/event5 2>/dev/null
 chmod 0666 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
 
+# 소리.
+#
+# udev 가 /dev/snd/* 를 audio 그룹 소유로 만들고, uid 1000 은 그
+# 그룹에 없다. 그래서 pipewire 는 뜨지만 카드를 열지 못하고, 결국
+# sink 가 하나도 없는 채로 남는다 - 퀵메뉴에는 "소리 장치가 없습니다"
+# 라고 나오고, 소리 장치는 멀쩡히 있다.
+#
+# 그룹에 넣는 대신 노드를 여는 이유는, 여기에 logind 가 없어서
+# 그룹 소속이 세션마다 갱신되지 않기 때문이다. 이 파일이 하는 다른
+# 일들과 같다: 원래 logind 가 할 일을 한 번에 해 둔다.
+chmod 0666 /dev/snd/* 2>/dev/null
+
 # 홈이 root 소유로 남아 있으면 세션이 설정 하나 저장하지 못한다.
 # 이미지를 만들 때 맞춰 두지만, 첫 부팅에서 expandfs 가 파티션을
 # 늘리고 나면 새로 생기는 것들이 있어 여기서 한 번 더 맞춘다.

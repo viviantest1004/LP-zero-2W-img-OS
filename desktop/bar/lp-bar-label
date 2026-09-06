@@ -40,23 +40,17 @@ mode)
         out="$out✱"
     fi
 
-    # 비행기 모드 - 인터페이스가 하나라도 있는데 전부 내려가 있으면
-    # 그것이 비행기 모드다. 따로 기록해 둔 상태가 아니라 지금 정말로
-    # 그런지를 본다.
-    total=0
-    down=0
-    for d in /sys/class/net/* ; do
-        n=$(basename "$d")
-        if test "$n" = lo ; then
-            continue
-        fi
-        total=$((total + 1))
-        state=$(cat "$d/operstate" 2>/dev/null)
-        if test "$state" = down ; then
-            down=$((down + 1))
-        fi
-    done
-    if test "$total" -gt 0 && test "$down" = "$total" ; then
+    # 비행기 모드.
+    #
+    # 처음에는 "인터페이스가 전부 내려가 있으면 비행기 모드" 로
+    # 읽었다. 그것은 틀렸다 - 랜선을 뽑아도, 부팅 중 아직 올라오지
+    # 않았어도 같은 모습이고, 그때마다 상단바가 켠 적 없는 비행기
+    # 모드를 켜져 있다고 말했다. 연결이 없는 것과 연결을 끊은 것은
+    # 다른 일이다.
+    #
+    # 그래서 사람이 켰다는 기록을 본다. 퀵메뉴와 설정이 이 파일을
+    # 쓰고, 둘 다 같은 파일을 보므로 어느 쪽에서 켜도 여기에 나온다.
+    if test -f "$HOME/.config/lp/airplane" ; then
         out="$out✈"
     fi
 

@@ -39,6 +39,7 @@
 
 #include <gtk/gtk.h>
 #include "lp-i18n.h"
+#include <glib/gstdio.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -459,24 +460,21 @@ static GtkWidget *page_network(void)
  *
  * 어딘가에 기록해 둔 상태가 아니라 인터페이스를 본다. 기록해 두면
  * 명령줄에서 ifconfig 로 올린 순간 설정 앱만 옛말을 하게 된다. */
+/* 켜져 있다는 기록. 인터페이스가 내려가 있는지로 알아낼 수는 없다 -
+ * 랜선을 뽑아도 같은 모습이고, 그것은 사람이 연결을 끊은 것과 다른
+ * 일이다. 상단바와 퀵메뉴가 같은 파일을 본다. */
+static char *airplane_flag(void)
+{
+    return g_build_filename(g_get_home_dir(), ".config", "lp", "airplane",
+                            NULL);
+}
+
 static gboolean airplane_on(void)
 {
-    GDir *d = g_dir_open("/sys/class/net", 0, NULL);
-    if (!d) return FALSE;
-
-    int total = 0, down = 0;
-    const char *n;
-    while ((n = g_dir_read_name(d))) {
-        if (g_strcmp0(n, "lo") == 0) continue;
-        total++;
-        char *p = g_strdup_printf("/sys/class/net/%s/operstate", n);
-        char *v = slurp(p);
-        g_free(p);
-        if (v && g_strcmp0(v, "down") == 0) down++;
-        g_free(v);
-    }
-    g_dir_close(d);
-    return total > 0 && down == total;
+    char *p = airplane_flag();
+    gboolean on = g_file_test(p, G_FILE_TEST_EXISTS);
+    g_free(p);
+    return on;
 }
 
 static void on_airplane(GObject *sw, GParamSpec *spec, gpointer data)
@@ -485,15 +483,27 @@ static void on_airplane(GObject *sw, GParamSpec *spec, gpointer data)
     gboolean want = gtk_switch_get_active(GTK_SWITCH(sw));
 
     GDir *d = g_dir_open("/sys/class/net", 0, NULL);
-    if (!d) return;
-    const char *n;
-    while ((n = g_dir_read_name(d))) {
-        if (g_strcmp0(n, "lo") == 0) continue;
-        const char *a[] = { "ifconfig", n, want ? "down" : "up", NULL };
-        char *o = run_cmd(a);
-        g_free(o);
+    if (d) {
+        const char *n;
+        while ((n = g_dir_read_name(d))) {
+            if (g_strcmp0(n, "lo") == 0) continue;
+            const char *a[] = { "ifconfig", n, want ? "down" : "up", NULL };
+            char *o = run_cmd(a);
+            g_free(o);
+        }
+        g_dir_close(d);
     }
-    g_dir_close(d);
+
+    char *p = airplane_flag();
+    if (want) {
+        char *dir = g_path_get_dirname(p);
+        g_mkdir_with_parents(dir, 0755);
+        g_free(dir);
+        g_file_set_contents(p, "on\n", -1, NULL);
+    } else {
+        g_unlink(p);
+    }
+    g_free(p);
 }
 
 /* 5-5 알림 ─────────────────────────────────────────────────────── */

@@ -39,6 +39,7 @@
 
 #include <gtk/gtk.h>
 #include "lp-i18n.h"
+#include <glib/gstdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -239,13 +240,40 @@ static void on_brightness(GtkRange *r, gpointer d)
     char *o = run_out(a); g_free(o);
 }
 
-static GtkWidget *slider(const char *icon, int value, GCallback cb)
+/* 슬라이더 한 줄.
+ *
+ * value 가 음수면 이 기계에 그 손잡이가 없다는 뜻이고, 그때도 줄은
+ * 만든다 - 없애 버리면 패널이 그때그때 다른 모양이 되고, 소리 조절이
+ * 어디 갔는지 찾게 된다. 대신 잠그고 왜 못 쓰는지 옆에 적는다.
+ * 끌어도 아무 일이 없는 손잡이가 제일 나쁘고, 그 다음이 사라진
+ * 손잡이이며, 이유가 적힌 잠긴 손잡이가 낫다. */
+static void update_readout(GtkRange *r, gpointer label)
+{
+    char text[16];
+    g_snprintf(text, sizeof text, "%d%%", (int)gtk_range_get_value(r));
+    gtk_label_set_text(GTK_LABEL(label), text);
+}
+
+static GtkWidget *slider(const char *icon, int value, GCallback cb,
+                         const char *why)
 {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     gtk_widget_add_css_class(box, "lp-quick-slider");
 
     GtkWidget *im = gtk_image_new_from_icon_name(icon);
     gtk_box_append(GTK_BOX(box), im);
+
+    if (value < 0) {
+        GtkWidget *l = gtk_label_new(why);
+        gtk_widget_add_css_class(l, "dim-label");
+        gtk_widget_add_css_class(l, "lp-detail");
+        gtk_label_set_ellipsize(GTK_LABEL(l), PANGO_ELLIPSIZE_END);
+        gtk_widget_set_halign(l, GTK_ALIGN_START);
+        gtk_widget_set_hexpand(l, TRUE);
+        gtk_box_append(GTK_BOX(box), l);
+        gtk_widget_set_sensitive(box, FALSE);
+        return box;
+    }
 
     GtkWidget *s = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,
                                             0, 100, 1);
@@ -254,6 +282,20 @@ static GtkWidget *slider(const char *icon, int value, GCallback cb)
     gtk_widget_set_hexpand(s, TRUE);
     g_signal_connect(s, "value-changed", cb, NULL);
     gtk_box_append(GTK_BOX(box), s);
+
+    /* 값은 숫자로도 적는다. 손잡이의 자리만 보고 62% 인지 68% 인지
+     * 알 수 있는 사람은 없고, 상단바가 숫자를 찍는 것과 같은 이유다. */
+    char text[16];
+    g_snprintf(text, sizeof text, "%d%%", value);
+    GtkWidget *n = gtk_label_new(text);
+    gtk_widget_add_css_class(n, "dim-label");
+    gtk_label_set_width_chars(GTK_LABEL(n), 4);
+    gtk_label_set_xalign(GTK_LABEL(n), 1.0);
+    gtk_box_append(GTK_BOX(box), n);
+
+    /* 끌면 숫자도 같이 움직여야 한다. 안 그러면 처음 열었을 때의
+     * 값이 남아서 손잡이와 숫자가 서로 다른 말을 한다. */
+    g_signal_connect(s, "value-changed", G_CALLBACK(update_readout), n);
     return box;
 }
 
@@ -304,16 +346,6 @@ static char *first_iface(void)
             found = g_strdup(n);
     g_dir_close(d);
     return found;
-}
-
-static gboolean iface_up(const char *name)
-{
-    char *p = g_strdup_printf("/sys/class/net/%s/operstate", name);
-    char *v = slurp(p);
-    g_free(p);
-    gboolean up = v && g_strcmp0(v, "down") != 0;
-    g_free(v);
-    return up;
 }
 
 /* ── 각 행의 동작 ──────────────────────────────────────────────── */
@@ -437,10 +469,30 @@ static GtkWidget *expand_power_mode(Quick *q)
 
 /* ── 아래쪽 아이콘 (3-2 의 마지막 줄) ──────────────────────────── */
 
+/* 비행기 모드가 켜져 있다는 기록이 놓이는 자리.
+ *
+ * 인터페이스가 내려가 있는지로 알아낼 수는 없다 - 랜선을 뽑아도 같은
+ * 모습이고, 그것은 사람이 연결을 끊은 것과 다른 일이다. 상단바도
+ * 설정 앱도 이 파일을 본다. */
+static char *airplane_flag(void)
+{
+    return g_build_filename(g_get_home_dir(), ".config", "lp", "airplane",
+                            NULL);
+}
+
+static gboolean airplane_on(void)
+{
+    char *p = airplane_flag();
+    gboolean on = g_file_test(p, G_FILE_TEST_EXISTS);
+    g_free(p);
+    return on;
+}
+
 static void toggle_airplane(GtkButton *b, gpointer d)
 {
     (void)b;
     Quick *q = d;
+    gboolean want = !airplane_on();
 
     /* 진짜로 내린다. 표시만 바꾸면 비행기 모드가 아니라 비행기
      * 모드라는 그림이다. */
@@ -449,13 +501,24 @@ static void toggle_airplane(GtkButton *b, gpointer d)
         const char *n;
         while ((n = g_dir_read_name(dir))) {
             if (g_strcmp0(n, "lo") == 0) continue;
-            gboolean up = iface_up(n);
-            const char *a[] = { "ifconfig", n, up ? "down" : "up", NULL };
+            const char *a[] = { "ifconfig", n, want ? "down" : "up", NULL };
             char *o = run_out(a);
             g_free(o);
         }
         g_dir_close(dir);
     }
+
+    char *p = airplane_flag();
+    if (want) {
+        char *dirn = g_path_get_dirname(p);
+        g_mkdir_with_parents(dirn, 0755);
+        g_free(dirn);
+        g_file_set_contents(p, "on\n", -1, NULL);
+    } else {
+        g_unlink(p);
+    }
+    g_free(p);
+
     gtk_window_close(GTK_WINDOW(q->window));
 }
 
@@ -578,19 +641,54 @@ static void activate(GtkApplication *gapp, gpointer data)
     gtk_widget_set_margin_top(box, 10);
     gtk_widget_set_margin_bottom(box, 10);
 
-    /* 볼륨 */
+    /* 볼륨. 3-2 는 이것을 패널의 첫 줄로 두었고, 그것이 퀵메뉴를
+     * 여는 가장 흔한 이유이기 때문이다.
+     *
+     * @DEFAULT_AUDIO_SINK@ 만 물으면 기본 출력이 아직 정해지지 않은
+     * 기계에서 실패한다 - 카드는 있는데 wireplumber 가 기본을 고르기
+     * 전이거나, 출력이 하나뿐이라 고를 것이 없었던 경우다. 그때
+     * "소리 장치가 없습니다" 라고 말하는 것은 틀린 말이므로, 목록의
+     * 첫 출력으로 한 번 더 물어본다. */
+    double v = -1;
     const char *vargv[] = { "wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@", NULL };
     char *vol = run_out(vargv);
-    if (vol) {
-        double v = 0;
-        if (sscanf(vol, "Volume: %lf", &v) == 1)
-            gtk_box_append(GTK_BOX(box),
-                slider("audio-volume-high-symbolic", (int)(v * 100 + 0.5),
-                       G_CALLBACK(on_volume)));
-        g_free(vol);
+
+    if (!vol) {
+        const char *st[] = { "wpctl", "status", NULL };
+        char *status = run_out(st);
+        if (status) {
+            char *sinks = strstr(status, "Sinks:");
+            int id = 0;
+            if (sinks) {
+                /* "│  *   32. Dummy Output" 에서 32 를 집는다. */
+                for (char *p = sinks; *p && !id; p++)
+                    if (g_ascii_isdigit(*p) && (p == sinks || !g_ascii_isdigit(p[-1])))
+                        id = atoi(p);
+            }
+            g_free(status);
+            if (id > 0) {
+                char idbuf[16];
+                g_snprintf(idbuf, sizeof idbuf, "%d", id);
+                const char *again[] = { "wpctl", "get-volume", idbuf, NULL };
+                vol = run_out(again);
+            }
+        }
     }
 
-    /* 밝기 - 백라이트가 있는 기계에서만 */
+    if (vol) {
+        double got = 0;
+        if (sscanf(vol, "Volume: %lf", &got) == 1)
+            v = got * 100;
+        g_free(vol);
+    }
+    gtk_box_append(GTK_BOX(box),
+        slider("audio-volume-high-symbolic",
+               v < 0 ? -1 : (int)(v + 0.5), G_CALLBACK(on_volume),
+               T("No sound device", "소리 장치가 없습니다")));
+
+    /* 밝기. 백라이트가 없으면 잠긴 채로 남는다 - 가상 머신에는 없고,
+     * 노트북에는 있다. 같은 이미지가 두 곳에서 같은 자리를 지킨다. */
+    int bright = -1;
     GDir *bl = g_dir_open("/sys/class/backlight", 0, NULL);
     if (bl) {
         const char *name = g_dir_read_name(bl);
@@ -599,13 +697,14 @@ static void activate(GtkApplication *gapp, gpointer data)
             char *mp = g_strdup_printf("/sys/class/backlight/%s/max_brightness", name);
             char *c = slurp(cp), *m = slurp(mp);
             if (c && m && atoi(m) > 0)
-                gtk_box_append(GTK_BOX(box),
-                    slider("display-brightness-symbolic",
-                           atoi(c) * 100 / atoi(m), G_CALLBACK(on_brightness)));
+                bright = atoi(c) * 100 / atoi(m);
             g_free(c); g_free(m); g_free(cp); g_free(mp);
         }
         g_dir_close(bl);
     }
+    gtk_box_append(GTK_BOX(box),
+        slider("display-brightness-symbolic", bright, G_CALLBACK(on_brightness),
+               T("No adjustable backlight", "조절할 수 있는 백라이트가 없습니다")));
 
     GtkWidget *sep1 = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_widget_set_margin_top(sep1, 8);

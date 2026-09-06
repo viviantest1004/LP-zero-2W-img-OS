@@ -107,3 +107,45 @@ window#waybar {
 #battery { padding-right: 11px; }
 #battery.warning { color: #f0b350; }
 #battery.critical { color: #f08585; }
+
+/* ── 오른쪽 상태 묶음 ─────────────────────────────────────────────
+ *
+ * 2-1: 이 셋(넷)은 하나의 정보 덩어리로 읽혀야 한다. 그래서 사이를
+ * 벌리지 않고 나란히 두고, 알약 배경을 깔지 않는다 - 그것은 윈도우
+ * 11 의 시각적 서명이고, 이 바가 그것을 흉내 낼 이유가 없다.
+ *
+ * 숫자가 붙으면서 폭이 변하는 것이 문제가 되었다. 볼륨이 9% 에서
+ * 10% 로 갈 때 왼쪽의 시계까지 밀린다. tnum 은 숫자 글리프의 폭을
+ * 같게 만들어 그 흔들림을 자릿수가 바뀔 때 한 번으로 줄인다. */
+#network,
+#backlight,
+#pulseaudio,
+#battery {
+  color: #a8a8a8;
+  padding: 0 6px;
+  font-feature-settings: "tnum";
+}
+
+#network:hover,
+#backlight:hover,
+#pulseaudio:hover,
+#battery:hover {
+  color: #e8e8e8;
+}
+
+/* 연결이 끊긴 것은 상태가 아니라 문제다. 1-3 은 빨강을 실패에
+ * 주었고, 네트워크가 없는 것은 실패다. */
+#network.disconnected {
+  color: #e05252;
+}
+
+/* 음소거는 꺼진 것이지 잘못된 것이 아니므로 색이 아니라 밝기로
+ * 말한다 - 1-3 의 "켜짐/꺼짐은 색이 아니라 글자 밝기로". */
+#pulseaudio.muted {
+  color: #6a6a6a;
+}
+
+/* 배터리는 한도이므로 앰버, 그리고 정말로 곧 꺼질 때만 빨강.
+ * 20% 에서 빨강을 쓰면 10% 에 쓸 색이 남지 않는다. */
+#battery.warning  { color: #f0b350; }
+#battery.critical { color: #e05252; }

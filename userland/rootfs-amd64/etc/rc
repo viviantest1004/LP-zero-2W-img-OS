@@ -153,7 +153,7 @@ if test -x /bin/udevadm ; then
     /lib/systemd/systemd-udevd --daemon 2>/dev/null || echo "[rc]   udevd did not start - input devices will not be found"
     /bin/udevadm trigger --action=add > /dev/null 2>&1
     /bin/udevadm settle --timeout=10 > /dev/null 2>&1
-    echo "[rc]   $(ls /dev/input 2>/dev/null | wc -l) input, $(ls /dev/dri 2>/dev/null | wc -l) graphics"
+    echo "[rc]   $(ls /dev/input 2>/dev/null | wc -l) input, $(ls /dev/dri 2>/dev/null | wc -l) graphics, $(ls /dev/snd 2>/dev/null | wc -l) sound"
 fi
 
 # The system bus.

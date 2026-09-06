@@ -280,6 +280,10 @@ if [[ -f "${REPO_ROOT}/desktop/session/sway.config" ]]; then
     done
     cp -a "${REPO_ROOT}/desktop/session/session-run" "$OUT/bin/session-run"
     chmod +x "$OUT/bin/session-run"
+    mkdir -p "$OUT/usr/local/bin"
+    cp -a "${REPO_ROOT}/desktop/session/lp-audio-start" \
+          "$OUT/usr/local/bin/lp-audio-start"
+    chmod +x "$OUT/usr/local/bin/lp-audio-start"
     log "sway 설정"
 fi
 
