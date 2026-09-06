@@ -37,6 +37,7 @@
  */
 
 #include <gtk/gtk.h>
+#include "lp-i18n.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -129,7 +130,10 @@ typedef struct {
 
 /* ── 표 ────────────────────────────────────────────────────────── */
 
-static const char *COLS[] = { "이름", "CPU", "메모리", "전력", "PID" };
+/* 열 이름. 정적 배열이라 T() 를 쓸 수 없어 두 벌을 나란히 둔다. */
+static const char *COLS_EN[] = { "Name", "CPU", "Memory", "Power", "PID" };
+static const char *COLS_KO[] = { "이름", "CPU", "메모리", "전력", "PID" };
+#define COLS (lp_korean() ? COLS_KO : COLS_EN)
 
 static void table_init(table_t *t, const char *first_col)
 {
@@ -409,7 +413,7 @@ static gboolean tick(gpointer data)
 
     if (rows_app == 0)
         table_set(&app->apps, rows_app++,
-                  "창이 열려 있는 프로그램이 없습니다", "", "", "", "");
+                  T("Nothing has a window open", "창이 열려 있는 프로그램이 없습니다"), "", "", "", "");
 
     table_trim(&app->apps, rows_app);
     table_trim(&app->all,  rows_all);
@@ -430,7 +434,7 @@ static gboolean tick(gpointer data)
         char  *up  = slurp("/proc/uptime");
         double sec = up ? g_ascii_strtod(up, NULL) : 0;
         g_free(up);
-        char *d2 = g_strdup_printf("프로세스 %d개 · 가동 %d시간 %d분 · %s",
+        char *d2 = g_strdup_printf(T("%d processes · up %dh %dm · %s", "프로세스 %d개 · 가동 %d시간 %d분 · %s"),
                                    (int)g_hash_table_size(app->procs),
                                    (int)sec / 3600, ((int)sec % 3600) / 60,
                                    u.machine);
@@ -466,10 +470,10 @@ static gboolean tick(gpointer data)
 
                 char *c2 = human((guint64)cached * 1024);
                 char *sw = swapt
-                    ? g_strdup_printf("스왑 %lu%% 사용",
+                    ? g_strdup_printf(T("swap %lu%% used", "스왑 %lu%% 사용"),
                                       (swapt - swapf) * 100 / swapt)
-                    : g_strdup("스왑 없음");
-                char *d2 = g_strdup_printf("캐시 %s · %s", c2, sw);
+                    : g_strdup(T("no swap", "스왑 없음"));
+                char *d2 = g_strdup_printf(T("cache %s · %s", "캐시 %s · %s"), c2, sw);
                 gtk_label_set_text(GTK_LABEL(app->mem_detail), d2);
                 g_free(c2); g_free(sw); g_free(d2);
             }
@@ -542,7 +546,7 @@ static GtkWidget *build_drives(void)
         GtkWidget *row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
 
         char *a = human(tot - fr), *b = human(tot), *c = human(fr);
-        char *head = g_strdup_printf("%s   %s · %s 중 %s 사용", mnt, dev, b, a);
+        char *head = g_strdup_printf(T("%s   %s · %s of %s used", "%s   %s · %s 중 %s 사용"), mnt, dev, b, a);
         GtkWidget *h = gtk_label_new(head);
         gtk_widget_set_halign(h, GTK_ALIGN_START);
         gtk_box_append(GTK_BOX(row), h);
@@ -557,9 +561,12 @@ static GtkWidget *build_drives(void)
          * 하는 상태이므로 문장이 바뀐다. */
         gboolean low = fr * 100 / tot < 15;
         char *note = low
-            ? g_strdup_printf("%s 남음 · 15%% 아래입니다."
-                              " 휴지통을 비우거나 큰 파일을 옮기십시오", c)
-            : g_strdup_printf("%s 남음", c);
+            ? g_strdup_printf(
+                  T("%s free · under 15%%. Empty the trash or move large"
+                    " files off it",
+                    "%s 남음 · 15%% 아래입니다."
+                    " 휴지통을 비우거나 큰 파일을 옮기십시오"), c)
+            : g_strdup_printf(T("%s free", "%s 남음"), c);
         GtkWidget *n = gtk_label_new(note);
         gtk_widget_set_halign(n, GTK_ALIGN_START);
         gtk_widget_add_css_class(n, low ? "lp-warning" : "dim-label");
@@ -597,7 +604,7 @@ static GtkWidget *build_network(void)
         if (g_strcmp0(iface, "lo") == 0) continue;
 
         char *a = human(rx), *b = human(tx);
-        char *t = g_strdup_printf("%s   받음 %s · 보냄 %s", iface, a, b);
+        char *t = g_strdup_printf(T("%s   received %s · sent %s", "%s   받음 %s · 보냄 %s"), iface, a, b);
         GtkWidget *lb = gtk_label_new(t);
         gtk_widget_set_halign(lb, GTK_ALIGN_START);
         gtk_box_append(GTK_BOX(box), lb);
@@ -652,7 +659,7 @@ static GtkWidget *meter_page(const char *title, GtkWidget **label,
         gtk_widget_set_margin_top(*graph, 10);
         gtk_box_append(GTK_BOX(box), *graph);
 
-        GtkWidget *cap = gtk_label_new("지난 60초");
+        GtkWidget *cap = gtk_label_new(T("last 60 seconds", "지난 60초"));
         gtk_widget_set_halign(cap, GTK_ALIGN_START);
         gtk_widget_add_css_class(cap, "dim-label");
         gtk_box_append(GTK_BOX(box), cap);
@@ -679,7 +686,7 @@ static void activate(GtkApplication *gapp, gpointer data)
                                        NULL, g_free);
 
     GtkWidget *win = gtk_application_window_new(gapp);
-    gtk_window_set_title(GTK_WINDOW(win), "작업 관리자");
+    gtk_window_set_title(GTK_WINDOW(win), T("Task Manager", "작업 관리자"));
     gtk_window_set_default_size(GTK_WINDOW(win), 820, 620);
 
     GtkWidget *head = gtk_header_bar_new();
@@ -687,25 +694,25 @@ static void activate(GtkApplication *gapp, gpointer data)
 
     GtkWidget *nb = gtk_notebook_new();
 
-    table_init(&app->apps, "앱");
-    table_init(&app->all,  "프로세스");
+    table_init(&app->apps, T("Apps", "앱"));
+    table_init(&app->all,  T("Processes", "프로세스"));
 
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), scrolled(app->apps.grid),
-                             gtk_label_new("앱"));
+                             gtk_label_new(T("Apps", "앱")));
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), scrolled(app->all.grid),
-                             gtk_label_new("프로세스"));
+                             gtk_label_new(T("Processes", "프로세스")));
     gtk_notebook_append_page(GTK_NOTEBOOK(nb),
         meter_page("CPU", &app->cpu_label, &app->cpu_bar, &app->cpu_detail,
                    &app->cpu_graph, app),
         gtk_label_new("CPU"));
     gtk_notebook_append_page(GTK_NOTEBOOK(nb),
-        meter_page("메모리", &app->mem_label, &app->mem_bar, &app->mem_detail,
+        meter_page(T("Memory", "메모리"), &app->mem_label, &app->mem_bar, &app->mem_detail,
                    NULL, app),
-        gtk_label_new("메모리"));
+        gtk_label_new(T("Memory", "메모리")));
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), scrolled(build_drives()),
-                             gtk_label_new("드라이브"));
+                             gtk_label_new(T("Drives", "드라이브")));
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), scrolled(build_network()),
-                             gtk_label_new("네트워크"));
+                             gtk_label_new(T("Network", "네트워크")));
 
     gtk_window_set_child(GTK_WINDOW(win), nb);
 

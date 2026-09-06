@@ -1,0 +1,30 @@
+#!/bin/sh
+# 상단바의 두 글자짜리 항목. waybar 의 설정 파일은 JSON 이라 언어를
+# 물어볼 방법이 없고, 그래서 문구를 여기서 정한다.
+#
+#   lp-bar-label search   왼쪽의 '검색' / 'Search'
+#   lp-bar-label ime      오른쪽의 입력 상태
+#
+# ime 는 지금 실제로 걸린 배열을 컴포지터에게 물어서 답한다. 명세서
+# 2-1 은 이 자리를 "입력기" 라고만 적어 두었는데, 고정된 글자를 찍어
+# 두면 배열을 바꿔도 그대로라서 표시가 아니라 장식이 된다.
+
+case "$1" in
+search)
+    case "$LANG" in
+    ko*) echo "검색" ;;
+    *)   echo "Search" ;;
+    esac
+    ;;
+ime)
+    layout=$(swaymsg -t get_inputs -r 2>/dev/null | grep -o 'xkb_active_layout_name": "[^"]*' | head -1 | sed 's/.*: "//')
+    case "$layout" in
+    *Korean*|*한*) echo "한" ;;
+    "")           echo "A" ;;
+    *)            echo "A" ;;
+    esac
+    ;;
+*)
+    echo ""
+    ;;
+esac

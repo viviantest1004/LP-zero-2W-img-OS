@@ -258,6 +258,12 @@ if [[ -d "${REPO_ROOT}/desktop/bar" ]]; then
         cp -a "${REPO_ROOT}/desktop/bar/style.css"    "$h/.config/waybar/style.css" 2>/dev/null || true
         cp -a "${REPO_ROOT}/desktop/bar/fuzzel.ini"   "$h/.config/fuzzel/fuzzel.ini" 2>/dev/null || true
     done
+    # 상단바가 부르는 작은 스크립트. /usr/local/bin 이라 PATH 에 있다.
+    if [[ -f "${REPO_ROOT}/desktop/bar/lp-bar-label" ]]; then
+        mkdir -p "$OUT/usr/local/bin"
+        cp -a "${REPO_ROOT}/desktop/bar/lp-bar-label" "$OUT/usr/local/bin/"
+        chmod +x "$OUT/usr/local/bin/lp-bar-label"
+    fi
     log "상단바와 런처"
 fi
 
@@ -304,7 +310,7 @@ fi
 # 달리 이 셋은 이 OS 의 것이고, 그래서 /usr/local/bin 에 들어간다 -
 # 패키지 관리자가 건드리지 않는 자리다.
 mkdir -p "$OUT/usr/local/bin" "$OUT/usr/local/share/applications"
-for app in files settings tasks; do
+for app in files settings tasks shot; do
     bin="${REPO_ROOT}/desktop/${app}/lp-${app}"
     [[ "$app" == files ]] && bin="${REPO_ROOT}/desktop/files/lp-files"
     if [[ -x "$bin" ]]; then
@@ -318,10 +324,36 @@ done
 # The places the file manager and the shell expect to exist. Making them
 # here rather than at first boot means the sidebar never shows a row
 # that leads nowhere.
+# ── 홈의 표준 폴더 ───────────────────────────────────────────────
+#
+# 디스크 위의 이름은 영어다. 화면에 보이는 이름은 그것과 별개이고,
+# 파일 관리자가 로케일에 따라 '다운로드' 라고 찍는다.
+#
+# 처음에는 폴더 자체를 한국어로 만들었고, 기계가 한 언어만 쓸 때는
+# 그래도 됐다. 두 언어를 쓰기 시작하면 그 순간 깨진다 - 영어 세션은
+# ~/Downloads 를 만들어 쓰고 한국어 세션은 ~/다운로드 를 만들어 써서,
+# 같은 사람의 파일이 그때그때 다른 폴더에 들어간다.
+#
+# user-dirs.dirs 는 XDG 의 표준 파일이고, GLib 의
+# g_get_user_special_dir 이 이것을 읽는다. 여기에 적어 두면 앱이
+# "다운로드 폴더" 를 물었을 때 전부 같은 곳을 답한다.
 for h in "$OUT/root" "$OUT/home/user"; do
-    mkdir -p "$h/문서" "$h/다운로드" "$h/사진" "$h/바탕화면" "$h/음악" \
-             "$h/동영상" "$h/.local/share/Trash/files" \
-             "$h/.local/share/Trash/info" "$h/.cache"
+    mkdir -p "$h/Desktop" "$h/Documents" "$h/Downloads" "$h/Music" \
+             "$h/Pictures" "$h/Videos" \
+             "$h/.local/share/Trash/files" \
+             "$h/.local/share/Trash/info" "$h/.cache" "$h/.config/lp"
+    cat > "$h/.config/user-dirs.dirs" <<'DIRS'
+# XDG 표준 폴더. 이름은 영어이고, 화면에 보이는 이름은 앱이 정한다.
+XDG_DESKTOP_DIR="$HOME/Desktop"
+XDG_DOCUMENTS_DIR="$HOME/Documents"
+XDG_DOWNLOAD_DIR="$HOME/Downloads"
+XDG_MUSIC_DIR="$HOME/Music"
+XDG_PICTURES_DIR="$HOME/Pictures"
+XDG_VIDEOS_DIR="$HOME/Videos"
+XDG_TEMPLATES_DIR="$HOME"
+XDG_PUBLICSHARE_DIR="$HOME"
+DIRS
+    printf 'en_US.UTF-8\n' > "$h/.config/lp/locale"
 done
 mkdir -p "$OUT/run/user/0" "$OUT/run/user/1000" \
          "$OUT/data" "$OUT/boot" "$OUT/tmp"

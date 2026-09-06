@@ -38,15 +38,23 @@ export GDK_BACKEND=wayland
 export SHELL=/bin/sh
 # 로케일.
 #
-# LANG 만으로는 부족했다. fuzzel 과 GTK 는 .desktop 파일에서 Name[ko]
-# 를 고르기 위해 LC_MESSAGES 를 보는데, 그 값이 비어 있으면 LANG 으로
-# 떨어지기 전에 C 로 확정되는 경로가 있어서 앱 이름이 전부 영어로
-# 나왔다 - 계산기가 Calculator 로. 세 개를 다 적어 두면 그 경로가
-# 어느 것을 보든 같은 답이 나온다.
-export LANG=ko_KR.UTF-8
-export LC_ALL=ko_KR.UTF-8
-export LC_MESSAGES=ko_KR.UTF-8
-export LANGUAGE=ko:en
+# 이 기계의 기본 언어는 영어다. 한국어는 이미지에 같이 들어 있고
+# (locale-gen 이 ko_KR.UTF-8 을 만들어 둔다), 설정 앱의 '지역과 언어'
+# 에서 고르면 아래 파일에 적힌다.
+#
+# 파일이 /etc/default/locale 이 아니라 홈에 있는 이유: 이 화면은
+# 표준 계정으로도 열려야 하고, 언어를 바꾸자고 관리자 권한을 물을
+# 이유가 없다. 계정마다 다른 언어를 쓸 수도 있다.
+#
+# LC_MESSAGES 까지 같이 내보내는 이유는 fuzzel 과 GTK 가 .desktop 의
+# Name[ko] 를 고를 때 그것을 보기 때문이다. LANG 만 두면 비어 있는
+# LC_MESSAGES 가 C 로 확정되는 경로가 있어서, 앱 이름만 영어로 남는다.
+LP_LOCALE=en_US.UTF-8
+if test -s /home/user/.config/lp/locale ; then
+    read LP_LOCALE < /home/user/.config/lp/locale
+fi
+export LANG=$LP_LOCALE
+export LC_MESSAGES=$LP_LOCALE
 export EDITOR=edit
 # 접근성 버스는 이 기계에 없다. 없다고 말해 두지 않으면 앱마다
 # 한 문단씩 경고를 찍는데, 그건 고장이 아니다.

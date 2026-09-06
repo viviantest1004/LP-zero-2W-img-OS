@@ -1,4 +1,4 @@
-# desktop/settings/Makefile - 설정 앱.
+# desktop/settings/Makefile - 스크린샷 앱.
 #
 # desktop/files/Makefile 과 같은 이유로 clang 도 자체 libc 도 쓰지
 # 않는다. 이 프로그램은 데비안 베이스의 glibc 와 GTK 4 에 링크되고,
@@ -13,9 +13,9 @@ CC      ?= cc
 PKG     ?= pkg-config
 PKGS    := gtk4
 
-BIN     := lp-settings
-SRC     := settings.c
-DESKTOP := lp-settings.desktop
+BIN     := lp-shot
+SRC     := shot.c
+DESKTOP := lp-shot.desktop
 
 CFLAGS  ?= -O2 -g
 CFLAGS  += -std=c11 -Wall -Wextra -I../common

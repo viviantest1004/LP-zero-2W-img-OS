@@ -20,6 +20,7 @@
  * the Makefile does not turn warnings into errors.
  */
 #include <gtk/gtk.h>
+#include "lp-i18n.h"
 #include <sys/statvfs.h>
 #include <string.h>
 
@@ -189,7 +190,7 @@ static char *format_free(const char *path)
      * same distinction df makes. */
     guint64 bytes = (guint64)vfs.f_bavail * (guint64)vfs.f_frsize;
     char   *size  = format_size((goffset)bytes);
-    char   *text  = g_strdup_printf("%s 남음", size);
+    char   *text  = g_strdup_printf(T("%s free", "%s 남음"), size);
 
     g_free(size);
     return text;
@@ -249,9 +250,9 @@ static char *format_date(guint64 seconds)
     if (days <= 0)
         text = g_date_time_format(when, "%H:%M");
     else if (days == 1)
-        text = g_strdup("어제");
+        text = g_strdup(T("yesterday", "어제"));
     else if (g_date_time_get_year(when) == g_date_time_get_year(now))
-        text = g_strdup_printf("%d월 %d일",
+        text = g_strdup_printf(T("%d %b", "%d월 %d일"),
                                g_date_time_get_month(when),
                                g_date_time_get_day_of_month(when));
     else
@@ -284,7 +285,7 @@ static void say(App *app, const char *what, const char *name, const char *why)
 
     gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dialog),
                                              "%s\n\n%s", name, why);
-    gtk_dialog_add_button(GTK_DIALOG(dialog), "확인", GTK_RESPONSE_CLOSE);
+    gtk_dialog_add_button(GTK_DIALOG(dialog), T("OK", "확인"), GTK_RESPONSE_CLOSE);
 
     g_signal_connect(dialog, "response",
                      G_CALLBACK(gtk_window_destroy), NULL);
@@ -360,7 +361,7 @@ static LpfItem *item_from_info(App *app, const char *dir_path, GFileInfo *info)
 
         item->icon_name = g_strdup("folder-symbolic");
         if (count_entries(child, app->show_hidden, &n))
-            item->size_text = g_strdup_printf("항목 %u", n);
+            item->size_text = g_strdup_printf(T("%u items", "항목 %u"), n);
         else
             item->size_text = g_strdup("");
         g_free(child);
@@ -593,7 +594,7 @@ static void build_crumbs(App *app)
         (app->path[strlen(home)] == '\0' || app->path[strlen(home)] == '/')) {
         base = g_strdup(home);
         rest = app->path + strlen(home);
-        crumb_append(app, "홈", home, rest[0] == '\0');
+        crumb_append(app, T("Home", "홈"), home, rest[0] == '\0');
     } else {
         base = g_strdup("/");
         crumb_append(app, "/", "/", app->path[1] == '\0');
@@ -705,10 +706,10 @@ static void update_status(App *app)
     char *left;
 
     if (chosen > 0)
-        left = g_strdup_printf("항목 %u개 · %u개 선택 · %s",
+        left = g_strdup_printf(T("%u items · %u selected · %s", "항목 %u개 · %u개 선택 · %s"),
                                total, chosen, size);
     else
-        left = g_strdup_printf("항목 %u개 · %s", total, size);
+        left = g_strdup_printf(T("%u items · %s", "항목 %u개 · %s"), total, size);
 
     gtk_label_set_text(GTK_LABEL(app->status_left), left);
     g_free(left);
@@ -744,10 +745,10 @@ static void navigate(App *app, const char *path, gboolean push)
         char *name = g_path_get_basename(full);
         const char *why =
             g_error_matches(error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED)
-                ? "읽기 권한이 없습니다."
-                : "폴더를 읽지 못했습니다.";
+                ? T("No permission to read it.", "읽기 권한이 없습니다.")
+                : T("The folder could not be read.", "폴더를 읽지 못했습니다.");
 
-        say(app, "열 수 없습니다", name, why);
+        say(app, T("cannot be opened", "열 수 없습니다"), name, why);
 
         g_free(name);
         g_clear_error(&error);
@@ -812,8 +813,8 @@ static void on_launched(GObject *source, GAsyncResult *result, gpointer data)
     /* Without this the failure is a line in the journal and nothing on
      * screen: you double-click, and the machine does nothing at all. */
     if (!gtk_show_uri_full_finish(launch->app->window, result, &error)) {
-        say(launch->app, "열 수 없습니다", launch->name,
-            "이 파일을 열 수 있는 프로그램이 없습니다.");
+        say(launch->app, T("cannot be opened", "열 수 없습니다"), launch->name,
+            T("Nothing installed can open this file.", "이 파일을 열 수 있는 프로그램이 없습니다."));
         g_clear_error(&error);
     }
 
@@ -826,14 +827,14 @@ static void open_item(App *app, LpfItem *item)
     char *path = g_build_filename(app->path, item->name, NULL);
 
     if (item->dangling) {
-        say(app, "열 수 없습니다", item->display,
-            "링크가 가리키는 위치가 없습니다.");
+        say(app, T("cannot be opened", "열 수 없습니다"), item->display,
+            T("The link points at nothing.", "링크가 가리키는 위치가 없습니다."));
     } else if (!item->readable) {
         /* Shown, not hidden. A file you may not read is still a fact
          * about the folder, and hiding it turns "no permission" into
          * "not there" - the second is a lie and it is the harder one to
          * debug. */
-        say(app, "열 수 없습니다", item->display, "읽기 권한이 없습니다.");
+        say(app, T("cannot be opened", "열 수 없습니다"), item->display, T("No permission to read it.", "읽기 권한이 없습니다."));
     } else if (item->is_dir) {
         navigate(app, path, TRUE);
     } else {
@@ -1146,14 +1147,32 @@ static GtkWidget *sidebar_row(App *app, const char *label_text,
  * machine does not keep. XDG's own directory is used when the user has
  * one; otherwise the folder is created under the Korean name the sidebar
  * shows, so the label and the path say the same thing. */
-static char *place_dir(GUserDirectory which, const char *korean)
+/* Where one of the standard folders actually is.
+ *
+ * The name on disk and the name on the screen are two different things
+ * and this used to conflate them: the label was passed in and used as
+ * the directory name, so the sidebar's "다운로드" was also the folder's
+ * name. That worked while the machine spoke one language. It stops
+ * working the moment it speaks two - the English session would make and
+ * use ~/Downloads while the Korean one made and used ~/다운로드, and the
+ * same person's files would be in whichever folder matched the language
+ * they were in when they saved.
+ *
+ * So the folder is named in English on disk, always, and what the
+ * sidebar prints is the caller's business. `fallback` is that on-disk
+ * name and is deliberately not translated.
+ *
+ * g_get_user_special_dir reads ~/.config/user-dirs.dirs, which the image
+ * writes, so this normally answers from there and the fallback is only
+ * for a home directory nobody set up. */
+static char *place_dir(GUserDirectory which, const char *fallback)
 {
     const char *xdg = g_get_user_special_dir(which);
 
     if (xdg && g_file_test(xdg, G_FILE_TEST_IS_DIR))
         return g_strdup(xdg);
 
-    char *path = g_build_filename(g_get_home_dir(), korean, NULL);
+    char *path = g_build_filename(g_get_home_dir(), fallback, NULL);
     g_mkdir_with_parents(path, 0755);
     return path;
 }
@@ -1215,7 +1234,7 @@ static void add_tag_rows(App *app, GtkWidget *box)
         if (field[0] && field[0][0] != '\0' && field[1] &&
             g_file_test(field[1], G_FILE_TEST_IS_DIR)) {
             if (!heading) {
-                heading = sidebar_heading("태그");
+                heading = sidebar_heading(T("Tags", "태그"));
                 gtk_box_append(GTK_BOX(box), heading);
             }
             gtk_box_append(GTK_BOX(box),
@@ -1252,26 +1271,26 @@ static GtkWidget *build_sidebar(App *app)
     gtk_widget_set_hexpand(box, FALSE);
     gtk_widget_set_halign(box, GTK_ALIGN_FILL);
 
-    gtk_box_append(GTK_BOX(box), sidebar_heading("위치"));
+    gtk_box_append(GTK_BOX(box), sidebar_heading(T("Places", "위치")));
 
-    char *documents = place_dir(G_USER_DIRECTORY_DOCUMENTS, "문서");
+    char *documents = place_dir(G_USER_DIRECTORY_DOCUMENTS, "Documents");
     /* 다운로드, never 내려받기 - see the note at the top of the Makefile. */
-    char *downloads = place_dir(G_USER_DIRECTORY_DOWNLOAD, "다운로드");
-    char *pictures  = place_dir(G_USER_DIRECTORY_PICTURES, "사진");
+    char *downloads = place_dir(G_USER_DIRECTORY_DOWNLOAD, "Downloads");
+    char *pictures  = place_dir(G_USER_DIRECTORY_PICTURES, "Pictures");
     char *trash     = trash_dir();
 
-    gtk_box_append(GTK_BOX(box), sidebar_row(app, "홈", "user-home-symbolic",
+    gtk_box_append(GTK_BOX(box), sidebar_row(app, T("Home", "홈"), "user-home-symbolic",
                                              g_get_home_dir()));
-    gtk_box_append(GTK_BOX(box), sidebar_row(app, "문서",
+    gtk_box_append(GTK_BOX(box), sidebar_row(app, T("Documents", "문서"),
                                              "folder-documents-symbolic",
                                              documents));
-    gtk_box_append(GTK_BOX(box), sidebar_row(app, "다운로드",
+    gtk_box_append(GTK_BOX(box), sidebar_row(app, T("Downloads", "다운로드"),
                                              "folder-download-symbolic",
                                              downloads));
-    gtk_box_append(GTK_BOX(box), sidebar_row(app, "사진",
+    gtk_box_append(GTK_BOX(box), sidebar_row(app, T("Pictures", "사진"),
                                              "folder-pictures-symbolic",
                                              pictures));
-    gtk_box_append(GTK_BOX(box), sidebar_row(app, "휴지통",
+    gtk_box_append(GTK_BOX(box), sidebar_row(app, T("Trash", "휴지통"),
                                              "user-trash-symbolic", trash));
 
     g_free(documents);
@@ -1279,8 +1298,8 @@ static GtkWidget *build_sidebar(App *app)
     g_free(pictures);
     g_free(trash);
 
-    gtk_box_append(GTK_BOX(box), sidebar_heading("드라이브"));
-    gtk_box_append(GTK_BOX(box), sidebar_row(app, "시스템",
+    gtk_box_append(GTK_BOX(box), sidebar_heading(T("Drives", "드라이브")));
+    gtk_box_append(GTK_BOX(box), sidebar_row(app, T("System", "시스템"),
                                              "drive-harddisk-symbolic", "/"));
 
     app->capacity = gtk_progress_bar_new();
@@ -1387,9 +1406,9 @@ static GtkWidget *build_header(App *app)
     g_signal_connect(list_view, "toggled", G_CALLBACK(on_view_toggled), app);
 
     GMenu *menu = g_menu_new();
-    g_menu_append(menu, "숨김 항목", "win.show-hidden");
-    g_menu_append(menu, "새로 고침", "win.refresh");
-    g_menu_append(menu, "상위 폴더", "win.up");
+    g_menu_append(menu, T("Hidden items", "숨김 항목"), "win.show-hidden");
+    g_menu_append(menu, T("Refresh", "새로 고침"), "win.refresh");
+    g_menu_append(menu, T("Parent folder", "상위 폴더"), "win.up");
 
     GtkWidget *menu_button = gtk_menu_button_new();
     gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_button),
@@ -1451,15 +1470,15 @@ static GtkWidget *build_list(App *app)
     gtk_column_view_set_reorderable(GTK_COLUMN_VIEW(view), FALSE);
     gtk_widget_add_css_class(view, "lp-list");
 
-    GtkColumnViewColumn *name = make_column("이름",
+    GtkColumnViewColumn *name = make_column(T("Name", "이름"),
                                             G_CALLBACK(name_setup),
                                             G_CALLBACK(name_bind), NULL, -1);
-    GtkColumnViewColumn *size = make_column("크기",
+    GtkColumnViewColumn *size = make_column(T("Size", "크기"),
                                             G_CALLBACK(text_setup),
                                             G_CALLBACK(size_bind),
                                             (gpointer)"lp-size",
                                             SIZE_COL_WIDTH);
-    GtkColumnViewColumn *date = make_column("수정일",
+    GtkColumnViewColumn *date = make_column(T("Modified", "수정일"),
                                             G_CALLBACK(text_setup),
                                             G_CALLBACK(date_bind),
                                             (gpointer)"lp-date",

@@ -25,7 +25,7 @@ SRC     := files.c
 DESKTOP := lp-files.desktop
 
 CFLAGS  ?= -O2 -g
-CFLAGS  += -std=c11 -Wall -Wextra
+CFLAGS  += -std=c11 -Wall -Wextra -I../common
 CFLAGS  += $(shell $(PKG) --cflags $(PKGS))
 LDLIBS  += $(shell $(PKG) --libs $(PKGS))
 

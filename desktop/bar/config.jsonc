@@ -30,7 +30,8 @@
   // entry is here so the entry point is visible - the one thing Windows
   // 8 got wrong that Spotlight and Activities get right.
   "custom/search": {
-    "format": "검색",
+    "exec": "lp-bar-label search",
+    "interval": "once",
     "tooltip": false,
     "on-click": "fuzzel"
   },
@@ -46,8 +47,11 @@
 
   // 한 or A. One glyph however many input sources exist - see
   // design/gui/topbar-input.html for why the width is fixed.
+  // 지금 걸려 있는 배열을 묻는다. 고정된 글자를 찍어 두면 배열을
+  // 바꿔도 그대로라서, 표시가 아니라 장식이 된다.
   "custom/ime": {
-    "format": "한",
+    "exec": "lp-bar-label ime",
+    "interval": 2,
     "tooltip": false,
     "on-click": "swaymsg input type:keyboard xkb_switch_layout next"
   },

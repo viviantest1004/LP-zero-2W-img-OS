@@ -38,6 +38,7 @@
 #define _DEFAULT_SOURCE 1
 
 #include <gtk/gtk.h>
+#include "lp-i18n.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -354,13 +355,13 @@ static GtkWidget *page_network(void)
 
     char *sub;
     if (addr && iface)
-        sub = g_strdup_printf("%s 로 연결되어 있습니다 · %s", iface, addr);
+        sub = g_strdup_printf(T("Connected over %s · %s", "%s 로 연결되어 있습니다 · %s"), iface, addr);
     else if (iface)
-        sub = g_strdup_printf("%s 가 있지만 주소를 받지 못했습니다", iface);
+        sub = g_strdup_printf(T("%s is up but has no address", "%s 가 있지만 주소를 받지 못했습니다"), iface);
     else
-        sub = g_strdup("연결된 네트워크가 없습니다");
+        sub = g_strdup(T("no network is connected", "연결된 네트워크가 없습니다"));
 
-    GtkWidget *page = page_new("네트워크", sub);
+    GtkWidget *page = page_new(T("Network", "네트워크"), sub);
     g_free(sub);
 
     GtkWidget *g1 = group_new(page, NULL);
@@ -384,9 +385,9 @@ static GtkWidget *page_network(void)
             if (ip)
                 val = g_strdup(ip);
             else if (st && g_strcmp0(st, "up") == 0)
-                val = g_strdup("주소 없음");
+                val = g_strdup(T("no address", "주소 없음"));
             else
-                val = g_strdup("연결 안 됨");
+                val = g_strdup(T("not connected", "연결 안 됨"));
 
             /* 무선인지 유선인지는 wireless 디렉터리가 있는지로 안다. */
             char *w = g_strdup_printf("/sys/class/net/%s/wireless", name);
@@ -394,7 +395,7 @@ static GtkWidget *page_network(void)
             g_free(w);
 
             char *title = g_strdup_printf("%s (%s)",
-                                          wifi ? "Wi-Fi" : "유선", name);
+                                          wifi ? "Wi-Fi" : T("Wired", "유선"), name);
             row_value(g1, title, NULL, val);
 
             g_free(title); g_free(val); g_free(ip); g_free(st);
@@ -402,11 +403,11 @@ static GtkWidget *page_network(void)
         g_dir_close(d);
     }
 
-    GtkWidget *g2 = group_new(page, "연결 정보");
-    row_value(g2, "IP 주소", NULL, addr ? addr : "없음");
+    GtkWidget *g2 = group_new(page, T("Connection", "연결 정보"));
+    row_value(g2, T("IP address", "IP 주소"), NULL, addr ? addr : T("none", "없음"));
 
     char *gw = net_gateway();
-    row_value(g2, "게이트웨이", NULL, gw ? gw : "없음");
+    row_value(g2, T("Gateway", "게이트웨이"), NULL, gw ? gw : T("none", "없음"));
     g_free(gw);
 
     char *dns = slurp("/etc/resolv.conf");
@@ -420,7 +421,7 @@ static GtkWidget *page_network(void)
             if (acc->len) g_string_append(acc, ", ");
             g_string_append(acc, v);
         }
-        row_value(g2, "DNS", NULL, acc->len ? acc->str : "없음");
+        row_value(g2, "DNS", NULL, acc->len ? acc->str : T("none", "없음"));
         g_string_free(acc, TRUE);
         g_strfreev(l);
         g_free(dns);
@@ -430,7 +431,7 @@ static GtkWidget *page_network(void)
         char *p = g_strdup_printf("/sys/class/net/%s/address", iface);
         char *mac = slurp(p);
         g_free(p);
-        row_value(g2, "MAC 주소", NULL, mac ? mac : "알 수 없음");
+        row_value(g2, T("MAC address", "MAC 주소"), NULL, mac ? mac : T("unknown", "알 수 없음"));
         g_free(mac);
     }
 
@@ -464,13 +465,13 @@ static GtkWidget *page_display(void)
             if (rp) sscanf(rp, "\"refresh\": %d", &mhz);
         }
         if (w && h && mhz)
-            sub = g_strdup_printf("%d × %d · %.0fHz", w, h, mhz / 1000.0);
+            sub = g_strdup_printf(T("%d × %d · %.0fHz", "%d × %d · %.0fHz"), w, h, mhz / 1000.0);
         else if (w && h)
-            sub = g_strdup_printf("%d × %d", w, h);
+            sub = g_strdup_printf(T("%d × %d", "%d × %d"), w, h);
     }
 
-    GtkWidget *page = page_new("화면",
-                               sub ? sub : "화면 정보를 읽지 못했습니다");
+    GtkWidget *page = page_new(T("Display", "화면"),
+                               sub ? sub : T("could not read the display", "화면 정보를 읽지 못했습니다"));
     g_free(sub);
 
     GtkWidget *g1 = group_new(page, NULL);
@@ -479,20 +480,20 @@ static GtkWidget *page_display(void)
         char b[160];
         char *p = strstr(json, "\"name\"");
         if (p && sscanf(p, "\"name\": \"%159[^\"]", b) == 1)
-            row_value(g1, "출력", NULL, b);
+            row_value(g1, T("Output", "출력"), NULL, b);
 
         p = strstr(json, "\"model\"");
         if (p && sscanf(p, "\"model\": \"%159[^\"]", b) == 1)
-            row_value(g1, "모니터", NULL, b);
+            row_value(g1, T("Monitor", "모니터"), NULL, b);
 
         if (w && h) {
-            char *v = g_strdup_printf("%d × %d", w, h);
-            row_value(g1, "해상도", NULL, v);
+            char *v = g_strdup_printf(T("%d × %d", "%d × %d"), w, h);
+            row_value(g1, T("Resolution", "해상도"), NULL, v);
             g_free(v);
         }
         if (mhz) {
             char *v = g_strdup_printf("%.0fHz", mhz / 1000.0);
-            row_value(g1, "주사율", NULL, v);
+            row_value(g1, T("Refresh rate", "주사율"), NULL, v);
             g_free(v);
         }
 
@@ -500,7 +501,7 @@ static GtkWidget *page_display(void)
         double sc = 0;
         if (p && sscanf(p, "\"scale\": %lf", &sc) == 1 && sc > 0) {
             char *v = g_strdup_printf("%d%%", (int)(sc * 100));
-            row_value(g1, "배율", NULL, v);
+            row_value(g1, T("Scale", "배율"), NULL, v);
             g_free(v);
         }
     }
@@ -517,7 +518,7 @@ static GtkWidget *page_display(void)
             char *c = slurp(cur), *m2 = slurp(max);
             if (c && m2 && atoi(m2) > 0) {
                 char *v = g_strdup_printf("%d%%", atoi(c) * 100 / atoi(m2));
-                row_value(g1, "밝기", NULL, v);
+                row_value(g1, T("Brightness", "밝기"), NULL, v);
                 g_free(v);
                 has_bl = TRUE;
             }
@@ -526,8 +527,8 @@ static GtkWidget *page_display(void)
         g_dir_close(bl);
     }
     if (!has_bl)
-        row_value(g1, "밝기",
-                  "이 기계에는 조절할 수 있는 백라이트가 없습니다", "해당 없음");
+        row_value(g1, T("Brightness", "밝기"),
+                  T("this machine has no adjustable backlight", "이 기계에는 조절할 수 있는 백라이트가 없습니다"), T("not applicable", "해당 없음"));
 
     g_free(json);
     return page;
@@ -561,17 +562,17 @@ static GtkWidget *page_sound(void)
 
     char *sub;
     if (pct >= 0)
-        sub = g_strdup_printf("출력 %d%%%s", pct, muted ? " · 음소거" : "");
+        sub = g_strdup_printf(T("Output %d%%%s", "출력 %d%%%s"), pct, muted ? T(" · muted", " · 음소거") : "");
     else
-        sub = g_strdup("소리 장치를 찾지 못했습니다");
+        sub = g_strdup(T("no sound device was found", "소리 장치를 찾지 못했습니다"));
 
-    GtkWidget *page = page_new("소리", sub);
+    GtkWidget *page = page_new(T("Sound", "소리"), sub);
     g_free(sub);
 
     GtkWidget *g1 = group_new(page, NULL);
 
     if (pct >= 0) {
-        GtkWidget *row = row_shell("출력 볼륨", NULL);
+        GtkWidget *row = row_shell(T("Output volume", "출력 볼륨"), NULL);
         GtkWidget *h   = g_object_get_data(G_OBJECT(row), "lp-hbox");
         GtkWidget *sc  = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,
                                                   0, 100, 1);
@@ -583,10 +584,10 @@ static GtkWidget *page_sound(void)
         gtk_box_append(GTK_BOX(h), sc);
         gtk_list_box_append(GTK_LIST_BOX(g1), row);
 
-        row_switch(g1, "음소거", NULL, muted, NULL, NULL);
+        row_switch(g1, T("Muted", "음소거"), NULL, muted, NULL, NULL);
     } else {
-        row_value(g1, "출력 볼륨",
-                  "pipewire 가 아직 장치를 잡지 못했습니다", "없음");
+        row_value(g1, T("Output volume", "출력 볼륨"),
+                  T("pipewire has not claimed a device yet", "pipewire 가 아직 장치를 잡지 못했습니다"), T("none", "없음"));
     }
 
     /* 어떤 장치로 나가는지. */
@@ -601,16 +602,16 @@ static GtkWidget *page_sound(void)
                 if (sscanf(star, "* %*d. %159[^[\n]", buf) == 1) {
                     g_strchomp(buf);
                     if (buf[0])
-                        row_value(g1, "출력 장치", NULL, buf);
+                        row_value(g1, T("Output device", "출력 장치"), NULL, buf);
                 }
             }
         }
         g_free(st);
     }
 
-    GtkWidget *g2 = group_new(page, "앱별 볼륨");
-    row_chevron(g2, "앱마다 따로 맞추기",
-                "pavucontrol 에서 다룹니다", NULL);
+    GtkWidget *g2 = group_new(page, T("Per-application volume", "앱별 볼륨"));
+    row_chevron(g2, T("Set the level per application", "앱마다 따로 맞추기"),
+                T("pavucontrol handles per-application volume", "pavucontrol 에서 다룹니다"), NULL);
 
     g_free(vol);
     return page;
@@ -643,28 +644,28 @@ static GtkWidget *page_power(void)
 
     char *sub;
     if (cap)
-        sub = g_strdup_printf("배터리 %s%%%s", cap,
+        sub = g_strdup_printf(T("Battery %s%%%s", "배터리 %s%%%s"), cap,
                               (status && g_strcmp0(status, "Charging") == 0)
-                              ? " · 충전 중" : "");
+                              ? T(" · charging", " · 충전 중") : "");
     else
-        sub = g_strdup("배터리가 없습니다. 전원에 연결된 채로 동작합니다");
+        sub = g_strdup(T("No battery. This machine runs on mains power", "배터리가 없습니다. 전원에 연결된 채로 동작합니다"));
 
-    GtkWidget *page = page_new("전원", sub);
+    GtkWidget *page = page_new(T("Power", "전원"), sub);
     g_free(sub);
 
     GtkWidget *g1 = group_new(page, NULL);
     if (cap) {
         char *v = g_strdup_printf("%s%%", cap);
-        row_value(g1, "배터리 잔량", NULL, v);
+        row_value(g1, T("Battery level", "배터리 잔량"), NULL, v);
         g_free(v);
-        row_value(g1, "상태", NULL, status ? status : "알 수 없음");
+        row_value(g1, T("State", "상태"), NULL, status ? status : T("unknown", "알 수 없음"));
     }
 
     /* 이 기계가 실제로 쓰는 값. sway 가 swayidle 로 화면을 끄고,
      * 그 시간은 세션 설정에 들어 있다. */
-    row_value(g1, "화면 끄기", "아무 입력이 없을 때 화면을 끕니다", "10분");
-    row_value(g1, "절전 대기",
-              "이 기계에서는 아직 절전 대기로 들어가지 않습니다", "사용 안 함");
+    row_value(g1, T("Turn the screen off", "화면 끄기"), T("Turns the screen off after no input", "아무 입력이 없을 때 화면을 끕니다"), T("10 minutes", "10분"));
+    row_value(g1, T("Suspend", "절전 대기"),
+              T("this machine does not suspend yet", "이 기계에서는 아직 절전 대기로 들어가지 않습니다"), T("Off", "사용 안 함"));
 
     g_free(cap); g_free(status);
     return page;
@@ -676,22 +677,22 @@ static GtkWidget *page_power(void)
  * 설정 파일이 곧 진실이고, 그것을 읽으면 둘이 어긋날 수가 없다. */
 static GtkWidget *page_keyboard(void)
 {
-    GtkWidget *page = page_new("키보드",
-                               "지금 이 기계에 걸려 있는 단축키입니다");
+    GtkWidget *page = page_new(T("Keyboard", "키보드"),
+                               T("The shortcuts this machine actually has", "지금 이 기계에 걸려 있는 단축키입니다"));
 
-    GtkWidget *g0 = group_new(page, "입력 소스");
+    GtkWidget *g0 = group_new(page, T("Input sources", "입력 소스"));
     const char *iargv[] = { "swaymsg", "-t", "get_inputs", "-r", NULL };
     char *inp = run_cmd(iargv);
     if (inp) {
         char *p = strstr(inp, "xkb_active_layout_name");
         char b[128] = "";
         if (p && sscanf(p, "xkb_active_layout_name\": \"%127[^\"]", b) == 1)
-            row_value(g0, "현재 배열", NULL, b);
+            row_value(g0, T("Current layout", "현재 배열"), NULL, b);
         g_free(inp);
     }
-    row_value(g0, "입력 전환", "Alt+Shift 로 배열을 넘깁니다", "Alt+Shift");
+    row_value(g0, T("Switch input", "입력 전환"), T("Alt+Shift moves to the next layout", "Alt+Shift 로 배열을 넘깁니다"), "Alt+Shift");
 
-    GtkWidget *g1 = group_new(page, "단축키");
+    GtkWidget *g1 = group_new(page, T("Shortcuts", "단축키"));
     char *path = g_build_filename(g_get_home_dir(), ".config", "sway",
                                   "config", NULL);
     char *cfg  = slurp(path);
@@ -724,8 +725,8 @@ static GtkWidget *page_keyboard(void)
         g_strfreev(l);
         g_free(cfg);
     } else {
-        row_value(g1, "설정 파일",
-                  "~/.config/sway/config 를 읽지 못했습니다", "없음");
+        row_value(g1, T("Config file", "설정 파일"),
+                  T("could not read ~/.config/sway/config", "~/.config/sway/config 를 읽지 못했습니다"), T("none", "없음"));
     }
     return page;
 }
@@ -783,8 +784,8 @@ static GtkWidget *page_apps(void)
     int n = add_apps_from(tmp, "/usr/local/share/applications");
     n    += add_apps_from(tmp, "/usr/share/applications");
 
-    char *sub = g_strdup_printf("설치된 앱 %d개", n);
-    GtkWidget *page = page_new("앱", sub);
+    char *sub = g_strdup_printf(T("%d applications installed", "설치된 앱 %d개"), n);
+    GtkWidget *page = page_new(T("Apps", "앱"), sub);
     g_free(sub);
 
     gtk_widget_set_margin_top(tmp, 8);
@@ -802,12 +803,12 @@ static GtkWidget *page_storage(void)
         guint64 total = (guint64)st.f_blocks * st.f_frsize;
         guint64 avail = (guint64)st.f_bavail * st.f_frsize;
         char *t = human(total), *u = human(total - avail), *f = human(avail);
-        sub = g_strdup_printf("%s 중 %s 사용 · %s 남음", t, u, f);
+        sub = g_strdup_printf(T("%s of %s used · %s free", "%s 중 %s 사용 · %s 남음"), t, u, f);
         g_free(t); g_free(u); g_free(f);
     }
 
-    GtkWidget *page = page_new("저장 공간",
-                               sub ? sub : "드라이브를 읽지 못했습니다");
+    GtkWidget *page = page_new(T("Storage", "저장 공간"),
+                               sub ? sub : T("could not read the drives", "드라이브를 읽지 못했습니다"));
     g_free(sub);
 
     GtkWidget *g1 = group_new(page, NULL);
@@ -832,13 +833,13 @@ static GtkWidget *page_storage(void)
                 guint64 tot = (guint64)s2.f_blocks * s2.f_frsize;
                 guint64 fr  = (guint64)s2.f_bavail * s2.f_frsize;
                 char *a = human(fr), *b = human(tot);
-                val = g_strdup_printf("%s / %s 남음", a, b);
+                val = g_strdup_printf(T("%s of %s free", "%s / %s 남음"), a, b);
                 g_free(a); g_free(b);
 
                 /* 명세서 2-2: 남은 공간 15% 미만이면 경고. 숫자만
                  * 보여 주면 그게 나쁜 상태인지 알 수 없다. */
                 if (tot && fr * 100 / tot < 15) {
-                    char *w = g_strdup_printf("%s · 곧 가득 찹니다", val);
+                    char *w = g_strdup_printf(T("%s · nearly full", "%s · 곧 가득 찹니다"), val);
                     g_free(val);
                     val = w;
                 }
@@ -862,28 +863,28 @@ static GtkWidget *page_datetime(void)
     localtime_r(&now, &tmv);
 
     char buf[160];
-    strftime(buf, sizeof buf, "%Y년 %m월 %d일 %H:%M", &tmv);
+    strftime(buf, sizeof buf, T("%d %B %Y  %H:%M", "%Y년 %m월 %d일 %H:%M"), &tmv);
 
-    GtkWidget *page = page_new("날짜와 시간", buf);
+    GtkWidget *page = page_new(T("Date & Time", "날짜와 시간"), buf);
     GtkWidget *g1   = group_new(page, NULL);
 
     /* 시간대는 /etc/localtime 이 어디를 가리키는지로 안다. */
     char *tz = g_file_read_link("/etc/localtime", NULL);
-    const char *shown = "알 수 없음";
+    const char *shown = T("unknown", "알 수 없음");
     if (tz) {
         const char *p = strstr(tz, "zoneinfo/");
         shown = p ? p + 9 : tz;
     }
-    row_value(g1, "시간대", NULL, shown);
-    row_value(g1, "형식", NULL, "24시간");
+    row_value(g1, T("Time zone", "시간대"), NULL, shown);
+    row_value(g1, T("Format", "형식"), NULL, T("24-hour", "24시간"));
     g_free(tz);
 
     char *pl = slurp("/proc/uptime");
     if (pl) {
         double up = g_ascii_strtod(pl, NULL);
-        char *v = g_strdup_printf("%d시간 %d분",
+        char *v = g_strdup_printf(T("%dh %dm", "%d시간 %d분"),
                                   (int)up / 3600, ((int)up % 3600) / 60);
-        row_value(g1, "가동 시간", NULL, v);
+        row_value(g1, T("Uptime", "가동 시간"), NULL, v);
         g_free(v); g_free(pl);
     }
     return page;
@@ -891,15 +892,90 @@ static GtkWidget *page_datetime(void)
 
 /* 5-16 지역과 언어 ─────────────────────────────────────────────── */
 
+/* 이 기계가 쓸 로케일이 적힌 파일.
+ *
+ * 세션이 뜰 때 session-run 이 이것을 읽고, 없으면 영어로 간다.
+ * /etc/default/locale 이 아니라 홈에 두는 이유는 이 화면이 표준
+ * 계정으로도 열리기 때문이다 - 계정마다 다른 언어를 쓸 수 있어야
+ * 하고, 그러자고 설정 앱에 관리자 권한을 요구하고 싶지는 않다. */
+static char *locale_file(void)
+{
+    return g_build_filename(g_get_home_dir(), ".config", "lp", "locale", NULL);
+}
+
+static void set_language(const char *locale)
+{
+    char *path = locale_file();
+    char *dir  = g_path_get_dirname(path);
+    g_mkdir_with_parents(dir, 0755);
+    g_file_set_contents(path, locale, -1, NULL);
+    g_free(dir);
+    g_free(path);
+}
+
+static void on_lang_english(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    set_language("en_US.UTF-8");
+}
+
+static void on_lang_korean(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    set_language("ko_KR.UTF-8");
+}
+
 static GtkWidget *page_locale(void)
 {
     const char *lang = g_getenv("LANG");
-    GtkWidget *page = page_new("지역과 언어",
-                               lang ? lang : "LANG 이 설정되어 있지 않습니다");
+    gboolean ko = lp_korean();
+
+    GtkWidget *page = page_new(T("Region & Language", "지역과 언어"),
+                               ko ? "한국어 · ko_KR.UTF-8"
+                                  : "English · en_US.UTF-8");
+
     GtkWidget *g1 = group_new(page, NULL);
-    row_value(g1, "시스템 언어", NULL, "한국어");
-    row_value(g1, "문자 인코딩", NULL, "UTF-8");
-    row_value(g1, "LANG", NULL, lang ? lang : "없음");
+
+    /* 두 언어뿐이므로 목록이 아니라 버튼 둘이다. 항목이 둘일 때
+     * 드롭다운을 쓰면 무엇이 있는지 보려고 한 번 더 눌러야 한다. */
+    GtkWidget *row = row_shell(T("System language", "시스템 언어"),
+                               T("Applies the next time you sign in",
+                                 "다음에 로그인할 때 적용됩니다"));
+    GtkWidget *h = g_object_get_data(G_OBJECT(row), "lp-hbox");
+
+    GtkWidget *pick = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(pick, "linked");
+    gtk_widget_set_valign(pick, GTK_ALIGN_CENTER);
+
+    GtkWidget *en = gtk_toggle_button_new_with_label("English");
+    GtkWidget *kb = gtk_toggle_button_new_with_label("한국어");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ko ? kb : en), TRUE);
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(kb), GTK_TOGGLE_BUTTON(en));
+    g_signal_connect(en, "clicked", G_CALLBACK(on_lang_english), NULL);
+    g_signal_connect(kb, "clicked", G_CALLBACK(on_lang_korean), NULL);
+    gtk_box_append(GTK_BOX(pick), en);
+    gtk_box_append(GTK_BOX(pick), kb);
+    gtk_box_append(GTK_BOX(h), pick);
+    gtk_list_box_append(GTK_LIST_BOX(g1), row);
+
+    row_value(g1, T("Character encoding", "문자 인코딩"), NULL, "UTF-8");
+    row_value(g1, "LANG", NULL, lang ? lang : T("none", "없음"));
+
+    /* 설치되어 있는 것을 그대로 보여 준다. 고를 수 있는 언어가 둘인
+     * 이유가 두 개만 생성해 두었기 때문이라는 것을, 목록을 보면
+     * 알 수 있다. */
+    GtkWidget *g2 = group_new(page, T("Installed languages", "설치된 언어"));
+    const char *gargv[] = { "locale", "-a", NULL };
+    char *all = run_cmd(gargv);
+    if (all) {
+        char **l = g_strsplit(all, "\n", -1);
+        for (int i = 0; l[i]; i++) {
+            if (!strstr(l[i], ".utf8") && !strstr(l[i], ".UTF-8")) continue;
+            row_value(g2, l[i], NULL, NULL);
+        }
+        g_strfreev(l);
+        g_free(all);
+    }
     return page;
 }
 
@@ -907,7 +983,7 @@ static GtkWidget *page_locale(void)
 
 static GtkWidget *page_users(void)
 {
-    GtkWidget *page = page_new("사용자", NULL);
+    GtkWidget *page = page_new(T("Users", "사용자"), NULL);
     GtkWidget *g1   = group_new(page, NULL);
 
     /* 사람이 쓰는 계정만. root 와 uid 1000 위다. 시스템 계정 스무
@@ -922,14 +998,14 @@ static GtkWidget *page_users(void)
 
         char *detail = g_strdup_printf("%s · %s", pw->pw_dir, pw->pw_shell);
         row_value(g1, pw->pw_name, detail,
-                  pw->pw_uid == 0 ? "관리자" : "표준");
+                  pw->pw_uid == 0 ? T("Administrator", "관리자") : T("Standard", "표준"));
         g_free(detail);
     }
     endpwent();
 
-    GtkWidget *g2 = group_new(page, "지금 로그인한 계정");
+    GtkWidget *g2 = group_new(page, T("Signed in as", "지금 로그인한 계정"));
     const char *me = g_get_user_name();
-    row_value(g2, me ? me : "알 수 없음", g_get_home_dir(), NULL);
+    row_value(g2, me ? me : T("unknown", "알 수 없음"), g_get_home_dir(), NULL);
     return page;
 }
 
@@ -945,11 +1021,11 @@ static GtkWidget *page_about(void)
 
     char *sub = g_strdup_printf("%s · %s",
                                 osname ? osname : "linux-LP", u.machine);
-    GtkWidget *page = page_new("정보", sub);
+    GtkWidget *page = page_new(T("About", "정보"), sub);
     g_free(sub);
 
-    GtkWidget *g1 = group_new(page, "기기");
-    row_value(g1, "기기 이름", NULL, host ? host : u.nodename);
+    GtkWidget *g1 = group_new(page, T("Device", "기기"));
+    row_value(g1, T("Device name", "기기 이름"), NULL, host ? host : u.nodename);
 
     char *ci = slurp("/proc/cpuinfo");
     if (ci) {
@@ -970,9 +1046,9 @@ static GtkWidget *page_about(void)
         g_strfreev(l);
         g_free(ci);
 
-        char *v = g_strdup_printf("%s · %d코어",
-                                  model[0] ? model : "알 수 없음", cores);
-        row_value(g1, "프로세서", NULL, v);
+        char *v = g_strdup_printf(T("%s · %d cores", "%s · %d코어"),
+                                  model[0] ? model : T("unknown", "알 수 없음"), cores);
+        row_value(g1, T("Processor", "프로세서"), NULL, v);
         g_free(v);
     }
 
@@ -981,22 +1057,22 @@ static GtkWidget *page_about(void)
         unsigned long kb = 0;
         sscanf(mi, "MemTotal: %lu kB", &kb);
         char *v = human((guint64)kb * 1024);
-        row_value(g1, "메모리", NULL, v);
+        row_value(g1, T("Memory", "메모리"), NULL, v);
         g_free(v); g_free(mi);
     }
 
     struct statvfs st;
     if (statvfs("/", &st) == 0) {
         char *v = human((guint64)st.f_blocks * st.f_frsize);
-        row_value(g1, "저장 공간", NULL, v);
+        row_value(g1, T("Storage", "저장 공간"), NULL, v);
         g_free(v);
     }
 
-    GtkWidget *g2 = group_new(page, "소프트웨어");
-    row_value(g2, "운영체제", NULL, osname ? osname : "linux-LP");
-    row_value(g2, "커널", NULL, u.release);
-    row_value(g2, "화면 서버", NULL, "Wayland");
-    row_value(g2, "셸", "이 기계의 /bin/sh 는 직접 만든 것입니다", "sh");
+    GtkWidget *g2 = group_new(page, T("Software", "소프트웨어"));
+    row_value(g2, T("Operating system", "운영체제"), NULL, osname ? osname : "linux-LP");
+    row_value(g2, T("Kernel", "커널"), NULL, u.release);
+    row_value(g2, T("Display server", "화면 서버"), NULL, "Wayland");
+    row_value(g2, T("Shell", "셸"), T("the /bin/sh on this machine was written here", "이 기계의 /bin/sh 는 직접 만든 것입니다"), "sh");
 
     g_free(osname); g_free(host);
     return page;
@@ -1014,24 +1090,35 @@ static GtkWidget *page_about(void)
  * 것만큼 쓸모없는 것도 없다.
  */
 
+/* 이름이 두 벌이라 표에 둘 다 담는다.
+ *
+ * T() 를 여기 쓸 수는 없다. 이 배열은 정적 초기화이고 T() 는 실행할
+ * 때 환경을 읽는 함수 호출이라, C 가 받아 주지 않는다. 어느 쪽을
+ * 쓸지는 사이드바를 만들면서 정한다. */
 typedef struct {
-    const char *name;
+    const char *en;
+    const char *ko;
     const char *icon;
     GtkWidget *(*build)(void);
 } section_t;
 
+static const char *section_name(const section_t *s)
+{
+    return lp_korean() ? s->ko : s->en;
+}
+
 static const section_t SECTIONS[] = {
-    { "네트워크",     "network-wireless-symbolic",     page_network  },
-    { "화면",         "video-display-symbolic",        page_display  },
-    { "소리",         "audio-volume-high-symbolic",    page_sound    },
-    { "전원",         "battery-symbolic",              page_power    },
-    { "키보드",       "input-keyboard-symbolic",       page_keyboard },
-    { "앱",           "view-grid-symbolic",            page_apps     },
-    { "저장 공간",    "drive-harddisk-symbolic",       page_storage  },
-    { "날짜와 시간",  "preferences-system-time-symbolic", page_datetime },
-    { "지역과 언어",  "preferences-desktop-locale-symbolic", page_locale },
-    { "사용자",       "system-users-symbolic",         page_users    },
-    { "정보",         "help-about-symbolic",           page_about    },
+    { "Network", "네트워크", "network-wireless-symbolic",     page_network  },
+    { "Display", "화면", "video-display-symbolic",        page_display  },
+    { "Sound", "소리", "audio-volume-high-symbolic",    page_sound    },
+    { "Power", "전원", "battery-symbolic",              page_power    },
+    { "Keyboard", "키보드", "input-keyboard-symbolic",       page_keyboard },
+    { "Apps", "앱", "view-grid-symbolic",            page_apps     },
+    { "Storage", "저장 공간", "drive-harddisk-symbolic",       page_storage  },
+    { "Date & Time", "날짜와 시간", "preferences-system-time-symbolic", page_datetime },
+    { "Region & Language", "지역과 언어", "preferences-desktop-locale-symbolic", page_locale },
+    { "Users", "사용자", "system-users-symbolic",         page_users    },
+    { "About", "정보", "help-about-symbolic",           page_about    },
 };
 
 typedef struct {
@@ -1060,7 +1147,7 @@ static void activate(GtkApplication *gapp, gpointer data)
     app_t *app = g_new0(app_t, 1);
 
     GtkWidget *win = gtk_application_window_new(gapp);
-    gtk_window_set_title(GTK_WINDOW(win), "설정");
+    gtk_window_set_title(GTK_WINDOW(win), T("Settings", "설정"));
     gtk_window_set_default_size(GTK_WINDOW(win), 860, 620);
 
     /* 헤더 바는 창과 한 몸이고 오른쪽에 닫기 하나뿐. 4-1 이다. */
@@ -1086,7 +1173,7 @@ static void activate(GtkApplication *gapp, gpointer data)
         GtkWidget *ic = gtk_image_new_from_icon_name(SECTIONS[i].icon);
         gtk_box_append(GTK_BOX(h), ic);
 
-        GtkWidget *l = gtk_label_new(SECTIONS[i].name);
+        GtkWidget *l = gtk_label_new(section_name(&SECTIONS[i]));
         gtk_widget_set_halign(l, GTK_ALIGN_START);
         gtk_box_append(GTK_BOX(h), l);
 
