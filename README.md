@@ -2,7 +2,7 @@
 
 **English → [README.en.md](README.en.md)**
 
-### ⬇ [이미지 내려받기](https://viviantest1004.github.io/LP-zero-2W-img-OS/)
+### ⬇ [이미지 다운로드](https://viviantest1004.github.io/LP-zero-2W-img-OS/)
 
 받을 이미지를 고르고 받은 뒤에 뭘 하는지가 한 페이지에 있습니다.
 페이지가 안 열리면 [`dist/`](dist/) 폴더에서 그대로 받으셔도 됩니다.

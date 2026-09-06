@@ -31,7 +31,21 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 source "${REPO_ROOT}/tools/common.sh"
 
-SIZE_GB="${SIZE_GB:-4}"
+# 1GB, not 4.
+#
+# The root filesystem that goes in it is nine megabytes. expandfs grows
+# the partition and the filesystem to the end of whatever disk the image
+# is written to, on the first boot - that is the entire reason it
+# exists - so the image only has to be big enough to hold what it ships
+# with.
+#
+# Getting this wrong is paid for twice at build time: the intermediate
+# filesystem is built beside the image at full size, so a 4GB image
+# means writing eight gigabytes to package nine megabytes, and it is
+# also four gigabytes for somebody to download.
+#
+#   SIZE_GB=8 ./tools/mkdisk.sh    if a big one is wanted anyway
+SIZE_GB="${SIZE_GB:-1}"
 SECTOR=512
 ESP_MB=256
 ESP_START=8192                          # 4MiB in, as the other images do
@@ -100,17 +114,30 @@ step "루트 파일시스템 (ext4, ${ROOT_LABEL})"
 
 TOTAL_SECTORS=$(( SIZE_GB * 1024 * 1024 * 1024 / SECTOR ))
 ROOT_SECTORS=$(( TOTAL_SECTORS - ROOT_START ))
-ROOT_IMG="${OUT_DIR}/.root.img"
 
 mkdir -p "$OUT_DIR"
-rm -f "$ROOT_IMG"
-truncate -s $(( ROOT_SECTORS * SECTOR )) "$ROOT_IMG"
+rm -f "$IMAGE"
+truncate -s $(( TOTAL_SECTORS * SECTOR )) "$IMAGE"
 
-# -d takes a directory straight in, which keeps ownership and modes
+# Built straight into the image at the partition's offset, with no
+# intermediate file.
+#
+# The obvious way is to mkfs a separate file and dd it in, and it costs
+# twice the disk and twice the time: a 1GB image needs a 1GB filesystem
+# beside it, and then every block is read and written again. mke2fs
+# takes -E offset= precisely so that this is unnecessary. On a machine
+# with room to spare that is merely wasteful; on one without, it is the
+# difference between a build that finishes and one that fills the disk
+# at 90% and leaves a corrupt image behind.
+#
+# -d takes the directory straight in, which keeps ownership and modes
 # without a loop mount - and a loop mount needs privileges a build
 # should not assume it has.
-mkfs.ext4 -q -F -L "$ROOT_LABEL" -m 1 -d "$ROOTFS" "$ROOT_IMG"
-log "$(( ROOT_SECTORS * SECTOR / 1024 / 1024 ))MiB"
+mkfs.ext4 -q -F -L "$ROOT_LABEL" -m 1 \
+    -E offset=$(( ROOT_START * SECTOR )) \
+    -d "$ROOTFS" \
+    "$IMAGE" $(( ROOT_SECTORS * SECTOR / 1024 ))k
+log "$(( ROOT_SECTORS * SECTOR / 1024 / 1024 ))MiB  (이미지 안에 직접)"
 
 # ── 4. the EFI system partition ──────────────────────────────────
 step "EFI 시스템 파티션 (FAT32, ${ESP_LABEL})"
@@ -138,15 +165,12 @@ rm -f "${OUT_DIR}/.cmdline.txt"
 
 # ── 5. assemble ──────────────────────────────────────────────────
 step "이미지 조립"
-rm -f "$IMAGE"
-truncate -s $(( TOTAL_SECTORS * SECTOR )) "$IMAGE"
-dd if="$ESP_IMG"  of="$IMAGE" bs=$SECTOR seek=$ESP_START  conv=notrunc status=none
-dd if="$ROOT_IMG" of="$IMAGE" bs=$SECTOR seek=$ROOT_START conv=notrunc status=none
+dd if="$ESP_IMG"  of="$IMAGE" bs=1M seek=$(( ESP_START / 2048 )) conv=notrunc,sparse status=none
 
 python3 "${REPO_ROOT}/tools/write-mbr.py" "$IMAGE" \
     "$ESP_START" "$ESP_SECTORS" "$ROOT_START" "$ROOT_SECTORS"
 
-rm -f "$ESP_IMG" "$ROOT_IMG"
+rm -f "$ESP_IMG"
 
 step "결과"
 log "$(stat -c%s "$IMAGE") bytes  ${IMAGE}"

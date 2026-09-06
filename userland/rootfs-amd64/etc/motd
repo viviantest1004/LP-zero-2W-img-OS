@@ -1,4 +1,4 @@
-linux-LP OS
+LP-zero OS
 
   bare-metal firmware -> Linux kernel -> own libc -> own init -> own shell
 

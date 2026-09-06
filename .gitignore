@@ -56,3 +56,7 @@ repo/
 .tmp.config*
 .merge_tmp.config*
 keys/
+
+# The disk-rooted kernel's output. Ten megabytes of build product that
+# mkdisk.sh remakes; the config that produced it is in kernel/.
+kernel/out-amd64-disk/
