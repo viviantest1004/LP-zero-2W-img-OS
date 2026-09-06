@@ -637,3 +637,16 @@ window.lp-quick.csd {
 window.lp-quick button image {
   -gtk-icon-size: 16px;
 }
+
+/* ── 칩 ───────────────────────────────────────────────────────────
+ *
+ * 퀵메뉴 맨 위의 배터리처럼, 숫자 하나가 그 자체로 하나의 정보인
+ * 자리. 목업 3-2 의 왼쪽 위다. 배터리가 없는 기계에서는 이 칩이
+ * 아예 그려지지 않으므로, 빈 알약이 남는 일은 없다. */
+.lp-chip {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-feature-settings: "tnum";
+}

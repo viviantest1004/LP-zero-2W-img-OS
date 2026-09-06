@@ -436,6 +436,61 @@ static GtkWidget *expand_dnd(Quick *q)
     return box;
 }
 
+/* 배터리. 있는 기계에서만 값이 있다.
+ *
+ * 없으면 NULL 을 돌려주고, 부르는 쪽은 아무것도 그리지 않는다.
+ * "배터리 없음" 이라고 적는 자리를 두지 않는 것이 요점이다 -
+ * 데스크탑에서 그 줄은 읽을 이유가 없고, 노트북에서만 의미가 있는
+ * 것은 노트북에서만 보이면 된다. */
+static char *battery_now(void)
+{
+    GDir *d = g_dir_open("/sys/class/power_supply", 0, NULL);
+    if (!d)
+        return NULL;
+
+    char *out = NULL;
+    const char *name;
+    while ((name = g_dir_read_name(d)) && !out) {
+        char *tp = g_strdup_printf("/sys/class/power_supply/%s/type", name);
+        char *t  = slurp(tp);
+        g_free(tp);
+        if (t && g_strcmp0(t, "Battery") == 0) {
+            char *pp = g_strdup_printf("/sys/class/power_supply/%s/present",
+                                       name);
+            char *cp = g_strdup_printf("/sys/class/power_supply/%s/capacity",
+                                       name);
+            char *sp = g_strdup_printf("/sys/class/power_supply/%s/status",
+                                       name);
+            char *pr = slurp(pp), *c = slurp(cp), *st = slurp(sp);
+
+            /* 배터리라고 적힌 자리가 있다고 배터리가 있는 것은 아니다.
+             *
+             * 가상 머신은 ACPI 배터리 슬롯을 만들어 두고 그 안을 비워
+             * 둔다: present 는 0 이거나, 용량이 0 이고 상태가 Unknown
+             * 이다. 그것을 그대로 그리면 화면에 "0%" 가 떠서, 배터리가
+             * 없는 기계가 다 닳은 노트북처럼 보인다. */
+            gboolean real = TRUE;
+            if (pr && g_strcmp0(pr, "0") == 0)
+                real = FALSE;
+            if (!c || !*c)
+                real = FALSE;
+            else if (atoi(c) == 0 &&
+                     (!st || g_strcmp0(st, "Unknown") == 0 || !*st))
+                real = FALSE;
+
+            if (real)
+                out = g_strdup_printf("%s%s%%",
+                                      (st && g_strcmp0(st, "Charging") == 0)
+                                      ? "⚡ " : "", c);
+            g_free(pr); g_free(c); g_free(st);
+            g_free(pp); g_free(cp); g_free(sp);
+        }
+        g_free(t);
+    }
+    g_dir_close(d);
+    return out;
+}
+
 /* 전원 모드. cpufreq 가 있는 기계에서만 값이 있다. */
 static char *governor(void)
 {
@@ -657,6 +712,17 @@ static void build_panel(GtkApplication *gapp, gpointer data)
     gtk_widget_set_hexpand(heading, TRUE);
     gtk_box_append(GTK_BOX(top), heading);
 
+    /* 배터리는 있을 때만. 3-2 의 왼쪽 위 자리다. */
+    char *bat = battery_now();
+    if (bat) {
+        GtkWidget *chip = gtk_label_new(bat);
+        gtk_widget_add_css_class(chip, "lp-chip");
+        gtk_widget_set_valign(chip, GTK_ALIGN_CENTER);
+        gtk_widget_set_margin_end(chip, 6);
+        gtk_box_append(GTK_BOX(top), chip);
+        g_free(bat);
+    }
+
     GtkWidget *shut = gtk_button_new_from_icon_name("window-close-symbolic");
     gtk_button_set_has_frame(GTK_BUTTON(shut), FALSE);
     gtk_widget_set_tooltip_text(shut, T("Close", "닫기"));
@@ -761,11 +827,17 @@ static void build_panel(GtkApplication *gapp, gpointer data)
             dnd_on() ? T("on", "켜짐") : T("off", "꺼짐"),
             toggle_dnd, expand_dnd);
 
+    /* 전원 모드는 cpufreq 가 있는 기계에만 있다. 없을 때 "해당 없음"
+     * 이라고 적어 두었었는데, 그 줄은 아무에게도 쓸모가 없다 - 읽고
+     * 나서 할 수 있는 일이 없고, 자리는 차지한다. 없는 것은 없는
+     * 채로 둔다. 배터리도 같은 이유로 배터리가 있는 기계에서만
+     * 나온다. */
     char *gov = governor();
-    add_row(q, T("Power mode", "전원"), NULL,
-            gov ? gov : T("not applicable", "해당 없음"),
-            NULL, expand_power_mode);
-    g_free(gov);
+    if (gov) {
+        add_row(q, T("Power mode", "전원 모드"), NULL, gov,
+                NULL, expand_power_mode);
+        g_free(gov);
+    }
 
     GtkWidget *sep2 = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_widget_set_margin_top(sep2, 4);

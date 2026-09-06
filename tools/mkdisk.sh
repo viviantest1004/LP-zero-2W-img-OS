@@ -106,10 +106,27 @@ log "$(du -sh "$TINY" | cut -f1)  ($TINY)"
 # identical result.
 step "커널 (디스크 루트용)"
 BZ_EXISTING="${KERNEL_OUT}/bzImage"
-if [[ -f "$BZ_EXISTING" && \
-      ! "${REPO_ROOT}/userland/bin-amd64/preinit" -nt "$BZ_EXISTING" ]]; then
+# 커널 안에 있는 것은 preinit 하나다. 그래서 다시 지어야 하는지는
+# preinit 의 **내용**이 바뀌었는지로 정한다.
+#
+# 전에는 시각(-nt)으로 정했고, 그것은 틀린 질문이었다: userland 를
+# 한 번 make 하면 libc 를 건드리지 않은 프로그램까지 전부 다시
+# 링크되어 preinit 의 시각이 앞선다. 내용은 한 바이트도 다르지
+# 않은데 커널을 다시 지으라고 하고, 커널 소스가 없는 기계에서는
+# 거기서 빌드가 멈춘다.
+PREINIT="${REPO_ROOT}/userland/bin-amd64/preinit"
+STAMP="${KERNEL_OUT}/preinit.sha256"
+NOW_SUM="$(sha256sum "$PREINIT" 2>/dev/null | cut -d' ' -f1)"
+OLD_SUM="$(cat "$STAMP" 2>/dev/null || true)"
+
+if [[ -f "$BZ_EXISTING" && -n "$NOW_SUM" && "$NOW_SUM" == "$OLD_SUM" ]]; then
     log "이미 있는 것을 씁니다 ($(stat -c%s "$BZ_EXISTING") bytes)"
     log "다시 빌드하려면 지우십시오: rm ${BZ_EXISTING}"
+elif [[ -f "$BZ_EXISTING" && -z "$OLD_SUM" && \
+        ! "$PREINIT" -nt "$BZ_EXISTING" ]]; then
+    # 도장이 아직 없는 예전 빌드. 시각으로 판단하고 도장을 남긴다.
+    log "이미 있는 것을 씁니다 ($(stat -c%s "$BZ_EXISTING") bytes)"
+    printf '%s\n' "$NOW_SUM" > "$STAMP"
 else
 LP_ARCH=amd64 \
 LP_ROOTFS_DIR="$(python3 -c "import os,sys;print(os.path.relpath(sys.argv[1], os.path.join(sys.argv[2],'userland')))" "$TINY" "$REPO_ROOT")" \
@@ -121,6 +138,7 @@ fi
 
 BZIMAGE="${KERNEL_OUT}/bzImage"
 [[ -f "$BZIMAGE" ]] || die "${BZIMAGE} 가 만들어지지 않았습니다"
+[[ -n "$NOW_SUM" ]] && printf '%s\n' "$NOW_SUM" > "${KERNEL_OUT}/preinit.sha256"
 log "$(stat -c%s "$BZIMAGE") bytes"
 
 # ── 3. the root filesystem ───────────────────────────────────────

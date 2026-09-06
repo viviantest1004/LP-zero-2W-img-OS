@@ -1111,24 +1111,46 @@ static GtkWidget *page_power(void)
             char *t  = slurp(tp);
             g_free(tp);
             if (t && g_strcmp0(t, "Battery") == 0) {
+                char *pp = g_strdup_printf("/sys/class/power_supply/%s/present", name);
                 char *cp = g_strdup_printf("/sys/class/power_supply/%s/capacity", name);
                 char *sp = g_strdup_printf("/sys/class/power_supply/%s/status", name);
+                char *pr = slurp(pp);
                 cap    = slurp(cp);
                 status = slurp(sp);
-                g_free(cp); g_free(sp);
+
+                /* 빈 슬롯은 배터리가 아니다. 가상 머신은 ACPI 배터리
+                 * 자리를 만들어 두고 비워 두므로, 그대로 믿으면 이
+                 * 화면이 "배터리 0%" 라고 말한다. present 가 0 이거나,
+                 * 용량이 0 인데 상태가 Unknown 이면 없는 것이다. */
+                gboolean empty = (pr && g_strcmp0(pr, "0") == 0) ||
+                                 !cap || !*cap ||
+                                 (atoi(cap) == 0 &&
+                                  (!status || !*status ||
+                                   g_strcmp0(status, "Unknown") == 0));
+                if (empty) {
+                    g_free(cap); g_free(status);
+                    cap = NULL; status = NULL;
+                }
+                g_free(pr); g_free(pp); g_free(cp); g_free(sp);
             }
             g_free(t);
         }
         g_dir_close(d);
     }
 
+    /* 배터리가 없는 기계에서는 배터리 이야기를 아예 하지 않는다.
+     *
+     * 전에는 "배터리가 없습니다" 라고 적어 두었다. 사실이지만 없는
+     * 것을 굳이 말하는 자리이고, 데스크탑에서 그 줄을 읽고 좋아지는
+     * 사람은 없다. 상단바의 배터리 아이콘도 같은 이유로 사라진다 -
+     * 없는 것은 자리를 차지하지 않는 것이 맞다. */
     char *sub;
     if (cap)
         sub = g_strdup_printf(T("Battery %s%%%s", "배터리 %s%%%s"), cap,
                               (status && g_strcmp0(status, "Charging") == 0)
                               ? T(" · charging", " · 충전 중") : "");
     else
-        sub = g_strdup(T("No battery. This machine runs on mains power", "배터리가 없습니다. 전원에 연결된 채로 동작합니다"));
+        sub = g_strdup(T("Screen and sleep", "화면과 절전"));
 
     GtkWidget *page = page_new(T("Power", "전원"), sub);
     g_free(sub);
