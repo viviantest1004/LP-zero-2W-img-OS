@@ -32,6 +32,10 @@ typedef struct {
      * "no file after the redirection". */
     char *redir_err;
     bool  err_append;
+    /* `cmd <<END` 로 온 본문의 번호. -1 이면 없다. 본문은 읽는 쪽에서
+     * 미리 모아 두고 여기에는 번호만 온다 - 그 시점에 파일이 없기
+     * 때문이다. */
+    int   heredoc;
 } cmd_t;
 
 /* How this pipeline joins onto the one before it */
@@ -42,6 +46,11 @@ typedef struct {
     int    ncmds;
     link_t link;        /* the operator in front of this pipeline */
     bool   background;  /* it ended in & - do not wait for it */
+    /* `! cmd` - 결과를 뒤집는다. `if ! test -f x ; then` 이 그 쓰임의
+     * 거의 전부이고, 없으면 셸이 "!: command not found" 를 찍은 뒤
+     * **참으로** 이어 간다 - 조건이 통째로 뒤집힌 채 계속 도는 것이라
+     * 오류 한 줄보다 훨씬 나쁘다. */
+    bool   negate;
 } pipeline_t;
 
 /* /data/bin is on the data partition. Large programs such as Python live
@@ -91,6 +100,7 @@ typedef enum {
     TOK_SEMI,           /* ;  */
     TOK_AMP,            /* &  - run the pipeline before it in the background */
     TOK_REDIR_IN,
+    TOK_REDIR_HERE,
     TOK_REDIR_OUT,
     TOK_REDIR_APPEND,
     TOK_REDIR_ERR,          /* 2>   */
@@ -121,6 +131,41 @@ static char *arena_push(const char *src, size_t len)
     return dst;
 }
 
+/* ── here-document ────────────────────────────────────────────────────
+ *
+ *     cat <<END
+ *     ...
+ *     END
+ *
+ * 없을 때는 `<` 두 개로 읽혀서 "sh: < needs a file after it" 이 나고
+ * 본문의 줄들이 하나씩 명령으로 실행됐다. usage() 를 가진 스크립트는
+ * 거의 다 이 꼴을 쓰므로 --help 하나가 스크립트 전체를 망가뜨렸다.
+ *
+ * 본문은 파일이 아니라 파이프로 넘긴다. /tmp 가 쓸 수 있는지 모르는
+ * 시점(부팅 초기)에도 돌아야 하고, 지울 임시 파일도 남지 않는다.
+ * 파이프 버퍼(보통 64KB)보다 큰 본문은 잘린다고 말해 준다 - 조용히
+ * 멈추는 것보다 낫다. */
+#define MAX_HEREDOCS 256
+#define HEREDOC_MAX  (60 * 1024)
+
+/* 본문은 셸이 살아 있는 동안 놓지 않는다.
+ *
+ * 처음에는 줄 하나를 실행하고 나면 놓았고, 그러면 함수 안의
+ * here-document 가 두 번째 호출부터 사라졌다: 본문을 모으는 것은
+ * 함수를 **정의할** 때이고 쓰는 것은 **부를** 때인데, 그 사이에
+ * 놓아 버리기 때문이다. usage() 를 한 번 부르면 그 다음부터는
+ * 도움말이 비어 있는 셸이 된다.
+ *
+ * 그래서 놓지 않는다. 값은 본문 몇 KB 짜리 256개가 상한이고, 그
+ * 정도는 이 셸이 도는 어떤 기계에서도 문제가 아니다. */
+typedef struct {
+    char *body;
+    bool  expand;       /* 구분자에 따옴표가 없었다 */
+} heredoc_t;
+
+static heredoc_t heredocs[MAX_HEREDOCS];
+static int       nheredocs = 0;
+
 /* Set by next_token, read by parse_line: a quoted word is never expanded
  * into file names, and a word with no * or ? never needs looking at.
  * tok_from_cmd marks a word that came out of $(...) unquoted, which is
@@ -128,6 +173,17 @@ static char *arena_push(const char *src, size_t len)
 static bool tok_quoted   = false;
 static bool tok_has_glob = false;
 static bool tok_from_cmd = false;
+/* Where the word's first quote fell, as an offset into the finished
+ * word; SIZE_MAX if it had none.
+ *
+ * This exists for one thing: telling out="" from "out=". Both are words
+ * containing a quote, and for a long time the shell refused both as
+ * assignments on that ground - so `out=""` ran as a command and printed
+ * "sh: out=: command not found", which is what the top bar's mode label
+ * did on every refresh. What decides an assignment is whether the NAME
+ * is quoted, not whether the value is; the value is quoted nearly every
+ * time somebody writes one. */
+static size_t tok_quote_at = (size_t)-1;
 
 static void run_logical_line(char *line);
 
@@ -184,13 +240,23 @@ static char script_name[128] = "sh";
  * fixed arena for words and fixed tables for jobs and pipelines, and a
  * script that needs more than sixteen functions of forty lines is one
  * that wants Python, which is on the data partition. */
-#define MAX_FUNCS       16
-#define MAX_FUNC_LINES  40
+/* 40줄이었다. 그 숫자가 어디서 걸리는지는 dpkg 가 알려 줬다:
+ * dpkg-maintscript-helper 의 dir_to_symlink() 가 158줄이고, 그것이
+ * 잘리면 함수 한가운데가 사라진 채로 실행돼서 "sh: while without do
+ * or done" 같은, 원인과 아무 상관 없어 보이는 말이 나온다. 그러면
+ * 그 패키지는 설치되지 않고, 왜 안 되는지는 아무 데도 적히지 않는다.
+ *
+ * 본문을 char[MAX_LINE] 배열이 아니라 strdup 한 포인터로 들고 있으니
+ * 한도를 키워도 값이 비싸지 않다: 쓰지 않는 함수 자리는 포인터 여덟
+ * 바이트다. 예전 방식이었다면 64×256×1024 = 16MB 를 BSS 에 늘 잡고
+ * 있어야 했다. */
+#define MAX_FUNCS       64
+#define MAX_FUNC_LINES  256
 
 typedef struct {
-    char name[64];
-    char lines[MAX_FUNC_LINES][MAX_LINE];
-    int  nlines;
+    char  name[64];
+    char *lines[MAX_FUNC_LINES];      /* strdup - 쓴 만큼만 */
+    int   nlines;
 } func_t;
 
 static func_t funcs[MAX_FUNCS];
@@ -338,6 +404,70 @@ static size_t expand_backtick(char **sp, char *buf, size_t n, size_t size)
  * sets it - comes much further down. */
 static pid_t last_bg_pid = 0;
 
+static bool   glob_match(const char *pat, const char *name);
+static size_t expand_dollar(char **sp, char *buf, size_t n, size_t size);
+
+/* 문자열 하나를 확장해서 out 에 담는다. ${VAR:-$OTHER} 처럼 기본값
+ * 자리에 또 다른 확장이 오는 경우를 위해 있다. */
+static void expand_str(const char *in, char *out, size_t size)
+{
+    size_t n = 0;
+    char  *p = (char *)in;
+    while (*p && n + 1 < size) {
+        if (*p == '$') {
+            n = expand_dollar(&p, out, n, size - 1);
+        } else if (*p == '\'' || *p == '"') {
+            char q = *p++;
+            while (*p && *p != q) {
+                if (n + 1 < size) out[n++] = *p;
+                p++;
+            }
+            if (*p == q) p++;
+        } else {
+            out[n++] = *p++;
+        }
+    }
+    out[n] = '\0';
+}
+
+/* ${VAR#pat} 와 ${VAR%pat} 는 앞뒤를 깎는다. shortest 면 가장 짧게
+ * 맞는 것을, 아니면 가장 길게 맞는 것을 뗀다. */
+static void strip_prefix(char *val, const char *pat, bool longest)
+{
+    size_t len = strlen(val);
+    size_t best = 0;
+    bool   found = false;
+    for (size_t i = 0; i <= len; i++) {
+        char save = val[i];
+        val[i] = '\0';
+        bool hit = glob_match(pat, val);
+        val[i] = save;
+        if (hit) {
+            best = i;
+            found = true;
+            if (!longest) break;
+        }
+    }
+    if (found && best)
+        memmove(val, val + best, len - best + 1);
+}
+
+static void strip_suffix(char *val, const char *pat, bool longest)
+{
+    size_t len = strlen(val);
+    size_t best = len;
+    bool   found = false;
+    for (size_t i = len + 1; i-- > 0; ) {
+        if (glob_match(pat, val + i)) {
+            best = i;
+            found = true;
+            if (!longest) break;
+        }
+    }
+    if (found && best < len)
+        val[best] = '\0';
+}
+
 static size_t expand_dollar(char **sp, char *buf, size_t n, size_t size)
 {
     char *s = *sp + 1;              /* step over the $ */
@@ -419,26 +549,183 @@ static size_t expand_dollar(char **sp, char *buf, size_t n, size_t size)
         return n;
     }
 
+    /* ── ${...} ──────────────────────────────────────────────────
+     *
+     * 여기 있는 것들이 없을 때 무슨 일이 났는지 적어 둔다: 셸은
+     * ${FOO:-기본값} 에서 $FOO 만 확장하고 나머지를 **글자 그대로**
+     * 남겼다. 그래서 값이 없을 때 `:-기본값}` 이라는 문자열이 변수에
+     * 들어갔다. 오류가 아니라 쓰레기가 들어가는 쪽이라 훨씬 나쁘다.
+     *
+     *   ${VAR}          그냥 값
+     *   ${#VAR}         길이
+     *   ${VAR:-w}       없거나 비었으면 w      ${VAR-w}   없으면 w
+     *   ${VAR:=w}       그리고 그 값을 놓는다  ${VAR=w}
+     *   ${VAR:+w}       있고 비지 않았으면 w   ${VAR+w}
+     *   ${VAR:?w}       없으면 w 를 찍고 만다  ${VAR?w}
+     *   ${VAR#pat}      앞에서 짧게 깎기       ${VAR##pat}  길게
+     *   ${VAR%pat}      뒤에서 짧게 깎기       ${VAR%%pat}  길게
+     */
     bool braced = (*s == '{');
-    if (braced) s++;
+    if (!braced) {
+        char name[64];
+        size_t k = 0;
+        while (is_name_char(*s) && k < sizeof(name) - 1)
+            name[k++] = *s++;
+        name[k] = '\0';
 
-    char name[64];
+        if (k == 0) {               /* a bare $: leave it as typed */
+            if (n < size) buf[n++] = '$';
+            *sp = s;
+            return n;
+        }
+        const char *val = getenv(name);
+        if (val)
+            while (*val && n < size) buf[n++] = *val++;
+        *sp = s;
+        return n;
+    }
+
+    s++;                            /* step over the { */
+
+    bool want_len = false;
+    if (*s == '#' && (is_name_char(s[1]) || s[1] == '@' || s[1] == '*')) {
+        want_len = true;
+        s++;
+    }
+
+    char   name[64];
     size_t k = 0;
-    while ((is_name_char(*s)) && k < sizeof(name) - 1)
+    while (is_name_char(*s) && k < sizeof(name) - 1)
         name[k++] = *s++;
     name[k] = '\0';
 
-    if (braced && *s == '}') s++;
+    /* ${1}, ${@}, ${#} - 이름이 아닌 것들. */
+    char special = '\0';
+    if (k == 0 && (*s == '@' || *s == '*' || *s == '?' || *s == '!' ||
+                   *s == '#'))
+        special = *s++;
 
-    if (k == 0) {                   /* a bare $: leave it as typed */
+    /* 연산자. */
+    char op[3] = { 0, 0, 0 };
+    if (*s == ':' && (s[1] == '-' || s[1] == '=' || s[1] == '+' ||
+                      s[1] == '?')) {
+        op[0] = ':'; op[1] = s[1]; s += 2;
+    } else if (*s == '-' || *s == '=' || *s == '+' || *s == '?') {
+        op[0] = *s++;
+    } else if (*s == '#' || *s == '%') {
+        op[0] = *s++;
+        if (*s == op[0]) op[1] = *s++;
+    }
+
+    /* 연산자의 오른쪽. 짝이 되는 } 까지. */
+    char   word[MAX_LINE];
+    size_t wn = 0;
+    int    depth = 1;
+    while (*s) {
+        if (*s == '{') depth++;
+        else if (*s == '}') { if (--depth == 0) break; }
+        if (wn + 1 < sizeof word) word[wn++] = *s;
+        s++;
+    }
+    word[wn] = '\0';
+    if (*s == '}') s++;
+
+    /* 값을 고른다. */
+    char        vbuf[MAX_LINE];
+    const char *val = NULL;
+    if (special == '@' || special == '*') {
+        size_t vn = 0;
+        for (int i = 0; i < pos_count; i++) {
+            if (i && vn + 1 < sizeof vbuf) vbuf[vn++] = ' ';
+            for (const char *v = pos_args[i]; *v && vn + 1 < sizeof vbuf; v++)
+                vbuf[vn++] = *v;
+        }
+        vbuf[vn] = '\0';
+        val = vbuf;
+    } else if (special == '?') {
+        snprintf(vbuf, sizeof vbuf, "%d", last_status);
+        val = vbuf;
+    } else if (special == '!') {
+        snprintf(vbuf, sizeof vbuf, "%d", (int)last_bg_pid);
+        val = vbuf;
+    } else if (special == '#') {
+        snprintf(vbuf, sizeof vbuf, "%d", pos_count);
+        val = vbuf;
+    } else if (k == 1 && name[0] >= '0' && name[0] <= '9') {
+        int idx = name[0] - '0';
+        val = (idx == 0) ? script_name
+            : (idx <= pos_count ? pos_args[idx - 1] : NULL);
+    } else if (k > 0) {
+        val = getenv(name);
+    } else {
         if (n < size) buf[n++] = '$';
         *sp = s;
         return n;
     }
 
-    const char *val = getenv(name);
-    if (val)
-        while (*val && n < size) buf[n++] = *val++;
+    bool empty = (val == NULL || *val == '\0');
+    bool unset = (val == NULL);
+
+    char out[MAX_LINE];
+    out[0] = '\0';
+    if (val) strlcpy(out, val, sizeof out);
+
+    if (op[0] == ':' || op[0] == '-' || op[0] == '=' || op[0] == '+' ||
+        op[0] == '?') {
+        char which   = (op[0] == ':') ? op[1] : op[0];
+        bool trigger = (op[0] == ':') ? empty : unset;
+
+        /* 오른쪽은 쓸 때만 확장한다.
+         *
+         * `${DPKG_ROOT:+$(realpath "$DPKG_ROOT")}` 이 그 이유다.
+         * 값이 없을 때 이 자리는 빈 문자열이어야 하는데, 미리
+         * 확장하면 realpath 가 빈 인자로 **실제로 실행되어**
+         * "realpath: '': No such file or directory" 를 찍는다.
+         * 결과는 버려지지만 오류는 남고, 스크립트는 아무 잘못이
+         * 없는데 오류를 내는 것처럼 보인다. */
+        bool need = (which == '+') ? !trigger : trigger;
+
+        char w[MAX_LINE];
+        w[0] = '\0';
+        if (need)
+            expand_str(word, w, sizeof w);
+
+        if (which == '-') {
+            if (trigger) strlcpy(out, w, sizeof out);
+        } else if (which == '=') {
+            if (trigger) {
+                strlcpy(out, w, sizeof out);
+                if (k > 0) setenv(name, w, 1);
+            }
+        } else if (which == '+') {
+            if (trigger) out[0] = '\0';
+            else         strlcpy(out, w, sizeof out);
+        } else if (which == '?') {
+            if (trigger) {
+                dprintf(STDERR_FILENO, "sh: %s: %s\n",
+                        k ? name : "parameter",
+                        w[0] ? w : "not set");
+                out[0] = '\0';
+            }
+        }
+    } else if (op[0] == '#') {
+        char pat[MAX_LINE];
+        expand_str(word, pat, sizeof pat);
+        strip_prefix(out, pat, op[1] == '#');
+    } else if (op[0] == '%') {
+        char pat[MAX_LINE];
+        expand_str(word, pat, sizeof pat);
+        strip_suffix(out, pat, op[1] == '%');
+    }
+
+    if (want_len) {
+        char num[24];
+        snprintf(num, sizeof num, "%d", (int)strlen(out));
+        strlcpy(out, num, sizeof out);
+    }
+
+    for (const char *q = out; *q && n < size; q++)
+        buf[n++] = *q;
 
     *sp = s;
     return n;
@@ -465,6 +752,12 @@ static tok_type_t next_token(char **p, char **word_out)
         *p = s + 2;
         return TOK_REDIR_ERR;
     }
+    /* << 은 여기서 잡아야 한다. < 두 개로 읽히면 본문이 명령이 된다. */
+    if (*s == '<' && s[1] == '<') {
+        *p = s + 2;
+        if (**p == '-') (*p)++;            /* <<- 는 읽는 쪽이 처리했다 */
+        return TOK_REDIR_HERE;
+    }
     if (*s == '<') { *p = s + 1; return TOK_REDIR_IN; }
     if (*s == '>') {
         if (s[1] == '>') { *p = s + 2; return TOK_REDIR_APPEND; }
@@ -488,6 +781,7 @@ static tok_type_t next_token(char **p, char **word_out)
     tok_quoted = false;
     tok_has_glob = false;
     tok_from_cmd = false;
+    tok_quote_at = (size_t)-1;
 
     /* ~ or ~/... at the start of a word. Not ~user: there is one user. */
     if (*s == '~' && (s[1] == '\0' || s[1] == '/' || is_space(s[1]))) {
@@ -500,6 +794,7 @@ static tok_type_t next_token(char **p, char **word_out)
            *s != '|' && *s != '<' && *s != '>' && *s != ';' && *s != '&') {
         if (*s == '\'') {                 /* single quotes: nothing expands */
             tok_quoted = true;
+            if (tok_quote_at == (size_t)-1) tok_quote_at = n;
             s++;
             while (*s && *s != '\'') {
                 if (n < sizeof(buf)) buf[n++] = *s;
@@ -508,6 +803,7 @@ static tok_type_t next_token(char **p, char **word_out)
             if (*s == '\'') s++;
         } else if (*s == '"') {
             tok_quoted = true;
+            if (tok_quote_at == (size_t)-1) tok_quote_at = n;
             s++;
             while (*s && *s != '"') {
                 if (*s == '$') {
@@ -723,6 +1019,7 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
 
     cmd_t *c = &pl->cmds[0];
     memset(c, 0, sizeof(*c));
+    c->heredoc = -1;
 
     char *p = line;
     for (;;) {
@@ -738,9 +1035,23 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
                 return -1;
             }
 
+            /* `!` 이 명령 자리의 첫 낱말이면 결과를 뒤집으라는 뜻이다.
+             * 그 자리가 아니면 그냥 느낌표다 - `echo !` 는 ! 를 찍는다. */
+            if (c->argc == 0 && !tok_quoted && strcmp(word, "!") == 0) {
+                pl->negate = !pl->negate;
+                continue;
+            }
+
             /* NAME=value, but only in front of the command. Anywhere else
-             * it is an ordinary argument: echo A=B has to print A=B. */
-            if (c->argc == 0 && !tok_quoted && try_assignment(word)) {
+             * it is an ordinary argument: echo A=B has to print A=B.
+             *
+             * The name has to be unquoted; the value does not. So the
+             * test is where the first quote fell, not whether there was
+             * one - out="" and X="$Y" are assignments, "X=1" is not. */
+            const char *eqp = strchr(word, '=');
+            if (c->argc == 0 && eqp &&
+                (size_t)(eqp - word) < tok_quote_at &&
+                try_assignment(word)) {
                 assigned = true;
                 continue;
             }
@@ -785,6 +1096,7 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
             }
             c = &pl->cmds[pl->ncmds++];
             memset(c, 0, sizeof(*c));
+            c->heredoc = -1;
             continue;
         }
 
@@ -820,6 +1132,7 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
                       : (t == TOK_OR)  ? LINK_OR : LINK_SEQ;
             c = &pl->cmds[0];
             memset(c, 0, sizeof(*c));
+            c->heredoc = -1;
             continue;
         }
 
@@ -857,13 +1170,23 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
         if (next_token(&p, &file) != TOK_WORD) {
             dprintf(STDERR_FILENO,
                     "sh: %s needs a file after it\n",
+                    (t == TOK_REDIR_HERE)      ? "<<" :
                     (t == TOK_REDIR_IN)        ? "<"  :
                     (t == TOK_REDIR_ERR)       ? "2>" :
                     (t == TOK_REDIR_ERR_APPEND)? "2>>":
                     (t == TOK_REDIR_APPEND)    ? ">>" : ">");
             return -1;
         }
-        if (t == TOK_REDIR_IN) {
+        if (t == TOK_REDIR_HERE) {
+            /* 읽는 쪽이 본문을 모아 두고 여기에는 @번호 만 남겼다. */
+            c->heredoc = (file[0] == '@') ? atoi(file + 1) : -1;
+            if (c->heredoc < 0 || c->heredoc >= nheredocs) {
+                dprintf(STDERR_FILENO,
+                        "sh: << without a body - the delimiter never"
+                        " appeared\n");
+                c->heredoc = -1;
+            }
+        } else if (t == TOK_REDIR_IN) {
             c->redir_in = file;
         } else if (t == TOK_REDIR_ERR || t == TOK_REDIR_ERR_APPEND) {
             c->redir_err  = file;
@@ -893,6 +1216,8 @@ static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
 /* ── Builtins ───────────────────────────────────────────────────── */
 
 
+static void source_file(const char *path);   /* `. file` 이 쓴다 */
+
 static const char *BUILTINS[] = {
     "break", "continue",
     /* "help" is deliberately not here. It is /bin/help, a real program,
@@ -900,8 +1225,78 @@ static const char *BUILTINS[] = {
      * builtin would only ever know what was hardcoded into the shell. */
     "exit", "cd", "pwd", "echo", "env", "reboot", "poweroff", "halt",
     "test", "[", "true", "false", ":",
-    "read", "shift", "export", "set", NULL
+    "read", "shift", "export", "set", "local", "unset", ".", "source", NULL
 };
+
+/* ── local ───────────────────────────────────────────────────────────
+ *
+ * 이 셸에는 변수 하나의 저장소밖에 없다 - 환경이다. 함수 안에서 놓은
+ * 이름은 밖에서도 보이고, 그래서 두 함수가 같은 이름을 쓰면 서로를
+ * 덮는다. `local` 이 하는 일은 그 덮어씀을 함수가 끝날 때 되돌리는
+ * 것이다.
+ *
+ * 구현은 원래 값을 쌓아 두었다가 함수가 끝날 때 되돌리는 것이 전부다.
+ * 진짜 지역 변수는 아니다 - 함수가 부르는 프로그램은 여전히 그 값을
+ * 환경에서 본다. dash 도 그 점은 같고(local 도 export 된다), 셸
+ * 스크립트가 local 에 기대하는 것은 "밖을 망가뜨리지 않는다" 이지
+ * "자식에게 숨긴다" 가 아니다.
+ *
+ * 없을 때 무슨 일이 생기냐면: dpkg 의 관리자 스크립트가 전부
+ * `local CONFFILE="$1"` 로 시작하고, local 을 모르는 셸은 그 줄을
+ * "local 이라는 명령을 CONFFILE=... 인자로 부른다" 로 읽는다.
+ * 명령이 없으니 대입은 일어나지 않고, 함수는 빈 변수로 계속 돈다. */
+#define MAX_LOCALS 128
+
+typedef struct {
+    char  name[64];
+    char *old;          /* 함수에 들어오기 전 값. 없었으면 NULL */
+    bool  had;
+} local_save_t;
+
+static local_save_t local_stack[MAX_LOCALS];
+static int          nlocals = 0;
+static int          in_function = 0;
+
+/* 이름 하나를 이 함수의 것으로 표시하고 값을 놓는다. */
+static void local_declare(const char *arg)
+{
+    char name[64];
+    const char *eq = strchr(arg, '=');
+    size_t len = eq ? (size_t)(eq - arg) : strlen(arg);
+    if (len >= sizeof name) len = sizeof name - 1;
+    memcpy(name, arg, len);
+    name[len] = '\0';
+    if (!name[0])
+        return;
+
+    if (nlocals < MAX_LOCALS) {
+        local_save_t *sv = &local_stack[nlocals++];
+        strlcpy(sv->name, name, sizeof sv->name);
+        const char *cur = getenv(name);
+        sv->had = cur != NULL;
+        sv->old = cur ? strdup(cur) : NULL;
+    } else {
+        dprintf(STDERR_FILENO,
+                "sh: more than %d local variables at once - %s will not be"
+                " put back\n", MAX_LOCALS, name);
+    }
+
+    /* 값이 없는 `local x` 는 비운다. 그래야 [ -z "$x" ] 가 참이 된다. */
+    if (eq) setenv(name, eq + 1, 1);
+    else    unsetenv(name);
+}
+
+/* 함수가 끝날 때 base 아래로 쌓인 것을 전부 되돌린다. */
+static void locals_unwind(int base)
+{
+    while (nlocals > base) {
+        local_save_t *sv = &local_stack[--nlocals];
+        if (sv->had) setenv(sv->name, sv->old, 1);
+        else         unsetenv(sv->name);
+        free(sv->old);
+        sv->old = NULL;
+    }
+}
 
 /* ── test ─────────────────────────────────────────────────────────────
  *
@@ -1010,6 +1405,15 @@ static int run_test(char **argv, int argc)
         /* -r -w -x ask what this process may do, which is not the same
          * as what the mode bits say - root may write a file with no w
          * anywhere in it. access() answers the question that was asked. */
+        /* -t N: 그 fd 가 터미널인가.
+         *
+         * 색을 켤지 정할 때 쓴다 - `[ -t 1 ]` 이 참이면 사람이 보는
+         * 화면이고, 거짓이면 파이프나 파일이라 색 코드를 넣으면
+         * 그것이 그대로 저장된다. 이것이 없으면 셸이 "unknown test"
+         * 를 찍고 2 를 돌려주는데, 2 는 거짓이 아니라 오류다. */
+        if (strcmp(op, "-t") == 0)
+            return lp_isatty(atoi(arg)) ? 0 : 1;
+
         if (strcmp(op, "-r") == 0) return lp_access(arg, 4) == 0 ? 0 : 1;
         if (strcmp(op, "-w") == 0) return lp_access(arg, 2) == 0 ? 0 : 1;
         if (strcmp(op, "-x") == 0) return lp_access(arg, 1) == 0 ? 0 : 1;
@@ -1240,6 +1644,55 @@ static bool run_builtin(cmd_t *c)
         return true;
     }
 
+    if (strcmp(cmd, "local") == 0) {
+        /* 함수 밖의 local 은 그냥 대입이다. dash 는 오류로 치지만,
+         * 오류를 내면 그 줄에서 스크립트가 멈추고 대입도 사라진다 -
+         * 값을 잃는 쪽이 더 나쁘다. */
+        for (int i = 1; i < c->argc; i++) {
+            if (in_function > 0) {
+                local_declare(c->argv[i]);
+            } else {
+                char *eq = strchr(c->argv[i], '=');
+                if (eq) {
+                    char name[128];
+                    size_t len = (size_t)(eq - c->argv[i]);
+                    if (len >= sizeof name) len = sizeof name - 1;
+                    memcpy(name, c->argv[i], len);
+                    name[len] = '\0';
+                    setenv(name, eq + 1, 1);
+                }
+            }
+        }
+        last_status = 0;
+        return true;
+    }
+
+    /* `. file` - 그 파일을 **이 셸에서** 읽어 돌린다.
+     *
+     * 없을 때는 PATH 에서 "." 이라는 이름의 프로그램을 찾다가
+     * "/usr/local/sbin/.: cannot run it (13)" 로 끝났다. 디렉터리를
+     * 실행하려 한 것이고, 그 말로는 무엇이 없는지 알 수 없다.
+     *
+     * 자식으로 돌리면 안 된다: 이 명령의 요점이 함수와 변수를
+     * **부르는 쪽에** 남기는 것이기 때문이다. dpkg 의 스크립트들은
+     * 오류 처리 함수를 이렇게 들여온다. */
+    if (strcmp(cmd, ".") == 0 || strcmp(cmd, "source") == 0) {
+        if (c->argc < 2) {
+            dprintf(STDERR_FILENO, "sh: %s: needs a file to read\n", cmd);
+            last_status = 2;
+            return true;
+        }
+        source_file(c->argv[1]);
+        return true;
+    }
+
+    if (strcmp(cmd, "unset") == 0) {
+        for (int i = 1; i < c->argc; i++)
+            unsetenv(c->argv[i]);
+        last_status = 0;
+        return true;
+    }
+
     /* ":" is "true" spelled the way scripts spell it - `while :` and
      * `if : ; then` are both idiomatic, and both were a
      * "command not found" here. */
@@ -1388,8 +1841,77 @@ static bool resolve_path(const char *cmd, char *buf, size_t size)
 }
 
 /* Apply redirections inside the child. Exit if one fails. */
+/* here-document 본문을 파이프에 흘려 넣고 읽는 끝을 stdin 으로.
+ * 성공하면 true. */
+static bool apply_heredoc(cmd_t *c)
+{
+    if (c->heredoc < 0 || c->heredoc >= nheredocs ||
+        !heredocs[c->heredoc].body)
+        return false;
+
+    int fds[2];
+    if (lp_pipe(fds) != 0)
+        return false;
+
+    const char *body = heredocs[c->heredoc].body;
+
+    /* 확장은 지금 한다 - 변수는 이 명령이 도는 시점의 값이어야 한다.
+     * 줄 단위로 하는 이유는 확장 버퍼가 한 줄 크기이기 때문이다. */
+    char  *made = NULL;
+    if (heredocs[c->heredoc].expand) {
+        size_t cap = strlen(body) * 2 + 256, len2 = 0;
+        made = malloc(cap);
+        if (made) {
+            made[0] = '\0';
+            const char *p = body;
+            while (*p) {
+                const char *nl = strchr(p, '\n');
+                size_t rl = nl ? (size_t)(nl - p) : strlen(p);
+                char raw2[MAX_LINE], exp2[MAX_LINE];
+                if (rl >= sizeof raw2) rl = sizeof raw2 - 1;
+                memcpy(raw2, p, rl);
+                raw2[rl] = '\0';
+                expand_str(raw2, exp2, sizeof exp2);
+
+                size_t el = strlen(exp2);
+                if (len2 + el + 2 >= cap) {
+                    size_t bigger = (len2 + el + 2) * 2;
+                    char *grown = malloc(bigger);
+                    if (!grown) break;
+                    memcpy(grown, made, len2 + 1);
+                    free(made);
+                    made = grown;
+                    cap  = bigger;
+                }
+                memcpy(made + len2, exp2, el);
+                len2 += el;
+                made[len2++] = '\n';
+                made[len2]   = '\0';
+
+                if (!nl) break;
+                p = nl + 1;
+            }
+            body = made;
+        }
+    }
+
+    size_t len = strlen(body);
+
+    /* 파이프 버퍼보다 크면 여기서 막힌다. 그래서 모을 때 상한을
+     * 두었고, 그 상한은 버퍼보다 작다. */
+    if (len)
+        lp_write(fds[1], body, len);
+    free(made);
+    lp_close(fds[1]);
+    lp_dup2(fds[0], STDIN_FILENO);
+    lp_close(fds[0]);
+    return true;
+}
+
 static void apply_redirects(cmd_t *c)
 {
+    apply_heredoc(c);
+
     if (c->redir_in) {
         long fd = lp_open(c->redir_in, O_RDONLY, 0);
         if (fd < 0) {
@@ -1627,6 +2149,14 @@ static void run_builtin_redirected(cmd_t *c)
     int saved_in  = -1;
     int saved_out = -1;
     int saved_err = -1;
+
+    if (c->heredoc >= 0) {
+        saved_in = (int)lp_dup(STDIN_FILENO);
+        if (!apply_heredoc(c)) {
+            lp_close(saved_in);
+            saved_in = -1;
+        }
+    }
 
     if (c->redir_in) {
         long fd = lp_open(c->redir_in, O_RDONLY, 0);
@@ -2267,6 +2797,9 @@ static void run_logical_line(char *line)
             run_builtin_redirected(&cmds[0]);
         else
             run_pipeline(cmds, n, pipes[i].background);
+
+        if (pipes[i].negate)
+            last_status = last_status == 0 ? 1 : 0;
     }
 }
 
@@ -2301,6 +2834,175 @@ static void run_logical_line(char *line)
 
 typedef char block_line_t[MAX_LINE];
 
+/* 줄 끝의 백슬래시는 "다음 줄에 이어진다" 는 뜻이다.
+ *
+ * 이것이 없을 때 무슨 일이 생겼는지 적어 둔다. 긴 스크립트는 거의
+ * 전부 이 꼴을 쓴다:
+ *
+ *     [ -n "$DPKG_MAINTSCRIPT_NAME" ] || \
+ *       error "환경 변수가 없습니다"
+ *
+ * 이음이 없으면 첫 줄이 그대로 끝나고 백슬래시가 명령 이름으로
+ * 읽혀서 "sh: \: command not found" 가 난다. 그리고 다음 줄의
+ * error 는 || 와 상관없이 **항상** 실행된다. 오류 하나가 아니라
+ * 조건이 통째로 사라지는 것이고, 그래서 조용히 틀린다.
+ *
+ * 짝수 개의 백슬래시는 이어짐이 아니다 - `\\` 는 백슬래시 한 개를
+ * 뜻하는 완결된 줄이다. */
+static long readline_joined(int fd, char *buf, size_t size)
+{
+    long len = readline(fd, buf, size);
+    if (len < 0)
+        return len;
+
+    for (;;) {
+        if (len <= 0 || buf[len - 1] != '\\')
+            break;
+
+        int bs = 0;
+        for (long i = len - 1; i >= 0 && buf[i] == '\\'; i--) bs++;
+        if (bs % 2 == 0)
+            break;
+
+        buf[--len] = '\0';                 /* 백슬래시는 버린다 */
+
+        char more[MAX_LINE];
+        long m = readline(fd, more, sizeof more);
+        if (m < 0)
+            break;
+
+        /* 이어지는 줄의 들여쓰기는 빈칸 하나로. 그대로 붙이면
+         * `cmd` 와 `arg` 사이에 여섯 칸이 들어간다. */
+        char *t = more;
+        while (*t == ' ' || *t == '\t') t++;
+        if (len > 0 && buf[len - 1] != ' ' && buf[len - 1] != '\t' && *t &&
+            (size_t)len + 1 < size)
+            buf[len++] = ' ';
+
+        size_t k = strlen(t);
+        if ((size_t)len + k >= size) k = size - (size_t)len - 1;
+        memcpy(buf + len, t, k);
+        len += (long)k;
+        buf[len] = '\0';
+    }
+    return len;
+}
+
+/* 한 줄에 << 가 있으면 그 본문을 여기서 읽어 둔다.
+ *
+ * 파서는 한 줄씩 본다. here-document 는 그 줄이 아니라 **다음 줄들**
+ * 에 있으므로, 파서가 볼 수 있는 시점에는 이미 늦다. 그래서 줄을
+ * 읽는 이 자리에서 본문을 통째로 가져다 표에 넣고, 줄에는 번호만
+ * 남긴다: `cat <<END` 는 `cat <<@0` 이 된다.
+ *
+ * 구분자를 따옴표로 감싸면(<<'END') 본문 안의 $ 는 확장하지 않는다.
+ * <<- 는 각 줄 앞의 탭을 떼는데, 들여쓴 스크립트 안에서 본문만
+ * 왼쪽 끝에 붙이지 않아도 되게 하려고 있는 것이다. */
+static void collect_heredocs(char *line, size_t size, int fd)
+{
+    char *lt = strstr(line, "<<");
+    if (!lt)
+        return;
+    /* `a << b` 가 아니라 `2>&1` 같은 것에 걸리지 않게: << 앞이 < 면
+     * 그것은 이미 우리가 본 것이다. */
+    if (lt > line && lt[-1] == '<')
+        return;
+
+    char *d = lt + 2;
+    bool strip_tabs = false;
+    if (*d == '-') { strip_tabs = true; d++; }
+    while (*d == ' ' || *d == '\t') d++;
+
+    /* 구분자. 따옴표가 있으면 본문은 확장하지 않는다. */
+    bool expand = true;
+    char delim[128];
+    size_t dn = 0;
+    if (*d == '\'' || *d == '"') {
+        char q = *d++;
+        expand = false;
+        while (*d && *d != q && dn + 1 < sizeof delim) delim[dn++] = *d++;
+        if (*d == q) d++;
+    } else {
+        while (*d && *d != ' ' && *d != '\t' && *d != ';' && *d != '|' &&
+               *d != '&' && *d != '>' && dn + 1 < sizeof delim)
+            delim[dn++] = *d++;
+    }
+    delim[dn] = '\0';
+    if (!dn)
+        return;
+
+    if (nheredocs >= MAX_HEREDOCS) {
+        dprintf(STDERR_FILENO,
+                "sh: more than %d here-documents on one line\n",
+                MAX_HEREDOCS);
+        return;
+    }
+
+    /* 본문. */
+    size_t cap = 4096, len = 0;
+    char  *body = malloc(cap);
+    if (!body)
+        return;
+    body[0] = '\0';
+
+    char  raw[MAX_LINE];
+    for (;;) {
+        long got = readline(fd, raw, sizeof raw);
+        if (got < 0)
+            break;                       /* 구분자 없이 끝났다 */
+
+        char *t = raw;
+        if (strip_tabs) while (*t == '\t') t++;
+        if (strcmp(t, delim) == 0)
+            break;
+
+        /* 확장은 여기서 하지 않는다.
+         *
+         * 본문을 모으는 시점은 스크립트를 **읽는** 때이고, 쓰는 때는
+         * 그 명령이 **도는** 때다. 둘 사이에 변수가 정해지는 일이
+         * 흔하다 - dpkg 의 usage() 는 파일 위쪽에 있고 $PROGNAME 은
+         * 아래에서 정해지므로, 읽을 때 확장하면 도움말의 프로그램
+         * 이름이 늘 빈칸이 된다. */
+        const char *src = t;
+        size_t sl = strlen(src);
+        while (len + sl + 2 > cap) {
+            size_t bigger = cap * 2;
+            char  *grown  = malloc(bigger);
+            if (!grown) { free(body); return; }
+            memcpy(grown, body, len + 1);
+            free(body);
+            body = grown;
+            cap  = bigger;
+        }
+        memcpy(body + len, src, sl);
+        len += sl;
+        body[len++] = '\n';
+        body[len]   = '\0';
+
+        if (len > HEREDOC_MAX) {
+            dprintf(STDERR_FILENO,
+                    "sh: here-document is larger than %dKB - the rest was"
+                    " dropped\n", HEREDOC_MAX / 1024);
+            break;
+        }
+    }
+
+    int idx = nheredocs++;
+    heredocs[idx].body   = body;
+    heredocs[idx].expand = expand;
+
+    /* `<<[-]DELIM` 을 `<<@N` 으로. */
+    char tag[24];
+    snprintf(tag, sizeof tag, "<<@%d", idx);
+    char rest[MAX_LINE];
+    strlcpy(rest, d, sizeof rest);
+    size_t head = (size_t)(lt - line);
+    if (head + strlen(tag) + strlen(rest) + 1 < size) {
+        strcpy(line + head, tag);
+        strcpy(line + head + strlen(tag), rest);
+    }
+}
+
 /* The first word of a line, for deciding whether it is a keyword. */
 static void first_word(const char *line, char *out, size_t size)
 {
@@ -2334,11 +3036,45 @@ static bool is_func_def(const char *line, char *out, size_t size)
     line++;
     while (*line == ' ' || *line == '\t') line++;
 
-    /* The brace has to be there. Without it we cannot tell where the
-     * function ends, and a shell that guesses at that is worse than one
-     * that says so. */
-    return line[0] == '{';
+    /* 중괄호는 이 줄에 있거나 다음 줄에 홀로 있다. 두 번째 꼴을
+     * 인정하지 않으면 dpkg 의 관리자 스크립트가 통째로 돌지 않는다 -
+     * 그 파일들이 그 꼴을 쓴다. 이 줄이 여기서 끝났다면 다음 줄에서
+     * { 를 찾는 것은 define_func 의 일이다. */
+    return line[0] == '{' || line[0] == '\0' || line[0] == '#';
 }
+
+/* 한 줄이 중괄호 깊이를 얼마나 바꾸는지. +1, 0, -1.
+ *
+ * 세 가지가 같은 규칙 아래 있어야 짝이 맞는다:
+ *
+ *   foo() {      함수 정의, 여는 중괄호가 같은 줄
+ *   foo()        함수 정의, 여는 중괄호는 다음 줄
+ *   {            그냥 묶음
+ *
+ * 예전에는 함수 정의를 하나 세고 홀로 선 { 는 세지 않았다. 그래서
+ * 두 번째 꼴은 { 에서 한 번 더 세지 않아 } 하나에 두 번 닫혔고,
+ * 세 번째 꼴은 } 에서만 세어서 깊이가 음수가 됐다. */
+static int brace_depth(const char *line, const char *w,
+                       char *fname, size_t fsize, bool *pending)
+{
+    if (is_func_def(line, fname, fsize)) {
+        /* 여는 중괄호가 다음 줄에 있더라도 겹은 지금 열린 것이다.
+         * 그렇지 않으면 줄을 모으는 쪽이 "다 읽었다" 고 판단하고
+         * 함수 이름만 담긴 한 줄을 실행해 버린다. */
+        *pending = !strchr(line, '{');
+        return 1;
+    }
+    if (strcmp(w, "{") == 0) {
+        if (*pending) { *pending = false; return 0; }   /* 위에서 이미 셌다 */
+        return 1;
+    }
+    *pending = false;
+    if (strcmp(w, "}") == 0) return -1;
+    return 0;
+}
+
+/* 정의는 pipe_into_block 옆에 있다 - 그것을 쓰기 때문이다. */
+static bool pipes_into_block(const char *line);
 
 /* Does this line open a block that needs a matching fi, done, esac or }? */
 static bool opens_block(const char *w)
@@ -2489,7 +3225,10 @@ static int split_statements(const char *line, block_line_t *out, int max)
 
             bool splittable = (strcmp(kw, "then") == 0 ||
                                strcmp(kw, "do")   == 0 ||
-                               strcmp(kw, "else") == 0);
+                               strcmp(kw, "else") == 0 ||
+                               /* `{ echo a` 의 { 도 제 줄을 가져야
+                                * 묶음의 시작을 찾을 수 있다. */
+                               strcmp(kw, "{")    == 0);
 
             /* `case x in y) echo yes ;; esac` on one line.
              *
@@ -2520,6 +3259,41 @@ static int split_statements(const char *line, block_line_t *out, int max)
                     if (!semi) break;
                     p = semi + 1;
                     continue;
+                }
+            }
+
+            /* `f() { echo hi ; }` - 한 줄짜리 함수 정의.
+             *
+             * 세미콜론으로 자르면 `f() { echo hi` 가 한 덩어리로 남고,
+             * 본문은 여는 중괄호 **다음 줄**부터 세므로 함수의 본문이
+             * 비게 된다. 정의는 되는데 부르면 아무 일도 없는, 가장
+             * 찾기 어려운 종류의 실패였다. 중괄호 뒤를 제 줄로 떼면
+             * 여러 줄로 쓴 것과 같은 모양이 된다. */
+            {
+                char fname[64];
+                if (is_func_def(out[n], fname, sizeof fname) && n + 1 < max) {
+                    char *brace = strchr(out[n], '{');
+                    if (brace && brace[1]) {
+                        char *rest = brace + 1;
+                        while (*rest == ' ' || *rest == '\t') rest++;
+                        if (*rest) {
+                            char tail[MAX_LINE];
+                            strlcpy(tail, rest, sizeof tail);
+                            brace[1] = '\0';
+                            strlcpy(out[n + 1], tail, MAX_LINE);
+                            n += 2;
+                            if (semi && semi[1] == ';') {
+                                if (n < max) {
+                                    strlcpy(out[n], ";;", MAX_LINE); n++;
+                                }
+                                p = semi + 2;
+                                continue;
+                            }
+                            if (!semi) break;
+                            p = semi + 1;
+                            continue;
+                        }
+                    }
                 }
             }
 
@@ -2585,7 +3359,7 @@ static int find_at_depth(block_line_t *lines, int n, int from,
                 return i;
         }
 
-        if (opens_block(w))  depth++;
+        if (opens_block(w) || pipes_into_block(lines[i])) depth++;
         if (closes_block(w)) depth--;
     }
     return -1;
@@ -2868,7 +3642,7 @@ static int case_clause_end(block_line_t *lines, int end, int from)
         if (depth == 0 && strcmp(w, ";;") == 0)
             return i;
 
-        if (opens_block(w))  depth++;
+        if (opens_block(w) || pipes_into_block(lines[i])) depth++;
         if (closes_block(w)) depth--;
     }
     return end;
@@ -2998,6 +3772,29 @@ static int exec_for(block_line_t *lines, int n, int start)
     return end + 1;
 }
 
+/* `{ ... }` - 묶음. 짝이 되는 } 를 찾아 그 사이를 이 셸에서 돌린다.
+ * 새 프로세스를 만들지 않으므로 안에서 cd 를 하거나 변수를 놓으면
+ * 밖에서도 보인다 - `( ... )` 와 다른 점이 그것이다. */
+static int exec_group(block_line_t *lines, int n, int start)
+{
+    int  depth   = 1;
+    int  end     = -1;
+    bool pending = false;
+    for (int i = start + 1; i < n; i++) {
+        char w[32], fname[64];
+        first_word(lines[i], w, sizeof w);
+        depth += brace_depth(lines[i], w, fname, sizeof fname, &pending);
+        if (depth == 0) { end = i; break; }
+    }
+    if (end < 0) {
+        dprintf(STDERR_FILENO, "sh: { without a closing }\n");
+        return n;
+    }
+    if (end > start + 1)
+        exec_block(lines + start + 1, end - start - 1);
+    return end + 1;
+}
+
 /* name() { BODY } - remember the body, run nothing.
  * Returns the index just past the closing brace. */
 static int define_func(block_line_t *lines, int n, int start,
@@ -3006,13 +3803,41 @@ static int define_func(block_line_t *lines, int n, int start,
     /* Find the '}' that closes it, at this nesting level. A brace on a
      * line of its own is the only form accepted, which is what makes
      * finding it a matter of looking rather than parsing. */
+    /* 여는 중괄호가 이 줄에 없으면 다음 줄에 홀로 있다.
+     *
+     *     prepare_dir_to_symlink()
+     *     {
+     *
+     * POSIX 가 허용하는 꼴이고 dpkg 의 도우미 스크립트가 실제로 쓴다.
+     * 이것을 몰랐을 때는 함수 이름이 명령으로 실행되고("sh:
+     * prepare_dir_to_symlink(): command not found") 그 다음 줄의 { 도
+     * 명령으로 실행됐다. */
+    int body = start + 1;
+    if (!strchr(lines[start], '{')) {
+        char w0[32];
+        first_word(lines[body < n ? body : start], w0, sizeof w0);
+        if (body < n && strcmp(w0, "{") == 0) {
+            body++;
+        } else {
+            dprintf(STDERR_FILENO,
+                    "sh: %s() - expected { on this line or the next\n", name);
+            return start + 1;
+        }
+    }
+
     int depth = 1;
     int end = -1;
-    for (int i = start + 1; i < n; i++) {
+    for (int i = body; i < n; i++) {
         char w[32];
         first_word(lines[i], w, sizeof w);
         char inner[64];
-        if (is_func_def(lines[i], inner, sizeof inner)) depth++;
+        /* 중첩된 함수도, 홀로 선 { 도 한 겹이다. 둘 중 하나만 세면
+         * 짝이 맞지 않아 엉뚱한 } 에서 함수가 끝난다. */
+        if (is_func_def(lines[i], inner, sizeof inner)) {
+            if (!strchr(lines[i], '{')) i++;    /* { 는 다음 줄 */
+            depth++;
+        }
+        else if (strcmp(w, "{") == 0) depth++;
         else if (strcmp(w, "}") == 0 && --depth == 0) { end = i; break; }
     }
     if (end < 0) {
@@ -3030,12 +3855,22 @@ static int define_func(block_line_t *lines, int n, int start,
         f = &funcs[nfuncs++];
     }
     strlcpy(f->name, name, sizeof f->name);
+    /* 같은 이름을 다시 정의하면 앞의 본문은 버린다. */
+    for (int i = 0; i < f->nlines; i++)
+        free(f->lines[i]);
     f->nlines = 0;
 
-    for (int i = start + 1; i < end && f->nlines < MAX_FUNC_LINES; i++)
-        strlcpy(f->lines[f->nlines++], lines[i], MAX_LINE);
+    for (int i = body; i < end && f->nlines < MAX_FUNC_LINES; i++) {
+        char *copy = strdup(lines[i]);
+        if (!copy) {
+            dprintf(STDERR_FILENO,
+                    "sh: out of memory while remembering %s()\n", name);
+            break;
+        }
+        f->lines[f->nlines++] = copy;
+    }
 
-    if (end - start - 1 > MAX_FUNC_LINES)
+    if (end - body > MAX_FUNC_LINES)
         dprintf(STDERR_FILENO,
                 "sh: %s() is longer than %d lines - the rest was dropped\n",
                 name, MAX_FUNC_LINES);
@@ -3073,15 +3908,41 @@ static void call_func(func_t *f, char **argv, int argc)
 
     /* The body is copied out: exec_block writes into the lines it is
      * given when it splits statements, and the function has to survive
-     * being called twice. */
-    static block_line_t body[MAX_FUNC_LINES];
+     * being called twice.
+     *
+     * 이 사본은 힙에 있고, 예전에는 static 이었다. static 이면 함수가
+     * 함수를 부를 때 안쪽 호출이 바깥쪽의 본문을 덮어쓴다 - 돌아온
+     * 뒤에 남은 줄이 다른 함수의 것이 된다. 재귀를 열여섯 겹까지
+     * 허용해 놓고 그 상태를 공유하고 있었던 셈이다. 쓴 만큼만
+     * 잡으므로 값도 예전보다 싸다. */
     int nb = f->nlines;
-    for (int i = 0; i < nb; i++)
-        strlcpy(body[i], f->lines[i], MAX_LINE);
+    block_line_t *body = NULL;
+    if (nb > 0) {
+        body = malloc(sizeof(block_line_t) * (size_t)nb);
+        if (!body) {
+            dprintf(STDERR_FILENO, "sh: out of memory calling %s()\n",
+                    f->name);
+            last_status = 1;
+            pos_count = saved_count;
+            for (int i = 0; i < saved_count; i++)
+                strlcpy(pos_args[i], saved[i], 256);
+            return;
+        }
+        for (int i = 0; i < nb; i++)
+            strlcpy(body[i], f->lines[i], MAX_LINE);
+    }
+
+    /* local 이 놓은 것은 이 지점까지 되돌린다. */
+    int local_base = nlocals;
 
     depth++;
+    in_function++;
     exec_block(body, nb);
+    in_function--;
     depth--;
+
+    locals_unwind(local_base);
+    free(body);
 
     pos_count = saved_count;
     for (int i = 0; i < saved_count; i++)
@@ -3162,6 +4023,22 @@ static char *pipe_into_block(char *line)
         return NULL;
     }
     return NULL;
+}
+
+/* 파이프의 오른쪽이 블록을 여는가 - `cat f | while read l ; do`.
+ *
+ * 이런 줄의 첫 낱말은 `cat` 이라서, 낱말만 보고 깊이를 세면 while 이
+ * 열린 것을 놓친다. 그러면 done 에서만 한 번 줄어들어 깊이가 한 칸
+ * 모자라게 되고, 그 줄이 함수 안에 있으면 함수가 done 에서 끝난
+ * 것으로 읽혀 "without a closing }" 가 난다. 실제로 dpkg 의
+ * prepare_dir_to_symlink() 가 그렇게 잘렸다.
+ *
+ * pipe_into_block 은 줄을 고치므로 사본에 대고 묻는다. */
+static bool pipes_into_block(const char *line)
+{
+    char copy[MAX_LINE];
+    strlcpy(copy, line, sizeof copy);
+    return pipe_into_block(copy) != NULL;
 }
 
 static int exec_block(block_line_t *lines, int n)
@@ -3275,6 +4152,11 @@ static int exec_block(block_line_t *lines, int n)
         char fname[64];
         if (is_func_def(lines[i], fname, sizeof fname))
             i = define_func(lines, n, i, fname);
+        /* `{ ... }` - 이 셸에서 그대로 도는 묶음. 리다이렉션을 여럿에
+         * 한꺼번에 걸거나 || 뒤에 여러 명령을 두려고 쓴다. */
+        else if (strcmp(w, "{") == 0)     i = exec_group(lines, n, i);
+        /* 짝을 찾아 실행한 뒤라면 닫는 중괄호는 구두점이다. */
+        else if (strcmp(w, "}") == 0)     i++;
         else if (strcmp(w, "if") == 0)    i = exec_if(lines, n, i);
         else if (strcmp(w, "while") == 0) i = exec_while(lines, n, i);
         else if (strcmp(w, "for") == 0)   i = exec_for(lines, n, i);
@@ -3462,9 +4344,11 @@ static void source_file(const char *path)
     static block_line_t sblock[MAX_BLOCK];
     char line[MAX_LINE];
     int  nblock = 0, depth = 0;
+    bool pending = false;
 
     for (;;) {
-        long len = readline((int)fd, line, sizeof line);
+        long len = readline_joined((int)fd, line, sizeof line);
+        if (len > 0) collect_heredocs(line, sizeof line, (int)fd);
         if (len < 0)
             break;
         if (len == 0 || line[0] == '#')
@@ -3475,10 +4359,11 @@ static void source_file(const char *path)
         for (int i = 0; i < added; i++) {
             char w[32], fname[64];
             first_word(sblock[nblock + i], w, sizeof w);
-            if (opens_block(w))  depth++;
+            if (opens_block(w) || pipes_into_block(sblock[nblock + i]))
+                depth++;
             if (closes_block(w)) depth--;
-            if (is_func_def(sblock[nblock + i], fname, sizeof fname)) depth++;
-            if (strcmp(w, "}") == 0) depth--;
+            depth += brace_depth(sblock[nblock + i], w, fname,
+                                 sizeof fname, &pending);
         }
         nblock += added;
 
@@ -3681,7 +4566,9 @@ int main(int argc, char **argv)
             int pw = build_prompt(prompt, sizeof(prompt));
             len = edit_line(prompt, pw, line, sizeof(line));
         } else {
-            len = readline(input_fd, line, sizeof(line));
+            len = readline_joined(input_fd, line, sizeof(line));
+            if (len > 0)
+                collect_heredocs(line, sizeof(line), input_fd);
         }
 
         if (len < 0) {              /* EOF: Ctrl-D, or the end of the file */
@@ -3707,26 +4594,30 @@ int main(int argc, char **argv)
 
         /* An unfinished block keeps reading. Interactively that means a
          * continuation prompt; in a script it just reads on. */
-        int depth = 0;
+        int  depth   = 0;
+        bool pending = false;
         for (int i = 0; i < nblock; i++) {
             char w[32], fname[64];
             first_word(block[i], w, sizeof(w));
-            if (opens_block(w))  depth++;
+            if (opens_block(w) || pipes_into_block(block[i])) depth++;
             if (closes_block(w)) depth--;
             /* A function body is a block too, opened by "name() {" and
              * closed by a brace on its own line. Without counting it,
              * typing a function at the prompt would try to run the
              * first line of it as soon as Enter was pressed. */
-            if (is_func_def(block[i], fname, sizeof fname)) depth++;
-            if (strcmp(w, "}") == 0) depth--;
+            depth += brace_depth(block[i], w, fname, sizeof fname,
+                                 &pending);
         }
 
         while (depth > 0 && nblock < MAX_BLOCK - 8 && shell_running) {
             long more;
-            if (interactive)
+            if (interactive) {
                 more = edit_line("> ", 2, line, sizeof(line));
-            else
-                more = readline(input_fd, line, sizeof(line));
+            } else {
+                more = readline_joined(input_fd, line, sizeof(line));
+                if (more > 0)
+                    collect_heredocs(line, sizeof(line), input_fd);
+            }
 
             if (more < 0) {
                 dprintf(STDERR_FILENO, "sh: unexpected end - %d block%s left"
@@ -3749,11 +4640,11 @@ int main(int argc, char **argv)
             for (int i = 0; i < added; i++) {
                 char w[32], fname[64];
                 first_word(block[nblock + i], w, sizeof(w));
-                if (opens_block(w))  depth++;
-                if (closes_block(w)) depth--;
-                if (is_func_def(block[nblock + i], fname, sizeof fname))
+                if (opens_block(w) || pipes_into_block(block[nblock + i]))
                     depth++;
-                if (strcmp(w, "}") == 0) depth--;
+                if (closes_block(w)) depth--;
+                depth += brace_depth(block[nblock + i], w,
+                                     fname, sizeof fname, &pending);
             }
             nblock += added;
         }

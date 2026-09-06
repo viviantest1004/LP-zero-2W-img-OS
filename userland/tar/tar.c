@@ -364,8 +364,53 @@ static int walk(const char *archive, const char *into, bool extract)
     return rc;
 }
 
+/* GNU tar 로 넘길 것인가.
+ *
+ * 이 tar 는 pkg 가 쓰는 ustar 부분집합만 안다. 그것으로 충분한
+ * 이유는 이 OS 의 패키지가 그 형식이기 때문이고, 충분하지 않은
+ * 이유는 이 기계에 데비안도 같이 있기 때문이다: dpkg-deb 는
+ * `tar --warning=no-timestamp -xf -` 처럼 부르고, PATH 가 /bin 을
+ * 먼저 보므로 그 tar 가 우리 것이 된다. 우리 것은 그 인자를 모르고,
+ * dpkg 는 "tar subprocess returned error exit status 1" 만 남긴다 -
+ * 무엇이 없는지 아무도 알 수 없는 실패다.
+ *
+ * 그래서 우리가 아는 꼴이 아니면 GNU tar 에게 넘긴다. 우리 것이
+ * 앞에 있다는 사실은 그대로 두면서(사람이 `tar -t pkg.tar` 를 치면
+ * 우리 것이 답한다) 기계가 우분투처럼 동작하게 하는 방법이다.
+ * GNU tar 가 없는 기계에서는 예전처럼 우리가 답한다. */
+static void hand_to_gnu_tar(int argc, char **argv)
+{
+    static const char *GNU = "/usr/bin/tar";
+    if (lp_access(GNU, 1) != 0)
+        return;                        /* 데비안이 깔리지 않은 이미지 */
+
+    (void)argc;
+    lp_execve(GNU, argv, environ);
+    /* 넘기지 못하면 그냥 우리가 계속한다. */
+}
+
+/* 우리가 다룰 수 있는 꼴인가: -c/-t/-x 하나에 파일 이름. */
+static bool ours(int argc, char **argv)
+{
+    if (argc < 3)
+        return false;
+    if (strcmp(argv[1], "-c") != 0 && strcmp(argv[1], "-t") != 0 &&
+        strcmp(argv[1], "-x") != 0)
+        return false;
+    /* 긴 옵션이 하나라도 있으면 GNU 것이다. '-' (표준 입력) 도. */
+    for (int i = 2; i < argc; i++)
+        if (argv[i][0] == '-' && argv[i][1])
+            return false;
+    if (strcmp(argv[2], "-") == 0)
+        return false;
+    return true;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !ours(argc, argv) && strcmp(argv[1], "-h") != 0)
+        hand_to_gnu_tar(argc, argv);
+
     if (argc < 3 || strcmp(argv[1], "-h") == 0) {
         printf("usage:\n");
         printf("  tar -c <archive> <path>...   create\n");

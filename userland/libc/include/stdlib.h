@@ -13,6 +13,7 @@ char *getenv(const char *name);
 /* Set a variable so that children inherit it. overwrite=0 keeps an
  * existing value. Returns 0, or -1 when there is no memory. */
 int   setenv(const char *name, const char *value, int overwrite);
+int   unsetenv(const char *name);
 int   atoi(const char *s);
 
 #endif /* _LP_STDLIB_H */

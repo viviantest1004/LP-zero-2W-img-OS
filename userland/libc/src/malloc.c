@@ -159,8 +159,7 @@ char *getenv(const char *name)
  * The environment we were handed by execve is an array we do not own and
  * cannot extend, so the first write copies it somewhere we can grow. From
  * then on the array is ours: environ points at it, and execve passes it
- * to every child. There is no unsetenv because nothing here needs one -
- * an empty value does the job. */
+ * to every child. */
 static char **env_owned  = NULL;
 static int    env_count  = 0;
 static int    env_capacity = 0;
@@ -232,4 +231,39 @@ int setenv(const char *name, const char *value, int overwrite)
 int atoi(const char *s)
 {
     return (int)strtol(s, NULL, 10);
+}
+
+/* Take a name back out of the environment.
+ *
+ * "빈 값으로 두면 된다" 고 오래 적어 두었는데, 맞지 않는 자리가 하나
+ * 있다. 셸의 `local x` 는 x 를 **없는** 상태로 만들어야 하고,
+ * 스크립트는 그것을 `[ -z "$x" ]` 가 아니라 `${x-기본값}` 이나
+ * `[ -n "${x+set}" ]` 로 본다. 빈 값과 없음은 거기서 다른 답을 낸다.
+ *
+ * 배열에서 그 자리를 빼고 뒤를 한 칸씩 당긴다. 문자열 자체는 두는데,
+ * execve 가 우리에게 준 원래 배열의 것일 수 있어서 free 할 수 없기
+ * 때문이다 - 우리가 만든 것 몇 개가 남는 편이 남의 것을 free 하는
+ * 것보다 낫다. */
+int unsetenv(const char *name)
+{
+    if (!name || !*name || strchr(name, '='))
+        return -1;
+    if (!environ)
+        return 0;
+
+    size_t nlen = strlen(name);
+    for (int i = 0; environ[i]; i++) {
+        if (strncmp(environ[i], name, nlen) != 0 || environ[i][nlen] != '=')
+            continue;
+
+        int j = i;
+        while (environ[j]) {
+            environ[j] = environ[j + 1];
+            j++;
+        }
+        if (env_owned == environ && env_count > 0)
+            env_count--;
+        i--;                        /* 같은 이름이 두 번 있을 수도 있다 */
+    }
+    return 0;
 }

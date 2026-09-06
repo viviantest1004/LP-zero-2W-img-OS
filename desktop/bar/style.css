@@ -149,3 +149,61 @@ window#waybar {
  * 20% 에서 빨강을 쓰면 10% 에 쓸 색이 남지 않는다. */
 #battery.warning  { color: #f0b350; }
 #battery.critical { color: #e05252; }
+
+/* ── 작업표시줄 ───────────────────────────────────────────────────
+ *
+ * 열려 있는 창이 여기 있고, 눌러서 부르고 다시 눌러서 치운다.
+ * 창이 하나도 없으면 이 자리는 비어 있어야 한다 - 빈 상자가 검색
+ * 글자 옆에 붙어 있으면 그것이 무엇인지 묻게 된다. */
+#taskbar {
+  margin-left: 10px;
+}
+
+#taskbar button {
+  color: #a8a8a8;
+  padding: 0 10px;
+  margin: 3px 2px;
+  border-radius: 6px;
+  background: transparent;
+  min-width: 0;
+}
+
+#taskbar button:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #e8e8e8;
+}
+
+/* 지금 보고 있는 창. 1-3 은 켜짐/꺼짐을 색이 아니라 글자 밝기로
+ * 구분하라고 했고, 여기가 그 규칙이 가장 자주 읽히는 자리다. */
+#taskbar button.active {
+  background: rgba(255, 255, 255, 0.10);
+  color: #e8e8e8;
+}
+
+/* 최소화된 창은 있지만 지금 보이지 않는 것이다. 사라지게 두면
+ * 최소화가 곧 잃어버림이 된다. */
+#taskbar button.minimized {
+  color: #6a6a6a;
+}
+
+/* ── 퀵메뉴 버튼 ─────────────────────────────────────────────────
+ *
+ * 오른쪽 끝. 상태 묶음 바로 뒤에 붙어서, 그 묶음을 눌러 여는 것과
+ * 같은 것을 연다는 것이 자리로 읽히게 한다. */
+/* 테두리를 그린다. 색만 다르게 두었을 때는 옆의 배터리 퍼센트와
+ * 같은 '읽는 것' 으로 보였다 - 누를 수 있다는 것이 보이지 않으면
+ * 퀵메뉴로 가는 길이 없는 것과 같다. */
+#custom-quick {
+  color: #a8a8a8;
+  padding: 0 9px;
+  margin: 4px 6px 4px 4px;
+  font-size: 13px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+#custom-quick:hover {
+  color: #e8e8e8;
+  background: rgba(255, 255, 255, 0.10);
+}

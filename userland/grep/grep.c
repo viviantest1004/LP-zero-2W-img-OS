@@ -80,6 +80,7 @@ static bool match_line(const char *line)
 
 typedef struct {
     bool invert, numbers, count_only, names_only, quiet;
+    bool only;          /* -o: print the matched part, not the line */
     int  before;        /* -B: lines of context before a match */
     int  after;         /* -A: lines after */
 } opts_t;
@@ -104,6 +105,51 @@ static void emit(const char *name, bool show_name, long lineno,
     if (o->numbers)
         printf("%ld%c", lineno, sep);
     printf("%s\n", text);
+}
+
+/* -o: every match on the line, each on its own line.
+ *
+ * Scripts want this far more often than they want the whole line -
+ * pulling one field out of a line of JSON is the usual case, and
+ * without it the only way is sed with a pattern written twice. */
+static void emit_matches(const char *name, bool show_name, long lineno,
+                         const opts_t *o, const char *line)
+{
+    if (fixed) {
+        size_t n = strlen(fixed_pat);
+        if (n == 0) return;
+        for (const char *t = line; *t; t++) {
+            if (fold ? fold_eq(t, fixed_pat, n)
+                     : strncmp(t, fixed_pat, n) == 0) {
+                char save[8192];
+                size_t k = n < sizeof save - 1 ? n : sizeof save - 1;
+                memcpy(save, t, k);
+                save[k] = '\0';
+                emit(name, show_name, lineno, o, save, ':');
+                t += n - 1;
+            }
+        }
+        return;
+    }
+
+    int caps[RE_MAX_CAPS];
+    int from = 0;
+    int len  = (int)strlen(line);
+    while (from <= len && re_search(program, line, from, from > 0, caps)) {
+        int b = caps[0], e = caps[1];
+        if (e > b) {
+            char save[8192];
+            size_t k = (size_t)(e - b);
+            if (k > sizeof save - 1) k = sizeof save - 1;
+            memcpy(save, line + b, k);
+            save[k] = '\0';
+            emit(name, show_name, lineno, o, save, ':');
+            from = e;
+        } else {
+            /* An empty match would spin here forever. */
+            from = b + 1;
+        }
+    }
 }
 
 static long grep_fd(int fd, const opts_t *o,
@@ -166,7 +212,10 @@ static long grep_fd(int fd, const opts_t *o,
         }
         ring_n = 0;
 
-        emit(name, show_name, lineno, o, line, ':');
+        if (o->only)
+            emit_matches(name, show_name, lineno, o, line);
+        else
+            emit(name, show_name, lineno, o, line, ':');
         last_shown = lineno;
         any_output = true;
         after_left = o->after;
@@ -254,7 +303,7 @@ static void grep_tree(const char *path, opts_t *o, int depth)
 
 int main(int argc, char **argv)
 {
-    opts_t o = { false, false, false, false, false, 0, 0 };
+    opts_t o = { false, false, false, false, false, false, 0, 0 };
     const char *pat = NULL;
     int files = 0;
 
@@ -302,11 +351,12 @@ int main(int argc, char **argv)
                 case 'c': o.count_only = true; break;
                 case 'l': o.names_only = true; break;
                 case 'q': o.quiet = true; break;
+                case 'o': o.only = true; break;
                 case 'r': case 'R': recursive = true; break;
                 case 'E': extended = true; break;
                 case 'F': fixed = true; break;
                 case 'h':
-                    printf("usage: grep [-invclqrEF] [-A n] [-B n] [-C n] <pattern> [file|dir]...\n");
+                    printf("usage: grep [-invoclqrEF] [-A n] [-B n] [-C n] <pattern> [file|dir]...\n");
                     printf("  -i ignore case   -v show the lines that do not match\n");
                     printf("  -n line numbers  -c count only\n");
                     printf("  -l name the files  -q say nothing, just the exit code\n");
@@ -332,7 +382,7 @@ int main(int argc, char **argv)
 
     if (!pat) {
         dprintf(STDERR_FILENO,
-                "usage: grep [-invclqrEF] <pattern> [file|dir]...\n");
+                "usage: grep [-invoclqrEF] <pattern> [file|dir]...\n");
         return 2;
     }
 

@@ -134,6 +134,21 @@ step "루트 파일시스템 (ext4, ${ROOT_LABEL})"
 TOTAL_SECTORS=$(( SIZE_GB * 1024 * 1024 * 1024 / SECTOR ))
 ROOT_SECTORS=$(( TOTAL_SECTORS - ROOT_START ))
 
+# 들어갈 것이 자리보다 크면 여기서 멈춘다.
+#
+# mke2fs 는 이 경우 "Could not allocate block in ext2 filesystem while
+# writing file <아무 파일 이름>" 이라고만 말한다. 그 이름은 마침 마지막
+# 으로 쓰려던 파일일 뿐이라, 읽는 사람은 그 파일이 잘못된 줄 알고 한참
+# 을 엉뚱한 데서 찾는다. 무엇이 부족한지는 여기서 이미 알 수 있다.
+NEED_KB=$(du -sk "$ROOTFS" | cut -f1)
+HAVE_KB=$(( ROOT_SECTORS * SECTOR / 1024 ))
+# ext4 자체의 메타데이터에 5% 쯤. 여유가 없으면 마지막에 가서 터진다.
+if (( NEED_KB * 105 / 100 > HAVE_KB )); then
+    want=$(( (NEED_KB * 105 / 100 + ESP_MB * 1024) / 1024 / 1024 + 1 ))
+    die "루트가 파티션보다 큽니다: $(( NEED_KB / 1024 ))MiB 를 $(( HAVE_KB / 1024 ))MiB 에 넣을 수 없습니다.
+       SIZE_GB=${want} ./tools/mkdisk.sh"
+fi
+
 mkdir -p "$OUT_DIR"
 rm -f "$IMAGE"
 truncate -s $(( TOTAL_SECTORS * SECTOR )) "$IMAGE"

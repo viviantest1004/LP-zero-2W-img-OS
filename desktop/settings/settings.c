@@ -95,6 +95,38 @@ static char *run_cmd(const char *const *argv)
     return out;
 }
 
+/* 기다리지 않고 띄운다. 데몬을 다시 시작하는 것처럼 출력이 없고
+ * 오래 사는 것에 run_cmd 를 쓰면, 자식이 파이프를 붙든 채 살아 있어서
+ * 설정 창이 그대로 얼어붙는다. */
+static void run_bg(const char *const *argv)
+{
+    g_spawn_async(NULL, (char **)argv, NULL,
+                  G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL |
+                  G_SPAWN_STDERR_TO_DEV_NULL,
+                  NULL, NULL, NULL, NULL);
+}
+
+/* ~/.config/lp/<name> 하나를 쓴다. 이 앱이 기억해 두는 것은 전부
+ * 여기 있고, 세션 스크립트와 상단바가 같은 자리를 읽는다. */
+static void lp_conf_set(const char *name, const char *value)
+{
+    char *dir  = g_build_filename(g_get_home_dir(), ".config", "lp", NULL);
+    char *path = g_build_filename(dir, name, NULL);
+    g_mkdir_with_parents(dir, 0755);
+    g_file_set_contents(path, value, -1, NULL);
+    g_free(path);
+    g_free(dir);
+}
+
+static char *lp_conf_get(const char *name)
+{
+    char *path = g_build_filename(g_get_home_dir(), ".config", "lp",
+                                  name, NULL);
+    char *v = slurp(path);
+    g_free(path);
+    return v;
+}
+
 /* 1024 단위. 사람이 읽는 쪽으로. */
 static char *human(guint64 bytes)
 {
@@ -189,6 +221,26 @@ static GtkWidget *row_switch(GtkWidget *list, const char *title,
     else
         gtk_widget_set_sensitive(sw, FALSE);
     gtk_box_append(GTK_BOX(h), sw);
+
+    gtk_list_box_append(GTK_LIST_BOX(list), row);
+    return row;
+}
+
+/* 오른쪽에 누르는 단추. 상태가 아니라 한 번의 행동인 항목 - 잠그기,
+ * 다시 시작하기 - 은 스위치로 그리면 안 된다. 스위치는 켜져 있다는
+ * 뜻을 갖는데 이것들에는 켜져 있는 상태가 없다. */
+static GtkWidget *row_button(GtkWidget *list, const char *title,
+                             const char *detail, const char *label,
+                             GCallback cb, gpointer data)
+{
+    GtkWidget *row = row_shell(title, detail);
+    GtkWidget *h   = g_object_get_data(G_OBJECT(row), "lp-hbox");
+
+    GtkWidget *b = gtk_button_new_with_label(label);
+    gtk_widget_set_valign(b, GTK_ALIGN_CENTER);
+    if (cb) g_signal_connect(b, "clicked", cb, data);
+    else    gtk_widget_set_sensitive(b, FALSE);
+    gtk_box_append(GTK_BOX(h), b);
 
     gtk_list_box_append(GTK_LIST_BOX(list), row);
     return row;
@@ -571,6 +623,150 @@ static GtkWidget *page_notify(void)
 
 /* 5-3 화면 ─────────────────────────────────────────────────────── */
 
+/* 여기서부터 아래 몇 절은 값을 읽기만 하던 것을 바꾸는 것으로
+ * 만든 부분이다.
+ *
+ * 바꿀 수 있는 것과 없는 것을 가르는 선은 하나다: 이 세션이 uid 1000
+ * 으로 할 수 있는가. 컴포지터에게 말하는 것(해상도, 배율, 자판),
+ * 소리 서버에게 말하는 것(볼륨, 음소거, 출력 장치), 홈에 파일을
+ * 쓰는 것(언어, 비행기 모드)은 할 수 있다. /etc 를 고치는 것(시간대,
+ * 기기 이름)은 할 수 없고, 그런 항목은 값만 보여 주고 왜 못 바꾸는지
+ * 적어 둔다.
+ *
+ * 바꾼 것은 그 자리에서 적용된다. '적용' 버튼을 두지 않은 이유는,
+ * 그 버튼이 있으면 누르지 않고 창을 닫은 사람이 바꾼 줄 알고 나가기
+ * 때문이다. */
+
+/* 지금 켜진 출력의 이름. swaymsg 로 무언가를 바꾸려면 이것이 필요하다. */
+static char *output_name(void)
+{
+    const char *argv[] = { "swaymsg", "-t", "get_outputs", "-r", NULL };
+    char *json = run_cmd(argv);
+    if (!json) return NULL;
+
+    char b[128] = "";
+    char *p = strstr(json, "\"name\"");
+    char *out = NULL;
+    if (p && sscanf(p, "\"name\": \"%127[^\"]", b) == 1)
+        out = g_strdup(b);
+    g_free(json);
+    return out;
+}
+
+/* 이 출력이 낼 수 있는 모드 전부. "1920x1080@60.000Hz" 꼴. */
+static char **output_modes(int *count)
+{
+    *count = 0;
+    const char *argv[] = { "swaymsg", "-t", "get_outputs", "-r", NULL };
+    char *json = run_cmd(argv);
+    if (!json) return NULL;
+
+    /* modes 배열 안의 width/height/refresh 세 쌍을 훑는다. JSON 파서를
+     * 들이는 것보다 이쪽이 작고, 형식은 sway 가 고정해 두었다. */
+    GPtrArray *list = g_ptr_array_new();
+    char *m = strstr(json, "\"modes\"");
+    char *end = m ? strstr(m, "]") : NULL;
+
+    for (char *p = m; p && end && p < end; ) {
+        char *w = strstr(p, "\"width\"");
+        if (!w || w > end) break;
+        int width = 0, height = 0, refresh = 0;
+        sscanf(w, "\"width\": %d", &width);
+        char *h = strstr(w, "\"height\"");
+        if (h) sscanf(h, "\"height\": %d", &height);
+        char *r = h ? strstr(h, "\"refresh\"") : NULL;
+        if (r) sscanf(r, "\"refresh\": %d", &refresh);
+
+        if (width && height) {
+            char *text = refresh
+                ? g_strdup_printf("%dx%d@%.3fHz", width, height, refresh / 1000.0)
+                : g_strdup_printf("%dx%d", width, height);
+            /* 같은 모드가 두 번 나오는 화면이 있다. */
+            gboolean dup = FALSE;
+            for (guint i = 0; i < list->len && !dup; i++)
+                dup = g_strcmp0(g_ptr_array_index(list, i), text) == 0;
+            if (dup) g_free(text);
+            else     g_ptr_array_add(list, text);
+        }
+        p = r ? r + 8 : w + 8;
+    }
+    g_free(json);
+
+    *count = (int)list->len;
+    g_ptr_array_add(list, NULL);
+    return (char **)g_ptr_array_free(list, FALSE);
+}
+
+static void on_mode_changed(GObject *dd, GParamSpec *spec, gpointer data)
+{
+    (void)spec;
+    char **modes = data;
+    guint i = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
+    if (!modes || !modes[i]) return;
+
+    char *name = output_name();
+    if (!name) return;
+
+    const char *a[] = { "swaymsg", "output", name, "mode", modes[i], NULL };
+    char *o = run_cmd(a);
+    g_free(o);
+    g_free(name);
+}
+
+static void on_scale_changed(GObject *dd, GParamSpec *spec, gpointer data)
+{
+    (void)spec; (void)data;
+    static const char *scales[] = { "1", "1.25", "1.5", "2" };
+    guint i = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
+    if (i >= G_N_ELEMENTS(scales)) return;
+
+    char *name = output_name();
+    if (!name) return;
+
+    const char *a[] = { "swaymsg", "output", name, "scale", scales[i], NULL };
+    char *o = run_cmd(a);
+    g_free(o);
+    g_free(name);
+}
+
+/* 바탕. 5-7 의 '배경 화면' 은 아직 그림을 고르지 못하고 색만 고른다 -
+ * 그림을 고르려면 파일 선택 대화상자가 필요하고 그것은 portal 이
+ * 하는 일인데, 이 이미지에서 portal 은 아직 반쯤만 산다. */
+static void on_bg_changed(GObject *dd, GParamSpec *spec, gpointer data)
+{
+    (void)spec; (void)data;
+    static const char *colors[] = { "#0e0e0e", "#1a1a1a", "#232323",
+                                    "#1e2a2a", "#2a2320" };
+    guint i = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
+    if (i >= G_N_ELEMENTS(colors)) return;
+
+    const char *a[] = { "swaymsg", "output", "*", "bg",
+                        colors[i], "solid_color", NULL };
+    char *o = run_cmd(a);
+    g_free(o);
+}
+
+/* 드롭다운 한 줄. 고른 값이 그 자리에서 적용된다. */
+static GtkWidget *row_choice(GtkWidget *list, const char *title,
+                             const char *detail, const char *const *items,
+                             guint selected, GCallback cb, gpointer data)
+{
+    GtkWidget *row = row_shell(title, detail);
+    GtkWidget *h   = g_object_get_data(G_OBJECT(row), "lp-hbox");
+
+    GtkWidget *dd = gtk_drop_down_new_from_strings(items);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(dd), selected);
+    gtk_widget_set_valign(dd, GTK_ALIGN_CENTER);
+    if (cb)
+        g_signal_connect(dd, "notify::selected", cb, data);
+    else
+        gtk_widget_set_sensitive(dd, FALSE);
+    gtk_box_append(GTK_BOX(h), dd);
+
+    gtk_list_box_append(GTK_LIST_BOX(list), row);
+    return row;
+}
+
 static GtkWidget *page_display(void)
 {
     /* sway 에게 묻는다. 컴포지터가 실제로 무엇을 켰는지 아는 것은
@@ -615,24 +811,58 @@ static GtkWidget *page_display(void)
         if (p && sscanf(p, "\"model\": \"%159[^\"]", b) == 1)
             row_value(g1, T("Monitor", "모니터"), NULL, b);
 
-        if (w && h) {
-            char *v = g_strdup_printf(T("%d × %d", "%d × %d"), w, h);
-            row_value(g1, T("Resolution", "해상도"), NULL, v);
-            g_free(v);
+        /* 해상도. sway 가 낼 수 있다고 말한 모드만 목록에 올린다 -
+         * 없는 모드를 고를 수 있게 두면 화면이 꺼진다. */
+        int nmodes = 0;
+        char **modes = output_modes(&nmodes);
+        if (modes && nmodes > 0) {
+            char *cur = NULL;
+            if (w && h && mhz)
+                cur = g_strdup_printf("%dx%d@%.3fHz", w, h, mhz / 1000.0);
+            else if (w && h)
+                cur = g_strdup_printf("%dx%d", w, h);
+
+            guint sel = 0;
+            for (int i = 0; i < nmodes; i++)
+                if (cur && g_strcmp0(modes[i], cur) == 0) { sel = (guint)i; break; }
+            g_free(cur);
+
+            GtkWidget *row = row_choice(g1, T("Resolution", "해상도"), NULL,
+                                        (const char *const *)modes, sel,
+                                        G_CALLBACK(on_mode_changed), modes);
+            /* 목록은 콜백이 들고 있어야 하므로 줄과 수명을 같이 한다. */
+            g_object_set_data_full(G_OBJECT(row), "lp-modes",
+                                   modes, (GDestroyNotify)g_strfreev);
+        } else {
+            if (modes) g_strfreev(modes);
+            if (w && h) {
+                char *v = g_strdup_printf("%d × %d", w, h);
+                row_value(g1, T("Resolution", "해상도"), NULL, v);
+                g_free(v);
+            }
         }
+
         if (mhz) {
             char *v = g_strdup_printf("%.0fHz", mhz / 1000.0);
             row_value(g1, T("Refresh rate", "주사율"), NULL, v);
             g_free(v);
         }
 
+        /* 배율. sway 는 아무 소수나 받지만 목록에는 쓸 만한 넷만 둔다. */
         p = strstr(json, "\"scale\"");
         double sc = 0;
-        if (p && sscanf(p, "\"scale\": %lf", &sc) == 1 && sc > 0) {
-            char *v = g_strdup_printf("%d%%", (int)(sc * 100));
-            row_value(g1, T("Scale", "배율"), NULL, v);
-            g_free(v);
-        }
+        if (p) sscanf(p, "\"scale\": %lf", &sc);
+        if (sc <= 0) sc = 1.0;
+
+        static const char *const scale_items[] =
+            { "100%", "125%", "150%", "200%", NULL };
+        guint ssel = 0;
+        if      (sc >= 1.9) ssel = 3;
+        else if (sc >= 1.4) ssel = 2;
+        else if (sc >= 1.2) ssel = 1;
+        row_choice(g1, T("Scale", "배율"),
+                   T("takes effect at once", "고르면 바로 적용됩니다"),
+                   scale_items, ssel, G_CALLBACK(on_scale_changed), NULL);
     }
 
     /* 밝기. 백라이트가 있는 기계에서만 값이 나온다 - 가상 머신에는
@@ -659,6 +889,22 @@ static GtkWidget *page_display(void)
         row_value(g1, T("Brightness", "밝기"),
                   T("this machine has no adjustable backlight", "이 기계에는 조절할 수 있는 백라이트가 없습니다"), T("not applicable", "해당 없음"));
 
+    /* 모양. 배경은 아직 단색만 고른다 - 그림을 고르려면 파일 선택
+     * 대화상자가 필요하고 그것은 portal 이 하는 일이다. */
+    GtkWidget *g2 = group_new(page, T("Appearance", "모양"));
+
+    const char *bg_items[] = {
+        T("Black",      "검정"),
+        T("Charcoal",   "숯"),
+        T("Slate",      "잿빛"),
+        T("Deep teal",  "짙은 청록"),
+        T("Warm brown", "따뜻한 갈색"),
+        NULL
+    };
+    row_choice(g2, T("Background", "배경"),
+               T("solid colour", "단색"),
+               bg_items, 1, G_CALLBACK(on_bg_changed), NULL);
+
     g_free(json);
     return page;
 }
@@ -671,6 +917,91 @@ static void on_volume(GtkRange *r, gpointer user)
     char v[32];
     g_snprintf(v, sizeof v, "%.2f", gtk_range_get_value(r) / 100.0);
     const char *a[] = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", v, NULL };
+    char *o = run_cmd(a);
+    g_free(o);
+}
+
+static void on_mute(GObject *sw, GParamSpec *spec, gpointer data)
+{
+    (void)spec; (void)data;
+    gboolean want = gtk_switch_get_active(GTK_SWITCH(sw));
+    const char *a[] = { "wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@",
+                        want ? "1" : "0", NULL };
+    char *o = run_cmd(a);
+    g_free(o);
+}
+
+/* 소리가 나갈 수 있는 곳 전부. wpctl status 의 Sinks: 아래를 읽는다.
+ * 이름만으로는 고를 수 없다 - set-default 가 받는 것은 번호이고,
+ * 그래서 이름과 번호를 짝지어 들고 있어야 한다. */
+typedef struct {
+    GPtrArray *names;   /* NULL 로 끝난다. 드롭다운에 그대로 넘긴다. */
+    GPtrArray *ids;
+    guint      cur;
+} sinks_t;
+
+static void sinks_free(gpointer p)
+{
+    sinks_t *s = p;
+    if (!s) return;
+    g_ptr_array_free(s->names, TRUE);
+    g_ptr_array_free(s->ids, TRUE);
+    g_free(s);
+}
+
+static sinks_t *sinks_read(void)
+{
+    const char *a[] = { "wpctl", "status", NULL };
+    char *st = run_cmd(a);
+    if (!st) return NULL;
+
+    sinks_t *s = g_new0(sinks_t, 1);
+    s->names = g_ptr_array_new_with_free_func(g_free);
+    s->ids   = g_ptr_array_new_with_free_func(g_free);
+
+    char  *sec = strstr(st, "Sinks:");
+    char **l   = sec ? g_strsplit(sec, "\n", -1) : NULL;
+    for (int i = 1; l && l[i]; i++) {
+        /* 다음 절이 시작되면 멈춘다. */
+        if (strstr(l[i], "Sources:") || strstr(l[i], "Filters:") ||
+            strstr(l[i], "Streams:"))
+            break;
+
+        /* '│  *   47. Built-in Audio [vol: 0.40]' */
+        char *dot = strchr(l[i], '.');
+        if (!dot) continue;
+        char *num = dot;
+        while (num > l[i] && g_ascii_isdigit(num[-1])) num--;
+        if (num == dot) continue;
+
+        char *nm = dot + 1;
+        while (*nm == ' ') nm++;
+        char *br   = strstr(nm, "[vol:");
+        char *name = br ? g_strndup(nm, br - nm) : g_strdup(nm);
+        g_strchomp(name);
+        if (!*name) { g_free(name); continue; }
+
+        if (strchr(l[i], '*')) s->cur = s->names->len;
+        g_ptr_array_add(s->names, name);
+        g_ptr_array_add(s->ids, g_strndup(num, dot - num));
+    }
+    if (l) g_strfreev(l);
+    g_free(st);
+
+    if (!s->names->len) { sinks_free(s); return NULL; }
+    g_ptr_array_add(s->names, NULL);
+    return s;
+}
+
+static void on_sink_changed(GObject *dd, GParamSpec *spec, gpointer data)
+{
+    (void)spec;
+    sinks_t *s = data;
+    guint i = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
+    if (!s || i >= s->ids->len) return;
+
+    const char *a[] = { "wpctl", "set-default",
+                        g_ptr_array_index(s->ids, i), NULL };
     char *o = run_cmd(a);
     g_free(o);
 }
@@ -713,29 +1044,26 @@ static GtkWidget *page_sound(void)
         gtk_box_append(GTK_BOX(h), sc);
         gtk_list_box_append(GTK_LIST_BOX(g1), row);
 
-        row_switch(g1, T("Muted", "음소거"), NULL, muted, NULL, NULL);
+        row_switch(g1, T("Muted", "음소거"), NULL, muted,
+                   G_CALLBACK(on_mute), NULL);
     } else {
         row_value(g1, T("Output volume", "출력 볼륨"),
                   T("pipewire has not claimed a device yet", "pipewire 가 아직 장치를 잡지 못했습니다"), T("none", "없음"));
     }
 
-    /* 어떤 장치로 나가는지. */
-    const char *nargv[] = { "wpctl", "status", NULL };
-    char *st = run_cmd(nargv);
-    if (st) {
-        char *sink = strstr(st, "Sinks:");
-        if (sink) {
-            char *star = strchr(sink, '*');
-            if (star) {
-                char buf[160] = "";
-                if (sscanf(star, "* %*d. %159[^[\n]", buf) == 1) {
-                    g_strchomp(buf);
-                    if (buf[0])
-                        row_value(g1, T("Output device", "출력 장치"), NULL, buf);
-                }
-            }
-        }
-        g_free(st);
+    /* 어떤 장치로 나갈지. 하나뿐인 기계에서도 목록을 그린다 -
+     * 고를 것이 없다는 사실도 답이다. */
+    sinks_t *sinks = sinks_read();
+    if (sinks) {
+        GtkWidget *row = row_choice(g1, T("Output device", "출력 장치"), NULL,
+                                    (const char *const *)sinks->names->pdata,
+                                    sinks->cur,
+                                    G_CALLBACK(on_sink_changed), sinks);
+        g_object_set_data_full(G_OBJECT(row), "lp-sinks", sinks, sinks_free);
+    } else {
+        row_value(g1, T("Output device", "출력 장치"),
+                  T("wireplumber is not running", "wireplumber 가 떠 있지 않습니다"),
+                  T("none", "없음"));
     }
 
     GtkWidget *g2 = group_new(page, T("Per-application volume", "앱별 볼륨"));
@@ -747,6 +1075,29 @@ static GtkWidget *page_sound(void)
 }
 
 /* 5-6 전원 ─────────────────────────────────────────────────────── */
+
+/* 화면을 언제 끌지. 초 단위로 ~/.config/lp/idle 에 적고 lp-idle 을
+ * 다시 띄운다 - swayidle 은 시간을 명령줄에서만 받고 다시 읽지
+ * 않으므로, 바꾸려면 그 프로세스를 갈아 끼우는 수밖에 없다. */
+static void on_lock_now(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    const char *a[] = { "swaylock", "-f", "-c", "0e0e0e", NULL };
+    run_bg(a);
+}
+
+static const char *const IDLE_SECS[] = { "0", "120", "300", "600", "1800", NULL };
+
+static void on_idle_changed(GObject *dd, GParamSpec *spec, gpointer data)
+{
+    (void)spec; (void)data;
+    guint i = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
+    if (i >= G_N_ELEMENTS(IDLE_SECS) - 1) return;
+
+    lp_conf_set("idle", IDLE_SECS[i]);
+    const char *a[] = { "/usr/local/bin/lp-idle", NULL };
+    run_bg(a);
+}
 
 static GtkWidget *page_power(void)
 {
@@ -790,9 +1141,29 @@ static GtkWidget *page_power(void)
         row_value(g1, T("State", "상태"), NULL, status ? status : T("unknown", "알 수 없음"));
     }
 
-    /* 이 기계가 실제로 쓰는 값. sway 가 swayidle 로 화면을 끄고,
-     * 그 시간은 세션 설정에 들어 있다. */
-    row_value(g1, T("Turn the screen off", "화면 끄기"), T("Turns the screen off after no input", "아무 입력이 없을 때 화면을 끕니다"), T("10 minutes", "10분"));
+    /* 이 기계가 실제로 쓰는 값. swayidle 이 화면을 끄고, 그 시간은
+     * 여기서 고른 것이 그대로 들어간다. */
+    char *idle = lp_conf_get("idle");
+    guint isel = 3;                          /* 기본 10분 */
+    for (guint i = 0; IDLE_SECS[i]; i++)
+        if (idle && g_strcmp0(idle, IDLE_SECS[i]) == 0) { isel = i; break; }
+    g_free(idle);
+
+    const char *idle_items[] = {
+        T("Never",      "끄지 않음"),
+        T("2 minutes",  "2분"),
+        T("5 minutes",  "5분"),
+        T("10 minutes", "10분"),
+        T("30 minutes", "30분"),
+        NULL
+    };
+    row_choice(g1, T("Turn the screen off", "화면 끄기"),
+               T("after no input", "아무 입력이 없을 때"),
+               idle_items, isel, G_CALLBACK(on_idle_changed), NULL);
+
+    row_button(g1, T("Lock the screen now", "지금 화면 잠그기"), NULL,
+               T("Lock", "잠그기"), G_CALLBACK(on_lock_now), NULL);
+
     row_value(g1, T("Suspend", "절전 대기"),
               T("this machine does not suspend yet", "이 기계에서는 아직 절전 대기로 들어가지 않습니다"), T("Off", "사용 안 함"));
 
@@ -802,6 +1173,60 @@ static GtkWidget *page_power(void)
 
 /* 5-9 키보드 ───────────────────────────────────────────────────── */
 
+/* 고를 수 있는 배열. xkb 이름과 화면에 적을 이름은 다르다 -
+ * 사람은 'kr' 이 무엇인지 모르고 'Korean' 은 안다. */
+static const char *const XKB_LAYOUTS[] = { "us", "us,kr", "kr", "us,jp",
+                                           "us,de", "us,fr", NULL };
+
+/* 고른 배열은 두 곳에 간다: swaymsg 로 지금 세션에, 그리고
+ * ~/.config/sway/input.conf 로 다음 세션에. 한 곳만 하면 다시
+ * 로그인했을 때 되돌아가거나 지금 화면이 그대로다. */
+static void on_layout_changed(GObject *dd, GParamSpec *spec, gpointer data)
+{
+    (void)spec; (void)data;
+    guint i = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
+    if (i >= G_N_ELEMENTS(XKB_LAYOUTS) - 1) return;
+
+    const char *a[] = { "swaymsg", "input", "type:keyboard",
+                        "xkb_layout", XKB_LAYOUTS[i], NULL };
+    char *o = run_cmd(a);
+    g_free(o);
+
+    char *dir  = g_build_filename(g_get_home_dir(), ".config", "sway", NULL);
+    char *path = g_build_filename(dir, "input.conf", NULL);
+    char *body = g_strdup_printf(
+        "# 설정 앱이 쓴 파일. 직접 고쳐도 되고, 그러면 설정 앱이\n"
+        "# 그 값을 읽어 보여 준다.\n"
+        "input * {\n"
+        "    xkb_layout %s\n"
+        "    xkb_options grp:alt_shift_toggle\n"
+        "}\n", XKB_LAYOUTS[i]);
+    g_mkdir_with_parents(dir, 0755);
+    g_file_set_contents(path, body, -1, NULL);
+    g_free(body); g_free(path); g_free(dir);
+}
+
+/* 지금 걸려 있는 배열. input.conf 를 먼저 보고, 없으면 us. */
+static guint layout_selected(void)
+{
+    char *path = g_build_filename(g_get_home_dir(), ".config", "sway",
+                                  "input.conf", NULL);
+    char *cfg = slurp(path);
+    g_free(path);
+    if (!cfg) return 0;
+
+    guint sel = 0;
+    char *p = strstr(cfg, "xkb_layout");
+    if (p) {
+        char b[64] = "";
+        if (sscanf(p, "xkb_layout %63s", b) == 1)
+            for (guint i = 0; XKB_LAYOUTS[i]; i++)
+                if (g_strcmp0(b, XKB_LAYOUTS[i]) == 0) { sel = i; break; }
+    }
+    g_free(cfg);
+    return sel;
+}
+
 /* 문서에 적힌 목록이 아니라 지금 걸려 있는 것을 보여 준다. sway 의
  * 설정 파일이 곧 진실이고, 그것을 읽으면 둘이 어긋날 수가 없다. */
 static GtkWidget *page_keyboard(void)
@@ -810,13 +1235,30 @@ static GtkWidget *page_keyboard(void)
                                T("The shortcuts this machine actually has", "지금 이 기계에 걸려 있는 단축키입니다"));
 
     GtkWidget *g0 = group_new(page, T("Input sources", "입력 소스"));
+
+    const char *layout_items[] = {
+        T("English (US)",            "영어 (US)"),
+        T("English (US) + Korean",   "영어 (US) + 한국어"),
+        T("Korean",                  "한국어"),
+        T("English (US) + Japanese", "영어 (US) + 일본어"),
+        T("English (US) + German",   "영어 (US) + 독일어"),
+        T("English (US) + French",   "영어 (US) + 프랑스어"),
+        NULL
+    };
+    row_choice(g0, T("Layout", "배열"),
+               T("takes effect at once", "고르면 바로 적용됩니다"),
+               layout_items, layout_selected(),
+               G_CALLBACK(on_layout_changed), NULL);
+
+    /* 지금 실제로 활성인 배열. 위에서 고른 것과 다를 수 있다 -
+     * 둘을 걸어 두면 Alt+Shift 로 오가기 때문이다. */
     const char *iargv[] = { "swaymsg", "-t", "get_inputs", "-r", NULL };
     char *inp = run_cmd(iargv);
     if (inp) {
         char *p = strstr(inp, "xkb_active_layout_name");
         char b[128] = "";
         if (p && sscanf(p, "xkb_active_layout_name\": \"%127[^\"]", b) == 1)
-            row_value(g0, T("Current layout", "현재 배열"), NULL, b);
+            row_value(g0, T("Active now", "지금 쓰는 배열"), NULL, b);
         g_free(inp);
     }
     row_value(g0, T("Switch input", "입력 전환"), T("Alt+Shift moves to the next layout", "Alt+Shift 로 배열을 넘깁니다"), "Alt+Shift");
@@ -985,6 +1427,46 @@ static GtkWidget *page_storage(void)
 
 /* 5-15 날짜와 시간 ─────────────────────────────────────────────── */
 
+/* 12시간제인지. 상단바의 시계도 이 값을 본다 - 설정에서 바꿨는데
+ * 바가 그대로면 바꾼 것이 아니다. waybar 의 설정 파일에서 시계
+ * 형식만 갈아 끼우고 SIGUSR2 로 다시 읽게 한다. */
+static gboolean clock12_on(void)
+{
+    char *v = lp_conf_get("clock");
+    gboolean on = v && g_strcmp0(v, "12") == 0;
+    g_free(v);
+    return on;
+}
+
+static void on_clock12(GObject *sw, GParamSpec *spec, gpointer data)
+{
+    (void)spec; (void)data;
+    gboolean want = gtk_switch_get_active(GTK_SWITCH(sw));
+    lp_conf_set("clock", want ? "12" : "24");
+
+    char *path = g_build_filename(g_get_home_dir(), ".config", "waybar",
+                                  "config", NULL);
+    char *cfg  = slurp(path);
+    if (cfg) {
+        const char *from = want ? "{:%a %H:%M}" : "{:%a %I:%M %p}";
+        const char *to   = want ? "{:%a %I:%M %p}" : "{:%a %H:%M}";
+        if (strstr(cfg, from)) {
+            char **parts = g_strsplit(cfg, from, -1);
+            char  *fixed = g_strjoinv(to, parts);
+            g_strfreev(parts);
+            g_file_set_contents(path, fixed, -1, NULL);
+            g_free(fixed);
+
+            /* waybar 는 SIGUSR2 를 받으면 설정을 다시 읽는다. */
+            const char *k[] = { "sh", "-c",
+                                "kill -USR2 $(pidof waybar)", NULL };
+            run_bg(k);
+        }
+        g_free(cfg);
+    }
+    g_free(path);
+}
+
 static GtkWidget *page_datetime(void)
 {
     time_t now = time(NULL);
@@ -992,7 +1474,10 @@ static GtkWidget *page_datetime(void)
     localtime_r(&now, &tmv);
 
     char buf[160];
-    strftime(buf, sizeof buf, T("%d %B %Y  %H:%M", "%Y년 %m월 %d일 %H:%M"), &tmv);
+    strftime(buf, sizeof buf,
+             clock12_on() ? T("%d %B %Y  %I:%M %p", "%Y년 %m월 %d일 %p %I:%M")
+                          : T("%d %B %Y  %H:%M",    "%Y년 %m월 %d일 %H:%M"),
+             &tmv);
 
     GtkWidget *page = page_new(T("Date & Time", "날짜와 시간"), buf);
     GtkWidget *g1   = group_new(page, NULL);
@@ -1005,7 +1490,9 @@ static GtkWidget *page_datetime(void)
         shown = p ? p + 9 : tz;
     }
     row_value(g1, T("Time zone", "시간대"), NULL, shown);
-    row_value(g1, T("Format", "형식"), NULL, T("24-hour", "24시간"));
+    row_switch(g1, T("12-hour clock", "12시간제"),
+               T("the top bar follows this", "상단바도 이 값을 따릅니다"),
+               clock12_on(), G_CALLBACK(on_clock12), NULL);
     g_free(tz);
 
     char *pl = slurp("/proc/uptime");

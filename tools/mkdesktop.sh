@@ -59,13 +59,24 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 [[ -d "$DEB"  ]] || die "데비안 베이스가 없습니다: $DEB"
 [[ -d "$OURS" ]] || die "우리 rootfs 가 없습니다: $OURS"
 
-# ── 1. strip the base ────────────────────────────────────────────
+# ── 1. the toolchain stays ───────────────────────────────────────
 #
-# The compiler and headers were installed to build the file manager
-# against the same GTK the image ships, which is the only way to know it
-# links. They have no business on the machine afterwards.
-step "베이스에서 빌드 도구 빼기"
-if [[ -x "$DEB/usr/bin/dpkg" ]]; then
+# 이 단계는 원래 gcc 와 GTK 개발 파일을 지웠다. 두 가지 이유로 그만뒀다.
+#
+# 첫째, 지우는 자리가 틀렸다. 이 스크립트는 in-place 로 도는 일이 많고
+# (LP_INPLACE), 그러면 지워지는 것은 이미지가 아니라 **빌드에 쓰는
+# chroot** 다. 앱을 하나 고쳐서 다시 빌드하려고 하면 컴파일러가 없다.
+# 이미지의 GTK 가 4.8 이고 빌드 호스트의 GTK 가 4.14 라서 반드시
+# chroot 안에서 빌드해야 하는데, 그 chroot 를 매 실행마다 스스로
+# 부수고 있었던 셈이다. 실제로 한 번 그렇게 막혔다.
+#
+# 둘째, 지울 이유가 약하다. 우분투급으로 쓰겠다는 기계에서 C 컴파일러가
+# 있는 것은 흠이 아니라 기능이고, 4GB 이미지에서 200MB 다.
+#
+# 그래도 빼고 싶으면 LP_STRIP_DEV=1. 그때는 이 chroot 로 앱을 다시
+# 빌드할 수 없게 된다는 것을 알고 쓰는 것이다.
+step "베이스 정리"
+if [[ "${LP_STRIP_DEV:-0}" == "1" && -x "$DEB/usr/bin/dpkg" ]]; then
     for m in proc sys dev dev/pts; do
         mkdir -p "$DEB/$m"; mount --bind "/$m" "$DEB/$m" 2>/dev/null || true
     done
@@ -77,6 +88,9 @@ if [[ -x "$DEB/usr/bin/dpkg" ]]; then
         apt-get clean
     ' 2>/dev/null || log "정리를 건너뜁니다"
     for m in dev/pts dev sys proc; do umount "$DEB/$m" 2>/dev/null || true; done
+    log "빌드 도구를 뺐습니다 (LP_STRIP_DEV=1)"
+else
+    log "빌드 도구를 남겨 둡니다 - 기기에서 컴파일할 수 있습니다"
 fi
 log "$(du -sh --exclude=proc --exclude=sys --exclude=dev "$DEB" 2>/dev/null | cut -f1)"
 
@@ -107,7 +121,15 @@ step "우리 유저랜드"
 # 루트가 반쯤 만들어진 채로 남는다.
 [[ -L "$OUT/bin" ]] && rm -f "$OUT/bin"
 mkdir -p "$OUT/bin"
-cp -a "$OURS/bin/." "$OUT/bin/"
+# --remove-destination 를 반드시 붙인다.
+#
+# 데비안의 /bin/sh 는 /usr/bin/dash 를 가리키는 절대 심볼릭 링크이고,
+# apt 가 무언가를 다시 설치할 때마다 그 링크가 되살아난다. cp 는
+# 기본적으로 링크를 따라가서 쓰므로, 그 상태에서 우리 sh 를 덮으면
+# 목적지가 chroot 안의 dash 가 아니라 **빌드 호스트의** /usr/bin/dash
+# 가 된다. 이번에는 그 파일이 실행 중이라 "Text file busy" 로 멈췄고,
+# 그래서 들켰다. 멈추지 않았으면 빌드 머신의 셸을 갈아 끼웠을 것이다.
+cp -a --remove-destination "$OURS/bin/." "$OUT/bin/"
 log "$(ls "$OUT/bin" | wc -l)개 명령"
 
 # init, and the files that decide how the machine comes up.
@@ -204,7 +226,10 @@ export HOME=/root
 export TERM=linux
 export PAGER=more
 export EDITOR=edit
-export LANG=ko_KR.UTF-8
+# 이 기계의 기본 언어는 영어다. 데스크탑 세션은 session-run 이
+# ~/.config/lp/locale 을 읽어 계정마다 따로 정하고, 콘솔은 이 값을
+# 쓴다. 둘이 다른 답을 하면 안 되므로 여기도 영어로 둔다.
+export LANG=en_US.UTF-8
 
 # Where the compositor and everything it talks to put their sockets.
 # Nothing on this machine creates it - there is no logind - so it is
@@ -272,6 +297,11 @@ if [[ -f "${REPO_ROOT}/desktop/session/sway.config" ]]; then
     for h in "$OUT/root" "$OUT/home/user"; do
         mkdir -p "$h/.config/sway" "$h/.config/gtk-4.0" "$h/.config/gtk-3.0"
         cp -a "${REPO_ROOT}/desktop/session/sway.config" "$h/.config/sway/config"
+        # 설정 앱이 키보드 배열을 여기에 쓴다. sway 는 없는 파일을
+        # include 하면 오류를 찍으므로 빈 파일을 미리 만들어 둔다.
+        [[ -f "$h/.config/sway/input.conf" ]] || \
+            printf '# 설정 > 키보드 에서 배열을 고르면 여기에 적힙니다.\n' \
+                > "$h/.config/sway/input.conf"
         cp -a "${REPO_ROOT}/desktop/theme/gtk-4.0/gtk.css" "$h/.config/gtk-4.0/gtk.css" 2>/dev/null || true
         [[ -f "${REPO_ROOT}/desktop/theme/settings.ini" ]] && {
             cp -a "${REPO_ROOT}/desktop/theme/settings.ini" "$h/.config/gtk-4.0/settings.ini"
@@ -284,6 +314,8 @@ if [[ -f "${REPO_ROOT}/desktop/session/sway.config" ]]; then
     cp -a "${REPO_ROOT}/desktop/session/lp-audio-start" \
           "$OUT/usr/local/bin/lp-audio-start"
     chmod +x "$OUT/usr/local/bin/lp-audio-start"
+    cp -a "${REPO_ROOT}/desktop/session/lp-idle" "$OUT/usr/local/bin/lp-idle"
+    chmod +x "$OUT/usr/local/bin/lp-idle"
     log "sway 설정"
 fi
 

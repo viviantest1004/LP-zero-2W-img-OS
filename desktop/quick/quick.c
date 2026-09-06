@@ -622,7 +622,7 @@ static gboolean place_window(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
-static void activate(GtkApplication *gapp, gpointer data)
+static void build_panel(GtkApplication *gapp, gpointer data)
 {
     (void)data;
     Quick *q = g_new0(Quick, 1);
@@ -638,8 +638,33 @@ static void activate(GtkApplication *gapp, gpointer data)
     gtk_widget_set_size_request(q->window, PANEL_WIDTH, -1);
 
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_margin_top(box, 10);
+    gtk_widget_set_margin_top(box, 6);
     gtk_widget_set_margin_bottom(box, 10);
+
+    /* 닫기.
+     *
+     * Esc 로도 닫히고 상단바의 버튼을 다시 눌러도 닫히지만, 그 둘 다
+     * 화면에 보이지 않는다. 마우스로 연 사람이 마우스로 닫을 자리가
+     * 없으면 그 패널은 닫는 법을 아는 사람만 쓸 수 있는 것이 된다. */
+    GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_margin_start(top, 14);
+    gtk_widget_set_margin_end(top, 8);
+    gtk_widget_set_margin_bottom(top, 2);
+
+    GtkWidget *heading = gtk_label_new(T("Quick menu", "퀵메뉴"));
+    gtk_widget_add_css_class(heading, "dim-label");
+    gtk_widget_set_halign(heading, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(heading, TRUE);
+    gtk_box_append(GTK_BOX(top), heading);
+
+    GtkWidget *shut = gtk_button_new_from_icon_name("window-close-symbolic");
+    gtk_button_set_has_frame(GTK_BUTTON(shut), FALSE);
+    gtk_widget_set_tooltip_text(shut, T("Close", "닫기"));
+    g_signal_connect_swapped(shut, "clicked",
+                             G_CALLBACK(gtk_window_close), q->window);
+    gtk_box_append(GTK_BOX(top), shut);
+
+    gtk_box_append(GTK_BOX(box), top);
 
     /* 볼륨. 3-2 는 이것을 패널의 첫 줄로 두었고, 그것이 퀵메뉴를
      * 여는 가장 흔한 이유이기 때문이다.
@@ -797,6 +822,25 @@ static void activate(GtkApplication *gapp, gpointer data)
 
     /* 창이 뜬 다음에야 컴포지터가 그것을 안다. */
     g_timeout_add(60, place_window, NULL);
+}
+
+/* 두 번째로 부르면 닫힌다.
+ *
+ * 상단바의 버튼은 누를 때마다 lp-quick 을 실행한다. GtkApplication 은
+ * 같은 app id 가 이미 돌고 있으면 새 프로세스를 만들지 않고 그쪽의
+ * activate 를 다시 부르므로, 여기서 창이 이미 있는지 보고 있으면
+ * 닫는다 - 그것이 사람이 기대하는 토글이다.
+ *
+ * 이것이 없으면 버튼을 두 번 누른 사람은 패널이 그대로 있는 것을
+ * 보게 되고, 닫는 방법을 따로 배워야 한다. */
+static void activate(GtkApplication *gapp, gpointer data)
+{
+    GtkWindow *existing = gtk_application_get_active_window(gapp);
+    if (existing) {
+        gtk_window_close(existing);
+        return;
+    }
+    build_panel(gapp, data);
 }
 
 int main(int argc, char **argv)
