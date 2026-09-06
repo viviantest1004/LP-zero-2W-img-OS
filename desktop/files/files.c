@@ -77,6 +77,9 @@ struct _LpfItem {
     char     *icon_name;
     char     *sort_key;
     goffset   size;
+    /* 화면에 찍는 문자열(date_text)과 별개로 숫자를 들고 있다.
+     * '어제' 와 '9월 4일' 을 문자열로 비교하면 정렬이 되지 않는다. */
+    guint64   mtime;
     gboolean  is_dir;
     gboolean  readable;
     gboolean  dangling;   /* a symlink whose target is not there */
@@ -146,6 +149,29 @@ typedef struct {
     gboolean            show_hidden;
 
     GPtrArray          *places;   /* Place*, for the selected row */
+
+    /* ── 잘라내기·복사한 것 ──
+     *
+     * 이 창 안의 클립보드다. 시스템 클립보드에도 text/uri-list 로
+     * 같이 실어 두므로 다른 앱에 붙여넣는 것도 되지만, 붙여넣기가
+     * '옮기기' 인지 '복사' 인지는 이쪽에만 있다 - uri-list 에는 그것을
+     * 적을 자리가 없고, 옮기기로 착각해 원본을 지우는 것보다는
+     * 이 창을 벗어나면 복사가 되는 편이 안전하다. */
+    GPtrArray          *clip;      /* GFile*, 참조를 들고 있다 */
+    gboolean            clip_cut;
+
+    GtkSortListModel   *sorted;
+    GtkWidget          *list_view; /* GtkColumnView, 정렬을 물어보려고 */
+    GtkWidget          *menu;      /* 우클릭 팝오버 */
+
+    /* 파일을 옮기거나 지우는 동안 참이다. 그동안 같은 일을 다시
+     * 시작하면 두 작업이 같은 파일을 두고 경쟁한다. */
+    gboolean            busy;
+
+    /* 하위 폴더까지 뒤지는 검색. 켜져 있으면 store 에 이 폴더가
+     * 아니라 검색 결과가 들어간다. */
+    gboolean            deep;
+    GCancellable       *deep_cancel;
 } App;
 
 static void navigate(App *app, const char *path, gboolean push);
@@ -376,11 +402,14 @@ static LpfItem *item_from_info(App *app, const char *dir_path, GFileInfo *info)
 
     /* A filesystem that carries no mtime, or an entry whose time could
      * not be read, would otherwise print 1970 with a straight face. */
-    if (g_file_info_has_attribute(info, G_FILE_ATTRIBUTE_TIME_MODIFIED))
-        item->date_text = format_date(g_file_info_get_attribute_uint64(
-                              info, G_FILE_ATTRIBUTE_TIME_MODIFIED));
-    else
+    if (g_file_info_has_attribute(info, G_FILE_ATTRIBUTE_TIME_MODIFIED)) {
+        item->mtime = g_file_info_get_attribute_uint64(
+            info, G_FILE_ATTRIBUTE_TIME_MODIFIED);
+        item->date_text = format_date(item->mtime);
+    } else {
+        item->mtime     = 0;
         item->date_text = g_strdup("");
+    }
 
     return item;
 }
@@ -956,13 +985,147 @@ static gboolean filter_match(gpointer object, gpointer data)
     return hit;
 }
 
+/* ── 하위 폴더까지 뒤지는 검색 ────────────────────────────────
+ *
+ * 평소의 검색은 지금 보고 있는 목록을 거르는 것뿐이라 즉시 끝난다.
+ * 이쪽은 폴더를 걸어 내려가므로 시간이 든다.
+ *
+ * 두 가지 한도를 둔다: 항목 20000개와 깊이 12단계. 한도가 없으면
+ * 홈에서 검색을 켜는 순간 창이 멈추고, 그 상태는 고장과 구별되지
+ * 않는다. 한도에 걸리면 상태줄이 "여기까지" 라고 말한다 - 결과를
+ * 전부 찾은 척하지 않는다. */
+#define DEEP_MAX_ITEMS 20000
+#define DEEP_MAX_DEPTH 12
+
+static void deep_walk(App *app, const char *root, const char *rel,
+                      const char *needle, GPtrArray *rows, int depth)
+{
+    if (depth > DEEP_MAX_DEPTH || rows->len >= DEEP_MAX_ITEMS)
+        return;
+
+    char  *here = rel[0] ? g_build_filename(root, rel, NULL) : g_strdup(root);
+    GFile *dir  = g_file_new_for_path(here);
+    GFileEnumerator *e = g_file_enumerate_children(
+        dir, QUERY_ATTRS, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, NULL);
+    g_object_unref(dir);
+
+    if (!e) { g_free(here); return; }
+
+    for (;;) {
+        GFileInfo *info = g_file_enumerator_next_file(e, NULL, NULL);
+        if (!info || rows->len >= DEEP_MAX_ITEMS) {
+            if (info) g_object_unref(info);
+            break;
+        }
+
+        const char *name = g_file_info_get_name(info);
+        if (!name || (!app->show_hidden && name[0] == '.')) {
+            g_object_unref(info);
+            continue;
+        }
+
+        char *child_rel = rel[0] ? g_build_filename(rel, name, NULL)
+                                 : g_strdup(name);
+
+        char *folded = g_utf8_casefold(g_file_info_get_display_name(info), -1);
+        if (strstr(folded, needle)) {
+            LpfItem *item = item_from_info(app, here, info);
+            /* name 은 지금 폴더에서의 상대 경로가 된다. open_item 이
+             * app->path 와 이어 붙이므로 그대로 열린다. */
+            g_free(item->name);
+            item->name = g_strdup(child_rel);
+            /* 어디서 찾았는지 보이지 않으면 같은 이름 열 개가 구별되지
+             * 않는다. */
+            if (rel[0]) {
+                char *shown = g_strdup_printf("%s  —  %s", item->display, rel);
+                g_free(item->display);
+                item->display = shown;
+            }
+            g_ptr_array_add(rows, item);
+        }
+        g_free(folded);
+
+        if (g_file_info_get_file_type(info) == G_FILE_TYPE_DIRECTORY)
+            deep_walk(app, root, child_rel, needle, rows, depth + 1);
+
+        g_free(child_rel);
+        g_object_unref(info);
+    }
+
+    g_object_unref(e);
+    g_free(here);
+}
+
+static void deep_search(App *app, const char *text)
+{
+    char *needle = g_utf8_casefold(text, -1);
+    GPtrArray *rows = g_ptr_array_new();
+
+    deep_walk(app, app->path, "", needle, rows, 0);
+    g_free(needle);
+
+    g_list_store_remove_all(app->store);
+    g_list_store_splice(app->store, 0, 0, rows->pdata, rows->len);
+    for (guint i = 0; i < rows->len; i++)
+        g_object_unref(g_ptr_array_index(rows, i));
+
+    char *msg = rows->len >= DEEP_MAX_ITEMS
+        ? g_strdup_printf(T("First %u matches", "먼저 찾은 %u개"), rows->len)
+        : g_strdup_printf(T("%u found under here", "이 아래에서 %u개"),
+                          rows->len);
+    gtk_label_set_text(GTK_LABEL(app->status_left), msg);
+    g_free(msg);
+    g_ptr_array_free(rows, TRUE);
+}
+
 static void on_search_changed(GtkEditable *entry, gpointer data)
 {
     App *app = data;
-    (void)entry;
+    const char *text = gtk_editable_get_text(entry);
+
+    if (app->deep && text && *text) {
+        deep_search(app, text);
+        /* 결과는 이미 걸러진 것이므로 필터는 통과시켜야 한다. */
+        gtk_filter_changed(GTK_FILTER(app->filter), GTK_FILTER_CHANGE_LESS_STRICT);
+        return;
+    }
+
+    if (app->deep)
+        reload(app);      /* 검색어를 지웠으면 원래 목록으로 */
 
     gtk_filter_changed(GTK_FILTER(app->filter), GTK_FILTER_CHANGE_DIFFERENT);
     update_status(app);
+}
+
+static void act_deep_search(GSimpleAction *action, GVariant *value,
+                            gpointer data)
+{
+    App *app = data;
+    app->deep = g_variant_get_boolean(value);
+    g_simple_action_set_state(action, value);
+
+    const char *text = gtk_editable_get_text(GTK_EDITABLE(app->search_entry));
+    if (app->deep && text && *text)
+        deep_search(app, text);
+    else
+        reload(app);
+}
+
+/* 선택한 것을 연다. 더블클릭과 같은 일이고, 우클릭 메뉴의 첫 줄이
+ * 그것이어야 해서 행동으로도 만들어 둔다.
+ *
+ * first_selected 는 파일을 다루는 절에 있고 그쪽이 아래에 있어서,
+ * 여기서는 앞선 선언만 두고 정의는 그 옆에 둔다. */
+static LpfItem *first_selected(App *app);
+
+static void act_open(GSimpleAction *a, GVariant *p, gpointer data)
+{
+    (void)a; (void)p;
+    App *app = data;
+    LpfItem *item = first_selected(app);
+    if (!item) return;
+    open_item(app, item);
+    g_object_unref(item);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1406,9 +1569,22 @@ static GtkWidget *build_header(App *app)
     g_signal_connect(list_view, "toggled", G_CALLBACK(on_view_toggled), app);
 
     GMenu *menu = g_menu_new();
-    g_menu_append(menu, T("Hidden items", "숨김 항목"), "win.show-hidden");
-    g_menu_append(menu, T("Refresh", "새로 고침"), "win.refresh");
-    g_menu_append(menu, T("Parent folder", "상위 폴더"), "win.up");
+
+    GMenu *make = g_menu_new();
+    g_menu_append(make, T("New folder", "새 폴더"), "win.new-folder");
+    g_menu_append(make, T("Paste", "붙여넣기"), "win.paste");
+    g_menu_append(make, T("Select all", "전체 선택"), "win.select-all");
+    g_menu_append_section(menu, NULL, G_MENU_MODEL(make));
+    g_object_unref(make);
+
+    GMenu *look = g_menu_new();
+    g_menu_append(look, T("Hidden items", "숨김 항목"), "win.show-hidden");
+    g_menu_append(look, T("Search sub-folders too", "하위 폴더까지 검색"),
+                  "win.deep-search");
+    g_menu_append(look, T("Refresh", "새로 고침"), "win.refresh");
+    g_menu_append(look, T("Parent folder", "상위 폴더"), "win.up");
+    g_menu_append_section(menu, NULL, G_MENU_MODEL(look));
+    g_object_unref(look);
 
     GtkWidget *menu_button = gtk_menu_button_new();
     gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_button),
@@ -1437,12 +1613,1000 @@ static GtkWidget *build_header(App *app)
 }
 
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* Doing things to files                                               */
+/* ------------------------------------------------------------------ */
+
+/* Everything below this line writes to the disk, and that is a different
+ * kind of program from the one above it, which only read.
+ *
+ * Three rules hold for all of it.
+ *
+ * 1. Delete means the trash. g_file_trash() puts the file where it can
+ *    be got back from, and that is what "delete" means to the person who
+ *    pressed it. Permanent deletion exists - Shift+Delete - and it asks
+ *    first, every time, and says how many things and from where.
+ *
+ * 2. Nothing is overwritten silently. A paste onto a name that exists
+ *    makes "name (2)" instead. Overwriting is the one mistake that has
+ *    no undo, and a file manager that does it quietly has destroyed
+ *    something the person still believed they had.
+ *
+ * 3. The work happens off the main thread. Copying a folder of photos
+ *    takes seconds to minutes, and a window that stops repainting for
+ *    that long is a window that looks broken - people force-quit it, and
+ *    then the copy really is half-finished. A thread keeps the window
+ *    alive, the status line says what is happening, and the operation
+ *    is refused rather than queued while another is running.
+ */
+
+typedef struct {
+    App        *app;
+    GPtrArray  *sources;    /* GFile* */
+    GFile      *dest_dir;
+    gboolean    move;
+    gboolean    permanent;  /* delete without the trash */
+    char       *error;      /* NULL when it went through */
+    guint       done;
+    guint       total;
+} Op;
+
+static void op_free(Op *op)
+{
+    if (op->sources) g_ptr_array_unref(op->sources);
+    g_clear_object(&op->dest_dir);
+    g_free(op->error);
+    g_free(op);
+}
+
+/* A name that is not taken yet: "photo.png", then "photo (2).png".
+ *
+ * The number goes before the extension rather than after the whole name
+ * because the extension is what decides which program opens it, and
+ * "photo.png (2)" opens in nothing. */
+static GFile *free_name(GFile *dir, const char *name)
+{
+    GFile *candidate = g_file_get_child(dir, name);
+
+    if (!g_file_query_exists(candidate, NULL))
+        return candidate;
+    g_object_unref(candidate);
+
+    const char *dot = strrchr(name, '.');
+    /* A leading dot is the whole name of a hidden file, not an
+     * extension: ".bashrc" must become ".bashrc (2)". */
+    if (dot == name)
+        dot = NULL;
+
+    char *stem = dot ? g_strndup(name, (gsize)(dot - name)) : g_strdup(name);
+    const char *ext = dot ? dot : "";
+
+    for (int i = 2; i < 10000; i++) {
+        char *try = g_strdup_printf("%s (%d)%s", stem, i, ext);
+        GFile *f = g_file_get_child(dir, try);
+        g_free(try);
+        if (!g_file_query_exists(f, NULL)) {
+            g_free(stem);
+            return f;
+        }
+        g_object_unref(f);
+    }
+    g_free(stem);
+    return g_file_get_child(dir, name);   /* 포기하고 원래 이름 */
+}
+
+/* GIO copies one file. A directory has to be walked, and this is that
+ * walk. Errors stop it - a half-copied folder that reports success is
+ * worse than one that says where it stopped. */
+static gboolean copy_tree(GFile *src, GFile *dst, GError **error)
+{
+    GFileType type = g_file_query_file_type(src, G_FILE_QUERY_INFO_NONE, NULL);
+
+    if (type != G_FILE_TYPE_DIRECTORY)
+        return g_file_copy(src, dst, G_FILE_COPY_NOFOLLOW_SYMLINKS,
+                           NULL, NULL, NULL, error);
+
+    if (!g_file_make_directory_with_parents(dst, NULL, error)) {
+        if (!g_error_matches(*error, G_IO_ERROR, G_IO_ERROR_EXISTS))
+            return FALSE;
+        g_clear_error(error);
+    }
+
+    GFileEnumerator *e = g_file_enumerate_children(
+        src, G_FILE_ATTRIBUTE_STANDARD_NAME, G_FILE_QUERY_INFO_NONE,
+        NULL, error);
+    if (!e)
+        return FALSE;
+
+    gboolean ok = TRUE;
+    for (;;) {
+        GFileInfo *info = g_file_enumerator_next_file(e, NULL, error);
+        if (!info) {
+            ok = (*error == NULL);
+            break;
+        }
+        GFile *child_src = g_file_get_child(src, g_file_info_get_name(info));
+        GFile *child_dst = g_file_get_child(dst, g_file_info_get_name(info));
+        ok = copy_tree(child_src, child_dst, error);
+        g_object_unref(child_src);
+        g_object_unref(child_dst);
+        g_object_unref(info);
+        if (!ok) break;
+    }
+    g_object_unref(e);
+    return ok;
+}
+
+static gboolean delete_tree(GFile *f, GError **error)
+{
+    if (g_file_query_file_type(f, G_FILE_QUERY_INFO_NONE, NULL)
+        == G_FILE_TYPE_DIRECTORY) {
+        GFileEnumerator *e = g_file_enumerate_children(
+            f, G_FILE_ATTRIBUTE_STANDARD_NAME, G_FILE_QUERY_INFO_NONE,
+            NULL, error);
+        if (!e) return FALSE;
+
+        for (;;) {
+            GFileInfo *info = g_file_enumerator_next_file(e, NULL, error);
+            if (!info) break;
+            GFile *child = g_file_get_child(f, g_file_info_get_name(info));
+            gboolean ok = delete_tree(child, error);
+            g_object_unref(child);
+            g_object_unref(info);
+            if (!ok) { g_object_unref(e); return FALSE; }
+        }
+        g_object_unref(e);
+        if (*error) return FALSE;
+    }
+    return g_file_delete(f, NULL, error);
+}
+
+/* ── 스레드에서 도는 부분 ─────────────────────────────────────── */
+
+static void op_thread(GTask *task, gpointer source, gpointer data,
+                      GCancellable *cancel)
+{
+    (void)source; (void)cancel;
+    Op *op = data;
+    GError *error = NULL;
+
+    for (guint i = 0; i < op->sources->len; i++) {
+        GFile *src = g_ptr_array_index(op->sources, i);
+
+        if (op->dest_dir) {
+            char  *base = g_file_get_basename(src);
+            GFile *dst  = free_name(op->dest_dir, base);
+            g_free(base);
+
+            if (op->move) {
+                /* 같은 파일시스템이면 rename 한 번이라 즉시 끝난다.
+                 * 아니면 GIO 가 복사한 뒤 지우는데, 그 판단을 여기서
+                 * 다시 할 이유는 없다. */
+                g_file_move(src, dst, G_FILE_COPY_NOFOLLOW_SYMLINKS,
+                            NULL, NULL, NULL, &error);
+                if (g_error_matches(error, G_IO_ERROR,
+                                    G_IO_ERROR_WOULD_RECURSE)) {
+                    /* 폴더를 다른 파일시스템으로 옮기는 경우.
+                     * g_file_move 가 못 하므로 손으로 복사하고 지운다. */
+                    g_clear_error(&error);
+                    if (copy_tree(src, dst, &error))
+                        delete_tree(src, &error);
+                }
+            } else {
+                copy_tree(src, dst, &error);
+            }
+            g_object_unref(dst);
+        } else if (op->permanent) {
+            delete_tree(src, &error);
+        } else {
+            g_file_trash(src, NULL, &error);
+            if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED)) {
+                /* 휴지통이 없는 파일시스템 - USB 의 FAT 이 그렇다.
+                 * 조용히 영구 삭제로 넘어가지 않는다. 지우려던 사람은
+                 * 되돌릴 수 있다고 믿고 눌렀다. */
+                g_clear_error(&error);
+                op->error = g_strdup(
+                    T("This filesystem has no trash. Use Shift+Delete to"
+                      " remove it for good.",
+                      "이 파일시스템에는 휴지통이 없습니다. 영구히 지우려면"
+                      " Shift+Delete 를 쓰십시오."));
+                break;
+            }
+        }
+
+        op->done++;
+        if (error) {
+            op->error = g_strdup(error->message);
+            g_clear_error(&error);
+            break;
+        }
+    }
+    g_task_return_boolean(task, TRUE);
+}
+
+static void op_finished(GObject *source, GAsyncResult *res, gpointer data)
+{
+    (void)source; (void)res;
+    Op  *op  = data;
+    App *app = op->app;
+
+    app->busy = FALSE;
+
+    if (op->error) {
+        char *how_far = op->done
+            ? g_strdup_printf(T("%u of %u done", "%u개 중 %u개 처리함"),
+                              op->done, op->total)
+            : g_strdup(T("Nothing was changed", "아무것도 바뀌지 않았습니다"));
+
+        say(app, T("The operation did not finish", "작업을 끝내지 못했습니다"),
+            how_far, op->error);
+        g_free(how_far);
+    }
+
+    reload(app);
+    update_status(app);
+    op_free(op);
+}
+
+static void op_start(App *app, GPtrArray *sources, GFile *dest_dir,
+                     gboolean move, gboolean permanent)
+{
+    if (app->busy || sources->len == 0) {
+        g_ptr_array_unref(sources);
+        return;
+    }
+    app->busy = TRUE;
+
+    Op *op = g_new0(Op, 1);
+    op->app       = app;
+    op->sources   = sources;
+    op->dest_dir  = dest_dir ? g_object_ref(dest_dir) : NULL;
+    op->move      = move;
+    op->permanent = permanent;
+    op->total     = sources->len;
+
+    GTask *task = g_task_new(NULL, NULL, op_finished, op);
+    g_task_set_task_data(task, op, NULL);
+    g_task_run_in_thread(task, op_thread);
+    g_object_unref(task);
+}
+
+/* ── 지금 선택된 것들 ─────────────────────────────────────────── */
+
+/* 선택된 항목의 GFile 목록. 아무것도 선택되지 않았으면 빈 배열이다. */
+static GPtrArray *selected_files(App *app)
+{
+    GPtrArray *out = g_ptr_array_new_with_free_func(g_object_unref);
+    GtkBitset *bits = gtk_selection_model_get_selection(app->selection);
+    GtkBitsetIter iter;
+    guint pos;
+
+    if (gtk_bitset_iter_init_first(&iter, bits, &pos)) {
+        do {
+            LpfItem *item = g_list_model_get_item(
+                G_LIST_MODEL(app->selection), pos);
+            if (item) {
+                char *path = g_build_filename(app->path, item->name, NULL);
+                g_ptr_array_add(out, g_file_new_for_path(path));
+                g_free(path);
+                g_object_unref(item);
+            }
+        } while (gtk_bitset_iter_next(&iter, &pos));
+    }
+    gtk_bitset_unref(bits);
+    return out;
+}
+
+static LpfItem *first_selected(App *app)
+{
+    GtkBitset *bits = gtk_selection_model_get_selection(app->selection);
+    LpfItem   *item = NULL;
+    GtkBitsetIter iter;
+    guint pos;
+
+    if (gtk_bitset_iter_init_first(&iter, bits, &pos))
+        item = g_list_model_get_item(G_LIST_MODEL(app->selection), pos);
+    gtk_bitset_unref(bits);
+    return item;
+}
+
+/* ── 복사 · 잘라내기 · 붙여넣기 ───────────────────────────────── */
+
+static void put_on_clipboard(App *app, GPtrArray *files)
+{
+    /* 시스템 클립보드에는 uri-list 로. 다른 앱에 붙여넣기가 되는 것은
+     * 이것 때문이고, 그쪽에서는 언제나 복사로 취급된다. */
+    GString *uris = g_string_new(NULL);
+    for (guint i = 0; i < files->len; i++) {
+        char *uri = g_file_get_uri(g_ptr_array_index(files, i));
+        g_string_append(uris, uri);
+        g_string_append_c(uris, '\n');
+        g_free(uri);
+    }
+    GdkClipboard *cb = gtk_widget_get_clipboard(GTK_WIDGET(app->window));
+    gdk_clipboard_set_text(cb, uris->str);
+    g_string_free(uris, TRUE);
+}
+
+static void set_clip(App *app, gboolean cut)
+{
+    GPtrArray *files = selected_files(app);
+    if (files->len == 0) {
+        g_ptr_array_unref(files);
+        return;
+    }
+
+    if (app->clip) g_ptr_array_unref(app->clip);
+    app->clip     = files;
+    app->clip_cut = cut;
+
+    put_on_clipboard(app, files);
+
+    char *msg = g_strdup_printf(
+        cut ? T("%u ready to move", "%u개를 옮길 준비가 되었습니다")
+            : T("%u ready to copy", "%u개를 복사할 준비가 되었습니다"),
+        files->len);
+    gtk_label_set_text(GTK_LABEL(app->status_left), msg);
+    g_free(msg);
+}
+
+static void act_copy(GSimpleAction *a, GVariant *p, gpointer data)
+{ (void)a; (void)p; set_clip(data, FALSE); }
+
+static void act_cut(GSimpleAction *a, GVariant *p, gpointer data)
+{ (void)a; (void)p; set_clip(data, TRUE); }
+
+static void act_paste(GSimpleAction *a, GVariant *p, gpointer data)
+{
+    (void)a; (void)p;
+    App *app = data;
+    if (!app->clip || app->clip->len == 0)
+        return;
+
+    GFile *dest = g_file_new_for_path(app->path);
+    GPtrArray *copy = g_ptr_array_new_with_free_func(g_object_unref);
+    for (guint i = 0; i < app->clip->len; i++)
+        g_ptr_array_add(copy, g_object_ref(g_ptr_array_index(app->clip, i)));
+
+    op_start(app, copy, dest, app->clip_cut, FALSE);
+    g_object_unref(dest);
+
+    /* 잘라내기는 한 번만 붙는다. 두 번째 붙여넣기는 이미 없는 원본을
+     * 찾게 되고, 그 오류는 사용자가 한 일과 이어지지 않는다. */
+    if (app->clip_cut) {
+        g_clear_pointer(&app->clip, g_ptr_array_unref);
+        app->clip_cut = FALSE;
+    }
+}
+
+/* ── 삭제 ─────────────────────────────────────────────────────── */
+
+typedef struct { App *app; GPtrArray *files; } Confirm;
+
+static void on_delete_response(GtkDialog *dialog, int response, gpointer data)
+{
+    Confirm *c = data;
+    if (response == GTK_RESPONSE_ACCEPT)
+        op_start(c->app, c->files, NULL, FALSE, TRUE);
+    else
+        g_ptr_array_unref(c->files);
+    g_free(c);
+    gtk_window_destroy(GTK_WINDOW(dialog));
+}
+
+static void act_trash(GSimpleAction *a, GVariant *p, gpointer data)
+{
+    (void)a; (void)p;
+    App *app = data;
+    op_start(app, selected_files(app), NULL, FALSE, FALSE);
+}
+
+static void act_delete(GSimpleAction *a, GVariant *p, gpointer data)
+{
+    (void)a; (void)p;
+    App *app = data;
+    GPtrArray *files = selected_files(app);
+    if (files->len == 0) {
+        g_ptr_array_unref(files);
+        return;
+    }
+
+    /* 영구 삭제는 되돌릴 수 없는 유일한 동작이므로, 몇 개를 어디서
+     * 지우는지 말하고 묻는다. 개수만 말하면 잘못 고른 것을 알 수
+     * 없다. */
+    char *what = g_strdup_printf(
+        T("Delete %u item%s for good?", "%u개%s를 영구히 지울까요?"),
+        files->len,
+        lp_korean() ? "" : (files->len == 1 ? "" : "s"));
+
+    GtkWidget *dialog = gtk_message_dialog_new(
+        app->window, GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+        GTK_MESSAGE_WARNING, GTK_BUTTONS_NONE, "%s", what);
+    g_free(what);
+
+    gtk_message_dialog_format_secondary_text(
+        GTK_MESSAGE_DIALOG(dialog), "%s\n\n%s", app->path,
+        T("They will not go to the trash and cannot be brought back.",
+          "휴지통을 거치지 않으며, 되돌릴 수 없습니다."));
+
+    gtk_dialog_add_button(GTK_DIALOG(dialog), T("Cancel", "취소"),
+                          GTK_RESPONSE_CANCEL);
+    GtkWidget *ok = gtk_dialog_add_button(GTK_DIALOG(dialog),
+                                          T("Delete", "지우기"),
+                                          GTK_RESPONSE_ACCEPT);
+    gtk_widget_add_css_class(ok, "destructive-action");
+
+    Confirm *c = g_new0(Confirm, 1);
+    c->app = app;
+    c->files = files;
+    g_signal_connect(dialog, "response",
+                     G_CALLBACK(on_delete_response), c);
+    gtk_window_present(GTK_WINDOW(dialog));
+}
+
+/* ── 이름 바꾸기 · 새 폴더 ────────────────────────────────────── */
+
+typedef struct {
+    App       *app;
+    GtkWidget *entry;
+    char      *old_name;    /* NULL 이면 새 폴더 */
+} NameDialog;
+
+static void on_name_response(GtkDialog *dialog, int response, gpointer data)
+{
+    NameDialog *nd = data;
+    App *app = nd->app;
+
+    if (response == GTK_RESPONSE_ACCEPT) {
+        const char *text = gtk_editable_get_text(GTK_EDITABLE(nd->entry));
+
+        /* 슬래시가 들어가면 이름이 아니라 경로가 된다. 조용히 잘라
+         * 붙이면 사용자가 의도하지 않은 자리에 파일이 생긴다. */
+        if (!*text || strchr(text, '/')) {
+            say(app, T("That name cannot be used", "쓸 수 없는 이름입니다"),
+                *text ? text : T("(empty)", "(비어 있음)"),
+                T("A name cannot be empty or contain a slash.",
+                  "이름은 비어 있을 수 없고 / 를 담을 수 없습니다."));
+        } else {
+            GFile  *dir = g_file_new_for_path(app->path);
+            GError *err = NULL;
+
+            if (nd->old_name) {
+                GFile *src = g_file_get_child(dir, nd->old_name);
+                GFile *dst = g_file_get_child(dir, text);
+                if (g_file_query_exists(dst, NULL)) {
+                    say(app, T("That name is taken", "이미 있는 이름입니다"),
+                        text, T("Something here already has it.",
+                                "이 폴더에 같은 이름이 있습니다."));
+                } else {
+                    g_file_move(src, dst, G_FILE_COPY_NOFOLLOW_SYMLINKS,
+                                NULL, NULL, NULL, &err);
+                }
+                g_object_unref(src);
+                g_object_unref(dst);
+            } else {
+                GFile *nf = g_file_get_child(dir, text);
+                g_file_make_directory(nf, NULL, &err);
+                g_object_unref(nf);
+            }
+
+            if (err) {
+                say(app, nd->old_name
+                        ? T("Could not rename it", "이름을 바꾸지 못했습니다")
+                        : T("Could not make the folder", "폴더를 만들지 못했습니다"),
+                    text, err->message);
+                g_error_free(err);
+            }
+            g_object_unref(dir);
+            reload(app);
+        }
+    }
+
+    g_free(nd->old_name);
+    g_free(nd);
+    gtk_window_destroy(GTK_WINDOW(dialog));
+}
+
+static void name_dialog(App *app, const char *old_name)
+{
+    GtkWidget *dialog = gtk_dialog_new_with_buttons(
+        old_name ? T("Rename", "이름 바꾸기") : T("New folder", "새 폴더"),
+        app->window, GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+        T("Cancel", "취소"), GTK_RESPONSE_CANCEL,
+        old_name ? T("Rename", "바꾸기") : T("Create", "만들기"),
+        GTK_RESPONSE_ACCEPT, NULL);
+
+    GtkWidget *entry = gtk_entry_new();
+    gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
+    gtk_widget_set_margin_start(entry, 16);
+    gtk_widget_set_margin_end(entry, 16);
+    gtk_widget_set_margin_top(entry, 12);
+    gtk_widget_set_margin_bottom(entry, 12);
+    gtk_widget_set_size_request(entry, 320, -1);
+
+    if (old_name) {
+        gtk_editable_set_text(GTK_EDITABLE(entry), old_name);
+        /* 확장자를 뺀 부분만 고른다. 이름을 바꾸려는 사람이 바꾸고
+         * 싶은 것은 대개 그쪽이고, 확장자까지 지워지면 파일이 열리지
+         * 않게 된다. */
+        const char *dot = strrchr(old_name, '.');
+        if (dot && dot != old_name)
+            gtk_editable_select_region(GTK_EDITABLE(entry), 0,
+                                       (int)g_utf8_strlen(old_name,
+                                                          dot - old_name));
+        else
+            gtk_editable_select_region(GTK_EDITABLE(entry), 0, -1);
+    } else {
+        gtk_editable_set_text(GTK_EDITABLE(entry),
+                              T("New folder", "새 폴더"));
+        gtk_editable_select_region(GTK_EDITABLE(entry), 0, -1);
+    }
+
+    gtk_box_append(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(dialog))),
+                   entry);
+    gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_ACCEPT);
+
+    NameDialog *nd = g_new0(NameDialog, 1);
+    nd->app = app;
+    nd->entry = entry;
+    nd->old_name = g_strdup(old_name);
+
+    g_signal_connect(dialog, "response", G_CALLBACK(on_name_response), nd);
+    gtk_window_present(GTK_WINDOW(dialog));
+}
+
+static void act_rename(GSimpleAction *a, GVariant *p, gpointer data)
+{
+    (void)a; (void)p;
+    App *app = data;
+    LpfItem *item = first_selected(app);
+    if (!item) return;
+    name_dialog(app, item->name);
+    g_object_unref(item);
+}
+
+static void act_new_folder(GSimpleAction *a, GVariant *p, gpointer data)
+{ (void)a; (void)p; name_dialog(data, NULL); }
+
+static void act_select_all(GSimpleAction *a, GVariant *p, gpointer data)
+{
+    (void)a; (void)p;
+    App *app = data;
+    gtk_selection_model_select_all(app->selection);
+}
+
+/* ── 속성 ─────────────────────────────────────────────────────── */
+
+/* 폴더 하나의 크기를 세는 것은 그 안을 전부 걷는 일이라, 큰 폴더에서는
+ * 오래 걸린다. 창을 먼저 띄우고 결과를 나중에 채워 넣는다. */
+static goffset dir_size(GFile *dir, guint *files, guint *dirs)
+{
+    GFileEnumerator *e = g_file_enumerate_children(
+        dir, G_FILE_ATTRIBUTE_STANDARD_NAME "," G_FILE_ATTRIBUTE_STANDARD_SIZE
+        "," G_FILE_ATTRIBUTE_STANDARD_TYPE,
+        G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, NULL);
+    if (!e) return 0;
+
+    goffset total = 0;
+    for (;;) {
+        GFileInfo *info = g_file_enumerator_next_file(e, NULL, NULL);
+        if (!info) break;
+        if (g_file_info_get_file_type(info) == G_FILE_TYPE_DIRECTORY) {
+            GFile *child = g_file_get_child(dir, g_file_info_get_name(info));
+            (*dirs)++;
+            total += dir_size(child, files, dirs);
+            g_object_unref(child);
+        } else {
+            (*files)++;
+            total += g_file_info_get_size(info);
+        }
+        g_object_unref(info);
+    }
+    g_object_unref(e);
+    return total;
+}
+
+static void prop_row(GtkWidget *grid, int row, const char *label,
+                     const char *value)
+{
+    GtkWidget *l = gtk_label_new(label);
+    gtk_widget_add_css_class(l, "dim-label");
+    gtk_widget_set_halign(l, GTK_ALIGN_END);
+    gtk_grid_attach(GTK_GRID(grid), l, 0, row, 1, 1);
+
+    GtkWidget *v = gtk_label_new(value);
+    gtk_widget_set_halign(v, GTK_ALIGN_START);
+    gtk_label_set_selectable(GTK_LABEL(v), TRUE);
+    gtk_label_set_wrap(GTK_LABEL(v), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(v), 44);
+    gtk_grid_attach(GTK_GRID(grid), v, 1, row, 1, 1);
+}
+
+static void act_properties(GSimpleAction *a, GVariant *p, gpointer data)
+{
+    (void)a; (void)p;
+    App *app = data;
+    LpfItem *item = first_selected(app);
+    if (!item) return;
+
+    char  *path = g_build_filename(app->path, item->name, NULL);
+    GFile *file = g_file_new_for_path(path);
+    GFileInfo *info = g_file_query_info(
+        file, "standard::*,time::modified,time::access,unix::mode,owner::*",
+        G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, NULL);
+
+    GtkWidget *dialog = gtk_dialog_new_with_buttons(
+        T("Properties", "속성"), app->window,
+        GTK_DIALOG_DESTROY_WITH_PARENT,
+        T("Close", "닫기"), GTK_RESPONSE_CLOSE, NULL);
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 440, -1);
+
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 16);
+    gtk_widget_set_margin_start(grid, 20);
+    gtk_widget_set_margin_end(grid, 20);
+    gtk_widget_set_margin_top(grid, 16);
+    gtk_widget_set_margin_bottom(grid, 16);
+
+    int r = 0;
+    prop_row(grid, r++, T("Name", "이름"), item->display);
+    prop_row(grid, r++, T("Where", "위치"), app->path);
+
+    if (info) {
+        prop_row(grid, r++, T("Type", "종류"),
+                 g_file_info_get_content_type(info)
+                     ? g_content_type_get_description(
+                           g_file_info_get_content_type(info))
+                     : T("unknown", "알 수 없음"));
+
+        if (item->is_dir) {
+            guint files = 0, dirs = 0;
+            goffset total = dir_size(file, &files, &dirs);
+            char *size = g_format_size(total);
+            char *v = g_strdup_printf(
+                T("%s · %u files in %u folders",
+                  "%s · 폴더 %u개 안에 파일 %u개"),
+                size, lp_korean() ? dirs : files, lp_korean() ? files : dirs);
+            prop_row(grid, r++, T("Size", "크기"), v);
+            g_free(v); g_free(size);
+        } else {
+            char *size = g_format_size(g_file_info_get_size(info));
+            char *v = g_strdup_printf("%s (%" G_GOFFSET_FORMAT " bytes)",
+                                      size, g_file_info_get_size(info));
+            prop_row(grid, r++, T("Size", "크기"), v);
+            g_free(v); g_free(size);
+        }
+
+        GDateTime *mod = g_file_info_get_modification_date_time(info);
+        if (mod) {
+            char *when = g_date_time_format(mod, "%Y-%m-%d %H:%M:%S");
+            prop_row(grid, r++, T("Modified", "수정일"), when);
+            g_free(when);
+            g_date_time_unref(mod);
+        }
+
+        guint32 mode = g_file_info_get_attribute_uint32(
+            info, G_FILE_ATTRIBUTE_UNIX_MODE);
+        if (mode) {
+            char perm[11] = "----------";
+            perm[0] = item->is_dir ? 'd' : '-';
+            const char *rwx = "rwxrwxrwx";
+            for (int i = 0; i < 9; i++)
+                perm[i + 1] = (mode & (1 << (8 - i))) ? rwx[i] : '-';
+            char *v = g_strdup_printf("%s (%04o)", perm, mode & 07777);
+            prop_row(grid, r++, T("Permissions", "권한"), v);
+            g_free(v);
+        }
+
+        const char *owner = g_file_info_get_attribute_string(
+            info, G_FILE_ATTRIBUTE_OWNER_USER);
+        if (owner)
+            prop_row(grid, r++, T("Owner", "소유자"), owner);
+
+        g_object_unref(info);
+    }
+
+    gtk_box_append(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(dialog))),
+                   grid);
+    g_signal_connect(dialog, "response", G_CALLBACK(gtk_window_destroy), NULL);
+    gtk_window_present(GTK_WINDOW(dialog));
+
+    g_object_unref(file);
+    g_free(path);
+    g_object_unref(item);
+}
+
+/* ── 압축 풀기 ────────────────────────────────────────────────── */
+
+/* 직접 풀지 않고 file-roller 에게 넘긴다. zip, tar, 7z, rar 를 저마다
+ * 다르게 다루는 코드를 여기 들이는 것은 이 앱이 할 일이 아니고,
+ * file-roller 는 이미 이미지에 들어 있다. */
+static void act_extract(GSimpleAction *a, GVariant *p, gpointer data)
+{
+    (void)a; (void)p;
+    App *app = data;
+    LpfItem *item = first_selected(app);
+    if (!item) return;
+
+    char *path = g_build_filename(app->path, item->name, NULL);
+    const char *argv[] = { "file-roller", "--extract-here", path, NULL };
+
+    if (!g_spawn_async(app->path, (char **)argv, NULL,
+                       G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL |
+                       G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, NULL, NULL))
+        say(app, T("Could not extract it", "압축을 풀지 못했습니다"),
+            item->display,
+            T("file-roller is not installed.",
+              "file-roller 가 설치되어 있지 않습니다."));
+
+    g_free(path);
+    g_object_unref(item);
+}
+
+/* 압축 파일처럼 보이는가. 우클릭 메뉴에 '압축 풀기' 를 넣을지 정하는
+ * 데만 쓰이므로, 확장자로 보는 것으로 충분하다. */
+static gboolean looks_like_archive(const char *name)
+{
+    static const char *ext[] = {
+        ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar",
+        ".zst", ".tar.gz", ".tar.xz", ".tar.bz2", NULL
+    };
+    char *lower = g_ascii_strdown(name, -1);
+    gboolean hit = FALSE;
+    for (int i = 0; ext[i] && !hit; i++)
+        hit = g_str_has_suffix(lower, ext[i]);
+    g_free(lower);
+    return hit;
+}
+
+/* ------------------------------------------------------------------ */
+/* The right-click menu                                                */
+/* ------------------------------------------------------------------ */
+
+/* Built each time it opens rather than once at startup.
+ *
+ * What belongs on it depends on what is under the pointer: Extract only
+ * for an archive, Rename only for exactly one thing, Paste only when
+ * something was copied. A fixed menu with half its entries greyed out
+ * makes a person read all of it to find the two that work. */
+static void popup_menu(App *app, GtkWidget *over, double x, double y)
+{
+    GtkBitset *bits = gtk_selection_model_get_selection(app->selection);
+    guint      n    = gtk_bitset_get_size(bits);
+    gtk_bitset_unref(bits);
+
+    GMenu *menu = g_menu_new();
+
+    if (n >= 1) {
+        GMenu *first = g_menu_new();
+        g_menu_append(first, T("Open", "열기"), "win.open");
+
+        if (n == 1) {
+            LpfItem *item = first_selected(app);
+            if (item) {
+                if (looks_like_archive(item->name))
+                    g_menu_append(first, T("Extract here", "여기에 압축 풀기"),
+                                  "win.extract");
+                g_object_unref(item);
+            }
+        }
+        g_menu_append_section(menu, NULL, G_MENU_MODEL(first));
+        g_object_unref(first);
+
+        GMenu *edit = g_menu_new();
+        g_menu_append(edit, T("Copy", "복사"), "win.copy");
+        g_menu_append(edit, T("Cut", "잘라내기"), "win.cut");
+        if (app->clip && app->clip->len)
+            g_menu_append(edit, T("Paste", "붙여넣기"), "win.paste");
+        if (n == 1)
+            g_menu_append(edit, T("Rename", "이름 바꾸기"), "win.rename");
+        g_menu_append_section(menu, NULL, G_MENU_MODEL(edit));
+        g_object_unref(edit);
+
+        GMenu *gone = g_menu_new();
+        g_menu_append(gone, T("Move to trash", "휴지통으로"), "win.trash");
+        g_menu_append(gone, T("Delete for good", "영구히 지우기"), "win.delete");
+        g_menu_append_section(menu, NULL, G_MENU_MODEL(gone));
+        g_object_unref(gone);
+
+        GMenu *info = g_menu_new();
+        g_menu_append(info, T("Properties", "속성"), "win.properties");
+        g_menu_append_section(menu, NULL, G_MENU_MODEL(info));
+        g_object_unref(info);
+    } else {
+        /* 빈 자리에서 눌렀다. 선택된 것이 없으므로 이 폴더에 대한
+         * 것만 남는다. */
+        GMenu *here = g_menu_new();
+        if (app->clip && app->clip->len)
+            g_menu_append(here, T("Paste", "붙여넣기"), "win.paste");
+        g_menu_append(here, T("New folder", "새 폴더"), "win.new-folder");
+        g_menu_append(here, T("Select all", "전체 선택"), "win.select-all");
+        g_menu_append(here, T("Refresh", "새로 고침"), "win.refresh");
+        g_menu_append_section(menu, NULL, G_MENU_MODEL(here));
+        g_object_unref(here);
+    }
+
+    if (app->menu)
+        gtk_widget_unparent(app->menu);
+
+    app->menu = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
+    g_object_unref(menu);
+
+    gtk_popover_set_has_arrow(GTK_POPOVER(app->menu), FALSE);
+    gtk_widget_set_halign(app->menu, GTK_ALIGN_START);
+    /* GTK 4.8 에는 gtk_popover_set_parent 가 없다. 팝오버도 위젯이므로
+     * 부모를 직접 붙인다 - 4.10 이 그 이름의 함수를 만들었을 뿐이고,
+     * 하는 일은 같다. */
+    gtk_widget_set_parent(app->menu, over);
+    gtk_popover_set_pointing_to(GTK_POPOVER(app->menu),
+                                &(GdkRectangle){ (int)x, (int)y, 1, 1 });
+    gtk_popover_popup(GTK_POPOVER(app->menu));
+}
+
+static void on_right_click(GtkGestureClick *gesture, int n_press,
+                           double x, double y, gpointer data)
+{
+    (void)n_press;
+    App *app = data;
+    GtkWidget *over = gtk_event_controller_get_widget(
+        GTK_EVENT_CONTROLLER(gesture));
+    popup_menu(app, over, x, y);
+}
+
+/* 오른쪽 버튼과 Menu 키 둘 다. 키보드만 쓰는 사람에게 메뉴가 없으면
+ * 복사와 삭제는 단축키를 외운 사람만 쓸 수 있는 기능이 된다. */
+static void attach_menu(App *app, GtkWidget *view)
+{
+    GtkGesture *click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_SECONDARY);
+    g_signal_connect(click, "pressed", G_CALLBACK(on_right_click), app);
+    gtk_widget_add_controller(view, GTK_EVENT_CONTROLLER(click));
+}
+
+/* ------------------------------------------------------------------ */
+/* Sorting by column                                                   */
+/* ------------------------------------------------------------------ */
+
+/* Folders stay above files whichever column is sorted, and that is not
+ * a decoration: a folder and a file of the same name are different
+ * kinds of thing, and mixing them by size puts a 4KB folder in the
+ * middle of a list of small files where nobody looks for it. Every
+ * comparison below therefore answers the directory question first. */
+static int dirs_first(LpfItem *a, LpfItem *b)
+{
+    if (a->is_dir != b->is_dir)
+        return a->is_dir ? -1 : 1;
+    return 0;
+}
+
+static int sort_by_name(gconstpointer a, gconstpointer b, gpointer user)
+{
+    (void)user;
+    LpfItem *x = (LpfItem *)a, *y = (LpfItem *)b;
+    int d = dirs_first(x, y);
+    return d ? d : strcmp(x->sort_key, y->sort_key);
+}
+
+static int sort_by_size(gconstpointer a, gconstpointer b, gpointer user)
+{
+    (void)user;
+    LpfItem *x = (LpfItem *)a, *y = (LpfItem *)b;
+    int d = dirs_first(x, y);
+    if (d) return d;
+    /* 폴더끼리는 크기가 없으므로 이름으로 떨어진다. 둘 다 0 이라고
+     * 답하면 정렬이 안정적이지 않아 누를 때마다 순서가 바뀐다. */
+    if (x->is_dir) return strcmp(x->sort_key, y->sort_key);
+    if (x->size < y->size) return -1;
+    if (x->size > y->size) return 1;
+    return strcmp(x->sort_key, y->sort_key);
+}
+
+static int sort_by_date(gconstpointer a, gconstpointer b, gpointer user)
+{
+    (void)user;
+    LpfItem *x = (LpfItem *)a, *y = (LpfItem *)b;
+    int d = dirs_first(x, y);
+    if (d) return d;
+    if (x->mtime < y->mtime) return -1;
+    if (x->mtime > y->mtime) return 1;
+    return strcmp(x->sort_key, y->sort_key);
+}
+
+/* ------------------------------------------------------------------ */
+/* Drag and drop                                                       */
+/* ------------------------------------------------------------------ */
+
+static GdkContentProvider *on_drag_prepare(GtkDragSource *source,
+                                           double x, double y, gpointer data)
+{
+    (void)source; (void)x; (void)y;
+    App *app = data;
+
+    GPtrArray *files = selected_files(app);
+    if (files->len == 0) {
+        g_ptr_array_unref(files);
+        return NULL;
+    }
+
+    GSList *list = NULL;
+    for (guint i = files->len; i > 0; i--)
+        list = g_slist_prepend(list, g_ptr_array_index(files, i - 1));
+
+    GdkFileList *fl = gdk_file_list_new_from_list(list);
+    g_slist_free(list);
+    g_ptr_array_unref(files);
+
+    /* new_typed 가 boxed 값을 복사해 가므로 이쪽 것은 여기서 놓는다.
+     * GdkFileList 는 boxed 타입이고 전용 unref 함수가 없다. */
+    GdkContentProvider *p =
+        gdk_content_provider_new_typed(GDK_TYPE_FILE_LIST, fl);
+    g_boxed_free(GDK_TYPE_FILE_LIST, fl);
+    return p;
+}
+
+static gboolean on_drop(GtkDropTarget *target, const GValue *value,
+                        double x, double y, gpointer data)
+{
+    (void)target; (void)x; (void)y;
+    App *app = data;
+
+    if (!G_VALUE_HOLDS(value, GDK_TYPE_FILE_LIST))
+        return FALSE;
+
+    GdkFileList *fl = g_value_get_boxed(value);
+    GSList      *l  = gdk_file_list_get_files(fl);
+
+    GPtrArray *sources = g_ptr_array_new_with_free_func(g_object_unref);
+    for (GSList *n = l; n; n = n->next) {
+        GFile *f = n->data;
+        /* 자기 자신이 있는 폴더로 끌어다 놓는 것은 아무 뜻이 없고,
+         * "(2)" 사본만 만들어 낸다. */
+        GFile *parent = g_file_get_parent(f);
+        char  *pp = parent ? g_file_get_path(parent) : NULL;
+        gboolean same = pp && g_strcmp0(pp, app->path) == 0;
+        g_free(pp);
+        g_clear_object(&parent);
+        if (!same)
+            g_ptr_array_add(sources, g_object_ref(f));
+    }
+    g_slist_free_full(l, g_object_unref);
+
+    if (sources->len == 0) {
+        g_ptr_array_unref(sources);
+        return FALSE;
+    }
+
+    /* 끌어 놓기는 복사다. 옮기기를 기본으로 하면, 잘못 놓았을 때
+     * 원본이 이미 없다. 옮기려면 잘라내기와 붙여넣기가 있고, 그쪽은
+     * 무엇을 하는지 이름이 말해 준다. */
+    GFile *dest = g_file_new_for_path(app->path);
+    op_start(app, sources, dest, FALSE, FALSE);
+    g_object_unref(dest);
+    return TRUE;
+}
+
+static void attach_dnd(App *app, GtkWidget *view)
+{
+    GtkDragSource *source = gtk_drag_source_new();
+    gtk_drag_source_set_actions(source, GDK_ACTION_COPY);
+    g_signal_connect(source, "prepare", G_CALLBACK(on_drag_prepare), app);
+    gtk_widget_add_controller(view, GTK_EVENT_CONTROLLER(source));
+
+    GtkDropTarget *target = gtk_drop_target_new(GDK_TYPE_FILE_LIST,
+                                                GDK_ACTION_COPY);
+    g_signal_connect(target, "drop", G_CALLBACK(on_drop), app);
+    gtk_widget_add_controller(view, GTK_EVENT_CONTROLLER(target));
+}
+
+/* ------------------------------------------------------------------ */
 /* The list                                                            */
 /* ------------------------------------------------------------------ */
 
 static GtkColumnViewColumn *make_column(const char *title,
                                         GCallback setup, GCallback bind,
-                                        gpointer setup_data, int width)
+                                        gpointer setup_data, int width,
+                                        GCompareDataFunc compare)
 {
     GtkListItemFactory *factory = gtk_signal_list_item_factory_new();
 
@@ -1456,6 +2620,13 @@ static GtkColumnViewColumn *make_column(const char *title,
     else
         gtk_column_view_column_set_expand(column, TRUE);
 
+    /* 정렬기를 붙이면 그 열의 머리글이 눌리는 것이 되고, 두 번 누르면
+     * 거꾸로 간다 - 그 왕복은 GtkColumnView 가 알아서 한다. */
+    if (compare) {
+        GtkSorter *sorter = GTK_SORTER(gtk_custom_sorter_new(compare, NULL, NULL));
+        gtk_column_view_column_set_sorter(column, sorter);
+        g_object_unref(sorter);
+    }
     return column;
 }
 
@@ -1472,17 +2643,20 @@ static GtkWidget *build_list(App *app)
 
     GtkColumnViewColumn *name = make_column(T("Name", "이름"),
                                             G_CALLBACK(name_setup),
-                                            G_CALLBACK(name_bind), NULL, -1);
+                                            G_CALLBACK(name_bind), NULL, -1,
+                                            sort_by_name);
     GtkColumnViewColumn *size = make_column(T("Size", "크기"),
                                             G_CALLBACK(text_setup),
                                             G_CALLBACK(size_bind),
                                             (gpointer)"lp-size",
-                                            SIZE_COL_WIDTH);
+                                            SIZE_COL_WIDTH,
+                                            sort_by_size);
     GtkColumnViewColumn *date = make_column(T("Modified", "수정일"),
                                             G_CALLBACK(text_setup),
                                             G_CALLBACK(date_bind),
                                             (gpointer)"lp-date",
-                                            DATE_COL_WIDTH);
+                                            DATE_COL_WIDTH,
+                                            sort_by_date);
 
     gtk_column_view_append_column(GTK_COLUMN_VIEW(view), name);
     gtk_column_view_append_column(GTK_COLUMN_VIEW(view), size);
@@ -1492,6 +2666,15 @@ static GtkWidget *build_list(App *app)
     g_object_unref(date);
 
     g_signal_connect(view, "activate", G_CALLBACK(on_row_activated), app);
+
+    /* 열 머리글을 눌러 정렬하는 것은 이 한 줄이다. 정렬 모델이
+     * 뷰의 정렬기를 따라가고, 뷰는 어느 머리글이 눌렸는지를 안다. */
+    app->list_view = view;
+    gtk_sort_list_model_set_sorter(app->sorted,
+                                   gtk_column_view_get_sorter(GTK_COLUMN_VIEW(view)));
+
+    attach_menu(app, view);
+    attach_dnd(app, view);
 
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), view);
     return scroller;
@@ -1511,6 +2694,12 @@ static GtkWidget *build_grid(App *app)
 
     gtk_widget_add_css_class(view, "lp-grid");
     g_signal_connect(view, "activate", G_CALLBACK(on_row_activated), app);
+
+    /* 타일 보기에는 열 머리글이 없으므로 정렬은 목록 쪽이 정한 것을
+     * 그대로 따른다 - 두 보기가 같은 모델을 쓰기 때문에 저절로 그렇게
+     * 된다. 메뉴와 끌어 놓기는 여기에도 있어야 한다. */
+    attach_menu(app, view);
+    attach_dnd(app, view);
 
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), view);
     return scroller;
@@ -1556,6 +2745,9 @@ static void free_app(gpointer data)
 
     g_ptr_array_free(app->history, TRUE);
     g_ptr_array_free(app->places, TRUE);
+    g_clear_pointer(&app->clip, g_ptr_array_unref);
+    if (app->menu)
+        gtk_widget_unparent(app->menu);
     g_clear_object(&app->selection);
     g_free(app->path);
     g_free(app);
@@ -1568,6 +2760,21 @@ static const GActionEntry ACTIONS[] = {
     { "home",    act_home,    NULL, NULL,    NULL, { 0 } },
     { "refresh", act_refresh, NULL, NULL,    NULL, { 0 } },
     { "show-hidden", act_show_hidden, NULL, "false", NULL, { 0 } },
+
+    /* 파일을 건드리는 것들. 위의 여섯은 보기만 바꾸고, 아래는
+     * 디스크에 쓴다. */
+    { "copy",       act_copy,       NULL, NULL, NULL, { 0 } },
+    { "cut",        act_cut,        NULL, NULL, NULL, { 0 } },
+    { "paste",      act_paste,      NULL, NULL, NULL, { 0 } },
+    { "trash",      act_trash,      NULL, NULL, NULL, { 0 } },
+    { "delete",     act_delete,     NULL, NULL, NULL, { 0 } },
+    { "rename",     act_rename,     NULL, NULL, NULL, { 0 } },
+    { "new-folder", act_new_folder, NULL, NULL, NULL, { 0 } },
+    { "select-all", act_select_all, NULL, NULL, NULL, { 0 } },
+    { "properties", act_properties, NULL, NULL, NULL, { 0 } },
+    { "extract",    act_extract,    NULL, NULL, NULL, { 0 } },
+    { "open",       act_open,       NULL, NULL, NULL, { 0 } },
+    { "deep-search", act_deep_search, NULL, "false", NULL, { 0 } },
 };
 
 static void open_window(GtkApplication *application, const char *start)
@@ -1584,10 +2791,16 @@ static void open_window(GtkApplication *application, const char *start)
     g_action_map_add_action_entries(G_ACTION_MAP(app->window), ACTIONS,
                                     G_N_ELEMENTS(ACTIONS), app);
 
-    /* store -> filter -> selection -> the two views. Each link takes the
-     * reference of the one below it, so the whole chain is owned by the
-     * one reference to the selection model that App keeps; `store` and
-     * `filter` are borrowed pointers into it. */
+    /* store -> filter -> sort -> selection -> the two views. Each link
+     * takes the reference of the one below it, so the whole chain is
+     * owned by the one reference to the selection model that App keeps;
+     * `store`, `filter` and `sorted` are borrowed pointers into it.
+     *
+     * The sort model starts with no sorter, which means it passes the
+     * order through untouched - and the order it passes through is the
+     * one fill_list already put the rows in, folders first and then by
+     * name. Clicking a column header hands it a sorter and it takes
+     * over; there is no third place where the order is decided. */
     app->store  = g_list_store_new(LPF_TYPE_ITEM);
     app->filter = gtk_custom_filter_new(filter_match, app, NULL);
 
@@ -1595,8 +2808,10 @@ static void open_window(GtkApplication *application, const char *start)
         gtk_filter_list_model_new(G_LIST_MODEL(app->store),
                                   GTK_FILTER(app->filter));
 
+    app->sorted = gtk_sort_list_model_new(G_LIST_MODEL(filtered), NULL);
+
     app->selection = GTK_SELECTION_MODEL(
-        gtk_multi_selection_new(G_LIST_MODEL(filtered)));
+        gtk_multi_selection_new(G_LIST_MODEL(app->sorted)));
 
     g_signal_connect_swapped(app->selection, "selection-changed",
                              G_CALLBACK(update_status), app);
@@ -1727,6 +2942,17 @@ int main(int argc, char **argv)
         { "win.home",        "<Alt>Home"  },
         { "win.refresh",     "F5"         },
         { "win.show-hidden", "<Control>h" },
+        /* 다른 파일 관리자와 같은 자리에 둔다. 여기서 독창적일
+         * 이유가 없고, 손이 먼저 기억하고 있는 키다. */
+        { "win.copy",        "<Control>c" },
+        { "win.cut",         "<Control>x" },
+        { "win.paste",       "<Control>v" },
+        { "win.select-all",  "<Control>a" },
+        { "win.new-folder",  "<Control><Shift>n" },
+        { "win.rename",      "F2"         },
+        { "win.trash",       "Delete"     },
+        { "win.delete",      "<Shift>Delete" },
+        { "win.properties",  "<Alt>Return" },
     };
 
     for (guint i = 0; i < G_N_ELEMENTS(keys); i++) {

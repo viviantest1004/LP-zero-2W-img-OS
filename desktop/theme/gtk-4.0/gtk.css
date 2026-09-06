@@ -522,3 +522,118 @@ notebook > header {
   background-color: @lp_header;
   border-bottom: 0.5px solid @lp_edge;
 }
+
+/* ── 팝오버 ───────────────────────────────────────────────────────── */
+
+/* 우클릭 메뉴가 배경 없이 떠서 뒤의 목록이 그대로 비쳤다.
+ *
+ * 이 파일 위쪽에서 창과 헤더에 색을 주는 규칙들이
+ * GTK_STYLE_PROVIDER_PRIORITY_USER 로 얹히는데, 팝오버의 배경은
+ * 스톡 테마의 `popover > contents` 가 칠하고 그것은 우선순위가 낮다.
+ * 그 규칙 자체는 살아 있지만, 여기서 `popover > contents` 의 모서리
+ * 반경만 덮어쓰면서 배경까지 다시 말하지 않아 스톡 값과 이쪽 값이
+ * 한 선언 블록에서 섞였다 - 결과가 배경 없는 메뉴다.
+ *
+ * 배경을 여기서 함께 말한다. 메뉴는 창 위에 뜨는 것이므로 창보다
+ * 한 단계 밝은 헤더 색을 쓰고, 그림자는 창의 것과 같은 2겹이다. */
+popover > contents {
+  background-color: @lp_header;
+  color: @lp_text;
+  border: 0.5px solid @lp_edge;
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+popover > arrow {
+  background-color: @lp_header;
+  border: 0.5px solid @lp_edge;
+}
+
+/* 메뉴 한 줄. 36px 은 이 파일이 목록 행에 준 높이이고, 메뉴도 목록의
+ * 일종이라 같은 높이여야 눈이 두 번 재지 않는다. */
+popover.menu modelbutton {
+  min-height: 30px;
+  padding: 4px 10px;
+  border-radius: 5px;
+  color: @lp_text;
+}
+
+popover.menu modelbutton:hover {
+  background-color: @lp_sidebar_sel;
+}
+
+/* 단축키가 항목 이름에 붙어 버려 "Delete for goodShift+Delete" 로
+ * 읽혔다. 오른쪽으로 밀고 사이를 띄운다. */
+popover.menu modelbutton accelerator {
+  color: @lp_group;
+  margin-left: 24px;
+}
+
+/* 묶음 사이의 줄. 메뉴를 세 덩어리로 나눈 것이 보이지 않으면
+ * '복사' 와 '영구히 지우기' 가 같은 무게로 읽힌다. */
+popover.menu separator {
+  background-color: @lp_edge;
+  margin: 4px 2px;
+  min-height: 1px;
+}
+
+/* ── 퀵메뉴 (shell-design-spec.md 3절) ────────────────────────────── */
+
+/* 창이지만 창처럼 보이면 안 된다. 제목 표시줄이 없고, 모서리는 창과
+ * 같은 10px 이며, 그림자는 그것이 상단바에서 떨어져 나온 것으로
+ * 읽히도록 창의 것보다 조금 더 세다. */
+window.lp-quick {
+  background-color: @lp_header;
+  border-radius: 10px;
+}
+
+window.lp-quick.csd {
+  box-shadow:
+    0 0 0 0.5px @lp_edge,
+    0 2px 4px rgba(0, 0, 0, 0.4),
+    0 12px 32px rgba(0, 0, 0, 0.55);
+}
+
+/* 행. 왼쪽 이름과 오른쪽 값이 각각 버튼이라, 눌리는 자리가 어디까지인지
+ * 배경으로 보여 준다. */
+.lp-quick-row button {
+  border-radius: 6px;
+  padding: 7px 10px;
+  margin: 0 6px;
+  min-height: 0;
+}
+
+.lp-quick-row button:hover {
+  background-color: @lp_sidebar_sel;
+}
+
+/* 슬라이더 두 개. 아이콘과 손잡이가 한 줄에 놓인다. */
+.lp-quick-slider {
+  padding: 4px 14px;
+}
+
+.lp-quick-slider image {
+  color: @lp_icon;
+}
+
+/* 펼친 안쪽의 링크. 행보다 한 단계 조용해야 펼친 것과 행이 구분된다. */
+.lp-quick-link {
+  padding: 5px 14px;
+  margin: 0 6px;
+  border-radius: 6px;
+  min-height: 0;
+  color: @lp_row;
+}
+
+.lp-quick-link:hover {
+  background-color: @lp_sidebar_sel;
+  color: @lp_text;
+}
+
+/* 아래쪽 아이콘 줄. */
+window.lp-quick button image {
+  -gtk-icon-size: 16px;
+}

@@ -348,6 +348,12 @@ static char *net_gateway(void)
     return gw;
 }
 
+/* 비행기 모드는 알림 절에 있는 두 함수를 쓴다. 그 절이 아래에
+ * 있어서 여기서는 앞선 선언만 둔다 - 순서를 바꾸면 5절의 번호와
+ * 파일의 순서가 어긋난다. */
+static gboolean airplane_on(void);
+static void     on_airplane(GObject *sw, GParamSpec *spec, gpointer data);
+
 static GtkWidget *page_network(void)
 {
     char *iface = net_default_iface();
@@ -363,6 +369,15 @@ static GtkWidget *page_network(void)
 
     GtkWidget *page = page_new(T("Network", "네트워크"), sub);
     g_free(sub);
+
+    /* 5-1 의 '비행기 모드'. 표시만 바꾸는 스위치가 아니라 정말로
+     * 인터페이스를 내린다 - 켜 두었는데 여전히 연결되어 있는 비행기
+     * 모드는 비행기 모드라는 그림일 뿐이다. */
+    GtkWidget *g0 = group_new(page, NULL);
+    row_switch(g0, T("Airplane mode", "비행기 모드"),
+               T("Brings every network interface down",
+                 "네트워크 장치를 전부 내립니다"),
+               airplane_on(), G_CALLBACK(on_airplane), NULL);
 
     GtkWidget *g1 = group_new(page, NULL);
 
@@ -437,6 +452,110 @@ static GtkWidget *page_network(void)
 
     g_free(addr);
     g_free(iface);
+    return page;
+}
+
+/* 비행기 모드: 지금 정말로 그런가.
+ *
+ * 어딘가에 기록해 둔 상태가 아니라 인터페이스를 본다. 기록해 두면
+ * 명령줄에서 ifconfig 로 올린 순간 설정 앱만 옛말을 하게 된다. */
+static gboolean airplane_on(void)
+{
+    GDir *d = g_dir_open("/sys/class/net", 0, NULL);
+    if (!d) return FALSE;
+
+    int total = 0, down = 0;
+    const char *n;
+    while ((n = g_dir_read_name(d))) {
+        if (g_strcmp0(n, "lo") == 0) continue;
+        total++;
+        char *p = g_strdup_printf("/sys/class/net/%s/operstate", n);
+        char *v = slurp(p);
+        g_free(p);
+        if (v && g_strcmp0(v, "down") == 0) down++;
+        g_free(v);
+    }
+    g_dir_close(d);
+    return total > 0 && down == total;
+}
+
+static void on_airplane(GObject *sw, GParamSpec *spec, gpointer data)
+{
+    (void)spec; (void)data;
+    gboolean want = gtk_switch_get_active(GTK_SWITCH(sw));
+
+    GDir *d = g_dir_open("/sys/class/net", 0, NULL);
+    if (!d) return;
+    const char *n;
+    while ((n = g_dir_read_name(d))) {
+        if (g_strcmp0(n, "lo") == 0) continue;
+        const char *a[] = { "ifconfig", n, want ? "down" : "up", NULL };
+        char *o = run_cmd(a);
+        g_free(o);
+    }
+    g_dir_close(d);
+}
+
+/* 5-5 알림 ─────────────────────────────────────────────────────── */
+
+/* 알림을 실제로 그리는 것은 mako 이고, 방해 금지는 mako 의 모드다.
+ * 우리가 따로 기억해 두지 않으므로, 명령줄에서 makoctl 로 바꿔도
+ * 이 화면과 상단바가 같은 답을 한다. */
+static gboolean dnd_on(void)
+{
+    const char *a[] = { "makoctl", "mode", NULL };
+    char *out = run_cmd(a);
+    gboolean on = out && strstr(out, "do-not-disturb") != NULL;
+    g_free(out);
+    return on;
+}
+
+static void on_dnd(GObject *sw, GParamSpec *spec, gpointer data)
+{
+    (void)spec; (void)data;
+    gboolean want = gtk_switch_get_active(GTK_SWITCH(sw));
+    const char *a[] = { "makoctl", "mode", want ? "-a" : "-r",
+                        "do-not-disturb", NULL };
+    char *o = run_cmd(a);
+    g_free(o);
+}
+
+static GtkWidget *page_notify(void)
+{
+    /* mako 가 떠 있는지부터 본다. 없으면 이 화면의 스위치는 켤 것이
+     * 없고, 그 사실을 스위치를 잠그는 것으로 말한다. */
+    const char *probe[] = { "makoctl", "mode", NULL };
+    char *have = run_cmd(probe);
+    gboolean running = have != NULL;
+    g_free(have);
+    gboolean on = running && dnd_on();
+
+    GtkWidget *page = page_new(
+        T("Notifications", "알림"),
+        running
+            ? (on ? T("Do not disturb is on", "방해 금지가 켜져 있습니다")
+                  : T("Notifications appear at the top of the screen",
+                      "알림은 화면 위쪽에 나타납니다"))
+            : T("The notification daemon is not running",
+                "알림 데몬이 돌고 있지 않습니다"));
+
+    GtkWidget *g1 = group_new(page, NULL);
+
+    row_switch(g1, T("Do not disturb", "방해 금지"),
+               T("Notifications are held instead of shown."
+                 " The top bar says so while it is on.",
+                 "알림이 뜨지 않고 쌓입니다. 켜져 있는 동안 상단바가"
+                 " 그렇다고 알려 줍니다."),
+               on, running ? G_CALLBACK(on_dnd) : NULL, NULL);
+
+    if (!running)
+        row_value(g1, T("Daemon", "데몬"),
+                  T("mako draws the notifications. The session starts it;"
+                    " if this says nothing is running, look at the log.",
+                    "알림을 그리는 것은 mako 입니다. 세션이 띄우며,"
+                    " 여기서 돌지 않는다고 나오면 로그를 보십시오."),
+                  T("not running", "돌지 않음"));
+
     return page;
 }
 
@@ -1111,6 +1230,8 @@ static const section_t SECTIONS[] = {
     { "Network", "네트워크", "network-wireless-symbolic",     page_network  },
     { "Display", "화면", "video-display-symbolic",        page_display  },
     { "Sound", "소리", "audio-volume-high-symbolic",    page_sound    },
+    { "Notifications", "알림", "preferences-system-notifications-symbolic",
+      page_notify },
     { "Power", "전원", "battery-symbolic",              page_power    },
     { "Keyboard", "키보드", "input-keyboard-symbolic",       page_keyboard },
     { "Apps", "앱", "view-grid-symbolic",            page_apps     },

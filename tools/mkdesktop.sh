@@ -310,7 +310,7 @@ fi
 # 달리 이 셋은 이 OS 의 것이고, 그래서 /usr/local/bin 에 들어간다 -
 # 패키지 관리자가 건드리지 않는 자리다.
 mkdir -p "$OUT/usr/local/bin" "$OUT/usr/local/share/applications"
-for app in files settings tasks shot; do
+for app in files settings tasks shot quick; do
     bin="${REPO_ROOT}/desktop/${app}/lp-${app}"
     [[ "$app" == files ]] && bin="${REPO_ROOT}/desktop/files/lp-files"
     if [[ -x "$bin" ]]; then
@@ -370,6 +370,21 @@ chmod 1777 "$OUT/tmp"
 if [[ -f "$OUT/bin/sh.lp" ]]; then
     mv -f "$OUT/bin/sh.lp" "$OUT/bin/sh"
     log "/bin/sh 를 우리 셸로 되돌림"
+fi
+
+# ── 이 이미지에서 setuid 인 단 하나 ────────────────────────────
+#
+# 세션이 uid 1000 으로 도는 한, 거기 앉은 사람은 기계를 끌 수 없다 -
+# poweroff 는 init 에 신호를 보내고 그것은 root 의 일이기 때문이다.
+# 다른 배포판은 logind 와 polkit 으로 그 구멍을 메우는데, 버튼 하나를
+# 얻자고 그 둘을 들이는 것은 남는 장사가 아니다.
+#
+# 대신 lp-power 하나만 setuid 로 둔다. 낱말 하나만 받고, 파일도 환경
+# 변수도 읽지 않고, 아무것도 exec 하지 않는다.
+if [[ -f "$OUT/bin/lp-power" ]]; then
+    chown 0:0 "$OUT/bin/lp-power"
+    chmod 4755 "$OUT/bin/lp-power"
+    log "lp-power (setuid - 이 이미지에서 유일하다)"
 fi
 
 # 데스크탑을 띄우는 것은 /etc/rc 가 직접 한다 - 여기서 한 줄을

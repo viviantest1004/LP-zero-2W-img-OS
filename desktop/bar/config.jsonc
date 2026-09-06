@@ -39,9 +39,13 @@
   // Amber, and only amber, and only when something is limited. The spec
   // reserves that colour for a constraint; a bar that is amber for
   // decoration has nowhere left to go when something really is limited.
+  //
+  // 비어 있을 때는 아무것도 그리지 않는다 - 2-4 는 켜져 있을 때만
+  // 보이라고 했고, 꺼진 상태를 회색 아이콘으로 그려 두면 그 자리가
+  // 늘 차 있어서 정작 켜졌을 때 눈에 띄지 않는다.
   "custom/mode": {
-    "exec": "echo ''",
-    "interval": 30,
+    "exec": "lp-bar-label mode",
+    "interval": 2,
     "tooltip": false
   },
 
@@ -61,21 +65,27 @@
     "format-alt": "{:%m월 %d일 %a %H:%M}",
     "tooltip": false
   },
+  // 오른쪽의 세 아이콘은 한 덩어리로 읽혀야 하고(2-1), 눌렀을 때
+  // 나오는 것도 하나여야 한다 - 볼륨만 따로 뜨고 네트워크만 따로 뜨면
+  // 그건 세 개의 패널이지 퀵메뉴가 아니다. 셋 다 같은 것을 연다.
   "network": {
     "format-wifi": "◈",
     "format-ethernet": "◈",
     "format-disconnected": "◇",
+    "on-click": "lp-quick",
     "tooltip-format": "{ifname} {ipaddr}"
   },
   "pulseaudio": {
     "format": "◑",
     "format-muted": "◔",
+    "on-click": "lp-quick",
     "tooltip": false
   },
   "battery": {
     "format": "▮",
     "format-charging": "▮",
     "states": { "warning": 20 },
+    "on-click": "lp-quick",
     "tooltip": false
   },
   "tray": { "spacing": 8, "icon-size": 14 },

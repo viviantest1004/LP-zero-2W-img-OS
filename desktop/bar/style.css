@@ -64,10 +64,18 @@ window#waybar {
 
 #tray { padding: 0 6px; }
 
-/* Amber is the mode group and nothing else. */
+/* Amber is the mode group and nothing else.
+ *
+ * 2-4: 방해 금지·비행기·절전이 켜져 있을 때만 여기에 글리프가 들어간다.
+ * 빈 문자열이면 padding 까지 0 이어야 한다 - 아무것도 없는 자리가
+ * 12px 을 차지하면 시계와 트레이 사이가 이유 없이 벌어지고, 모드가
+ * 켜졌을 때 무엇이 달라졌는지가 흐려진다. GTK CSS 에 :empty 가 없어서
+ * padding 을 글리프 쪽에 붙이지 못하므로, 좌우 여백을 label 이 아니라
+ * 글자 간격으로 준다. */
 #custom-mode {
   color: #f0b350;
-  padding: 0 6px;
+  letter-spacing: 4px;
+  margin-right: 2px;
 }
 
 #custom-ime {
