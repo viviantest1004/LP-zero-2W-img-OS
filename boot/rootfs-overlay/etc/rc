@@ -109,6 +109,20 @@ echo 3000 > /proc/sys/kernel/threads-max || echo "[rc]   could not set threads-m
 # handle - instead of taking the machine down with it.
 mount -t tmpfs -o size=64M,nosuid,nodev tmpfs /tmp || echo "[rc]   /tmp is unbounded"
 
+# /dev/shm, which is not optional the moment there is a graphical
+# session.
+#
+# Every Wayland client draws into a shared memory buffer and hands the
+# compositor a file descriptor for it. shm_open() creates that file in
+# /dev/shm and nowhere else. Without the mount the call fails, the client
+# asserts on a file descriptor of -1, and the screen stays black - with
+# an error that says nothing about a missing mount.
+#
+# Nothing on a headless machine ever noticed, which is why it was not
+# here before.
+mkdir -p /dev/shm
+mount -t tmpfs -o size=64M,nosuid,nodev tmpfs /dev/shm || echo "[rc]   no /dev/shm - a graphical session will not draw"
+
 echo "[rc] the boot partition"
 # Mounted before the data partition, and read-only.
 #

@@ -60,3 +60,7 @@ keys/
 # The disk-rooted kernel's output. Ten megabytes of build product that
 # mkdisk.sh remakes; the config that produced it is in kernel/.
 kernel/out-amd64-disk/
+
+# The compiled file manager. Built in the Debian chroot against the same
+# GTK the image ships, by tools/mkdesktop.sh.
+desktop/files/lp-files

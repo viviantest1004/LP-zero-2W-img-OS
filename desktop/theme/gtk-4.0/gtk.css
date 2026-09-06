@@ -1,0 +1,379 @@
+/* gtk.css - every application window drawn the way the owner's mockup draws it.
+ *
+ * Installed at ~/.config/gtk-4.0/gtk.css, which GTK loads on top of the theme
+ * named in settings.ini instead of in place of it. A file that replaces the
+ * theme has to restyle every widget GTK has, and every widget it forgets falls
+ * back to GTK's unstyled default - so this file states the mockup and nothing
+ * else, and the base theme keeps drawing the rest.
+ *
+ * Sitting there decides how the rules below are written, twice over.
+ *
+ * Against the theme this file always wins. GTK builds the cascade from
+ * providers in priority order, and the user file is loaded at
+ * GTK_STYLE_PROVIDER_PRIORITY_USER - above the theme and above the
+ * application's own stylesheet - so a declaration here beats theirs whether it
+ * is more specific or not. That is the reason the file is this short.
+ *
+ * Against itself it is ordinary CSS specificity, and that is a trap that has
+ * already bitten this file once. The base window rules carry :not(.popup), and
+ * a :not() counts as a class, so the obvious `window.maximized` loses to
+ * `window.background:not(.popup)` and a maximised window keeps its rounded
+ * corners and its shadow. Every state rule below therefore repeats the
+ * selector it is correcting and adds to it, rather than trusting a shorter one
+ * to win.
+ *
+ * ── 뒤 창 ────────────────────────────────────────────────────────────────
+ * The state the mockup calls 뒤 창 is GTK's :backdrop, which GTK sets on every
+ * widget in a window that loses focus. An unfocused window does not dim. It
+ * loses its shadow and settles toward the desktop - window and header go one
+ * step darker, title and icons go quiet, and the shadow is gone rather than
+ * faint. Fading a window says "disabled". Sinking it says "behind".
+ *
+ * The base theme fades two things in that state and both are pinned off
+ * below: it puts `filter: opacity(0.5)` on the backdrop title, and 0.7 opacity
+ * on sidebar icons. A colour change laid over a fade is still a fade.
+ *
+ * Every value below is the mockup's, transcribed. Nothing is rounded.
+ */
+
+/* ── the mockup's values ──────────────────────────────────────────────── */
+
+@define-color lp_window        #232323;
+@define-color lp_window_back   #202020;
+@define-color lp_header        #2c2c2c;
+@define-color lp_header_back   #242424;
+@define-color lp_edge          #3a3a3a;
+@define-color lp_edge_back     #303030;
+
+@define-color lp_sidebar       #1e1e1e;
+@define-color lp_sidebar_edge  #333333;
+@define-color lp_sidebar_sel   #333333;
+
+@define-color lp_text          #e8e8e8;
+@define-color lp_text_back     #6a6a6a;
+@define-color lp_icon          #a8a8a8;
+@define-color lp_icon_back     #4a4a4a;
+@define-color lp_row           #a8a8a8;
+@define-color lp_row_icon      #8a8a8a;
+@define-color lp_group         #4a4a4a;
+
+/* ── the window ───────────────────────────────────────────────────────── */
+
+/* The mockup names #e8e8e8 twice - once as the title, once as the selected
+ * sidebar row - and never as a colour belonging to either. It is the
+ * interface's text colour, so the window carries it and the rest inherits.
+ *
+ * The 10px is on all four corners because the mockup gives one radius. GTK's
+ * own theme rounds only the top two, and for a reason that still applies
+ * here: a child that paints its own background paints it square, over these
+ * corners, and GTK CSS has no overflow property to clip it. Where an app fills
+ * its content area, the bottom two corners will come out square. */
+window.background:not(.popup) {
+  background-color: @lp_window;
+  color: @lp_text;
+  border-radius: 10px;
+}
+
+window.background:not(.popup):backdrop {
+  background-color: @lp_window_back;
+}
+
+/* The border and the shadow are one property here, deliberately. A border set
+ * with `border` is painted on the window node and the window's own child is
+ * drawn straight over it; a shadow at zero offset with 0.5px of spread lands
+ * outside the box, where no child can reach it. */
+window.csd:not(.popup) {
+  box-shadow:
+    0 0 0 0.5px @lp_edge,
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    0 10px 28px rgba(0, 0, 0, 0.55);
+}
+
+/* "Removed, not reduced" is written as alpha 0 rather than `box-shadow: none`
+ * on purpose. GTK sizes the window's surface to fit the extents of this very
+ * shadow, so a layer that disappears from the list shrinks the surface, and
+ * the window visibly jumps the moment focus leaves it. Same three layers, same
+ * geometry, no light. The stock theme keeps a transparent layer in its own
+ * backdrop rule for exactly this. */
+window.csd:not(.popup):backdrop {
+  box-shadow:
+    0 0 0 0.5px @lp_edge_back,
+    0 1px 2px rgba(0, 0, 0, 0),
+    0 10px 28px rgba(0, 0, 0, 0);
+}
+
+/* No corner to round against when the window fills the screen or an edge of
+ * it. */
+window.background:not(.popup).maximized,
+window.background:not(.popup).fullscreen,
+window.background:not(.popup).tiled,
+window.background:not(.popup).tiled-top,
+window.background:not(.popup).tiled-right,
+window.background:not(.popup).tiled-bottom,
+window.background:not(.popup).tiled-left {
+  border-radius: 0;
+}
+
+/* Tiled is not maximised. Two tiled windows meet along an edge and the
+ * mockup's 0.5px border is what draws that meeting, so only the two blur
+ * layers go - there is nothing behind a tiled window to cast onto either.
+ *
+ * The transparent 20px layer paints nothing. It is there because the extents
+ * of the shadow are also the width of the invisible frame GTK gives the
+ * window, and that frame is what a pointer grabs to resize; a tiled window
+ * whose frame is 0.5px wide cannot be resized by hand. The stock theme
+ * reserves it the same way, with the same 20px. */
+window.csd:not(.popup).tiled,
+window.csd:not(.popup).tiled-top,
+window.csd:not(.popup).tiled-right,
+window.csd:not(.popup).tiled-bottom,
+window.csd:not(.popup).tiled-left {
+  box-shadow:
+    0 0 0 0.5px @lp_edge,
+    0 0 0 20px transparent;
+}
+
+window.csd:not(.popup).tiled:backdrop,
+window.csd:not(.popup).tiled-top:backdrop,
+window.csd:not(.popup).tiled-right:backdrop,
+window.csd:not(.popup).tiled-bottom:backdrop,
+window.csd:not(.popup).tiled-left:backdrop {
+  box-shadow:
+    0 0 0 0.5px @lp_edge_back,
+    0 0 0 20px transparent;
+}
+
+/* Maximised and fullscreen lose the whole shadow, hairline included - not
+ * because a hairline would look wrong but because that invisible frame is
+ * sized from it. Leave even a 0.5px layer here and a maximised window stops
+ * reaching the screen edge it was maximised to.
+ *
+ * This comes after the tiled rules and not before them on purpose. A
+ * compositor is free to report a window as maximised and tiled at once, the
+ * two selectors are equally specific, and in that tie the later rule wins - so
+ * the later one has to be the one that lets the window fill the screen. */
+window.csd:not(.popup).maximized,
+window.csd:not(.popup).fullscreen {
+  box-shadow: none;
+}
+
+window.csd:not(.popup).maximized:backdrop,
+window.csd:not(.popup).fullscreen:backdrop {
+  box-shadow: none;
+}
+
+/* ── the header bar ───────────────────────────────────────────────────── */
+
+/* min-height goes to zero because the mockup gives the header a padding and no
+ * height. The stock theme puts a 46px floor under it, which makes the padding
+ * decide nothing. */
+headerbar, .titlebar {
+  min-height: 0;
+  padding: 8px 10px;
+  background-color: @lp_header;
+  background-image: none;
+  border-bottom: 0.5px solid @lp_edge;
+}
+
+headerbar:backdrop, .titlebar:backdrop {
+  background-color: @lp_header_back;
+  background-image: none;
+  border-bottom-color: @lp_edge_back;
+}
+
+/* Only the header that is the window's own titlebar meets the window's top
+ * corners. A header bar inside the content has no corner to match. */
+.titlebar {
+  border-radius: 10px 10px 0 0;
+}
+
+.maximized .titlebar, .fullscreen .titlebar,
+.tiled .titlebar,
+.tiled-top .titlebar, .tiled-right .titlebar,
+.tiled-bottom .titlebar, .tiled-left .titlebar {
+  border-radius: 0;
+}
+
+/* GTK adds CSS border-spacing to the box's own spacing property, and
+ * GtkHeaderBar's boxes carry none of their own, so 8px here is 8px on screen.
+ * This is the mockup's gap, and it is also what places the separator: see the
+ * window controls below. */
+headerbar > windowhandle > box,
+headerbar > windowhandle > box > box.start,
+headerbar > windowhandle > box > box.end,
+headerbar windowcontrols {
+  border-spacing: 8px;
+}
+
+/* The stock theme pads the title 12px on each side, which is a second gap on
+ * top of the 8px one.
+ *
+ * The mockup also has the title take the free space. That is hexpand on the
+ * label - a widget property, set by whoever builds the header, with no CSS
+ * spelling in GTK 4. GtkHeaderBar's own title stays centred and this file
+ * cannot move it. The gap is real and it is recorded here so it is not read
+ * as an oversight. */
+headerbar .title, .titlebar .title {
+  font-size: 12px;
+  font-weight: 500;
+  color: @lp_text;
+  padding: 0;
+}
+
+/* Both fades are pinned off. The stock theme dims the backdrop title with
+ * `filter: opacity(0.5)`, which a colour alone does not undo - the title would
+ * change colour and go half transparent, which is the one thing 뒤 창 must not
+ * do. opacity is pinned alongside it for a base theme that reaches for that
+ * instead. */
+headerbar:backdrop .title, .titlebar:backdrop .title {
+  color: @lp_text_back;
+  opacity: 1;
+  filter: none;
+}
+
+/* Every glyph in the header, the close button's included. */
+headerbar image, .titlebar image {
+  -gtk-icon-size: 13px;
+  color: @lp_icon;
+}
+
+headerbar:backdrop image, .titlebar:backdrop image {
+  color: @lp_icon_back;
+}
+
+/* ── the close button, and the separator before it ────────────────────── */
+
+/* Which buttons exist is settings.ini's answer (gtk-decoration-layout=:close),
+ * not this file's - GTK CSS has no way to hide a widget. The stock 2px of side
+ * margin is dropped because it would turn the mockup's 8px gap into 10px. */
+headerbar windowcontrols > button,
+.titlebar windowcontrols > button {
+  margin: 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The separator is 1px wide and 12px tall, which is shorter than any widget
+ * GTK would give it, so it is drawn as a background on the controls box rather
+ * than added as a widget: a one-colour gradient sized 1px x 12px, held against
+ * the left edge. A background sits in the padding box, so the 8px of padding
+ * is what stands between the bar and the close button, and the box spacing
+ * above is what stands between it and the last icon - both are the mockup's
+ * single gap value, so the bar sits centred in its own space.
+ *
+ * .empty is how GTK marks the controls box on the side that got no buttons;
+ * without the guard the empty one would draw a bar of its own on the left. */
+headerbar windowcontrols.end:not(.empty),
+.titlebar windowcontrols.end:not(.empty) {
+  margin-left: 0;
+  margin-right: 0;
+  padding-left: 8px;
+  background-image: linear-gradient(to bottom, @lp_edge, @lp_edge);
+  background-size: 1px 12px;
+  background-position: left center;
+  background-repeat: no-repeat;
+}
+
+headerbar windowcontrols.end:not(.empty):dir(rtl),
+.titlebar windowcontrols.end:not(.empty):dir(rtl) {
+  padding-left: 0;
+  padding-right: 8px;
+  background-position: right center;
+}
+
+/* The mockup gives the separator one colour, #3a3a3a, which is exactly the
+ * colour of the window and header borders. Under :backdrop those go to
+ * #303030, so the separator follows them. The mockup states no separate value
+ * for it. */
+headerbar:backdrop windowcontrols.end:not(.empty),
+.titlebar:backdrop windowcontrols.end:not(.empty) {
+  background-image: linear-gradient(to bottom, @lp_edge_back, @lp_edge_back);
+}
+
+/* ── the sidebar ──────────────────────────────────────────────────────── */
+
+/* Two node names for one thing: .sidebar is usually the scrolled window that
+ * holds the list, .navigation-sidebar the list itself, and an app may use
+ * either or nest both. Colour and edge go on whichever is outermost; the
+ * nested case is undone right below.
+ *
+ * separator is excluded because .sidebar really does land on separator nodes -
+ * GTK's own theme styles `separator.sidebar` and writes `separator:not(.sidebar)`
+ * where it means the other kind. A separator handed a sidebar's min-width is an
+ * 82px bar down the middle of the window.
+ *
+ * The mockup gives 82-96px. GTK CSS has min-width and no max-width, so the
+ * floor is stated here and the ceiling belongs to whoever sizes the pane. */
+.sidebar:not(separator), .navigation-sidebar {
+  min-width: 82px;
+  padding: 8px 5px;
+  background-color: @lp_sidebar;
+}
+
+.sidebar:not(separator):dir(ltr), .navigation-sidebar:dir(ltr) {
+  border-right: 0.5px solid @lp_sidebar_edge;
+  border-left-style: none;
+}
+
+.sidebar:not(separator):dir(rtl), .navigation-sidebar:dir(rtl) {
+  border-left: 0.5px solid @lp_sidebar_edge;
+  border-right-style: none;
+}
+
+/* Nested, the inner list would pad the padding and draw a second edge on top
+ * of the first. */
+.sidebar .navigation-sidebar {
+  padding: 0;
+  border-right-style: none;
+  border-left-style: none;
+}
+
+/* Lists paint their own view background, which would cover the sidebar's. */
+.sidebar list, .sidebar listview, .sidebar viewport {
+  background-color: transparent;
+}
+
+/* The sidebar keeps its colours when the window loses focus. It has no shadow
+ * to lose, and dimming it is the thing the mockup rules out. The edge is
+ * restated with the fill because the base theme darkens both together. */
+.sidebar:not(separator):backdrop, .navigation-sidebar:backdrop {
+  background-color: @lp_sidebar;
+  border-color: @lp_sidebar_edge;
+}
+
+.navigation-sidebar > row, .sidebar list > row {
+  min-height: 0;
+  margin: 0;
+  padding: 4px 7px;
+  border-radius: 5px;
+  font-size: 11px;
+  color: @lp_row;
+}
+
+/* opacity is pinned for the same reason as the title: the stock theme fades a
+ * sidebar icon to 0.7, and a faded #8a8a8a is not #8a8a8a. The icon is quiet
+ * because of its colour. */
+.navigation-sidebar > row image, .sidebar list > row image {
+  -gtk-icon-size: 12px;
+  color: @lp_row_icon;
+  opacity: 1;
+}
+
+.navigation-sidebar > row box, .sidebar list > row box {
+  border-spacing: 6px;
+}
+
+.navigation-sidebar > row:selected, .sidebar list > row:selected,
+.navigation-sidebar > row:selected:backdrop, .sidebar list > row:selected:backdrop {
+  background-color: @lp_sidebar_sel;
+  color: @lp_text;
+}
+
+/* GTK has no node of its own for a sidebar group heading; .heading is the
+ * style class GTK 4 asks applications to put on one. The mockup gives it a
+ * size and a colour and no weight, so the weight is left where the base theme
+ * put it - bold - rather than invented here. */
+.sidebar .heading, .navigation-sidebar .heading {
+  font-size: 10px;
+  color: @lp_group;
+}

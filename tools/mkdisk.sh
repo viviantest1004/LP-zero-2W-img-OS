@@ -46,6 +46,8 @@ source "${REPO_ROOT}/tools/common.sh"
 #
 #   SIZE_GB=8 ./tools/mkdisk.sh    if a big one is wanted anyway
 SIZE_GB="${SIZE_GB:-1}"
+# The merged desktop root is about 700MB, so the console default of 1GB
+# does not fit it. mkdesktop.sh sets this.
 SECTOR=512
 ESP_MB=256
 ESP_START=8192                          # 4MiB in, as the other images do
@@ -61,7 +63,11 @@ ESP_LABEL="LPZERO"
 
 OUT_DIR="${REPO_ROOT}/sdcard"
 IMAGE="${OUT_DIR}/linux-LP_desktop.img"
-ROOTFS="${REPO_ROOT}/userland/rootfs-amd64"
+# LP_ROOTFS_OVERRIDE points at a root built somewhere else - the merged
+# Debian-plus-ours tree that mkdesktop.sh makes. Without it this builds
+# the console image from our userland alone, which is the same image and
+# a smaller one.
+ROOTFS="${LP_ROOTFS_OVERRIDE:-${REPO_ROOT}/userland/rootfs-amd64}"
 TINY="${LPZERO_WORK}/initramfs-preinit"
 KERNEL_OUT="${REPO_ROOT}/kernel/out-amd64-disk"
 
@@ -92,13 +98,26 @@ mknod "$TINY/dev/null"    c 1 3 2>/dev/null || true
 log "$(du -sh "$TINY" | cut -f1)  ($TINY)"
 
 # ── 2. the kernel that boots from disk ───────────────────────────
+#
+# Skipped when there is already a bzImage that is newer than the preinit
+# inside it. The kernel here changes only when preinit does - the config
+# is fixed and the initramfs holds one program - so rebuilding it to
+# package a different root filesystem is eight minutes for a byte-
+# identical result.
 step "커널 (디스크 루트용)"
+BZ_EXISTING="${KERNEL_OUT}/bzImage"
+if [[ -f "$BZ_EXISTING" && \
+      ! "${REPO_ROOT}/userland/bin-amd64/preinit" -nt "$BZ_EXISTING" ]]; then
+    log "이미 있는 것을 씁니다 ($(stat -c%s "$BZ_EXISTING") bytes)"
+    log "다시 빌드하려면 지우십시오: rm ${BZ_EXISTING}"
+else
 LP_ARCH=amd64 \
 LP_ROOTFS_DIR="$(python3 -c "import os,sys;print(os.path.relpath(sys.argv[1], os.path.join(sys.argv[2],'userland')))" "$TINY" "$REPO_ROOT")" \
 LP_BUILD_DIR="${LPZERO_WORK}/build-amd64-disk" \
 LP_OUT_SUBDIR=out-amd64-disk \
 LP_CMDLINE="root=LABEL=${ROOT_LABEL} rw console=tty0 console=ttyS0,115200 loglevel=4" \
     "${REPO_ROOT}/kernel/build.sh"
+fi
 
 BZIMAGE="${KERNEL_OUT}/bzImage"
 [[ -f "$BZIMAGE" ]] || die "${BZIMAGE} 가 만들어지지 않았습니다"
@@ -149,6 +168,22 @@ mkfs.vfat -F 32 -n "$ESP_LABEL" "$ESP_IMG" >/dev/null
 mmd -i "$ESP_IMG" ::EFI ::EFI/BOOT
 mcopy -o -i "$ESP_IMG" "$BZIMAGE" ::EFI/BOOT/BOOTX64.EFI
 log "EFI/BOOT/BOOTX64.EFI"
+
+# startup.nsh, and it is not belt and braces.
+#
+# EFI/BOOT/BOOTX64.EFI is the removable-media path and every firmware is
+# supposed to try it. Not all of them do on the first boot of a blank
+# NVRAM: OVMF with fresh variables walks its own boot list, finds
+# nothing it put there itself, and falls through to the EFI shell -
+# which leaves a machine sitting at a Shell> prompt that most people
+# will read as "it does not boot".
+#
+# The shell runs startup.nsh without being asked. So the one firmware
+# path that looks like a dead end becomes the one that boots.
+printf 'fs0:\r\nEFI\\BOOT\\BOOTX64.EFI\r\n' > "${OUT_DIR}/.startup.nsh"
+mcopy -o -i "$ESP_IMG" "${OUT_DIR}/.startup.nsh" ::startup.nsh
+rm -f "${OUT_DIR}/.startup.nsh"
+log "startup.nsh (NVRAM 이 비어 있을 때의 길)"
 
 for f in authorized_keys wpa_supplicant.conf firewall.conf beacon.conf; do
     src="${REPO_ROOT}/boot/rootfs-overlay/etc/${f}"

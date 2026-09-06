@@ -1,0 +1,33 @@
+#!/bin/sh
+# The session itself, already running as uid 1000.
+export XDG_RUNTIME_DIR=/run/user/1000
+export HOME=/home/lp
+export XDG_CONFIG_HOME=/home/lp/.config
+export GTK_THEME=LP
+export XDG_CURRENT_DESKTOP=sway
+export XKB_DEFAULT_LAYOUT=us
+# Software rendering, deliberately. A virtual machine has no GPU: wlroots
+# would pick the GLES renderer, fail to bring EGL up against a virtio_gpu
+# with no 3D, and segfault - which reads as "the desktop is broken"
+# rather than "there is no graphics card here". pixman draws on the CPU.
+export WLR_RENDERER=pixman
+export WLR_RENDERER_ALLOW_SOFTWARE=1
+export LIBGL_ALWAYS_SOFTWARE=1
+export WLR_LIBINPUT_NO_DEVICES=1
+# GTK 4 asks for OpenGL first and there is none here. Told to use cairo
+# it draws on the CPU and starts; left to discover it, it prints
+# "Couldn't open libGL.so.1" and falls back anyway, one warning per app.
+export GSK_RENDERER=cairo
+export GDK_BACKEND=wayland
+# foot reads the login shell out of /etc/passwd and got /bin/false.
+# Saying it plainly costs nothing and removes a whole class of question.
+export SHELL=/bin/sh
+# Nothing here runs a session bus. GTK works without one; what it does
+# without this is print a paragraph about autolaunching D-Bus at every
+# start, which reads like a fault and is not one.
+export NO_AT_BRIDGE=1
+cd /home/lp
+# Straight to the console. A compositor that fails to start is the one
+# thing on this machine nobody can read a log file about - there is no
+# screen to read it on.
+/usr/bin/sway
