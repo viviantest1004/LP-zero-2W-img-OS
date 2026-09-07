@@ -205,10 +205,21 @@ static void header(pid_t pid)
 
     if (n > 0) {
         /* The arguments are NUL separated and the last one ends with a
-         * NUL too, which must not become a trailing space. */
+         * NUL too, which must not become a trailing space.
+         *
+         * A command line is one line here whatever it contained, so a
+         * newline inside an argument becomes a space; every other
+         * control character becomes a question mark, so that an argument
+         * full of escape sequences cannot repaint the terminal of
+         * whoever ran pmap. Bytes above 127 are left alone: they are the
+         * UTF-8 of a filename somebody typed, and procps only mangles
+         * those when it is running in a locale that cannot read them. */
         if (buf[n - 1] == '\0') n--;
-        for (long i = 0; i < n; i++)
-            if (buf[i] == '\0') buf[i] = ' ';
+        for (long i = 0; i < n; i++) {
+            unsigned char c = (unsigned char)buf[i];
+            if (c == '\0' || c == '\n')       buf[i] = ' ';
+            else if (c < 0x20 || c == 0x7f)   buf[i] = '?';
+        }
         buf[n] = '\0';
         printf("%d:   %s\n", (int)pid, buf);
         return;

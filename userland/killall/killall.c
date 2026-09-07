@@ -83,6 +83,18 @@ static bool same_fold(const char *a, const char *b)
     return *a == *b;
 }
 
+/* strncasecmp over n bytes, stopping at the first NUL in either. */
+static bool same_fold_n(const char *a, const char *b, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (upper((unsigned char)a[i]) != upper((unsigned char)b[i]))
+            return false;
+        if (!a[i])
+            return true;
+    }
+    return true;
+}
+
 /* "9", "KILL" and "SIGKILL" all mean 9. -1 when it is none of them.
  *
  * The comparison is case sensitive on purpose: psmisc rejects `-s term`
@@ -383,7 +395,7 @@ int main(int argc, char **argv)
                      * own process; both strings end inside that, so
                      * this is an exact comparison for ordinary names. */
                     match = opt_icase
-                        ? same_fold(names[i], comm)
+                        ? same_fold_n(names[i], comm, COMM_LEN - 1)
                         : strncmp(names[i], comm, COMM_LEN - 1) == 0;
                 }
                 if (!match)

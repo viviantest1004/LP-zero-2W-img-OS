@@ -605,8 +605,9 @@ static void usage(int fd)
            "\n");
 }
 
-/* Rebuild a shadow line with a new hash and, when `touch_date` is set,
- * today as the last change. */
+/* Rebuild a shadow line with a new hash. `lstchg` is the day to record
+ * in field 3, or -1 to keep whatever is already there - lock, unlock and
+ * delete leave that field alone, and only -e and a real change move it. */
 static void rebuild(const char *name, const char *hash, long lstchg,
                     char *out, size_t n)
 {
@@ -695,8 +696,11 @@ int main(int argc, char **argv)
     int me = lp_getuid();
     bool amroot = (me == 0);
 
+    /* Not "unless you are root": shadow-utils refuses for root too, and
+     * a root with no line of its own in /etc/passwd is a broken file
+     * that this program should say so about rather than write to. */
     pwent_t self = pw_lookup(NULL, me);
-    if (!self.found && !amroot) {
+    if (!self.found) {
         dprintf(STDERR_FILENO, "%s: Cannot determine your user name.\n", prog);
         return 1;
     }
