@@ -415,7 +415,13 @@ static void load_services_from(const char *path)
      * was silently cut off: it never started, and nothing said so. A
      * service quietly missing is the worst way for this to fail, so the
      * truncation is now reported. */
-    char buf[8192];
+    /* 32K, not 8K. The file that ships is 8.4K - most of it comments
+     * explaining what each service is for - and at 8K the last line of
+     * it fell off the end. That line was `defend -d`, the thing that
+     * watches what happens to a board left on the internet, and it had
+     * simply never started on any image. The warning below is what
+     * found it; the size is what fixes it. */
+    static char buf[32768];
     long n = proc_read(path, buf, sizeof(buf));
     if (n <= 0)
         return;
