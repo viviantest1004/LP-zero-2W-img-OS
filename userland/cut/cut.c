@@ -134,15 +134,20 @@ int main(int argc, char **argv)
     const char *file = NULL;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
-            have_list = parse_list(argv[++i]);
-        } else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
+        /* `-f2` and `-f 2` both. Nobody types the space - every example
+         * anybody has ever read writes `cut -d: -f1` - and refusing the
+         * attached form made this look like it did not work at all. */
+        if (strncmp(argv[i], "-f", 2) == 0 && (argv[i][2] || i + 1 < argc)) {
+            have_list = parse_list(argv[i][2] ? argv[i] + 2 : argv[++i]);
+        } else if (strncmp(argv[i], "-c", 2) == 0 &&
+                   (argv[i][2] || i + 1 < argc)) {
             by_char = true;
-            have_list = parse_list(argv[++i]);
+            have_list = parse_list(argv[i][2] ? argv[i] + 2 : argv[++i]);
         } else if (strcmp(argv[i], "-w") == 0) {
             by_space = true;
-        } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
-            delim = argv[++i][0];
+        } else if (strncmp(argv[i], "-d", 2) == 0 &&
+                   (argv[i][2] || i + 1 < argc)) {
+            delim = argv[i][2] ? argv[i][2] : argv[++i][0];
         } else if (strcmp(argv[i], "-h") == 0) {
             printf("usage: cut -f <list> [-d char | -w] [file]\n");
             printf("       cut -c <list> [file]\n");

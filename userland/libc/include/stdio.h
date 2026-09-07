@@ -17,6 +17,10 @@ int  putchar(int c);
 /* Read one line. The newline is dropped and the result NUL terminated.
  * Returns the length read, or -1 at EOF. */
 long readline(int fd, char *buf, size_t size);
+/* One record ending at `delim`, bytes untouched. -1 at end of input.
+ * saw_delim (may be NULL) tells a record that ended at a delimiter from
+ * one that ended at end of input. */
+long readrec(int fd, char *buf, size_t size, char delim, bool *saw_delim);
 
 /* ── Paged output ─────────────────────────────────────────────────────
  * A framebuffer console keeps no scrollback. Anything that scrolls off

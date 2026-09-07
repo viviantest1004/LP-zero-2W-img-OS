@@ -26,7 +26,8 @@ static int mkdir_p(const char *path, mode_t mode)
         *p = '\0';
         long rc = lp_mkdir(buf, mode);
         if (rc < 0 && rc != -EEXIST) {
-            dprintf(STDERR_FILENO, "mkdir: %s: failed (%ld)\n", buf, -rc);
+            lp_diag("mkdir", "cannot create directory", NULL,
+                    "cannot create", buf, (int)-rc);
             return 1;
         }
         *p = '/';
@@ -34,7 +35,8 @@ static int mkdir_p(const char *path, mode_t mode)
 
     long rc = lp_mkdir(buf, mode);
     if (rc < 0 && rc != -EEXIST) {
-        dprintf(STDERR_FILENO, "mkdir: %s: failed (%ld)\n", buf, -rc);
+        lp_diag("mkdir", "cannot create directory", NULL,
+                "cannot create", buf, (int)-rc);
         return 1;
     }
     return 0;
@@ -62,7 +64,8 @@ int main(int argc, char **argv)
         } else {
             long r = lp_mkdir(argv[i], 0755);
             if (r < 0) {
-                dprintf(STDERR_FILENO, "mkdir: %s: failed (%ld)\n", argv[i], -r);
+                lp_diag("mkdir", "cannot create directory", NULL,
+                        "cannot create", argv[i], (int)-r);
                 rc = 1;
             }
         }

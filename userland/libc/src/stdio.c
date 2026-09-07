@@ -297,6 +297,42 @@ int putchar(int c)
     return c;
 }
 
+/* readrec - one record ending at `delim`, with the bytes untouched.
+ *
+ * readline() below is for a terminal: it erases on backspace and always
+ * splits on newline. A file tool wants neither. `uniq -z`, `sort -z` and
+ * `xargs -0` split on NUL, and a byte that happens to be 0x7F in a file
+ * is a byte, not an edit. Returns the length, or -1 at end of input with
+ * nothing read; the record is NUL-terminated and the delimiter is not
+ * part of it. `saw_delim`, when given, says whether the record ended at
+ * a delimiter or at end of input - the difference between a file with a
+ * final newline and one without. */
+long readrec(int fd, char *buf, size_t size, char delim, bool *saw_delim)
+{
+    size_t n = 0;
+    if (saw_delim) *saw_delim = false;
+
+    for (;;) {
+        char c;
+        long r = lp_read(fd, &c, 1);
+
+        if (r == 0) {
+            buf[n < size ? n : size - 1] = '\0';
+            return (n == 0) ? -1 : (long)n;
+        }
+        if (r < 0)
+            return r;
+        if (c == delim) {
+            if (saw_delim) *saw_delim = true;
+            break;
+        }
+        if (n < size - 1)
+            buf[n++] = c;
+    }
+    buf[n] = '\0';
+    return (long)n;
+}
+
 long readline(int fd, char *buf, size_t size)
 {
     size_t n = 0;

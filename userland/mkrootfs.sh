@@ -124,7 +124,12 @@ ln -sf su      "${ROOT_DIR}/bin/sudo"
 # `less` is what people type. `more` here already scrolls both ways and
 # quits on q, so the name is the only thing that was missing.
 ln -sf more    "${ROOT_DIR}/bin/less"
-log "bin/: ${PROGRAMS[*]} umount lsattr chgrp groups userdel sudo less"
+# md5sum and its siblings are the same program: one digest front end that
+# picks the algorithm from the name it was called by.
+ln -sf sha256sum "${ROOT_DIR}/bin/md5sum"
+ln -sf sha256sum "${ROOT_DIR}/bin/sha1sum"
+ln -sf sha256sum "${ROOT_DIR}/bin/sha512sum"
+log "bin/: ${PROGRAMS[*]} umount lsattr chgrp groups userdel sudo less md5sum sha1sum sha512sum"
 
 # 커널은 initramfs 의 /init 을 PID 1 로 실행한다
 ln -sf bin/init "${ROOT_DIR}/init"

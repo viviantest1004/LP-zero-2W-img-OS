@@ -197,6 +197,7 @@ typedef struct {
     uid_t uid;
     gid_t gid;
     s64 mtime;       /* seconds since 1970 */
+    u64 blocks;      /* 512-byte units actually allocated */
 } lp_stat_t;
 
 #define LP_S_IFMT   0170000
@@ -333,6 +334,36 @@ long  lp_sync(void);
 /* SHA-256 of a file, written to `hex` as 64 characters and a NUL.
  * false when the file cannot be read. */
 bool  lp_sha256_file(const char *path, char *hex);
+
+/* ── Message digests ──────────────────────────────────────────────────
+ *
+ * One front end for MD5, SHA-1, SHA-256 and SHA-512, because md5sum and
+ * its three siblings are one program under four names and pkg wants the
+ * same code the checksum commands use.
+ *
+ * MD5 and SHA-1 are here to read what other people published, not to
+ * decide whether to trust it. Nothing in this system verifies a
+ * signature with either.
+ */
+typedef enum { LP_MD5 = 0, LP_SHA1, LP_SHA256, LP_SHA512 } lp_algo_t;
+
+typedef struct {
+    int  algo;
+    int  block;      /* 64, or 128 for SHA-512 */
+    int  used;
+    u64  len;
+    u32  h32[8];
+    u64  h64[8];
+    u8   buf[128];
+} lp_digest_t;
+
+void lp_digest_init(lp_digest_t *d, int algo);
+void lp_digest_update(lp_digest_t *d, const void *data, size_t n);
+/* Writes 2*bytes hex characters and a NUL. */
+void lp_digest_final(lp_digest_t *d, char *hex);
+int  lp_digest_bits(int algo);
+bool lp_digest_fd(int fd, int algo, char *hex);
+bool lp_digest_file(const char *path, int algo, char *hex);
 
 /* Scheduling priority ("nice"): -20 gets the CPU first, 19 last, 0 is
  * the default. Lowering it needs root. */
@@ -478,3 +509,60 @@ const char *lp_strerror(int err);
  */
 void lp_diag(const char *prog, const char *gnu_before, const char *gnu_after,
              const char *lp_phrase, const char *path, int err);
+
+/* ── Option parsing ───────────────────────────────────────────────────
+ *
+ * The grammar every GNU tool shares: -n5, -n 5, -abc bundled, --lines=5,
+ * --lines 5, "--" to end options, "-" as a filename, and operands that
+ * may appear before options. Implemented once in libc/src/getopt.c so
+ * the commands cannot each get a different subset of it right.
+ *
+ *   lp_getopt_t   g;
+ *   lp_getopt_init(&g, argc, argv, "n:vq", longopts);
+ *   for (int c; (c = lp_getopt(&g)) != -1; )
+ *       switch (c) {
+ *       case 'n': limit = atoi(g.arg); break;
+ *       case '?': lp_getopt_err("head", &g); return 1;
+ *       }
+ *   for (int i = g.ind; i < argc; i++)  ... operands ...
+ *
+ * shortopts: "n" takes no value, "n:" requires one, "n::" takes one only
+ * when attached. longopts is a table ended by a zero name; has_arg uses
+ * the same 0/1/2, and val is what lp_getopt returns for it (use a value
+ * above 255 for a long option with no short spelling).
+ */
+typedef struct {
+    const char *name;
+    int         has_arg;   /* 0 none, 1 required, 2 optional */
+    int         val;
+} lp_lopt_t;
+
+typedef struct {
+    int          ind;            /* first operand, once lp_getopt returns -1 */
+    const char  *arg;            /* value of the option just returned */
+    const char  *lname;          /* long name it matched, else NULL */
+    char         badchar;        /* the letter, on '?' */
+    const char  *badlong;        /* the word, on '?' from a long option */
+    int          ambig;          /* the long option was an ambiguous prefix */
+    /* internal */
+    int          argc;
+    char       **argv;
+    const char  *shortopts;
+    const lp_lopt_t *longopts;
+    const char  *cur;
+    int          pos;
+    int          first_operand;
+    int          flags;
+} lp_getopt_t;
+
+/* -3 is an operand, not three flags. seq, sort and tail need this. */
+#define LP_GETOPT_NEGNUM  1
+
+void lp_getopt_init(lp_getopt_t *st, int argc, char **argv,
+                    const char *shortopts, const lp_lopt_t *longopts);
+void lp_getopt_init_ex(lp_getopt_t *st, int argc, char **argv,
+                       const char *shortopts, const lp_lopt_t *longopts,
+                       int flags);
+int  lp_getopt(lp_getopt_t *st);
+/* GNU's two lines: "prog: invalid option -- 'x'" and the --help hint. */
+void lp_getopt_err(const char *prog, const lp_getopt_t *st);

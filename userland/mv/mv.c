@@ -49,7 +49,7 @@ static int move_across(const char *src, const char *dst)
     lp_stat_t st;
     long r = lp_stat(src, &st, true);
     if (r < 0) {
-        dprintf(STDERR_FILENO, "mv: %s: cannot read (%ld)\n", src, -r);
+        lp_diag("mv", "cannot stat", NULL, "cannot read", src, (int)-r);
         return 1;
     }
     if ((st.mode & LP_S_IFMT) == LP_S_IFDIR) {
@@ -61,13 +61,14 @@ static int move_across(const char *src, const char *dst)
 
     long in = lp_open(src, O_RDONLY, 0);
     if (in < 0) {
-        dprintf(STDERR_FILENO, "mv: %s: cannot open (%ld)\n", src, -in);
+        lp_diag("mv", "cannot open", NULL, "cannot open", src, (int)-in);
         return 1;
     }
     long out = lp_open(dst, O_WRONLY | O_CREAT | O_TRUNC, st.mode & 07777);
     if (out < 0) {
         lp_close((int)in);
-        dprintf(STDERR_FILENO, "mv: %s: cannot create (%ld)\n", dst, -out);
+        lp_diag("mv", "cannot create regular file", NULL,
+                "cannot create", dst, (int)-out);
         return 1;
     }
 
@@ -113,7 +114,17 @@ static int move_one(const char *src, const char *dst)
     if (r == -EXDEV)
         return move_across(src, dst);
 
-    dprintf(STDERR_FILENO, "mv: %s -> %s: failed (%ld)\n", src, dst, -r);
+    /* GNU names only the source and says what the errno was. Naming
+     * both, as this did, reads better - but it is not what anyone else
+     * prints, and matching is the point. `voice lp` keeps the old form. */
+    /* GNU reaches for stat before rename, so a source that is not there
+     * comes out as "cannot stat" - which is the message people have seen
+     * a thousand times. Anything else is "cannot move". */
+    if (lp_voice() == LP_VOICE_GNU)
+        lp_diag("mv", r == -2 ? "cannot stat" : "cannot move",
+                NULL, NULL, src, (int)-r);
+    else
+        dprintf(STDERR_FILENO, "mv: %s -> %s: failed (%ld)\n", src, dst, -r);
     return 1;
 }
 

@@ -55,6 +55,8 @@
 
 static bool opt_long, opt_all, opt_human, opt_time, opt_size;
 static bool opt_reverse, opt_recurse, opt_dironly, opt_one;
+/* -F / -p: 이름 뒤에 종류를 알리는 한 글자. */
+static bool opt_classify;
 static int  failures;
 
 typedef struct {
@@ -114,6 +116,10 @@ static void mode_string(u32 mode, char *out)
     out[10] = '\0';
 }
 
+/* Bytes unless -h was asked for, which is what GNU does. Printing
+ * human sizes by default reads better and teaches somebody that `ls -l`
+ * gives you "98K"; it does not, and a script that assumed so would be
+ * wrong everywhere but here. */
 static void human_size(u64 n, char *out, size_t size)
 {
     if (!opt_human) {
@@ -126,15 +132,43 @@ static void human_size(u64 n, char *out, size_t size)
     snprintf(out, size, "%lu%s", (unsigned long)n, unit[u]);
 }
 
-/* "2026-09-03 08:15". A date nobody has to decode beats the one ls
- * usually prints, which hides the year on anything recent. */
+/* The date column.
+ *
+ * This used to print "2026-09-03 08:15" always, with a note saying a
+ * date nobody has to decode beats the one ls usually prints. That was
+ * true and it was still the wrong call: somebody learning here would
+ * write a script that cuts fields out of `ls -l` and find it broken on
+ * every other machine. GNU's shape is the one that has to be learned,
+ * so it is the one printed - recent files get the time, anything older
+ * than six months gets the year instead, and the year has two spaces in
+ * front of it so both forms are the same width.
+ *
+ * The old format is still here under `voice lp`.
+ *
+ * Local time, not UTC. `date` and `ls` disagreeing about what time it is
+ * was the thing that made the zone worth putting in the libc. */
+static const char *MON[13] = { "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
 static void time_string(s64 t, char *out, size_t size)
 {
     if (t <= 0) { strlcpy(out, "               -", size); return; }
     lp_tm_t tm;
-    lp_gmtime(t, &tm);
-    snprintf(out, size, "%04d-%02d-%02d %02d:%02d",
-             tm.year, tm.mon, tm.day, tm.hour, tm.min);
+    lp_localtime(t, &tm);
+
+    if (lp_voice() == LP_VOICE_LP) {
+        snprintf(out, size, "%04d-%02d-%02d %02d:%02d",
+                 tm.year, tm.mon, tm.day, tm.hour, tm.min);
+        return;
+    }
+
+    /* Six months, as GNU counts it. */
+    s64 age = lp_time() - t;
+    if (age > 15552000LL || age < -3600LL)
+        snprintf(out, size, "%s %2d  %04d", MON[tm.mon], tm.day, tm.year);
+    else
+        snprintf(out, size, "%s %2d %02d:%02d",
+                 MON[tm.mon], tm.day, tm.hour, tm.min);
 }
 
 static int compare(const entry_t *a, const entry_t *b)
@@ -166,12 +200,62 @@ static void sort_entries(int n)
     }
 }
 
+/* Column widths for a whole listing.
+ *
+ * GNU sizes each column to the widest value in the listing and puts one
+ * space between them. Fixed widths - what this used to do - line up
+ * until a name is longer or a size is bigger than the guess, and then
+ * the columns jump. Worse for a learner: the output does not match the
+ * one they will cut fields out of on any other machine.
+ *
+ * Computed once per directory, before anything is printed, which is why
+ * the names are collected first. */
+typedef struct { int nlink, owner, group, size; } widths_t;
+static widths_t W = { 1, 1, 1, 1 };
+
+static int textlen(const char *s) { return (int)strlen(s); }
+
+static void entry_columns(const entry_t *e, char *owner, size_t osz,
+                          char *group, size_t gsz, char *size, size_t ssz)
+{
+    strlcpy(owner, "?", osz);
+    strlcpy(group, "?", gsz);
+    strlcpy(size,  "?", ssz);
+    if (!e->have_stat)
+        return;
+
+    lp_user_t u;
+    if (lp_user_by_uid(e->st.uid, &u)) strlcpy(owner, u.name, osz);
+    else snprintf(owner, osz, "%d", (int)e->st.uid);
+    lp_group_name(e->st.gid, group, gsz);
+    human_size(e->st.size, size, ssz);
+}
+
+static void measure(int n)
+{
+    W.nlink = W.owner = W.group = W.size = 1;
+    for (int i = 0; i < n; i++) {
+        char o[32], g[32], z[24], nl[16];
+        entry_columns(&entries[i], o, sizeof o, g, sizeof g, z, sizeof z);
+        snprintf(nl, sizeof nl, "%u",
+                 (unsigned)(entries[i].have_stat ? entries[i].st.nlink : 1));
+        if (textlen(nl) > W.nlink) W.nlink = textlen(nl);
+        if (textlen(o)  > W.owner) W.owner = textlen(o);
+        if (textlen(g)  > W.group) W.group = textlen(g);
+        if (textlen(z)  > W.size)  W.size  = textlen(z);
+    }
+}
+
 static void print_entry(const char *dir, const entry_t *e)
 {
     if (!opt_long) {
-        char suffix = type_suffix(e->type);
-        if (suffix && !opt_one) printf("%s%c\n", e->name, suffix);
-        else                    printf("%s\n", e->name);
+        /* GNU 는 -F 나 -p 를 줬을 때만 꼬리표를 붙인다. 늘 붙이면
+         * `ls | while read d` 가 "sub/" 를 받고, 그 이름으로 만든
+         * 경로가 다른 기계에서만 맞는다. 배우는 사람이 여기서 익힌
+         * 것이 저기서 틀리는 그 자리다. */
+        char suffix = (opt_classify && !opt_one) ? type_suffix(e->type) : 0;
+        if (suffix) printf("%s%c\n", e->name, suffix);
+        else        printf("%s\n", e->name);
         return;
     }
 
@@ -202,9 +286,21 @@ static void print_entry(const char *dir, const entry_t *e)
         else       link[0] = '\0';
     }
 
-    printf("%s %3u %-8s %-8s %8s  %s  %s%s%s\n",
-           modes, (unsigned)(e->have_stat ? e->st.nlink : 1),
-           owner, group, size, when, e->name,
+    if (lp_voice() == LP_VOICE_LP) {
+        printf("%s %3u %-8s %-8s %8s  %s  %s%s%s\n",
+               modes, (unsigned)(e->have_stat ? e->st.nlink : 1),
+               owner, group, size, when, e->name,
+               link[0] ? " -> " : "", link);
+        return;
+    }
+
+    printf("%s %*u %-*s %-*s %*s %s %s%s%s\n",
+           modes,
+           W.nlink, (unsigned)(e->have_stat ? e->st.nlink : 1),
+           W.owner, owner,
+           W.group, group,
+           W.size,  size,
+           when, e->name,
            link[0] ? " -> " : "", link);
 }
 
@@ -311,15 +407,26 @@ static int list_dir(const char *path, bool show_header)
                 path, MAX_ENTRIES, MAX_ENTRIES, path);
 
     sort_entries(n);
+    measure(n);
 
     if (opt_long) {
+        /* GNU's "total" is the 512-byte blocks the files actually take,
+         * expressed in 1K units. Rounding the size up to the next
+         * kilobyte - what this did - is a different number whenever a
+         * file is sparse or the filesystem's block is not 1K, and
+         * "different from every other ls" is the one thing this output
+         * must not be. */
         u64 blocks = 0;
         for (int i = 0; i < n; i++)
             if (entries[i].have_stat)
-                blocks += (entries[i].st.size + 1023) / 1024;
-        char t[16];
-        human_size(blocks * 1024, t, sizeof t);
-        printf("total %s\n", t);
+                blocks += entries[i].st.blocks;
+        if (lp_voice() == LP_VOICE_LP) {
+            char t[16];
+            human_size(blocks * 512, t, sizeof t);
+            printf("total %s\n", t);
+        } else {
+            printf("total %lu\n", (unsigned long)(blocks / 2));
+        }
     }
 
     for (int i = 0; i < n; i++)
@@ -381,6 +488,7 @@ int main(int argc, char **argv)
                 case 'R': opt_recurse = true; break;
                 case 'd': opt_dironly = true; break;
                 case '1': opt_one = true; break;
+                case 'F': case 'p': opt_classify = true; break;
                 default:
                     dprintf(STDERR_FILENO, "ls: unknown option -%c\n", *o);
                     usage();
