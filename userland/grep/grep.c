@@ -499,7 +499,7 @@ int main(int argc, char **argv)
     int  nfpat = 0;
 
     lp_getopt_t g;
-    lp_getopt_init(&g, argc, argv, "EFGe:f:iwxvclLoqsnHhm:rRA:B:C:bazU", lo);
+    lp_getopt_init(&g, argc, argv, "EFGe:f:iwxvclLoqsnHhm:rRA:B:C:bazUZ", lo);
     for (int c; (c = lp_getopt(&g)) != -1; ) {
         switch (c) {
         case 'E': extended = true; break;
@@ -526,7 +526,7 @@ int main(int argc, char **argv)
         case 'A': o.after  = (int)strtol(g.arg, NULL, 10); break;
         case 'B': o.before = (int)strtol(g.arg, NULL, 10); break;
         case 'C': o.after = o.before = (int)strtol(g.arg, NULL, 10); break;
-        case 'a': case 'U': case 'z': case 1001: case 1002: break;
+        case 'a': case 'U': case 'z': case 'Z': case 1001: case 1002: break;
         case 1003: usage(STDOUT_FILENO); return 0;
         default: lp_getopt_err(prog, &g); return 2;
         }

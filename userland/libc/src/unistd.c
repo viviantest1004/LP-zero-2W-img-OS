@@ -77,6 +77,18 @@ long sys_getdents(int fd, void *buf, size_t size) { return sys_call3(SYS_getdent
  * "total", so guessing it from the size gave a different number from
  * every other ls. Both architectures put it at 64. */
 #define STAT_BLOCKS_OFF   64
+/* dev, ino, atime and ctime land in the same place on both; only rdev
+ * and the width of st_blksize differ. */
+#define STAT_DEV_OFF       0
+#define STAT_INO_OFF       8
+#define STAT_BLKSIZE_OFF  56
+#define STAT_ATIME_OFF    72
+#define STAT_CTIME_OFF   104
+#if defined(__x86_64__)
+#  define STAT_RDEV_OFF   40
+#else
+#  define STAT_RDEV_OFF   32
+#endif
 #define S_IFMT          0170000
 #define S_IFDIR         0040000
 
@@ -111,8 +123,77 @@ bool lp_is_dir(const char *path)
 #define STAT_SIZE_OFF       48
 #define AT_SYMLINK_NOFOLLOW 0x100
 
+/* statx, laid out the way the kernel writes it. It is here for one
+ * field - the creation time - which newfstatat cannot report at all and
+ * which `stat` prints on every other Linux. Everything else it returns
+ * we already had. Kernels before 4.11 have no statx, so a failure here
+ * falls back rather than failing the call. */
+#define STATX_BASIC_STATS 0x7ff
+#define STATX_BTIME       0x800
+#define STATX_MASK_OFF      0
+#define STATX_BLKSIZE_OFF   4
+#define STATX_NLINK_OFF    16
+#define STATX_UID_OFF      20
+#define STATX_GID_OFF      24
+#define STATX_MODE_OFF     28
+#define STATX_INO_OFF      32
+#define STATX_SIZE_OFF     40
+#define STATX_BLOCKS_OFF   48
+#define STATX_ATIME_OFF    64
+#define STATX_BTIME_OFF    80
+#define STATX_CTIME_OFF    96
+#define STATX_MTIME_OFF   112
+#define STATX_RDEV_MAJ_OFF 128
+#define STATX_RDEV_MIN_OFF 132
+#define STATX_DEV_MAJ_OFF 136
+#define STATX_DEV_MIN_OFF 140
+
+static u64 makedev(u32 maj, u32 min)
+{
+    return ((u64)(maj & 0xfff) << 8) | (u64)(min & 0xff) |
+           ((u64)(maj & ~0xfffu) << 32) | ((u64)(min & ~0xffu) << 12);
+}
+
+static long try_statx(const char *path, lp_stat_t *out, bool follow_symlink)
+{
+    u8 buf[256];
+    memset(buf, 0, sizeof buf);
+    long r = sys_call5(SYS_statx, AT_FDCWD, (long)path,
+                       follow_symlink ? 0 : AT_SYMLINK_NOFOLLOW,
+                       STATX_BASIC_STATS | STATX_BTIME, (long)buf);
+    if (r < 0)
+        return r;
+
+    u32 mask   = *(u32 *)(buf + STATX_MASK_OFF);
+    out->mode  = *(u16 *)(buf + STATX_MODE_OFF);
+    out->size  = *(u64 *)(buf + STATX_SIZE_OFF);
+    out->nlink = *(u32 *)(buf + STATX_NLINK_OFF);
+    out->uid   = *(u32 *)(buf + STATX_UID_OFF);
+    out->gid   = *(u32 *)(buf + STATX_GID_OFF);
+    out->blocks  = *(u64 *)(buf + STATX_BLOCKS_OFF);
+    out->blksize = *(u32 *)(buf + STATX_BLKSIZE_OFF);
+    out->ino     = *(u64 *)(buf + STATX_INO_OFF);
+    out->atime = *(s64 *)(buf + STATX_ATIME_OFF);
+    out->mtime = *(s64 *)(buf + STATX_MTIME_OFF);
+    out->ctime = *(s64 *)(buf + STATX_CTIME_OFF);
+    out->atime_ns = *(u32 *)(buf + STATX_ATIME_OFF + 8);
+    out->mtime_ns = *(u32 *)(buf + STATX_MTIME_OFF + 8);
+    out->ctime_ns = *(u32 *)(buf + STATX_CTIME_OFF + 8);
+    out->btime    = (mask & STATX_BTIME) ? *(s64 *)(buf + STATX_BTIME_OFF) : 0;
+    out->btime_ns = (mask & STATX_BTIME) ? *(u32 *)(buf + STATX_BTIME_OFF + 8) : 0;
+    out->has_btime = (mask & STATX_BTIME) != 0;
+    out->rdev = makedev(*(u32 *)(buf + STATX_RDEV_MAJ_OFF),
+                        *(u32 *)(buf + STATX_RDEV_MIN_OFF));
+    out->dev  = makedev(*(u32 *)(buf + STATX_DEV_MAJ_OFF),
+                        *(u32 *)(buf + STATX_DEV_MIN_OFF));
+    return 0;
+}
+
 long lp_stat(const char *path, lp_stat_t *out, bool follow_symlink)
 {
+    if (try_statx(path, out, follow_symlink) == 0)
+        return 0;
+
     u8 buf[STAT_BUF_SIZE];
     long r = sys_call4(SYS_newfstatat, AT_FDCWD, (long)path, (long)buf,
                        follow_symlink ? 0 : AT_SYMLINK_NOFOLLOW);
@@ -129,7 +210,42 @@ long lp_stat(const char *path, lp_stat_t *out, bool follow_symlink)
     out->gid   = *(u32 *)(buf + STAT_GID_OFF);
     out->mtime = *(s64 *)(buf + STAT_MTIME_OFF);
     out->blocks = *(u64 *)(buf + STAT_BLOCKS_OFF);
+    out->dev   = *(u64 *)(buf + STAT_DEV_OFF);
+    out->ino   = *(u64 *)(buf + STAT_INO_OFF);
+    out->rdev  = *(u64 *)(buf + STAT_RDEV_OFF);
+#if defined(__x86_64__)
+    out->blksize = *(u64 *)(buf + STAT_BLKSIZE_OFF);
+#else
+    out->blksize = *(u32 *)(buf + STAT_BLKSIZE_OFF);
+#endif
+    out->atime = *(s64 *)(buf + STAT_ATIME_OFF);
+    out->ctime = *(s64 *)(buf + STAT_CTIME_OFF);
+    out->atime_ns = (u32)*(u64 *)(buf + STAT_ATIME_OFF + 8);
+    out->mtime_ns = (u32)*(u64 *)(buf + STAT_MTIME_OFF + 8);
+    out->ctime_ns = (u32)*(u64 *)(buf + STAT_CTIME_OFF + 8);
+    out->btime = 0;
+    out->btime_ns = 0;
+    out->has_btime = false;
     return 0;
+}
+
+/* Set a file's length. truncate and `> file` both want it, and it is
+ * the only way to make a sparse file without writing the whole thing. */
+long lp_ftruncate(int fd, s64 length)
+{
+    return sys_call2(SYS_ftruncate, fd, (long)length);
+}
+
+/* A hard link: a second name for the same inode. */
+long lp_link(const char *from, const char *to)
+{
+    return sys_call5(SYS_linkat, AT_FDCWD, (long)from, AT_FDCWD, (long)to, 0);
+}
+
+/* A named pipe, or any other node the caller has a mode for. */
+long lp_mknod(const char *path, mode_t mode, u64 dev)
+{
+    return sys_call4(SYS_mknodat, AT_FDCWD, (long)path, mode, (long)dev);
 }
 
 long lp_rename(const char *from, const char *to)
@@ -619,6 +735,40 @@ int lp_getpriority(pid_t pid)
 #define STATFS_OFF_BSIZE    8
 #define STATFS_OFF_BLOCKS  16
 #define STATFS_OFF_BAVAIL  32
+
+/* statfs, in full. df needs every field of it: the total is one number,
+ * what is used is another, and what an ordinary process may still write
+ * is a third - ext4 keeps a few percent back for root, and reporting
+ * the difference between total and used as "free" overstates it by
+ * exactly the reserve that keeps a full disk recoverable. */
+#define STATFS_OFF_TYPE     0
+#define STATFS_OFF_BFREE   24
+#define STATFS_OFF_FILES   40
+#define STATFS_OFF_FFREE   48
+#define STATFS_OFF_NAMELEN 64
+#define STATFS_OFF_FRSIZE  72
+
+long lp_statfs(const char *path, lp_statfs_t *out)
+{
+    u8 buf[STATFS_BUF_SIZE];
+    memset(buf, 0, sizeof(buf));
+
+    long rc = sys_call2(SYS_statfs, (long)path, (long)buf);
+    if (rc < 0)
+        return rc;
+
+    out->type    = *(u64 *)(buf + STATFS_OFF_TYPE);
+    out->bsize   = *(u64 *)(buf + STATFS_OFF_BSIZE);
+    out->blocks  = *(u64 *)(buf + STATFS_OFF_BLOCKS);
+    out->bfree   = *(u64 *)(buf + STATFS_OFF_BFREE);
+    out->bavail  = *(u64 *)(buf + STATFS_OFF_BAVAIL);
+    out->files   = *(u64 *)(buf + STATFS_OFF_FILES);
+    out->ffree   = *(u64 *)(buf + STATFS_OFF_FFREE);
+    out->namelen = *(u64 *)(buf + STATFS_OFF_NAMELEN);
+    out->frsize  = *(u64 *)(buf + STATFS_OFF_FRSIZE);
+    if (out->frsize == 0) out->frsize = out->bsize;
+    return 0;
+}
 
 long lp_fs_space(const char *path, u64 *free_bytes, u64 *total_bytes)
 {

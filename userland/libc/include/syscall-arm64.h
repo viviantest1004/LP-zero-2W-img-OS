@@ -29,6 +29,8 @@
 #define SYS_mkdirat         34
 #define SYS_unlinkat        35
 #define SYS_linkat          37
+#define SYS_ftruncate       46
+#define SYS_mknodat         33
 #define SYS_symlinkat       36
 #define SYS_renameat        38
 #define SYS_umount2         39
@@ -50,6 +52,8 @@
 #define SYS_writev          66
 #define SYS_readlinkat      78
 #define SYS_newfstatat      79
+/* statx: the only way to ask for a file's creation time. */
+#define SYS_statx           291
 #define SYS_fstat           80
 #define SYS_exit            93
 #define SYS_exit_group      94

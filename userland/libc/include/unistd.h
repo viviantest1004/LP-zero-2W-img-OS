@@ -183,13 +183,22 @@ bool  lp_isatty(int fd);
 long  lp_term_set_utf8(int fd);
 bool  lp_exists(const char *path);
 bool  lp_is_dir(const char *path);
+long  lp_ftruncate(int fd, s64 length);
+long  lp_link(const char *from, const char *to);
+#define LP_S_IFIFO_MODE 0010000
+long  lp_mknod(const char *path, mode_t mode, u64 dev);
 long  lp_rename(const char *from, const char *to);
 long  lp_chmod(const char *path, mode_t mode);
 long  lp_symlink(const char *target, const char *linkpath);
 long  lp_readlink(const char *path, char *buf, size_t n);
 
-/* The kernel's struct stat is 128 bytes on arm64 and most of it is
- * fields we never use. This carries only what we need. */
+/* The kernel's struct stat is 128 bytes on arm64, 144 on x86-64, and
+ * the layouts differ. This is the same fields in one shape, so nothing
+ * above here has to know which machine it is on.
+ *
+ * `stat` wants all of it - the whole point of the command is to show
+ * what the kernel actually recorded, so leaving fields out would make
+ * it a worse `ls -l` rather than a stat. */
 typedef struct {
     u32 mode;        /* file type (S_IF*) plus permissions */
     u64 size;
@@ -198,6 +207,15 @@ typedef struct {
     gid_t gid;
     s64 mtime;       /* seconds since 1970 */
     u64 blocks;      /* 512-byte units actually allocated */
+    u64 dev;         /* the device the file lives on */
+    u64 ino;
+    u64 rdev;        /* which device it *is*, for a device node */
+    u64 blksize;     /* the I/O size the filesystem prefers */
+    s64 atime, ctime;
+    u32 mtime_ns, atime_ns, ctime_ns;
+    s64 btime;       /* when it was created; statx only */
+    u32 btime_ns;
+    bool has_btime;  /* false on a filesystem that does not record it */
 } lp_stat_t;
 
 #define LP_S_IFMT   0170000
@@ -403,6 +421,17 @@ bool  lp_proc_ids(pid_t pid, pid_t *ppid, pid_t *pgid, pid_t *sid,
 
 /* Free and total bytes of the filesystem holding `path`.
  * "free" is what an unprivileged process may still use. */
+/* Everything statfs reports, for df. */
+typedef struct {
+    u64 type;        /* the magic number that names the filesystem */
+    u64 bsize;       /* the block size for I/O */
+    u64 blocks, bfree, bavail;
+    u64 files, ffree;
+    u64 namelen;
+    u64 frsize;      /* the block size the counts above are in */
+} lp_statfs_t;
+
+long  lp_statfs(const char *path, lp_statfs_t *out);
 long  lp_fs_space(const char *path, u64 *free_bytes, u64 *total_bytes);
 long  lp_uname(void *buf);
 long  lp_getrandom(void *buf, size_t n, unsigned flags);

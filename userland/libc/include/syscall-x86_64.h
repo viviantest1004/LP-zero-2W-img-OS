@@ -86,10 +86,14 @@
 #define SYS_mkdirat          258
 #define SYS_fchownat         260
 #define SYS_newfstatat       262
+/* statx: the only way to ask for a file's creation time. */
+#define SYS_statx           332
 #define SYS_fstat              5
 #define SYS_unlinkat         263
 #define SYS_renameat         264
 #define SYS_linkat           265
+#define SYS_ftruncate         77
+#define SYS_mknodat          259
 #define SYS_symlinkat        266
 #define SYS_readlinkat       267
 #define SYS_fchmodat         268
