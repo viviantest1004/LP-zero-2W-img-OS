@@ -1,12 +1,18 @@
 /* rm - remove files and directories.
  *
- *   rm <path>...
- *   rm -r <path>...     including directories
- *   rm -f <path>...     a missing file is not an error
+ *   rm [-dfrv] <path>...
  *
- * This cannot be undone, so there are two guards against a slip:
- *   - "/" is always refused
- *   - removing a directory without -r is refused
+ * This cannot be undone, so the two guards GNU has are here too and they
+ * work the same way: "/" is refused under -r, and "." or ".." are
+ * skipped. Both are cheap and both have saved somebody's afternoon.
+ *
+ * A directory without -r is not refused with a sentence of our own; it
+ * fails with EISDIR the way unlink(2) reports it, so the line reads
+ * "rm: cannot remove 'x': Is a directory" - the same words as on Ubuntu.
+ *
+ * -f means two separate things and they are easy to confuse: a path that
+ * is not there is not an error, and nothing is ever asked. We never ask
+ * anything, so only the first half does any work here.
  */
 #include "types.h"
 #include "string.h"
@@ -17,16 +23,20 @@
 #define DIRENT_RECLEN 16
 #define DIRENT_NAME   19
 
-#define ENOENT 2
+#define ENOENT   2
+#define EISDIR   21
+#define ENOTEMPTY 39
 
 static bool recursive = false;
+static bool dir_ok    = false;   /* -d: rmdir an empty directory */
 static bool force     = false;
+static bool verbose   = false;
 static int  failures  = 0;
 
-/* GNU says `rm: cannot remove 'x': No such file or directory` for every
- * failure, whatever the failure was, and quotes the name. Matching that
- * exactly matters more here than the extra precision our own wording
- * had, because this is one of the first errors anybody sees. */
+/* GNU says `rm: cannot remove 'x': <errno>` for every failure, whatever
+ * the failure was. Matching that exactly matters more here than the
+ * extra precision our own wording had, because this is one of the first
+ * errors anybody sees. */
 static void oops(const char *what, const char *path, long rc)
 {
     if (force && rc == -ENOENT)
@@ -62,7 +72,7 @@ static int remove_dir(const char *path)
     for (;;) {
         long n = sys_getdents((int)fd, dbuf, sizeof(dbuf));
         if (n == 0) break;
-        if (n < 0) { oops("read failed", path, n); rc = 1; break; }
+        if (n < 0) { oops("cannot read", path, n); rc = 1; break; }
 
         for (long off = 0; off < n; ) {
             char       *rec  = dbuf + off;
@@ -75,7 +85,7 @@ static int remove_dir(const char *path)
 
             char child[512];
             if (!join(child, sizeof(child), path, name)) {
-                dprintf(STDERR_FILENO, "rm: path too long: %s\n", name);
+                oops("path too long", name, -36);
                 rc = 1;
                 continue;
             }
@@ -89,6 +99,7 @@ static int remove_dir(const char *path)
      * above makes this fail too. */
     long r = lp_rmdir(path);
     if (r < 0) { oops("cannot remove", path, r); return 1; }
+    if (verbose) printf("removed directory '%s'\n", path);
     return rc;
 }
 
@@ -96,52 +107,105 @@ static int remove_any(const char *path)
 {
     lp_stat_t st;
     long r = lp_stat(path, &st, false);      /* remove the link, not its target */
-    if (r < 0) { oops("no such file", path, r); return force ? 0 : 1; }
+    if (r < 0) { oops("cannot remove", path, r); return force ? 0 : 1; }
 
     if ((st.mode & LP_S_IFMT) == LP_S_IFDIR) {
-        if (!recursive) {
-            dprintf(STDERR_FILENO, "rm: %s is a directory (use -r)\n", path);
-            failures = 1;
-            return 1;
+        if (recursive)
+            return remove_dir(path);
+        if (dir_ok) {
+            long d = lp_rmdir(path);
+            if (d < 0) { oops("cannot remove", path, d); return 1; }
+            if (verbose) printf("removed directory '%s'\n", path);
+            return 0;
         }
-        return remove_dir(path);
+        /* unlink(2) on a directory is EISDIR, and that is the word GNU
+         * prints. Saying "use -r" instead would be friendlier and would
+         * also be a sentence nobody meets anywhere else. */
+        oops("cannot remove", path, -EISDIR);
+        return 1;
     }
 
     r = lp_unlink(path);
     if (r < 0) { oops("cannot remove", path, r); return force ? 0 : 1; }
+    if (verbose) printf("removed '%s'\n", path);
     return 0;
+}
+
+/* "." and ".." as the last element: removing them means removing the
+ * directory you are standing in by another name. */
+static bool is_dot_dir(const char *p)
+{
+    const char *last = p;
+    for (const char *c = p; *c; c++)
+        if (*c == '/' && c[1] != '\0')
+            last = c + 1;
+    size_t n = strlen(last);
+    while (n > 0 && last[n - 1] == '/') n--;
+    return (n == 1 && last[0] == '.') || (n == 2 && last[0] == '.' && last[1] == '.');
+}
+
+static void usage(int fd)
+{
+    dprintf(fd, "Usage: rm [OPTION]... [FILE]...\n"
+                "Remove (unlink) the FILE(s).\n\n"
+                "  -f, --force           ignore nonexistent files and arguments, never prompt\n"
+                "  -r, -R, --recursive   remove directories and their contents recursively\n"
+                "  -d, --dir             remove empty directories\n"
+                "  -v, --verbose         explain what is being done\n"
+                "      --help     display this help and exit\n\n"
+                "By default, rm does not remove directories.  Use the --recursive (-r or -R)\n"
+                "option to remove each listed directory, too, along with all of its contents.\n");
 }
 
 int main(int argc, char **argv)
 {
-    int first = 1;
-    for (; first < argc; first++) {
-        if (strcmp(argv[first], "-r") == 0 || strcmp(argv[first], "-R") == 0)
-            recursive = true;
-        else if (strcmp(argv[first], "-f") == 0)
-            force = true;
-        else if (strcmp(argv[first], "-rf") == 0 || strcmp(argv[first], "-fr") == 0)
-            recursive = force = true;
-        else
-            break;
+    static const lp_lopt_t lo[] = {
+        { "force", 0, 'f' }, { "recursive", 0, 'r' }, { "dir", 0, 'd' },
+        { "verbose", 0, 'v' }, { "help", 0, 'H' }, { 0, 0, 0 }
+    };
+    lp_getopt_t g;
+    lp_getopt_init(&g, argc, argv, "dfrRv", lo);
+    for (int c; (c = lp_getopt(&g)) != -1; )
+        switch (c) {
+        case 'd': dir_ok = true; break;
+        case 'f': force = true; break;
+        case 'r': case 'R': recursive = true; break;
+        case 'v': verbose = true; break;
+        case 'H': usage(STDOUT_FILENO); return 0;
+        default:  lp_getopt_err("rm", &g); return 1;
+        }
+
+    if (g.ind >= argc) {
+        /* `rm -f` with nothing to remove has removed everything it was
+         * asked to, so it succeeds and says nothing. */
+        if (force) return 0;
+        dprintf(STDERR_FILENO, "rm: missing operand\n"
+                               "Try 'rm --help' for more information.\n");
+        return 1;
     }
 
-    if (first >= argc) {
-        dprintf(STDERR_FILENO, "usage: rm [-r] [-f] <path>...\n");
-        return force ? 0 : 2;
-    }
-
-    for (int i = first; i < argc; i++) {
-        /* Removing the root leaves no way back, so it is always refused.
-         * Not just "/" but anything that resolves to it, like "//" or "/.". */
+    for (int i = g.ind; i < argc; i++) {
         const char *p = argv[i];
-        bool only_root = true;
-        for (const char *c = p; *c; c++)
-            if (*c != '/' && *c != '.') { only_root = false; break; }
-        if (only_root && p[0] == '/') {
-            dprintf(STDERR_FILENO, "rm: refusing to remove the root (%s)\n", p);
+
+        if (is_dot_dir(p)) {
+            dprintf(STDERR_FILENO,
+                    "rm: refusing to remove '.' or '..' directory: skipping '%s'\n", p);
             failures = 1;
             continue;
+        }
+        /* Only -r can reach the whole tree, so only -r needs the guard;
+         * a plain `rm /` fails with EISDIR on its own. */
+        if (recursive) {
+            bool only_slash = p[0] == '/';
+            for (const char *c = p; *c && only_slash; c++)
+                if (*c != '/') only_slash = false;
+            if (only_slash) {
+                dprintf(STDERR_FILENO,
+                        "rm: it is dangerous to operate recursively on '%s'\n"
+                        "rm: use --no-preserve-root to override this failsafe\n", p);
+                failures = 1;
+                continue;
+            }
         }
         remove_any(p);
     }

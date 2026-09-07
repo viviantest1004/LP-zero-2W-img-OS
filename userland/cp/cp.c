@@ -1,48 +1,55 @@
 /* cp - copy files.
  *
- *   cp <source> <dest>
- *   cp <source>... <directory>
- *   cp -r <source>... <dest>    including directories
- *   cp -n <source> <dest>       leave the destination alone if it exists (success)
- *   cp -q <source> <dest>       stay quiet when the source is missing
- *                               (the exit status still says it failed)
- *
- * -n and -q exist for the boot script (/etc/rc). Our shell has neither if
- * nor test, so this is the only way to say "skip it if it is already there,
- * create it if it is not".
+ *   cp [-fnvR] <source> <dest>
+ *   cp [-fnvR] <source>... <directory>
  *
  * Permissions follow the source. Owner and timestamps do not - there is
- * only one user on this system, so they would mean nothing.
+ * one user on this system, so they would mean nothing, and GNU only
+ * copies them when asked with -p, which is not here either.
  *
- * Copying a file onto itself is refused. Opening it would truncate the
- * source before reading it, and the contents would be gone.
+ * Copying a file onto itself is refused before anything is opened,
+ * because O_TRUNC on the destination would empty the source first and
+ * the contents would be gone. The test is device plus inode, not the
+ * path text, so `cp a link-to-a` is caught as well.
+ *
+ * -q is this system's own, and the only option here GNU does not have:
+ * /etc/rc uses `cp -q` to mean "copy it if it is there, say nothing if
+ * it is not". Our shell has no `if` and no `test`, so without it the
+ * boot script has no way to express that. The exit status still says it
+ * failed; only the message goes away.
  */
 #include "types.h"
 #include "string.h"
 #include "stdio.h"
 #include "unistd.h"
 
-#define BUF_SIZE  32768
+#define BUF_SIZE  65536
 
 /* linux_dirent64 offsets. We read by offset rather than declaring a
  * struct, so nothing depends on the compiler's padding. (Same as ls.c) */
 #define DIRENT_RECLEN 16
 #define DIRENT_NAME   19
-#define EEXIST    17
 
-#define ENOENT 2
+#define ENOENT  2
+#define ENOTDIR 20
+#define EEXIST  17
 
 static bool recursive  = false;
 static bool no_clobber = false;
-static bool quiet      = false;
+static bool force      = false;
+static bool verbose    = false;
+static bool quiet      = false;      /* -q, see the header */
 static int  failures   = 0;
 
-static void oops(const char *what, const char *path, long rc)
+/* A missing source under -q is the case the boot script asks us to keep
+ * quiet about. Everything else still gets a line. */
+static void diag(const char *before, const char *after, const char *lp,
+                 const char *path, long rc)
 {
-    if (quiet && rc == -ENOENT)
-        return;                 /* stay quiet, but still count it as a failure */
-    dprintf(STDERR_FILENO, "cp: %s: %s (%ld)\n", path, what, -rc);
     failures = 1;
+    if (quiet && -rc == ENOENT)
+        return;
+    lp_diag("cp", before, after, lp, path, (int)-rc);
 }
 
 /* Last element of a path. "/a/b/c" -> "c", "/a/b/" -> "b" */
@@ -68,47 +75,49 @@ static bool join(char *out, size_t cap, const char *dir, const char *name)
     return strlcat(out, name, cap) < cap;
 }
 
-static int copy_file(const char *src, const char *dst)
+static void announce(const char *src, const char *dst)
+{
+    if (verbose) printf("'%s' -> '%s'\n", src, dst);
+}
+
+static int copy_file(const char *src, const char *dst, const lp_stat_t *st)
 {
     if (no_clobber && lp_exists(dst))
         return 0;               /* already there - leaving it alone is success */
 
-    lp_stat_t st;
-    long r = lp_stat(src, &st, true);
-    if (r < 0) {
-        oops("cannot read", src, r);
-        if (quiet) failures = 1;
-        return 1;
-    }
-
-    /* Copying a file onto itself would lose it. Catch it first.
-     * The right comparison is device+inode, not the path string, but our
-     * stat does not carry those fields. A string compare catches the
-     * common mistake. */
-    if (strcmp(src, dst) == 0) {
-        dprintf(STDERR_FILENO, "cp: %s and the destination are the same file\n", src);
-        failures = 1;
-        return 1;
-    }
-
     long in = lp_open(src, O_RDONLY, 0);
-    if (in < 0) { oops("cannot open", src, in); return 1; }
+    if (in < 0) { diag("cannot open", "for reading", "cannot open", src, in); return 1; }
 
     /* Create it with the source's permissions, so an executable stays one. */
-    long out = lp_open(dst, O_WRONLY | O_CREAT | O_TRUNC, st.mode & 07777);
-    if (out < 0) { lp_close((int)in); oops("cannot create", dst, out); return 1; }
+    long out = lp_open(dst, O_WRONLY | O_CREAT | O_TRUNC, st->mode & 07777);
+    if (out < 0 && force) {
+        /* -f: a destination that cannot be opened is removed and remade,
+         * which is the only way past a file whose mode forbids writing. */
+        lp_unlink(dst);
+        out = lp_open(dst, O_WRONLY | O_CREAT | O_TRUNC, st->mode & 07777);
+    }
+    if (out < 0) {
+        lp_close((int)in);
+        diag("cannot create regular file", NULL, "cannot create", dst, out);
+        return 1;
+    }
+    announce(src, dst);
 
     static char buf[BUF_SIZE];
     int rc = 0;
     for (;;) {
         long n = lp_read((int)in, buf, sizeof(buf));
         if (n == 0) break;
-        if (n < 0) { oops("read failed", src, n); rc = 1; break; }
+        if (n < 0) { diag("error reading", NULL, "cannot read", src, n); rc = 1; break; }
 
         long off = 0;
         while (off < n) {
             long w = lp_write((int)out, buf + off, (size_t)(n - off));
-            if (w <= 0) { oops("write failed", dst, w); rc = 1; break; }
+            if (w <= 0) {
+                diag("error writing", NULL, "cannot write", dst, w ? w : -5);
+                rc = 1;
+                break;
+            }
             off += w;
         }
         if (rc) break;
@@ -119,28 +128,23 @@ static int copy_file(const char *src, const char *dst)
 
     /* umask trims the mode O_CREAT asked for. Set it exactly. */
     if (rc == 0)
-        lp_chmod(dst, st.mode & 07777);
+        lp_chmod(dst, st->mode & 07777);
     return rc;
 }
 
-static int copy_any(const char *src, const char *dst);
+static int copy_any(const char *src, const char *dst, bool cmdline);
 
-static int copy_dir(const char *src, const char *dst)
+static int copy_dir(const char *src, const char *dst, const lp_stat_t *st)
 {
-    if (!recursive) {
-        dprintf(STDERR_FILENO, "cp: %s is a directory (use -r)\n", src);
-        failures = 1;
+    long r = lp_mkdir(dst, st->mode & 07777);
+    if (r < 0 && r != -EEXIST) {
+        diag("cannot create directory", NULL, "cannot create", dst, r);
         return 1;
     }
-
-    lp_stat_t st;
-    if (lp_stat(src, &st, true) < 0) return 1;
-
-    long r = lp_mkdir(dst, st.mode & 07777);
-    if (r < 0 && r != -EEXIST) { oops("cannot create", dst, r); return 1; }
+    if (r == 0) announce(src, dst);
 
     long fd = lp_open(src, O_RDONLY | O_DIRECTORY, 0);
-    if (fd < 0) { oops("cannot open", src, fd); return 1; }
+    if (fd < 0) { diag("cannot open", "for reading", "cannot open", src, fd); return 1; }
 
     /* Keep the buffer on the stack. As a static, a recursive call would
      * overwrite the parent's and entries would vanish silently. 8KB a level. */
@@ -151,7 +155,7 @@ static int copy_dir(const char *src, const char *dst)
     for (;;) {
         long n = sys_getdents((int)fd, dbuf, sizeof(dbuf));
         if (n == 0) break;
-        if (n < 0) { oops("read failed", src, n); rc = 1; break; }
+        if (n < 0) { diag("error reading", NULL, "cannot read", src, n); rc = 1; break; }
 
         for (long off = 0; off < n; ) {
             char       *rec  = dbuf + off;
@@ -165,11 +169,11 @@ static int copy_dir(const char *src, const char *dst)
             char s[512], t[512];
             if (!join(s, sizeof(s), src, name) ||
                 !join(t, sizeof(t), dst, name)) {
-                dprintf(STDERR_FILENO, "cp: path too long: %s\n", name);
+                diag("cannot create regular file", NULL, "path too long", name, -36);
                 rc = 1;
                 continue;
             }
-            rc |= copy_any(s, t);
+            rc |= copy_any(s, t, false);
         }
     }
 
@@ -177,67 +181,117 @@ static int copy_dir(const char *src, const char *dst)
     return rc;
 }
 
-static int copy_any(const char *src, const char *dst)
+/* A symlink named on the command line is followed - `cp link out` gives
+ * a copy of the file, which is what GNU does and what people expect. A
+ * symlink found inside a directory being copied is recreated as a link,
+ * which is also what GNU does: -R without -P still preserves them. */
+static int copy_any(const char *src, const char *dst, bool cmdline)
 {
     lp_stat_t st;
-    long r = lp_stat(src, &st, false);        /* look at the link, not its target */
-    if (r < 0) { oops("cannot read", src, r); return 1; }
+    long r = lp_stat(src, &st, cmdline);
+    if (r < 0) { diag("cannot stat", NULL, "cannot stat", src, r); return 1; }
+
+    /* Same file: opening the destination would truncate the source. */
+    lp_stat_t ds;
+    if (lp_stat(dst, &ds, false) == 0 && ds.dev == st.dev && ds.ino == st.ino) {
+        dprintf(STDERR_FILENO, "cp: '%s' and '%s' are the same file\n", src, dst);
+        failures = 1;
+        return 1;
+    }
 
     if ((st.mode & LP_S_IFMT) == LP_S_IFLNK) {
         char target[512];
         long n = lp_readlink(src, target, sizeof(target) - 1);
-        if (n < 0) { oops("cannot read the link", src, n); return 1; }
+        if (n < 0) { diag("cannot read symbolic link", NULL, "cannot read the link", src, n); return 1; }
         target[n] = '\0';
         lp_unlink(dst);                        /* replace any existing entry */
         long lr = lp_symlink(target, dst);
-        if (lr < 0) { oops("cannot create the link", dst, lr); return 1; }
+        if (lr < 0) { diag("cannot create symbolic link", NULL, "cannot create the link", dst, lr); return 1; }
+        announce(src, dst);
         return 0;
     }
 
-    if ((st.mode & LP_S_IFMT) == LP_S_IFDIR)
-        return copy_dir(src, dst);
+    if ((st.mode & LP_S_IFMT) == LP_S_IFDIR) {
+        if (!recursive) {
+            dprintf(STDERR_FILENO, "cp: -r not specified; omitting directory '%s'\n", src);
+            failures = 1;
+            return 1;
+        }
+        return copy_dir(src, dst, &st);
+    }
 
-    return copy_file(src, dst);
+    return copy_file(src, dst, &st);
+}
+
+static void usage(int fd)
+{
+    dprintf(fd, "Usage: cp [OPTION]... SOURCE DEST\n"
+                "  or:  cp [OPTION]... SOURCE... DIRECTORY\n"
+                "Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.\n\n"
+                "  -f, --force                  if an existing destination file cannot be\n"
+                "                                 opened, remove it and try again\n"
+                "  -n, --no-clobber             do not overwrite an existing file and do not fail\n"
+                "  -R, -r, --recursive          copy directories recursively\n"
+                "  -v, --verbose                explain what is being done\n"
+                "  -q                           say nothing when the source is missing\n"
+                "                                 (this system's own; the exit status still fails)\n"
+                "      --help     display this help and exit\n");
 }
 
 int main(int argc, char **argv)
 {
-    int first = 1;
-    for (; first < argc; first++) {
-        const char *a = argv[first];
-        if (strcmp(a, "-r") == 0 || strcmp(a, "-R") == 0) recursive  = true;
-        else if (strcmp(a, "-n") == 0)                    no_clobber = true;
-        else if (strcmp(a, "-q") == 0)                    quiet      = true;
-        else break;
-    }
+    static const lp_lopt_t lo[] = {
+        { "force", 0, 'f' }, { "no-clobber", 0, 'n' },
+        { "recursive", 0, 'R' }, { "verbose", 0, 'v' },
+        { "help", 0, 'H' }, { 0, 0, 0 }
+    };
+    lp_getopt_t g;
+    lp_getopt_init(&g, argc, argv, "fnqrRv", lo);
+    for (int c; (c = lp_getopt(&g)) != -1; )
+        switch (c) {
+        case 'f': force = true; break;
+        case 'n': no_clobber = true; break;
+        case 'q': quiet = true; break;
+        case 'r': case 'R': recursive = true; break;
+        case 'v': verbose = true; break;
+        case 'H': usage(STDOUT_FILENO); return 0;
+        default:  lp_getopt_err("cp", &g); return 1;
+        }
 
-    if (argc - first < 2) {
-        dprintf(STDERR_FILENO, "usage: cp [-r] [-n] [-q] <source>... <dest>\n");
-        return 2;
+    int nargs = argc - g.ind;
+    if (nargs == 0) {
+        dprintf(STDERR_FILENO, "cp: missing file operand\n"
+                               "Try 'cp --help' for more information.\n");
+        return 1;
+    }
+    if (nargs == 1) {
+        dprintf(STDERR_FILENO, "cp: missing destination file operand after '%s'\n"
+                               "Try 'cp --help' for more information.\n", argv[g.ind]);
+        return 1;
     }
 
     const char *dst = argv[argc - 1];
     bool dst_is_dir = lp_is_dir(dst);
-    int  nsrc = argc - 1 - first;
 
-    /* With several sources the destination must be a directory, or each
-     * would overwrite the last and only one would survive. */
-    if (nsrc > 1 && !dst_is_dir) {
-        dprintf(STDERR_FILENO, "cp: with several sources the destination must be a directory\n");
-        return 2;
+    /* With several sources the destination has to be a directory, or
+     * each would overwrite the last and only one would survive. GNU
+     * names the reason it is not one, so the errno decides the line. */
+    if (nargs > 2 && !dst_is_dir) {
+        lp_diag("cp", "target", NULL, "not a directory", dst,
+                lp_exists(dst) ? ENOTDIR : ENOENT);
+        return 1;
     }
 
-    for (int i = first; i < argc - 1; i++) {
+    for (int i = g.ind; i < argc - 1; i++) {
         if (dst_is_dir) {
             char full[512];
             if (!join(full, sizeof(full), dst, basename_of(argv[i]))) {
-                dprintf(STDERR_FILENO, "cp: path too long\n");
-                failures = 1;
+                diag("cannot create regular file", NULL, "path too long", argv[i], -36);
                 continue;
             }
-            copy_any(argv[i], full);
+            copy_any(argv[i], full, true);
         } else {
-            copy_any(argv[i], dst);
+            copy_any(argv[i], dst, true);
         }
     }
     return failures;
