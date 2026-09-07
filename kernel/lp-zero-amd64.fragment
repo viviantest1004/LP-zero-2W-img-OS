@@ -53,6 +53,45 @@ CONFIG_MMC_BLOCK=y
 CONFIG_MMC_SDHCI=y
 CONFIG_MMC_SDHCI_PCI=y
 
+# ── the clock ──
+# A PC and an EC2 instance both have a battery-backed clock that keeps
+# running while the machine is off. The kernel had the driver but not
+# RTC_HCTOSYS, which is the part that actually reads it at boot - so the
+# clock started at 1970 every time and the only thing standing between
+# that and a working HTTPS handshake was the timestamp we saved at the
+# last shutdown. That number does not advance while the power is off, so
+# a machine switched on a week later thought a week had not passed.
+#
+# SYSTOHC writes the other way, but only for a kernel that believes its
+# clock is synchronised; `date -s`, `ntp` and `hwclock -w` write the RTC
+# themselves rather than hoping.
+CONFIG_RTC_CLASS=y
+CONFIG_RTC_HCTOSYS=y
+CONFIG_RTC_HCTOSYS_DEVICE="rtc0"
+CONFIG_RTC_SYSTOHC=y
+CONFIG_RTC_INTF_DEV=y
+CONFIG_RTC_DRV_CMOS=y
+
+# ── Amazon EC2 ──
+# Nitro instances (everything from m5/c5 on) present their network card
+# as ENA and their disk as NVMe. Without the ENA driver the instance
+# boots, finds no network device at all, and there is no way in to see
+# why - the console shows a system that came up perfectly and cannot be
+# reached. DIMLIB is ENA's adaptive interrupt moderation and the build
+# fails without it.
+#
+# The older Xen generations (t2, m4) are still rented out and use
+# netfront/blkfront instead, so both are here.
+CONFIG_ENA_ETHERNET=y
+CONFIG_DIMLIB=y
+CONFIG_XEN=y
+CONFIG_XEN_PV=y
+CONFIG_XEN_PVHVM=y
+CONFIG_XEN_BLKDEV_FRONTEND=y
+CONFIG_XEN_NETDEV_FRONTEND=y
+CONFIG_HYPERVISOR_GUEST=y
+CONFIG_PARAVIRT=y
+
 # ── virtual machines ──
 CONFIG_VIRTIO=y
 CONFIG_VIRTIO_PCI=y

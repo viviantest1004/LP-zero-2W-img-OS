@@ -75,26 +75,26 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    /* /data first, because that is the half that survives a reboot.
-     * Falling back to /etc is not silent: a setting that only lasts
-     * until the power goes is worth knowing about. */
+    /* /data first, because on a RAM root that is the half that survives
+     * a reboot; on a disk root there is no /data and /etc is ordinary.
+     * Written by rename rather than in place - see lp_write_file_atomic:
+     * an in-place write that loses power leaves an empty file, and an
+     * empty voice file reads back as the default, silently undoing what
+     * somebody just chose. */
+    char text[8];
+    int  len = snprintf(text, sizeof text, "%s\n", want);
+
     const char *path = LIVE;
-    long fd = lp_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
+    if (!lp_write_file_atomic(path, text, (size_t)len)) {
         path = IMAGE;
-        fd = lp_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd < 0) {
-            lp_diag("voice", "cannot write", NULL, "cannot write", LIVE, (int)-fd);
+        if (!lp_write_file_atomic(path, text, (size_t)len)) {
+            lp_diag("voice", "cannot write", NULL, "cannot write", LIVE, 13);
             return 1;
         }
         dprintf(STDERR_FILENO,
                 "voice: /data is not writable, so this went to %s and\n"
                 "voice:   will be lost at the next reboot.\n", IMAGE);
     }
-    lp_write((int)fd, want, strlen(want));
-    lp_write((int)fd, "\n", 1);
-    lp_close((int)fd);
-    lp_sync();
 
     /* Read it back through the same door every other command uses, so
      * what is printed now is what they will actually do. */

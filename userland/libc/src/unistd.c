@@ -248,6 +248,82 @@ long lp_mknod(const char *path, mode_t mode, u64 dev)
     return sys_call4(SYS_mknodat, AT_FDCWD, (long)path, mode, (long)dev);
 }
 
+/* Force one file's contents to the disk. sync() does the whole system
+ * and returns before the disk has necessarily finished; this waits for
+ * one file, which is what a settings write actually needs. */
+long lp_fsync(int fd)
+{
+    return sys_call1(SYS_fsync, fd);
+}
+
+/* ── Writing a setting so that a power cut cannot lose it ─────────────
+ *
+ * open(O_TRUNC), write, close looks like it saves a file. What it
+ * actually does is empty the file first and fill it in afterwards, and
+ * between those two the file is zero bytes long. Pull the power there -
+ * which on a board with no battery is not a rare event, it is Tuesday -
+ * and the setting is not "the old value" or "the new value", it is
+ * gone. The timezone comes back as UTC and every timestamp on the
+ * machine is wrong by hours until somebody notices.
+ *
+ * So: write a new file beside it, make sure that reached the disk, then
+ * rename over the old one. rename is atomic - a reader sees the old
+ * contents or the new ones and never anything in between - and the
+ * final fsync on the directory is what makes the rename itself survive
+ * the power going, rather than just the bytes it points at.
+ */
+bool lp_write_file_atomic(const char *path, const void *data, size_t n)
+{
+    char tmp[1024];
+    int  len = snprintf(tmp, sizeof tmp, "%s.new", path);
+    if (len <= 0 || (size_t)len >= sizeof tmp)
+        return false;
+
+    long fd = lp_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return false;
+
+    const u8 *p = data;
+    size_t left = n;
+    while (left) {
+        long w = lp_write((int)fd, p, left);
+        if (w <= 0) { lp_close((int)fd); lp_unlink(tmp); return false; }
+        p += w;
+        left -= (size_t)w;
+    }
+    if (lp_fsync((int)fd) < 0) { lp_close((int)fd); lp_unlink(tmp); return false; }
+    lp_close((int)fd);
+
+    if (lp_rename(tmp, path) < 0) { lp_unlink(tmp); return false; }
+
+    /* The directory entry now points at the new file. Without this the
+     * rename can still be sitting in the page cache when the power goes. */
+    char dir[1024];
+    strlcpy(dir, path, sizeof dir);
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = '\0';
+        long dfd = lp_open(dir[0] ? dir : "/", O_RDONLY, 0);
+        if (dfd >= 0) { lp_fsync((int)dfd); lp_close((int)dfd); }
+    }
+    return true;
+}
+
+/* Where a setting belongs on this machine.
+ *
+ * On a RAM root only /data survives a reboot, so that is where it goes.
+ * On a disk root /data does not exist and /etc is an ordinary writable
+ * directory, so writing to /data would silently save nothing. Try the
+ * writable one and say which it was. */
+const char *lp_setting_path(const char *name, char *buf, size_t cap)
+{
+    snprintf(buf, cap, "/data/%s", name);
+    if (lp_is_dir("/data") && lp_access("/data", W_OK) == 0)
+        return buf;
+    snprintf(buf, cap, "/etc/%s", name);
+    return buf;
+}
+
 long lp_rename(const char *from, const char *to)
 {
     return sys_call4(SYS_renameat, AT_FDCWD, (long)from, AT_FDCWD, (long)to);
@@ -528,6 +604,73 @@ s64 lp_time(void)
     if (sys_call2(SYS_clock_gettime, CLOCK_REALTIME, (long)ts) < 0)
         return 0;
     return ts[0];
+}
+
+/* ── The battery-backed clock ─────────────────────────────────────────
+ *
+ * A PC and an EC2 instance have one; a Pi Zero 2 W does not. The
+ * difference matters more than it sounds: a machine with an RTC comes
+ * back from a week powered off knowing a week has passed, and one
+ * without it comes back believing no time went by at all. Certificates,
+ * log order and cron all depend on which of those is true.
+ *
+ * The kernel reads it once at boot (RTC_HCTOSYS). These two are for
+ * writing it back, because a clock set by hand or by ntp is only worth
+ * something if it is still there after the power goes.
+ *
+ * struct rtc_time is nine ints - the same shape as struct tm - and the
+ * kernel keeps it in UTC.
+ */
+#define RTC_RD_TIME   0x80247009UL
+#define RTC_SET_TIME  0x4024700aUL
+
+static const char *RTC_PATHS[] = { "/dev/rtc0", "/dev/rtc", "/dev/misc/rtc", NULL };
+
+static long rtc_open(int flags)
+{
+    for (int i = 0; RTC_PATHS[i]; i++) {
+        long fd = lp_open(RTC_PATHS[i], flags, 0);
+        if (fd >= 0)
+            return fd;
+    }
+    return -2;                       /* ENOENT: this board has no RTC */
+}
+
+bool lp_rtc_read(s64 *out)
+{
+    long fd = rtc_open(O_RDONLY);
+    if (fd < 0)
+        return false;
+
+    int t[9];
+    memset(t, 0, sizeof t);
+    long r = lp_ioctl((int)fd, RTC_RD_TIME, t);
+    lp_close((int)fd);
+    if (r < 0)
+        return false;
+
+    lp_tm_t tm = { .year = t[5] + 1900, .mon = t[4] + 1, .day = t[3],
+                   .hour = t[2], .min = t[1], .sec = t[0], .wday = t[6] };
+    *out = lp_timegm(&tm);
+    return true;
+}
+
+bool lp_rtc_write(s64 unix_seconds)
+{
+    long fd = rtc_open(O_WRONLY);
+    if (fd < 0)
+        fd = rtc_open(O_RDONLY);     /* RTC_SET_TIME goes through either */
+    if (fd < 0)
+        return false;
+
+    lp_tm_t tm;
+    lp_gmtime(unix_seconds, &tm);
+
+    int t[9] = { tm.sec, tm.min, tm.hour, tm.day,
+                 tm.mon - 1, tm.year - 1900, tm.wday, 0, 0 };
+    long r = lp_ioctl((int)fd, RTC_SET_TIME, t);
+    lp_close((int)fd);
+    return r >= 0;
 }
 
 long lp_settime(s64 unix_seconds)

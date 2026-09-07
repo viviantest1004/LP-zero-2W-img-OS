@@ -183,6 +183,15 @@ bool  lp_isatty(int fd);
 long  lp_term_set_utf8(int fd);
 bool  lp_exists(const char *path);
 bool  lp_is_dir(const char *path);
+long  lp_fsync(int fd);
+/* Save a whole file so a power cut leaves the old contents or the new
+ * ones and never half of either: write beside it, fsync, rename over.
+ * Read the comment in libc/src/unistd.c before replacing this with an
+ * open(O_TRUNC) - the failure it avoids is a setting that vanishes. */
+bool  lp_write_file_atomic(const char *path, const void *data, size_t n);
+/* "/data/<name>" on a RAM root, "/etc/<name>" on a disk root - whichever
+ * of the two actually survives a reboot on this machine. */
+const char *lp_setting_path(const char *name, char *buf, size_t cap);
 long  lp_ftruncate(int fd, s64 length);
 long  lp_link(const char *from, const char *to);
 #define LP_S_IFIFO_MODE 0010000
@@ -284,6 +293,12 @@ long  lp_sleep_ms(long ms);
 s64   lp_time(void);
 /* Set the system clock. Root only. */
 long  lp_settime(s64 unix_seconds);
+
+/* The battery-backed clock, when the board has one. A PC and an EC2
+ * instance do; a Pi Zero 2 W does not, and lp_rtc_read returns false
+ * there rather than pretending. The kernel keeps it in UTC. */
+bool  lp_rtc_read(s64 *out);
+bool  lp_rtc_write(s64 unix_seconds);
 
 /* Milliseconds since the machine started. Unlike lp_time this never
  * jumps: ntp setting the clock does not move it, so it is the one to

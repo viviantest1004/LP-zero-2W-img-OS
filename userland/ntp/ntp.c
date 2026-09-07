@@ -164,11 +164,20 @@ static s64 query_ntp_quiet(const char *server)
 }
 
 /* ── Save and restore ────────────────────────────────────────────
- * There is no RTC, so we stand in for one. Imperfect, but far better
- * than starting at 1970. */
+ *
+ * A PC and an EC2 instance have a battery-backed clock; the kernel
+ * reads it at boot and it counts on while the power is off. So the
+ * first thing a fetched time does is go back into it.
+ *
+ * A Pi Zero 2 W has no such clock, and this file stands in for one.
+ * It does not advance while the machine is off, so a board switched on
+ * a week later is a week behind - but a week behind is a working HTTPS
+ * handshake and 1970 is not. */
 
 static void save_clock(s64 t)
 {
+    lp_rtc_write(t);
+
     char buf[32];
     int  len = snprintf(buf, sizeof(buf), "%lld\n", (long long)t);
     long fd = lp_open(CLOCK_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -277,6 +286,14 @@ int main(int argc, char **argv)
     /* -r: restore the saved time without a network. Used early in boot. */
     if (argc > 1 && strcmp(argv[1], "-r") == 0) {
         s64 saved = load_clock();
+        /* The hardware clock, if this machine has one, is better than
+         * the saved timestamp: it kept counting while the power was off.
+         * The kernel has usually already applied it, in which case the
+         * check below finds the clock ahead and leaves it alone. */
+        s64 rtc = 0;
+        if (lp_rtc_read(&rtc) && rtc > saved)
+            saved = rtc;
+
         if (saved < SANITY_MIN) {
             dprintf(STDERR_FILENO, "ntp: no saved time\n");
             return 1;

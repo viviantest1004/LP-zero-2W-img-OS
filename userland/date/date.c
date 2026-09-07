@@ -9,7 +9,10 @@
  *   date -z Asia/Seoul              pick a zone by name
  *   date -z +9                      or by raw offset
  *
- * The zone is stored in /data/timezone so it survives a reboot.
+ * The zone is stored in /data/timezone - or /etc/timezone on a machine
+ * whose root is a real disk - so it survives a reboot. It is written by
+ * rename, not in place: a power cut in the middle of an in-place write
+ * leaves an empty file, and an empty timezone reads back as UTC.
  *
  * On the clock itself see ntp(1). This board has no battery-backed
  * clock, so time stops when the power goes.
@@ -20,8 +23,12 @@
 #include "stdlib.h"
 #include "unistd.h"
 
-#define TZ_FILE     "/data/timezone"
-#define CLOCK_FILE  "/data/.clock"
+/* The zone and the last-known time both have to outlive a reboot, and
+ * where that is depends on the machine: on a RAM root only /data does,
+ * on a disk root there is no /data and /etc is ordinary. lp_setting_path
+ * picks whichever one this machine actually keeps. */
+#define TZ_NAME     "timezone"
+#define CLOCK_NAME  ".clock"
 
 /* Anything before 2020 means the clock was never set. */
 #define SANE_MIN    1577836800LL
@@ -166,16 +173,16 @@ static bool save_zone(int minutes, const char *label,
                         minutes, label, rule ? rule : "-",
                         summer ? summer : label);
 
-    long fd = lp_open(TZ_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
+    char path[256];
+    lp_setting_path(TZ_NAME, path, sizeof path);
+
+    if (!lp_write_file_atomic(path, buf, (size_t)len)) {
         dprintf(STDERR_FILENO,
-                "date: cannot write %s (%ld)\n"
-                "      is /data mounted?\n", TZ_FILE, -fd);
+                "date: cannot write %s\n"
+                "      nothing writable survives a reboot on this machine -\n"
+                "      is /data mounted?\n", path);
         return false;
     }
-    lp_write((int)fd, buf, (size_t)len);
-    lp_close((int)fd);
-    lp_sync();
     return true;
 }
 
@@ -254,20 +261,32 @@ static void print_time(s64 t, int minutes, const char *label)
         printf("clock is not set - run 'ntp', or 'date -s \"2026-09-01 12:00:00\"'\n");
 }
 
-/* Remember the time so the next boot can pick up where this one left off.
- * ntp reads the same file. */
+/* Remember the time so the next boot can pick up where this one left
+ * off. Two places, because the two machines this runs on are different:
+ *
+ *   the hardware clock  A PC and an EC2 instance have one with a
+ *                       battery, and it keeps counting while the power
+ *                       is off. That is the only way a machine switched
+ *                       on a week later knows a week has passed.
+ *   /data/.clock        A Pi Zero 2 W has no such clock. The saved
+ *                       timestamp does not advance while the power is
+ *                       off, but it beats starting at 1970 - which
+ *                       fails every HTTPS handshake outright.
+ *
+ * Whichever exists gets written. ntp reads the same file. */
 static void save_clock(s64 t)
 {
+    bool rtc = lp_rtc_write(t);
+
     char buf[32];
     int  len = snprintf(buf, sizeof(buf), "%lld\n", (long long)t);
-    long fd = lp_open(CLOCK_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        printf("(/data is not mounted - this will not survive a reboot)\n");
-        return;
-    }
-    lp_write((int)fd, buf, (size_t)len);
-    lp_close((int)fd);
-    lp_sync();
+
+    char path[256];
+    lp_setting_path(CLOCK_NAME, path, sizeof path);
+
+    if (!lp_write_file_atomic(path, buf, (size_t)len) && !rtc)
+        printf("(no hardware clock and nothing writable that survives a "
+               "reboot - this time will be gone at the next boot)\n");
 }
 
 static void usage(void)
