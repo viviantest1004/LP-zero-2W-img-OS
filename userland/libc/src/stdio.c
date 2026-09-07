@@ -300,6 +300,7 @@ int putchar(int c)
 long readline(int fd, char *buf, size_t size)
 {
     size_t n = 0;
+    bool   warned = false;
 
     for (;;) {
         char c;
@@ -323,9 +324,24 @@ long readline(int fd, char *buf, size_t size)
             continue;
         }
 
-        if (n < size - 1)
+        if (n < size - 1) {
             buf[n++] = c;
-        /* Drop the overflow. The caller sees truncation in the length. */
+        } else {
+            /* 넘치는 것은 버린다. 예전에는 "부르는 쪽이 길이로 안다"
+             * 고 적어 두었는데, 길이가 딱 size-1 인 것은 정확히 맞는
+             * 줄과 잘린 줄이 구별되지 않는다. 셸에서는 그 차이가
+             * 크다 - 긴 URL 이나 긴 JSON 한 줄이 조용히 반토막 나서
+             * 엉뚱한 명령이 되고, 아무 데도 그 말이 없다.
+             *
+             * 그래서 여기서 한 번 말한다. 한 줄에 한 번만 말하고,
+             * 나머지는 계속 읽어 버려서 줄 경계는 지킨다. */
+            if (!warned) {
+                warned = true;
+                dprintf(STDERR_FILENO,
+                        "readline: a line longer than %lu bytes was cut\n",
+                        (unsigned long)(size - 1));
+            }
+        }
     }
 
     buf[n] = '\0';

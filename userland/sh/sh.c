@@ -285,7 +285,12 @@ static const char *matching_paren(const char *s)
     bool in_single = false, in_double = false;
 
     for (; *s; s++) {
+        /* 백슬래시는 다음 글자를 건너뛰게 한다. 이것이 없을 때
+         * `$(echo "a\"b")` 에서 \" 를 닫는 따옴표로 읽고, 그 뒤의
+         * 괄호를 짝으로 잡아 "sh: $( without )" 를 냈다. 홑따옴표
+         * 안에서는 백슬래시도 그냥 글자다. */
         if (in_single) { if (*s == '\'') in_single = false; continue; }
+        if (*s == '\\' && s[1]) { s++; continue; }
         if (in_double) { if (*s == '"')  in_double = false; continue; }
         if (*s == '\'') { in_single = true;  continue; }
         if (*s == '"')  { in_double = true;  continue; }
@@ -468,9 +473,160 @@ static void strip_suffix(char *val, const char *pat, bool longest)
         val[best] = '\0';
 }
 
+/* ── $(( )) 안의 계산 ────────────────────────────────────────────
+ *
+ * 없을 때는 `i=$((i+1))` 이 "sh: (i+1): command not found" 로 끝났다.
+ * 셈이 되는 셸을 기대하고 쓴 반복문이 전부 그 자리에서 멈춘다.
+ *
+ * 재귀 내려가기로 다섯 층: || && 비교, 더하기빼기, 곱하기나누기나머지,
+ * 단항. 괄호도 받는다.
+ * 정수만 다루고, 0 으로 나누면 0 을 돌려주고 말한다 - 셸을 죽이는
+ * 것보다 낫다. */
+static const char *ax_p;
+
+static long ax_or(void);
+
+static void ax_ws(void) { while (*ax_p == ' ' || *ax_p == '\t') ax_p++; }
+
+static long ax_primary(void)
+{
+    ax_ws();
+    if (*ax_p == '(') {
+        ax_p++;
+        long v = ax_or();
+        ax_ws();
+        if (*ax_p == ')') ax_p++;
+        return v;
+    }
+    if (*ax_p == '!') { ax_p++; return !ax_primary(); }
+    if (*ax_p == '-') { ax_p++; return -ax_primary(); }
+    if (*ax_p == '+') { ax_p++; return  ax_primary(); }
+
+    if (*ax_p >= '0' && *ax_p <= '9') {
+        long v = 0;
+        while (*ax_p >= '0' && *ax_p <= '9') v = v * 10 + (*ax_p++ - '0');
+        return v;
+    }
+
+    /* 이름은 그 값으로. $ 를 붙이지 않고 쓰는 것이 이 안의 규칙이다:
+     * $((i+1)) 과 $(($i+1)) 이 둘 다 돌아야 한다. */
+    if (is_name_char(*ax_p)) {
+        char name[64];
+        size_t k = 0;
+        while (is_name_char(*ax_p) && k < sizeof name - 1) name[k++] = *ax_p++;
+        name[k] = '\0';
+        const char *v = getenv(name);
+        return v ? (long)atoi(v) : 0;
+    }
+    return 0;
+}
+
+static long ax_mul(void)
+{
+    long v = ax_primary();
+    for (;;) {
+        ax_ws();
+        char op = *ax_p;
+        if (op != '*' && op != '/' && op != '%') return v;
+        ax_p++;
+        long r = ax_primary();
+        if ((op == '/' || op == '%') && r == 0) {
+            dprintf(STDERR_FILENO, "sh: division by zero in $(( ))\n");
+            return 0;
+        }
+        v = (op == '*') ? v * r : (op == '/') ? v / r : v % r;
+    }
+}
+
+static long ax_add(void)
+{
+    long v = ax_mul();
+    for (;;) {
+        ax_ws();
+        if (*ax_p == '+' && ax_p[1] != '+') { ax_p++; v += ax_mul(); }
+        else if (*ax_p == '-' && ax_p[1] != '-') { ax_p++; v -= ax_mul(); }
+        else return v;
+    }
+}
+
+static long ax_cmp(void)
+{
+    long v = ax_add();
+    for (;;) {
+        ax_ws();
+        if      (ax_p[0]=='<' && ax_p[1]=='=') { ax_p+=2; v = v <= ax_add(); }
+        else if (ax_p[0]=='>' && ax_p[1]=='=') { ax_p+=2; v = v >= ax_add(); }
+        else if (ax_p[0]=='=' && ax_p[1]=='=') { ax_p+=2; v = v == ax_add(); }
+        else if (ax_p[0]=='!' && ax_p[1]=='=') { ax_p+=2; v = v != ax_add(); }
+        else if (ax_p[0]=='<')                 { ax_p++;  v = v <  ax_add(); }
+        else if (ax_p[0]=='>')                 { ax_p++;  v = v >  ax_add(); }
+        else return v;
+    }
+}
+
+static long ax_and(void)
+{
+    long v = ax_cmp();
+    for (;;) {
+        ax_ws();
+        if (ax_p[0]=='&' && ax_p[1]=='&') { ax_p+=2; long r = ax_cmp(); v = v && r; }
+        else return v;
+    }
+}
+
+static long ax_or(void)
+{
+    long v = ax_and();
+    for (;;) {
+        ax_ws();
+        if (ax_p[0]=='|' && ax_p[1]=='|') { ax_p+=2; long r = ax_and(); v = v || r; }
+        else return v;
+    }
+}
+
+static long arith_eval(const char *expr)
+{
+    ax_p = expr;
+    return ax_or();
+}
+
 static size_t expand_dollar(char **sp, char *buf, size_t n, size_t size)
 {
     char *s = *sp + 1;              /* step over the $ */
+
+    /* $(( ... )) 는 $( ... ) 보다 먼저 봐야 한다 - 안 그러면 명령
+     * 치환이 "(2+3" 을 명령으로 잡는다. */
+    if (s[0] == '(' && s[1] == '(') {
+        const char *q = s + 2;
+        int depth = 1;
+        while (*q) {
+            if (q[0] == '(') depth++;
+            else if (q[0] == ')') {
+                if (--depth == 0) break;
+            }
+            q++;
+        }
+        if (*q == ')' && q[1] == ')') {
+            char expr[MAX_LINE], done[MAX_LINE];
+            size_t len = (size_t)(q - (s + 2));
+            if (len >= sizeof expr) len = sizeof expr - 1;
+            memcpy(expr, s + 2, len);
+            expr[len] = '\0';
+
+            /* 안쪽의 $VAR 을 먼저 편다. */
+            expand_str(expr, done, sizeof done);
+
+            char num[32];
+            snprintf(num, sizeof num, "%ld", arith_eval(done));
+            for (char *r = num; *r && n < size; r++) buf[n++] = *r;
+
+            *sp = (char *)q + 2;
+            return n;
+        }
+        dprintf(STDERR_FILENO, "sh: $(( without ))\n");
+        *sp = s + 2;
+        return n;
+    }
 
     if (*s == '(') {                /* $(command) */
         const char *close = matching_paren(s + 1);
@@ -792,6 +948,19 @@ static tok_type_t next_token(char **p, char **word_out)
 
     while (*s && !is_space(*s) &&
            *s != '|' && *s != '<' && *s != '>' && *s != ';' && *s != '&') {
+        /* 백슬래시는 바로 다음 글자에서 뜻을 빼앗는다.
+         *
+         * 이것이 없을 때 `echo a\ b` 는 `a\ b` 를 찍었고 - 백슬래시가
+         * 글자로 남고 빈칸은 여전히 낱말을 갈랐다 - 더 나쁘게는
+         * `"a\"b"` 에서 \" 를 닫는 따옴표로 읽어서 그 줄의 인용이
+         * 통째로 어긋났다. 파일 이름에 빈칸이 있는 스크립트, awk 나
+         * sed 를 부르는 줄이 전부 여기에 걸린다. */
+        if (*s == '\\' && s[1]) {
+            s++;
+            if (n < sizeof(buf)) buf[n++] = *s;
+            s++;
+            continue;
+        }
         if (*s == '\'') {                 /* single quotes: nothing expands */
             tok_quoted = true;
             if (tok_quote_at == (size_t)-1) tok_quote_at = n;
@@ -806,6 +975,16 @@ static tok_type_t next_token(char **p, char **word_out)
             if (tok_quote_at == (size_t)-1) tok_quote_at = n;
             s++;
             while (*s && *s != '"') {
+                /* 겹따옴표 안에서 백슬래시가 뜻을 빼앗는 것은 넷뿐이다:
+                 * $ ` " 와 백슬래시 자신. 나머지 앞에서는 백슬래시가
+                 * 그냥 백슬래시다 - "C:\path" 가 그대로 나와야 한다. */
+                if (*s == '\\' && (s[1] == '$' || s[1] == '`' ||
+                                   s[1] == '"' || s[1] == '\\')) {
+                    s++;
+                    if (n < sizeof(buf)) buf[n++] = *s;
+                    s++;
+                    continue;
+                }
                 if (*s == '$') {
                     n = expand_dollar(&s, buf, n, sizeof(buf));
                     tok_from_cmd = false;   /* "$(...)" is one word */
@@ -1516,22 +1695,40 @@ static bool run_builtin(cmd_t *c)
             return true;
         }
 
+        /* IFS 가 자르는 글자를 정한다.
+         *
+         * 없을 때는 빈칸과 탭으로만 잘랐다. 그래서
+         * `IFS=: read user pass rest < /etc/passwd` 가 줄 전체를 첫
+         * 변수에 넣었다 - 서버에서 설정 파일을 읽는 반복문이 거의 다
+         * 이 꼴이라, 안 되면 스크립트가 조용히 틀린 값을 쓴다.
+         *
+         * IFS 가 빈칸/탭뿐이면 POSIX 의 "여러 개를 하나로" 규칙을 쓰고
+         * (`a   b` 는 두 낱말), 다른 글자가 있으면 그 글자 하나가
+         * 한 번 자른다 (`a::b` 는 세 낱말, 가운데는 빈 것). 두 규칙이
+         * 다른 이유는 `:` 로 자를 때 빈 칸이 뜻을 갖기 때문이다. */
+        const char *ifs = getenv("IFS");
+        if (!ifs) ifs = " \t\n";
+        bool ws_only = true;
+        for (const char *q = ifs; *q; q++)
+            if (*q != ' ' && *q != '\t' && *q != '\n') { ws_only = false; break; }
+
         char *p = buf;
         for (int i = first; i < c->argc; i++) {
-            while (*p == ' ' || *p == '\t') p++;
+            if (ws_only)
+                while (*p && strchr(ifs, *p)) p++;
 
             if (i == c->argc - 1) {
-                /* The last variable takes everything left, trailing
-                 * spaces trimmed - that is what makes `read cmd rest`
-                 * useful for parsing a line. */
+                /* 마지막 변수는 남은 것을 전부 가져간다. 뒤쪽의
+                 * 구분자만 떼는데, 그것이 `read cmd rest` 를 줄
+                 * 나누기에 쓸 수 있게 하는 점이다. */
                 char *end = p + strlen(p);
-                while (end > p && (end[-1] == ' ' || end[-1] == '\t')) *--end = 0;
+                while (end > p && strchr(ifs, end[-1])) *--end = 0;
                 setenv(c->argv[i], p, 1);
                 break;
             }
 
             char *word = p;
-            while (*p && *p != ' ' && *p != '\t') p++;
+            while (*p && !strchr(ifs, *p)) p++;
             if (*p) *p++ = '\0';
             setenv(c->argv[i], word, 1);
         }
@@ -3130,8 +3327,11 @@ static const char *unquoted_semicolon(const char *p)
 
         if (*p == '\'' || *p == '"') { quote = *p; continue; }
         if (*p == '`')                { backtick = true; continue; }
+        /* $( ) 든 그냥 ( ) 든 그 안의 세미콜론은 우리 것이 아니다.
+         * 예전에는 $( ) 만 셌고, 그래서 `( cd /tmp ; pwd )` 가 두
+         * 조각으로 잘려 괄호가 짝을 잃었다. */
         if (*p == '$' && p[1] == '(') { depth++; p++; continue; }
-        if (*p == '(' && depth)       { depth++; continue; }
+        if (*p == '(')                { depth++; continue; }
         if (*p == ')' && depth)       { depth--; continue; }
 
         if (*p == ';' && depth == 0)
@@ -3888,7 +4088,7 @@ static void call_func(func_t *f, char **argv, int argc)
     /* A function that calls itself with no way out would otherwise run
      * until the machine is out of memory, and this shell is pid 1's
      * child - taking it down takes the console with it. */
-    if (depth >= 16) {
+    if (depth >= 64) {
         dprintf(STDERR_FILENO,
                 "sh: %s() is %d calls deep. Stopping - this is what a\n"
                 "sh:   function that calls itself forever looks like.\n",
@@ -4147,6 +4347,94 @@ static int exec_block(block_line_t *lines, int n)
                     }
                 }
             }
+        }
+
+        /* `( ... )` - 서브셸.
+         *
+         * 자식에서 돈다. 그것이 { } 와 다른 점 전부다: 안에서 cd 를
+         * 하거나 변수를 놓아도 밖은 그대로고, 안에서 exit 를 해도
+         * 셸이 끝나지 않는다. `(cd build && make)` 가 이것을 기대하고
+         * 쓰는 가장 흔한 꼴이다.
+         *
+         * 두 가지로 나눠 다룬다. 괄호 뒤에 아무것도 없으면 여기서
+         * fork 한다 - 그러면 부모가 정의한 함수와 변수를 그대로 보고,
+         * 그것이 POSIX 가 말하는 서브셸이다.
+         *
+         * 괄호 뒤에 무언가 있으면 - `(...) | cmd`, `(...) > f`,
+         * `(...) && rest` - `sh -c '...'` 로 바꿔 쓴다. 처음에는 뒤를
+         * 그냥 버렸는데, 그러면 `(cd x && make) || exit 1` 이 조용히
+         * 절반만 도는 것이 된다. 바꿔 쓰면 파이프도 리다이렉션도
+         * && 도 이미 있는 파서가 다 처리한다. 대신 자식이 새 셸이라
+         * 부모의 함수는 보지 못한다 - 뒤가 붙은 경우에만 그렇다. */
+        if (w[0] == '(') {
+            const char *open  = strchr(lines[i], '(');
+            const char *close = NULL;
+            int d = 0;
+            for (const char *q = open; *q; q++) {
+                if (*q == '(') d++;
+                else if (*q == ')') { if (--d == 0) { close = q; break; } }
+            }
+            if (!close) {
+                dprintf(STDERR_FILENO, "sh: ( without )\n");
+                last_status = 2;
+                i++;
+                continue;
+            }
+
+            char inner[MAX_LINE];
+            size_t len = (size_t)(close - open - 1);
+            if (len >= sizeof inner) len = sizeof inner - 1;
+            memcpy(inner, open + 1, len);
+            inner[len] = '\0';
+
+            const char *tail = close + 1;
+            while (*tail == ' ' || *tail == '\t') tail++;
+
+            if (!*tail) {
+                pid_t kid = lp_fork();
+                if (kid == 0) {
+                    lp_signal_default(SIGINT);
+                    lp_signal_default(SIGQUIT);
+                    block_line_t sub[MAX_BLOCK];
+                    int sn = split_statements(inner, sub, MAX_BLOCK);
+                    exec_block(sub, sn);
+                    lp_exit(last_status);
+                }
+                if (kid > 0) {
+                    int st = 0;
+                    lp_waitpid(kid, &st, 0);
+                    last_status = LP_WIFEXITED(st) ? LP_WEXITSTATUS(st)
+                                                   : 128 + LP_WTERMSIG(st);
+                } else {
+                    dprintf(STDERR_FILENO, "sh: cannot fork for ( )\n");
+                    last_status = 1;
+                }
+                i++;
+                continue;
+            }
+
+            /* 뒤가 있다: sh -c '<안쪽>' <뒤> 로 다시 쓴다.
+             * 홑따옴표는 '\'' 로 감싼다 - 따옴표를 닫고, 백슬래시로
+             * 하나를 내보내고, 다시 연다. */
+            char rebuilt[MAX_LINE];
+            size_t r = 0;
+            const char *pre = "sh -c '";
+            for (const char *q = pre; *q && r + 1 < sizeof rebuilt; q++)
+                rebuilt[r++] = *q;
+            for (const char *q = inner; *q && r + 5 < sizeof rebuilt; q++) {
+                if (*q == '\'') {
+                    rebuilt[r++] = '\''; rebuilt[r++] = '\\';
+                    rebuilt[r++] = '\''; rebuilt[r++] = '\'';
+                } else {
+                    rebuilt[r++] = *q;
+                }
+            }
+            if (r + 2 < sizeof rebuilt) { rebuilt[r++] = '\''; rebuilt[r++] = ' '; }
+            for (const char *q = tail; *q && r + 1 < sizeof rebuilt; q++)
+                rebuilt[r++] = *q;
+            rebuilt[r] = '\0';
+            strlcpy(lines[i], rebuilt, MAX_LINE);
+            first_word(lines[i], w, sizeof(w));
         }
 
         char fname[64];
