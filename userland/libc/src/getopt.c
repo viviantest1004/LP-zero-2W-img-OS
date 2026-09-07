@@ -172,6 +172,7 @@ int lp_getopt(lp_getopt_t *st)
     st->badchar = 0;
     st->badlong = NULL;
     st->ambig   = 0;
+    st->missing = 0;
 
     /* Still inside a bundle like -abc? */
     if (st->cur && *st->cur) {
@@ -193,6 +194,15 @@ int lp_getopt(lp_getopt_t *st)
         }
         st->cur = NULL;
         st->pos++;
+        /* `head -n` with nothing after it. Handing the caller a NULL
+         * here is how every one of these commands segfaulted: they pass
+         * st->arg straight to strtol. It is the option grammar's job to
+         * catch it, once, rather than every command's to remember. */
+        if (ha == 1 && !st->arg) {
+            st->badchar = c;
+            st->missing = 1;
+            return '?';
+        }
         return c;
     }
 
@@ -221,6 +231,11 @@ int lp_getopt(lp_getopt_t *st)
         } else if (l->has_arg == 1 && st->pos < st->first_operand) {
             st->arg = st->argv[st->pos++];
         }
+        if (l->has_arg == 1 && !st->arg) {
+            st->badlong = a;
+            st->missing = 1;
+            return '?';
+        }
         return l->val;
     }
 
@@ -230,6 +245,22 @@ int lp_getopt(lp_getopt_t *st)
 
 void lp_getopt_err(const char *prog, const lp_getopt_t *st)
 {
+    if (st->missing && st->badlong) {
+        /* GNU prints the name as it was typed, without any "=value". */
+        char name[128];
+        strlcpy(name, st->badlong, sizeof name);
+        char *eq = strchr(name, '=');
+        if (eq) *eq = '\0';
+        dprintf(STDERR_FILENO, "%s: option '%s' requires an argument\n", prog, name);
+        dprintf(STDERR_FILENO, "Try '%s --help' for more information.\n", prog);
+        return;
+    }
+    if (st->missing) {
+        dprintf(STDERR_FILENO, "%s: option requires an argument -- '%c'\n",
+                prog, st->badchar);
+        dprintf(STDERR_FILENO, "Try '%s --help' for more information.\n", prog);
+        return;
+    }
     if (st->badlong && st->ambig)
         dprintf(STDERR_FILENO, "%s: option '%s' is ambiguous\n", prog, st->badlong);
     else if (st->badlong)

@@ -594,6 +594,7 @@ typedef struct {
     char         badchar;        /* the letter, on '?' */
     const char  *badlong;        /* the word, on '?' from a long option */
     int          ambig;          /* the long option was an ambiguous prefix */
+    int          missing;        /* the option needs a value and got none */
     /* internal */
     int          argc;
     char       **argv;

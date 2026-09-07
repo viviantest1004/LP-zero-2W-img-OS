@@ -528,7 +528,29 @@ int main(int argc, char **argv)
         case 'C': o.after = o.before = (int)strtol(g.arg, NULL, 10); break;
         case 'a': case 'U': case 'z': case 'Z': case 1001: case 1002: break;
         case 1003: usage(STDOUT_FILENO); return 0;
-        default: lp_getopt_err(prog, &g); return 2;
+        default:
+            /* grep puts its one-line usage between the complaint and the
+             * hint, which nothing else does. */
+            if (g.missing && g.badlong) {
+                char name[128];
+                strlcpy(name, g.badlong, sizeof name);
+                char *eq = strchr(name, '=');
+                if (eq) *eq = '\0';
+                dprintf(STDERR_FILENO, "%s: option '%s' requires an argument\n",
+                        prog, name);
+            } else if (g.missing) {
+                dprintf(STDERR_FILENO, "%s: option requires an argument -- '%c'\n",
+                        prog, g.badchar);
+            } else if (g.badlong) {
+                dprintf(STDERR_FILENO, "%s: unrecognized option '%s'\n",
+                        prog, g.badlong);
+            } else {
+                dprintf(STDERR_FILENO, "%s: invalid option -- '%c'\n",
+                        prog, g.badchar);
+            }
+            dprintf(STDERR_FILENO, "Usage: %s [OPTION]... PATTERNS [FILE]...\n", prog);
+            dprintf(STDERR_FILENO, "Try '%s --help' for more information.\n", prog);
+            return 2;
         }
     }
     grep_quiet_errors = no_messages;
@@ -542,7 +564,15 @@ int main(int argc, char **argv)
 
     int first_file = g.ind;
     if (npats == 0) {
-        if (g.ind >= argc) { usage(STDERR_FILENO); return 2; }
+        if (g.ind >= argc) {
+            /* No pattern at all: the one-line usage, not the whole help.
+             * grep prints the long help only when it was asked for. */
+            dprintf(STDERR_FILENO,
+                    "Usage: %s [OPTION]... PATTERNS [FILE]...\n", prog);
+            dprintf(STDERR_FILENO,
+                    "Try '%s --help' for more information.\n", prog);
+            return 2;
+        }
         if (!add_pattern_lines(argv[g.ind])) return 2;
         first_file = g.ind + 1;
     }
