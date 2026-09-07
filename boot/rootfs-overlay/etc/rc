@@ -424,13 +424,23 @@ then
 fi
 
 echo "[rc] restoring the clock"
-# The Pi Zero 2 W has no battery-backed clock. At power-on the kernel
-# clock starts at 1970. Left that way, file timestamps are nonsense and
-# HTTPS fails outright because every server certificate looks like it was
-# issued in the future.
-# Start from the time we saved last. Not exact, but far better than 1970.
-# The real time comes once the network is up.
+# Two kinds of machine, two answers.
+#
+# A PC or an EC2 instance has a battery-backed clock that keeps running
+# while the power is off, and the kernel now reads it before this script
+# starts (CONFIG_RTC_HCTOSYS). On those, the time is already right here
+# and the line below finds the clock ahead of anything saved and leaves
+# it alone.
+#
+# A Pi Zero 2 W has no such clock. At power-on its clock starts at 1970.
+# Left that way, file timestamps are nonsense and HTTPS fails outright,
+# because every server certificate looks like it was issued in the
+# future. So we start from the time saved at the last shutdown - not
+# exact, and it does not advance while the board is off, but it is on
+# the right side of every certificate. The real time comes once the
+# network is up.
 ntp -r || echo "[rc]   no saved time (first boot)"
+hwclock -r > /dev/null && echo "[rc]   hardware clock present - the time survives a power cut"
 
 echo "[rc] home directory on storage"
 # /root is in RAM and would vanish on reboot. Bind a directory from the

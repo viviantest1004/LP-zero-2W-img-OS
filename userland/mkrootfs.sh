@@ -129,7 +129,18 @@ ln -sf more    "${ROOT_DIR}/bin/less"
 ln -sf sha256sum "${ROOT_DIR}/bin/md5sum"
 ln -sf sha256sum "${ROOT_DIR}/bin/sha1sum"
 ln -sf sha256sum "${ROOT_DIR}/bin/sha512sum"
-log "bin/: ${PROGRAMS[*]} umount lsattr chgrp groups userdel sudo less md5sum sha1sum sha512sum"
+# base32 is base64 with a different alphabet, and nothing else.
+ln -sf base64    "${ROOT_DIR}/bin/base32"
+# `[` is test. The shell has both built in; the files have to exist too,
+# because `find -exec [ ... ]` and a crontab line look for a file.
+ln -sf test      "${ROOT_DIR}/bin/["
+# pkill is pgrep that sends a signal instead of printing a pid.
+ln -sf pgrep     "${ROOT_DIR}/bin/pkill"
+# gunzip is `gzip -d` and zcat is `gzip -dc`. One decompressor, three
+# names, because those are the three names people type.
+ln -sf gzip      "${ROOT_DIR}/bin/gunzip"
+ln -sf gzip      "${ROOT_DIR}/bin/zcat"
+log "bin/: ${PROGRAMS[*]} umount lsattr chgrp groups userdel sudo less md5sum sha1sum sha512sum base32 [ pkill gunzip zcat"
 
 # 커널은 initramfs 의 /init 을 PID 1 로 실행한다
 ln -sf bin/init "${ROOT_DIR}/init"

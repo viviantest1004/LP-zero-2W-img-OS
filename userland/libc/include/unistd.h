@@ -503,8 +503,14 @@ typedef enum {
     LP_DST_NZ       /* last Sun Sep -> 1st Sun Apr (southern) */
 } lp_dst_t;
 
-/* Minutes east of UTC right now, daylight saving included. */
+/* Minutes east of UTC at that instant, daylight saving included. Ask
+ * about the time you are formatting, not about now - in March a summer
+ * offset applied to a winter date is an hour wrong. */
 int   lp_tz_offset(s64 utc);
+/* Drop the cached zone. For a program that has just written a new one
+ * and wants to print the result through the same door everything else
+ * reads it by. */
+void  lp_tz_forget(void);
 /* The label to print next to a time ("KST", "CEST", "UTC"). */
 const char *lp_tz_label(s64 utc);
 /* Unix seconds -> broken-down time in the configured zone. */

@@ -1347,6 +1347,19 @@ static char     tz_std_lab[16] = "UTC";
 static char     tz_dst_lab[16] = "UTC";
 static lp_dst_t tz_rule     = LP_DST_NONE;
 
+/* Forget what was read, so the next call goes back to the file.
+ *
+ * The zone is cached for ten seconds, which is right for every program
+ * that only reads it. `date -z Asia/Seoul` is the exception: it writes
+ * the file and then prints the time through this same cache to show
+ * what it just did, and without this it printed the old zone - which
+ * looks exactly like the setting not having worked. */
+void lp_tz_forget(void)
+{
+    tz_loaded  = false;
+    tz_checked = -1;
+}
+
 static void tz_load(void)
 {
     s64 now = lp_monotonic_ms();
