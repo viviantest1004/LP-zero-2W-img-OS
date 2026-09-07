@@ -93,8 +93,15 @@ int main(int argc, char **argv)
         if (argv[i][0] == '-' && argv[i][1] >= '0' && argv[i][1] <= '9') continue;
         long f = lp_open(argv[i], O_RDONLY, 0);
         if (f < 0) {
-            dprintf(STDERR_FILENO, "strings: '%s': %s\n", argv[i],
-                    lp_strerror((int)-f));
+            /* strings is binutils, not coreutils, and binutils says
+             * "No such file" where coreutils says "No such file or
+             * directory". Matching the command people actually have
+             * means matching binutils here. */
+            if (lp_voice() == LP_VOICE_GNU)
+                dprintf(STDERR_FILENO, "strings: '%s': %s\n", argv[i],
+                        (int)-f == 2 ? "No such file" : lp_strerror((int)-f));
+            else
+                lp_diag("strings", NULL, NULL, "cannot open", argv[i], (int)-f);
             rc = 1;
             continue;
         }

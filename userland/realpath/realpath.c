@@ -120,8 +120,7 @@ int main(int argc, char **argv)
         char out[4096];
         if (!resolve(argv[i], out, sizeof out, missing)) {
             if (!quiet)
-                dprintf(STDERR_FILENO, "%s: %s: No such file or directory\n",
-                        prog, argv[i]);
+                lp_diag(prog, NULL, NULL, "cannot resolve", argv[i], 2);
             rc = 1;
             continue;
         }

@@ -146,8 +146,7 @@ int main(int argc, char **argv)
         }
         if (!ok) {
             if (!quiet)
-                dprintf(STDERR_FILENO, "%s: %s: No such file or directory\n",
-                        prog, argv[i]);
+                lp_diag(prog, NULL, NULL, "cannot read the link", argv[i], 2);
             rc = 1;
             continue;
         }

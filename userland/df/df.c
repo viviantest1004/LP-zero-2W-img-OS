@@ -158,7 +158,7 @@ static void row_for_path(const char *path, char mounts[][3][256], int nm)
         if (l >= bestlen) { bestlen = l; best = i; }
     }
     if (best < 0) {
-        dprintf(STDERR_FILENO, "%s: %s: No such file or directory\n", prog, path);
+        lp_diag(prog, NULL, NULL, "not on any mounted filesystem", path, 2);
         failed = 1;
         return;
     }

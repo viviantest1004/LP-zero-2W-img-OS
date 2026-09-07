@@ -20,12 +20,20 @@ typedef struct { int from, to; } range_t;
 static range_t ranges[MAX_RANGES];
 static int nranges;
 
+static bool complement = false;      /* --complement */
+static bool only_delimited = false;  /* -s */
+static const char *out_delim = NULL; /* --output-delimiter */
+static char rec_delim = '\n';        /* -z */
+
 static bool wanted(int n)
 {
+    bool hit = false;
     for (int i = 0; i < nranges; i++)
-        if (n >= ranges[i].from && (ranges[i].to == 0 || n <= ranges[i].to))
-            return true;
-    return false;
+        if (n >= ranges[i].from && (ranges[i].to == 0 || n <= ranges[i].to)) {
+            hit = true;
+            break;
+        }
+    return complement ? !hit : hit;
 }
 
 /* "1,3,5-7" or "2-" */
@@ -77,13 +85,13 @@ static void cut_fields_ws(const char *line)
         while (*p && *p != ' ' && *p != '\t') p++;
 
         if (wanted(field)) {
-            if (!first) printf(" ");
+            if (!first) printf("%s", out_delim ? out_delim : " ");
             lp_write(STDOUT_FILENO, start, (size_t)(p - start));
             first = false;
         }
         field++;
     }
-    printf("\n");
+    lp_write(STDOUT_FILENO, &rec_delim, 1);
 }
 
 static void cut_fields(const char *line, char delim)
@@ -92,12 +100,24 @@ static void cut_fields(const char *line, char delim)
     bool first = true;
     const char *p = line;
 
+    /* -s: a line with no delimiter in it has no fields to take, and
+     * printing it whole is how a header sneaks into cut's output. */
+    if (!strchr(line, delim)) {
+        if (only_delimited) return;
+        printf("%s", line);
+        lp_write(STDOUT_FILENO, &rec_delim, 1);
+        return;
+    }
+
     while (p) {
         const char *end = strchr(p, delim);
         size_t len = end ? (size_t)(end - p) : strlen(p);
 
         if (wanted(field)) {
-            if (!first) printf("%c", delim);
+            if (!first) {
+                if (out_delim) printf("%s", out_delim);
+                else           printf("%c", delim);
+            }
             lp_write(STDOUT_FILENO, p, len);
             first = false;
         }
@@ -105,7 +125,7 @@ static void cut_fields(const char *line, char delim)
         field++;
         p = end ? end + 1 : NULL;
     }
-    printf("\n");
+    lp_write(STDOUT_FILENO, &rec_delim, 1);
 }
 
 static void cut_chars(const char *line)
@@ -122,68 +142,104 @@ static void cut_chars(const char *line)
         i = next;
         col++;
     }
-    printf("\n");
+    lp_write(STDOUT_FILENO, &rec_delim, 1);
+}
+
+static void usage(int fd)
+{
+    dprintf(fd, "Usage: cut OPTION... [FILE]...\n"
+                "Print selected parts of lines from each FILE to standard output.\n\n"
+                "With no FILE, or when FILE is -, read standard input.\n\n"
+                "  -b, --bytes=LIST        select only these bytes\n"
+                "  -c, --characters=LIST   select only these characters\n"
+                "  -d, --delimiter=DELIM   use DELIM instead of TAB for the field delimiter\n"
+                "  -f, --fields=LIST       select only these fields\n"
+                "  -s, --only-delimited    do not print lines not containing delimiters\n"
+                "      --complement        complement the set of selected bytes or fields\n"
+                "      --output-delimiter=STRING  use STRING as the output delimiter\n"
+                "  -w                      fields are split on runs of whitespace, which is\n"
+                "                            what the column-padded output of ps, df and ls\n"
+                "                            actually is (this one is not GNU's)\n"
+                "  -z, --zero-terminated   line delimiter is NUL, not newline\n"
+                "      --help     display this help and exit\n\n"
+                "Use one, and only one, of -b, -c or -f.  Each LIST is made up of one\n"
+                "range, or many ranges separated by commas: N, N-M, N- or -M.\n");
 }
 
 int main(int argc, char **argv)
 {
+    static const lp_lopt_t lo[] = {
+        { "bytes", 1, 'b' }, { "characters", 1, 'c' },
+        { "delimiter", 1, 'd' }, { "fields", 1, 'f' },
+        { "only-delimited", 0, 's' }, { "complement", 0, 'C' },
+        { "output-delimiter", 1, 'O' }, { "zero-terminated", 0, 'z' },
+        { "help", 0, 'H' }, { 0, 0, 0 }
+    };
     char delim = '\t';
-    bool by_space = false;
-    bool by_char = false;
-    bool have_list = false;
-    const char *file = NULL;
+    bool by_space = false, by_char = false, have_list = false;
+    int  kinds = 0;                 /* how many of -b/-c/-f were given */
 
-    for (int i = 1; i < argc; i++) {
-        /* `-f2` and `-f 2` both. Nobody types the space - every example
-         * anybody has ever read writes `cut -d: -f1` - and refusing the
-         * attached form made this look like it did not work at all. */
-        if (strncmp(argv[i], "-f", 2) == 0 && (argv[i][2] || i + 1 < argc)) {
-            have_list = parse_list(argv[i][2] ? argv[i] + 2 : argv[++i]);
-        } else if (strncmp(argv[i], "-c", 2) == 0 &&
-                   (argv[i][2] || i + 1 < argc)) {
-            by_char = true;
-            have_list = parse_list(argv[i][2] ? argv[i] + 2 : argv[++i]);
-        } else if (strcmp(argv[i], "-w") == 0) {
-            by_space = true;
-        } else if (strncmp(argv[i], "-d", 2) == 0 &&
-                   (argv[i][2] || i + 1 < argc)) {
-            delim = argv[i][2] ? argv[i][2] : argv[++i][0];
-        } else if (strcmp(argv[i], "-h") == 0) {
-            printf("usage: cut -f <list> [-d char | -w] [file]\n");
-            printf("       cut -c <list> [file]\n");
-            printf("  list: 1,3 or 2-5 or 3- (counting from 1)\n");
-            printf("  -d  the field separator (a tab by default)\n");
-            printf("  -w  fields split on runs of whitespace, for the\n");
-            printf("      column-padded output of /proc, free, df and ls\n");
-            return 0;
-        } else if (!file) {
-            file = argv[i];
+    lp_getopt_t g;
+    lp_getopt_init(&g, argc, argv, "b:c:d:f:swzn", lo);
+    for (int c; (c = lp_getopt(&g)) != -1; ) {
+        switch (c) {
+        case 'b': case 'c':
+            by_char = true; kinds++;
+            have_list = parse_list(g.arg);
+            break;
+        case 'f':
+            kinds++;
+            have_list = parse_list(g.arg);
+            break;
+        case 'd': delim = g.arg[0]; break;
+        case 'w': by_space = true; break;
+        case 's': only_delimited = true; break;
+        case 'C': complement = true; break;
+        case 'O': out_delim = g.arg; break;
+        case 'z': rec_delim = '\0'; break;
+        case 'n': break;            /* accepted and ignored, as GNU does */
+        case 'H': usage(STDOUT_FILENO); return 0;
+        default: lp_getopt_err("cut", &g); return 1;
         }
     }
 
+    if (kinds > 1) {
+        dprintf(STDERR_FILENO, "cut: only one list may be specified\n");
+        dprintf(STDERR_FILENO, "Try 'cut --help' for more information.\n");
+        return 1;
+    }
     if (!have_list) {
-        dprintf(STDERR_FILENO, "cut: say which fields: -f 1,3  or  -c 1-10\n");
-        return 2;
+        dprintf(STDERR_FILENO,
+                "cut: you must specify a list of bytes, characters, or fields\n");
+        dprintf(STDERR_FILENO, "Try 'cut --help' for more information.\n");
+        return 1;
     }
 
-    int fd = STDIN_FILENO;
-    if (file) {
-        long f = lp_open(file, O_RDONLY, 0);
-        if (f < 0) {
-            dprintf(STDERR_FILENO, "cut: %s: cannot open\n", file);
-            return 1;
+    int rc = 0;
+    int files = argc - g.ind;
+
+    for (int i = 0; i < (files ? files : 1); i++) {
+        int fd = STDIN_FILENO;
+        if (files) {
+            const char *name = argv[g.ind + i];
+            if (strcmp(name, "-") != 0) {
+                long f = lp_open(name, O_RDONLY, 0);
+                if (f < 0) {
+                    lp_diag("cut", NULL, NULL, "cannot open", name, (int)-f);
+                    rc = 1;
+                    continue;
+                }
+                fd = (int)f;
+            }
         }
-        fd = (int)f;
-    }
 
-    char line[8192];
-    while (readline(fd, line, sizeof(line)) >= 0) {
-        if (by_char) cut_chars(line);
-        else if (by_space) cut_fields_ws(line);
-        else               cut_fields(line, delim);
+        char line[8192];
+        while (readrec(fd, line, sizeof(line), rec_delim, NULL) >= 0) {
+            if (by_char) cut_chars(line);
+            else if (by_space) cut_fields_ws(line);
+            else               cut_fields(line, delim);
+        }
+        if (fd != STDIN_FILENO) lp_close(fd);
     }
-
-    if (fd != STDIN_FILENO)
-        lp_close(fd);
-    return 0;
+    return rc;
 }
