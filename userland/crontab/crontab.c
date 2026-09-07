@@ -533,6 +533,13 @@ int main(int argc, char **argv)
             lp_unlink(tmp);
             return 1;
         }
+        if (textlen >= FILE_MAX) {
+            dprintf(STDERR_FILENO,
+                    "%s: %s is larger than %d bytes, which is more table"
+                    " than cron can hold\n", prog, tmp, FILE_MAX);
+            dprintf(STDERR_FILENO, "%s: edits left in %s\n", prog, tmp);
+            return 1;
+        }
         if (textlen == before && memcmp(was, text, (size_t)textlen) == 0) {
             lp_unlink(tmp);
             dprintf(STDERR_FILENO, "%s: no changes made to crontab\n", prog);
@@ -573,6 +580,15 @@ int main(int argc, char **argv)
 
     if (!read_path(from, NULL))
         return 1;
+    /* The whole table is installed from this buffer, so one that did not
+     * fit would be installed with its tail missing - jobs that vanish
+     * without a word. */
+    if (textlen >= FILE_MAX) {
+        dprintf(STDERR_FILENO,
+                "%s: %s is larger than %d bytes, which is more table than"
+                " cron can hold\n", prog, from, FILE_MAX);
+        return 1;
+    }
     if (check(strcmp(from, "-") == 0 ? "-" : from) != 0)
         return 1;
     if (!install(install_table()))

@@ -129,18 +129,51 @@ static bool parse_map(char *line, map_t *m)
     return true;
 }
 
-/* What pmap calls a mapping. Anything in brackets is anonymous as far
- * as this command is concerned; only the stack gets its own name. */
-static const char *mapping_name(const char *path)
+/* Where this process's stack started, from field 28 of
+ * /proc/PID/stat. Parsing begins after the LAST ')' because field 2 is
+ * the process name and a process may put ") 1 (" in its own name.
+ * 0 when the kernel will not say, which is not an error - a thread has
+ * no start_stack of its own and neither does a kernel task. */
+static u64 start_stack(pid_t pid)
 {
-    if (strcmp(path, "[stack]") == 0)
-        return "  [ stack ]";
-    if (path[0] == '\0' || path[0] == '[')
-        return "  [ anon ]";
+    char path[64], buf[1024];
+    snprintf(path, sizeof path, "/proc/%d/stat", (int)pid);
+    if (proc_read(path, buf, sizeof buf) <= 0)
+        return 0;
+    char *p = strrchr(buf, ')');
+    if (!p)
+        return 0;
+    p++;
+    /* The tokens after the name are fields 3 upwards; start_stack is
+     * field 28, so it is the 26th of them. */
+    for (int i = 0; i < 26; i++) {
+        while (*p == ' ') p++;
+        if (i == 25)
+            return (u64)strtol(p, NULL, 10);
+        while (*p && *p != ' ') p++;
+    }
+    return 0;
+}
+
+/* What pmap calls a mapping.
+ *
+ * The name in maps is not what decides "[ stack ]": the kernel labels
+ * one mapping [stack] and pmap ignores that label, asking instead
+ * whether the stack pointer this process started with lies inside the
+ * mapping. The two answers differ - init here has a [stack] mapping and
+ * a start_stack of 0, and pmap calls it anonymous - and matching pmap
+ * means asking the same question it asks. Everything else in brackets
+ * (heap, vdso, vvar, vsyscall) is anonymous memory too, and prints that
+ * way; only a file keeps its name. */
+static const char *mapping_name(const map_t *m, u64 stack)
+{
+    if (m->path[0] == '\0' || m->path[0] == '[')
+        return (stack >= m->start && stack <= m->end) ? "  [ stack ]"
+                                                      : "  [ anon ]";
     if (opt_p)
-        return path;
-    const char *slash = strrchr(path, '/');
-    return slash ? slash + 1 : path;
+        return m->path;
+    const char *slash = strrchr(m->path, '/');
+    return slash ? slash + 1 : m->path;
 }
 
 static void mode_of(const map_t *m, char *out)
@@ -201,6 +234,7 @@ static int one_proc(pid_t pid)
         return 42;
 
     header(pid);
+    u64 stack = start_stack(pid);
 
     snprintf(path, sizeof path, "/proc/%d/%s", (int)pid,
              opt_x ? "smaps" : "maps");
@@ -250,7 +284,7 @@ static int one_proc(pid_t pid)
             if (m.perms[3] == 's')                       shared += kb;
             else if (m.perms[1] == 'w')                  writeable_private += kb;
             mode_of(&m, mode);
-            name = mapping_name(m.path);
+            name = mapping_name(&m, stack);
 
             if (opt_x) {
                 rss = dirty = 0;

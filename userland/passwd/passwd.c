@@ -444,6 +444,8 @@ static bool store_line(const char *name, const char *newline)
                              "%s\n", newline);
             replaced = true;
         } else if (len > 0) {
+            if (olen + len + 1 >= (long)sizeof obuf)
+                return false;
             memcpy(obuf + olen, fbuf + i, (size_t)len);
             olen += len;
             obuf[olen++] = '\n';
@@ -455,6 +457,32 @@ static bool store_line(const char *name, const char *newline)
                          "%s\n", newline);
 
     return write_atomically(wpath);
+}
+
+/* Is the file this would write even writable? Worth asking before a
+ * password is typed twice for nothing.
+ *
+ * On this machine the answer for anybody but root is no, and it is not a
+ * misconfiguration: nothing here is setuid, and /etc/rc mounts /data
+ * nosuid on purpose, so there is no way for an ordinary user's passwd to
+ * hold the file open for writing. A user's password is changed by root
+ * doing it for them. */
+static bool shadow_writable(void)
+{
+    char path[256];
+    shadow_write_path(path, sizeof path);
+    char dir[256];
+    strlcpy(dir, path, sizeof dir);
+    char *slash = strrchr(dir, '/');
+    if (slash && slash != dir) *slash = '\0';
+    else strlcpy(dir, "/", sizeof dir);
+    return lp_access(dir, W_OK) == 0;
+}
+
+static int store_failed(void)
+{
+    dprintf(STDERR_FILENO, "passwd: password unchanged\n");
+    return 10;
 }
 
 /* ── Asking for a password ────────────────────────────────────────── */
@@ -699,6 +727,17 @@ int main(int argc, char **argv)
     flen = read_file(rpath, fbuf, FILE_MAX);
     if (flen < 0)
         flen = 0;                          /* no shadow file yet */
+    /* Everything below rewrites the whole file from this buffer, so a
+     * file that did not fit in it would be silently shortened - the
+     * accounts past the cut would simply stop existing. Refusing is the
+     * only safe answer; a partial rewrite is the failure this program
+     * exists to avoid. */
+    if (flen >= FILE_MAX) {
+        dprintf(STDERR_FILENO,
+                "%s: %s is larger than %d bytes and will not be rewritten"
+                " here\n", prog, rpath, FILE_MAX);
+        return 10;
+    }
 
     if (aflg) {
         char path[256];
@@ -757,7 +796,7 @@ int main(int argc, char **argv)
     if (dflg) {
         rebuild(target.name, "", -1, line, sizeof line);
         if (!store_line(target.name, line))
-            return 10;
+            return store_failed();
         if (!opt_quiet) printf("%s: password changed.\n", prog);
         return 0;
     }
@@ -770,7 +809,7 @@ int main(int argc, char **argv)
             snprintf(locked, sizeof locked, "!%s", oldhash);
         rebuild(target.name, locked, -1, line, sizeof line);
         if (!store_line(target.name, line))
-            return 10;
+            return store_failed();
         if (!opt_quiet) printf("%s: password changed.\n", prog);
         return 0;
     }
@@ -788,7 +827,7 @@ int main(int argc, char **argv)
         }
         rebuild(target.name, bare, -1, line, sizeof line);
         if (!store_line(target.name, line))
-            return 10;
+            return store_failed();
         if (!opt_quiet) printf("%s: password changed.\n", prog);
         return 0;
     }
@@ -796,15 +835,30 @@ int main(int argc, char **argv)
     if (eflg) {
         rebuild(target.name, oldhash, 0, line, sizeof line);
         if (!store_line(target.name, line))
-            return 10;
+            return store_failed();
         if (!opt_quiet) printf("%s: password changed.\n", prog);
         return 0;
     }
 
     /* ── setting a password ── */
+    if (!shadow_writable()) {
+        char path[256];
+        shadow_write_path(path, sizeof path);
+        dprintf(STDERR_FILENO,
+                "%s: cannot write %s.\n", prog, path);
+        if (!amroot)
+            dprintf(STDERR_FILENO,
+                    "%s:   Nothing on this machine is setuid and /data is"
+                    " mounted nosuid,\n"
+                    "%s:   so only root can change a password here.\n",
+                    prog, prog);
+        dprintf(STDERR_FILENO, "passwd: password unchanged\n");
+        return 10;
+    }
+
     if (!amroot) {
         if (!opt_quiet)
-            dprintf(STDERR_FILENO, "Changing password for %s.\n", target.name);
+            printf("Changing password for %s.\n", target.name);
         char old[PW_MAX];
         if (!ask("Current password: ", old, sizeof old))
             return fail_unchanged("Authentication token manipulation error");
@@ -851,7 +905,7 @@ int main(int argc, char **argv)
     sha512_crypt(chosen, salt, ROUNDS_DEF, hash, sizeof hash);
     rebuild(target.name, hash, days_now(), line, sizeof line);
     if (!store_line(target.name, line))
-        return 10;
+        return store_failed();
 
     if (!opt_quiet)
         printf("passwd: password updated successfully\n");
