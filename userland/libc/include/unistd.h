@@ -586,6 +586,9 @@ typedef struct {
 
 /* -3 is an operand, not three flags. seq, sort and tail need this. */
 #define LP_GETOPT_NEGNUM  1
+/* Everything after the first operand belongs to whatever this program
+ * is about to run. timeout, watch, nice and env work this way. */
+#define LP_GETOPT_STOP_AT_OPERAND 2
 
 void lp_getopt_init(lp_getopt_t *st, int argc, char **argv,
                     const char *shortopts, const lp_lopt_t *longopts);

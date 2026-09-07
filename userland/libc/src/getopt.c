@@ -105,6 +105,13 @@ void lp_getopt_init_ex(lp_getopt_t *st, int argc, char **argv,
         const char *a = argv[i];
 
         if (a[0] != '-' || a[1] == '\0') { /* operand, or "-" for stdin */
+            /* `timeout 5 ls -l` - the -l is the command's, not ours. A
+             * program that runs another one stops here and hands over
+             * everything that follows. */
+            if (flags & LP_GETOPT_STOP_AT_OPERAND) {
+                while (i < argc) ops[np++] = argv[i++];
+                break;
+            }
             ops[np++] = argv[i++];
             continue;
         }
