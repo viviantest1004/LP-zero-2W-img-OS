@@ -81,7 +81,8 @@ int main(int argc, char **argv)
     if (file) {
         long f = lp_open(file, O_RDONLY, 0);
         if (f < 0) {
-            dprintf(STDERR_FILENO, "tail: %s: cannot open\n", file);
+            lp_diag("tail", "cannot open", "for reading",
+                    "cannot open", file, (int)-f);
             return 1;
         }
         fd = (int)f;

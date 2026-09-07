@@ -403,3 +403,78 @@ void  lp_log(const char *tag, const char *msg);           /* struct utsname is 3
 #define LP_WTERMSIG(s)     ((s) & 0x7F)
 
 #endif /* _LP_UNISTD_H */
+
+/* ── Local time ───────────────────────────────────────────────────────
+ *
+ * The machine keeps its clock in UTC. Everything a person reads should
+ * be in the zone they chose, and until now only `date` knew what that
+ * zone was - so `ls -l`, the log, `top` and cron all disagreed with it.
+ * These put the answer in one place.
+ *
+ * The zone is /etc/timezone, or /data/timezone when that exists (the
+ * writable half wins, so a choice survives a reboot on a RAM root). The
+ * file holds "<minutes> <label>", e.g. "540 KST".
+ *
+ * Daylight saving is computed, not looked up. Full tzdata is tens of
+ * megabytes; the four rules below cover every zone this system offers
+ * and they have not changed in twenty years. A zone whose rule is not
+ * one of these is a fixed offset and says so.
+ */
+typedef enum {
+    LP_DST_NONE = 0,
+    LP_DST_EU,      /* last Sun Mar 01:00 UTC -> last Sun Oct 01:00 UTC */
+    LP_DST_US,      /* 2nd Sun Mar 02:00 local -> 1st Sun Nov 02:00 local */
+    LP_DST_AU,      /* 1st Sun Oct -> 1st Sun Apr (southern) */
+    LP_DST_NZ       /* last Sun Sep -> 1st Sun Apr (southern) */
+} lp_dst_t;
+
+/* Minutes east of UTC right now, daylight saving included. */
+int   lp_tz_offset(s64 utc);
+/* The label to print next to a time ("KST", "CEST", "UTC"). */
+const char *lp_tz_label(s64 utc);
+/* Unix seconds -> broken-down time in the configured zone. */
+void  lp_localtime(s64 t, lp_tm_t *out);
+/* Broken-down local time -> unix seconds. */
+s64   lp_timelocal(const lp_tm_t *tm);
+
+/* ── Which voice the commands speak in ────────────────────────────────
+ *
+ * Every command here was written from scratch, and each one invented its
+ * own wording for "that file is not there". They were clear, and they
+ * were all different from GNU:
+ *
+ *     ours   cat: nosuch: cannot open (2)
+ *     GNU    cat: nosuch: No such file or directory
+ *
+ * For somebody learning on this machine that is worse than a missing
+ * command. A missing command teaches nothing; a command that answers
+ * differently teaches something false, and they carry it to Ubuntu and
+ * find out there. So the default is GNU's wording, exactly.
+ *
+ * The other voice is kept because it says more: it names the errno, and
+ * several of these tools know things GNU's do not. `voice lp` turns it
+ * on, `voice gnu` turns it back, and nothing else changes.
+ */
+typedef enum { LP_VOICE_GNU = 0, LP_VOICE_LP = 1 } lp_voice_t;
+
+/* Read once from /data/voice, then /etc/voice. Default GNU. */
+lp_voice_t lp_voice(void);
+
+/* "No such file or directory" for 2, and so on. Takes a positive errno
+ * or the negative return of a syscall; both are understood, because
+ * half the callers have one and half the other. */
+const char *lp_strerror(int err);
+
+/* One diagnostic line, in whichever voice is set.
+ *
+ *   before NULL   ->  prog: path: No such file or directory
+ *   before set    ->  prog: cannot access 'path': No such file or directory
+ *   before+after  ->  prog: cannot open 'path' for reading: No such file...
+ *   lp voice      ->  prog: path: <lp_phrase> (errno)
+ *
+ * GNU uses all three shapes and is not consistent about which: cat takes
+ * the first, ls and rm the second, head and tail the third. The caller
+ * says which, because matching it exactly is the whole point.
+ */
+void lp_diag(const char *prog, const char *gnu_before, const char *gnu_after,
+             const char *lp_phrase, const char *path, int err);

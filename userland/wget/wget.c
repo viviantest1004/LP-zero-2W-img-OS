@@ -23,6 +23,7 @@ int main(int argc, char **argv)
     if (argc < 2 || strcmp(argv[1], "-h") == 0) {
         printf("usage: wget <url> [file]\n");
         printf("       wget -O <file> <url>\n");
+        printf("       wget -O- <url>          to standard output\n");
         printf("  https:// works too, by way of python3 on /data -\n");
         printf("  a few seconds slower to start, and it checks the\n");
         printf("  certificate against /data/ssl/cert.pem\n");
@@ -31,6 +32,7 @@ int main(int argc, char **argv)
 
     const char *url  = NULL;
     const char *dest = NULL;
+    bool quiet = false;
 
     /* -O is accepted because it is what everybody types.
      *
@@ -40,12 +42,18 @@ int main(int argc, char **argv)
      * rejected rather than the option not existing. Every other wget on
      * earth spells it this way; refusing it taught nobody anything. */
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-O") == 0) {
+        if (strcmp(argv[i], "-O-") == 0 || strcmp(argv[i], "-qO-") == 0) {
+            /* 붙여 쓴 꼴. `wget -O- url | grep` 이 이 도구로 하는 일의
+             * 거의 전부이고, 그때 아무도 빈칸을 넣지 않는다. */
+            dest = "-";
+        } else if (strcmp(argv[i], "-O") == 0) {
             if (i + 1 >= argc) {
                 dprintf(STDERR_FILENO, "wget: -O needs a file name after it\n");
                 return 2;
             }
             dest = argv[++i];
+        } else if (strcmp(argv[i], "-q") == 0) {
+            quiet = true;
         } else if (!url) {
             url = argv[i];
         } else if (!dest) {
@@ -69,11 +77,18 @@ int main(int argc, char **argv)
         dest = name;
     }
 
-    printf("wget: %s -> %s\n", url, dest);
+    /* 표준출력으로 보낼 때는 아무 말도 하지 않는다. 진행 상황 한 줄이
+     * 파이프 저쪽의 첫 줄이 되어 버리기 때문이다. */
+    bool to_stdout = dest[0] == '-' && dest[1] == '\0';
+    if (!quiet && !to_stdout)
+        printf("wget: %s -> %s\n", url, dest);
 
     long n = net_http_get(url, dest);
     if (n < 0)
         return 1;
+
+    if (quiet || to_stdout)
+        return 0;
 
     if (n >= 1048576)
         printf("wget: %lld MB\n", (long long)(n / 1048576));

@@ -51,7 +51,8 @@ int main(int argc, char **argv)
         }
         long fd = lp_open(argv[i], O_RDONLY, 0);
         if (fd < 0) {
-            dprintf(STDERR_FILENO, "head: %s: cannot open\n", argv[i]);
+            lp_diag("head", "cannot open", "for reading",
+                    "cannot open", argv[i], (int)-fd);
             rc = 1;
             continue;
         }

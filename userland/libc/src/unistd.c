@@ -1075,3 +1075,327 @@ void lp_log(const char *tag, const char *msg)
     line[n++] = '\n';
     lp_write(kfd, line, (size_t)n);
 }
+
+/* ── Local time ───────────────────────────────────────────────────────
+ *
+ * See unistd.h for why this is here rather than in `date`.
+ *
+ * ── Why daylight saving is computed ──
+ *
+ * The zone table used to say "uses DST - shift by hand in summer", and
+ * that is not a time zone, it is a chore with a deadline. Twice a year
+ * every timestamp on the machine is an hour wrong until somebody
+ * notices, and logs written across the change cannot be read at all.
+ *
+ * Real tzdata is tens of megabytes and this root lives in RAM. But the
+ * rules themselves are four paragraphs and they have been stable for
+ * twenty years, so they are code here. A zone that follows none of them
+ * is a fixed offset, which is the truth for most of the world.
+ */
+
+/* The day of the month of the nth Sunday (nth = -1 means the last). */
+static int nth_sunday(int year, int mon, int nth)
+{
+    lp_tm_t t = { .year = year, .mon = mon, .day = 1,
+                  .hour = 0, .min = 0, .sec = 0, .wday = 0 };
+    lp_gmtime(lp_timegm(&t), &t);
+    int first_sun = 1 + ((7 - t.wday) % 7);      /* wday 0 = Sunday */
+
+    if (nth > 0)
+        return first_sun + (nth - 1) * 7;
+
+    static const int LEN[13] = { 0,31,28,31,30,31,30,31,31,30,31,30,31 };
+    int len = LEN[mon];
+    if (mon == 2 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0))
+        len = 29;
+    int d = first_sun;
+    while (d + 7 <= len) d += 7;
+    return d;
+}
+
+/* Unix seconds of a given Y/M/D H:00 UTC. */
+static s64 at_utc(int year, int mon, int day, int hour)
+{
+    lp_tm_t t = { .year = year, .mon = mon, .day = day,
+                  .hour = hour, .min = 0, .sec = 0, .wday = 0 };
+    return lp_timegm(&t);
+}
+
+/* Is daylight saving in force at this instant, under this rule? */
+static bool dst_active(lp_dst_t rule, s64 utc, int std_minutes)
+{
+    if (rule == LP_DST_NONE)
+        return false;
+
+    lp_tm_t g;
+    lp_gmtime(utc, &g);
+    int y = g.year;
+
+    s64 start, end;
+    switch (rule) {
+    case LP_DST_EU:
+        /* Both transitions happen at 01:00 UTC across the whole union,
+         * which is what makes this the easy one. */
+        start = at_utc(y, 3,  nth_sunday(y, 3, -1), 1);
+        end   = at_utc(y, 10, nth_sunday(y, 10, -1), 1);
+        return utc >= start && utc < end;
+
+    case LP_DST_US:
+        /* 02:00 local standard time in each zone, so the instant in UTC
+         * depends on the offset. */
+        start = at_utc(y, 3,  nth_sunday(y, 3, 2), 2) - (s64)std_minutes * 60;
+        end   = at_utc(y, 11, nth_sunday(y, 11, 1), 2) - (s64)(std_minutes + 60) * 60;
+        return utc >= start && utc < end;
+
+    case LP_DST_AU:
+        /* Southern hemisphere: summer spans the new year, so the test is
+         * "outside the winter gap" rather than "inside a summer range". */
+        start = at_utc(y, 10, nth_sunday(y, 10, 1), 2) - (s64)std_minutes * 60;
+        end   = at_utc(y, 4,  nth_sunday(y, 4, 1), 3) - (s64)(std_minutes + 60) * 60;
+        return utc >= start || utc < end;
+
+    case LP_DST_NZ:
+        start = at_utc(y, 9, nth_sunday(y, 9, -1), 2) - (s64)std_minutes * 60;
+        end   = at_utc(y, 4, nth_sunday(y, 4, 1), 3) - (s64)(std_minutes + 60) * 60;
+        return utc >= start || utc < end;
+
+    default:
+        return false;
+    }
+}
+
+/* The chosen zone. "<minutes> <label> [<rule>] [<summer label>]".
+ *
+ * Re-read every ten seconds rather than once.
+ *
+ * Once was wrong for the half of this system that never exits. cron,
+ * logd and the supervisor all start at boot and run for months; with a
+ * one-shot cache, `date -z Asia/Seoul` would move the clock for every
+ * command you typed afterwards and for none of the daemons, until the
+ * next reboot. Two clocks on one machine, and the logs are the ones
+ * that stay wrong. Ten seconds costs a stat per ten seconds and makes
+ * the setting mean what it says. */
+static s64      tz_checked  = -1;
+static bool     tz_loaded   = false;
+static int      tz_std_min  = 0;
+static char     tz_std_lab[16] = "UTC";
+static char     tz_dst_lab[16] = "UTC";
+static lp_dst_t tz_rule     = LP_DST_NONE;
+
+static void tz_load(void)
+{
+    s64 now = lp_monotonic_ms();
+    if (tz_loaded && tz_checked >= 0 && now - tz_checked < 10000)
+        return;
+    tz_checked = now;
+    tz_loaded  = true;
+
+    /* Back to the defaults before re-reading, or a zone that was unset
+     * would keep the last one it had. */
+    tz_std_min = 0;
+    tz_rule    = LP_DST_NONE;
+    strlcpy(tz_std_lab, "UTC", sizeof tz_std_lab);
+    strlcpy(tz_dst_lab, "UTC", sizeof tz_dst_lab);
+
+    char buf[128];
+    buf[0] = '\0';
+    /* /data first: on a RAM root it is the half that survives. */
+    const char *paths[2] = { "/data/timezone", "/etc/timezone" };
+    for (int i = 0; i < 2; i++) {
+        long fd = lp_open(paths[i], O_RDONLY, 0);
+        if (fd < 0)
+            continue;
+        long n = lp_read((int)fd, buf, sizeof buf - 1);
+        lp_close((int)fd);
+        if (n > 0) { buf[n] = '\0'; break; }
+        buf[0] = '\0';
+    }
+    if (!buf[0])
+        return;
+
+    /* minutes */
+    const char *p = buf;
+    while (*p == ' ') p++;
+    tz_std_min = atoi(p);
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+
+    /* label */
+    int k = 0;
+    while (*p && *p != ' ' && *p != '\n' && k < (int)sizeof tz_std_lab - 1)
+        tz_std_lab[k++] = *p++;
+    tz_std_lab[k] = '\0';
+    if (!k)
+        strlcpy(tz_std_lab, "UTC", sizeof tz_std_lab);
+    strlcpy(tz_dst_lab, tz_std_lab, sizeof tz_dst_lab);
+
+    /* rule, optional */
+    while (*p == ' ') p++;
+    char rule[16] = "";
+    k = 0;
+    while (*p && *p != ' ' && *p != '\n' && k < (int)sizeof rule - 1)
+        rule[k++] = *p++;
+    rule[k] = '\0';
+
+    if      (strcmp(rule, "EU") == 0) tz_rule = LP_DST_EU;
+    else if (strcmp(rule, "US") == 0) tz_rule = LP_DST_US;
+    else if (strcmp(rule, "AU") == 0) tz_rule = LP_DST_AU;
+    else if (strcmp(rule, "NZ") == 0) tz_rule = LP_DST_NZ;
+
+    /* The summer label, if one was given. */
+    while (*p == ' ') p++;
+    k = 0;
+    while (*p && *p != ' ' && *p != '\n' && k < (int)sizeof tz_dst_lab - 1)
+        tz_dst_lab[k++] = *p++;
+    if (k) tz_dst_lab[k] = '\0';
+}
+
+int lp_tz_offset(s64 utc)
+{
+    tz_load();
+    return tz_std_min + (dst_active(tz_rule, utc, tz_std_min) ? 60 : 0);
+}
+
+const char *lp_tz_label(s64 utc)
+{
+    tz_load();
+    return dst_active(tz_rule, utc, tz_std_min) ? tz_dst_lab : tz_std_lab;
+}
+
+void lp_localtime(s64 t, lp_tm_t *out)
+{
+    lp_gmtime(t + (s64)lp_tz_offset(t) * 60, out);
+}
+
+s64 lp_timelocal(const lp_tm_t *tm)
+{
+    /* The offset depends on the instant, and the instant is what we are
+     * computing. One round of feedback settles it everywhere except the
+     * hour that daylight saving skips, which has no answer to settle on. */
+    s64 guess = lp_timegm(tm);
+    guess -= (s64)lp_tz_offset(guess) * 60;
+    return guess - ((s64)lp_tz_offset(guess) * 60
+                    - (s64)lp_tz_offset(lp_timegm(tm)) * 60);
+}
+
+/* ── Which voice the commands speak in ────────────────────────────────
+ *
+ * See unistd.h. The default is GNU's wording because this machine is
+ * used to learn on, and a command that answers differently from the one
+ * on Ubuntu teaches something that has to be unlearned later.
+ */
+static bool       voice_loaded = false;
+static lp_voice_t voice_value  = LP_VOICE_GNU;
+
+lp_voice_t lp_voice(void)
+{
+    if (voice_loaded)
+        return voice_value;
+    voice_loaded = true;
+
+    char buf[32];
+    const char *paths[2] = { "/data/voice", "/etc/voice" };
+    for (int i = 0; i < 2; i++) {
+        long fd = lp_open(paths[i], O_RDONLY, 0);
+        if (fd < 0)
+            continue;
+        long n = lp_read((int)fd, buf, sizeof buf - 1);
+        lp_close((int)fd);
+        if (n <= 0)
+            continue;
+        buf[n] = '\0';
+        if (buf[0] == 'l' || buf[0] == 'L')      /* "lp" */
+            voice_value = LP_VOICE_LP;
+        return voice_value;
+    }
+    return voice_value;
+}
+
+/* The errno names people actually see. Not the whole table: the ones
+ * missing here print as a number, which is still more than "failed". */
+const char *lp_strerror(int err)
+{
+    if (err < 0) err = -err;
+    switch (err) {
+    case 0:   return "Success";
+    case 1:   return "Operation not permitted";
+    case 2:   return "No such file or directory";
+    case 3:   return "No such process";
+    case 4:   return "Interrupted system call";
+    case 5:   return "Input/output error";
+    case 6:   return "No such device or address";
+    case 7:   return "Argument list too long";
+    case 8:   return "Exec format error";
+    case 9:   return "Bad file descriptor";
+    case 10:  return "No child processes";
+    case 11:  return "Resource temporarily unavailable";
+    case 12:  return "Cannot allocate memory";
+    case 13:  return "Permission denied";
+    case 14:  return "Bad address";
+    case 16:  return "Device or resource busy";
+    case 17:  return "File exists";
+    case 18:  return "Invalid cross-device link";
+    case 19:  return "No such device";
+    case 20:  return "Not a directory";
+    case 21:  return "Is a directory";
+    case 22:  return "Invalid argument";
+    case 23:  return "Too many open files in system";
+    case 24:  return "Too many open files";
+    case 25:  return "Inappropriate ioctl for device";
+    case 26:  return "Text file busy";
+    case 27:  return "File too large";
+    case 28:  return "No space left on device";
+    case 29:  return "Illegal seek";
+    case 30:  return "Read-only file system";
+    case 31:  return "Too many links";
+    case 32:  return "Broken pipe";
+    case 33:  return "Numerical argument out of domain";
+    case 34:  return "Numerical result out of range";
+    case 36:  return "File name too long";
+    case 38:  return "Function not implemented";
+    case 39:  return "Directory not empty";
+    case 40:  return "Too many levels of symbolic links";
+    case 61:  return "No data available";
+    case 62:  return "Timer expired";
+    case 71:  return "Protocol error";
+    case 88:  return "Socket operation on non-socket";
+    case 91:  return "Protocol wrong type for socket";
+    case 95:  return "Operation not supported";
+    case 97:  return "Address family not supported by protocol";
+    case 98:  return "Address already in use";
+    case 99:  return "Cannot assign requested address";
+    case 101: return "Network is unreachable";
+    case 104: return "Connection reset by peer";
+    case 110: return "Connection timed out";
+    case 111: return "Connection refused";
+    case 113: return "No route to host";
+    default:  return NULL;
+    }
+}
+
+void lp_diag(const char *prog, const char *gnu_before, const char *gnu_after,
+             const char *lp_phrase, const char *path, int err)
+{
+    if (err < 0) err = -err;
+    const char *msg = lp_strerror(err);
+    char unknown[32];
+    if (!msg) {
+        snprintf(unknown, sizeof unknown, "Unknown error %d", err);
+        msg = unknown;
+    }
+
+    if (lp_voice() == LP_VOICE_GNU) {
+        if (gnu_before)
+            dprintf(STDERR_FILENO, "%s: %s '%s'%s%s: %s\n",
+                    prog, gnu_before, path,
+                    gnu_after ? " " : "", gnu_after ? gnu_after : "", msg);
+        else
+            dprintf(STDERR_FILENO, "%s: %s: %s\n", prog, path, msg);
+        return;
+    }
+
+    /* This system's own voice: the errno number is kept, because it is
+     * the thing you look up when the sentence is not enough. */
+    dprintf(STDERR_FILENO, "%s: %s: %s (%d)\n",
+            prog, path, lp_phrase ? lp_phrase : (msg ? msg : "failed"), err);
+}

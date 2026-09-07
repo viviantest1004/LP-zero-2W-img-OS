@@ -59,8 +59,7 @@ int main(int argc, char **argv)
 
         long fd = lp_open(argv[i], O_RDONLY, 0);
         if (fd < 0) {
-            dprintf(STDERR_FILENO, "cat: %s: cannot open (%ld)\n",
-                    argv[i], -fd);
+            lp_diag("cat", NULL, NULL, "cannot open", argv[i], (int)-fd);
             rc = 1;
             continue;
         }

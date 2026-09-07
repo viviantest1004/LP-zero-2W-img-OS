@@ -218,7 +218,7 @@ static int list_one(const char *path)
 
     if (opt_dironly || (have && (st.mode & LP_S_IFMT) != LP_S_IFDIR)) {
         if (!have) {
-            dprintf(STDERR_FILENO, "ls: %s: no such file\n", path);
+            lp_diag("ls", "cannot access", NULL, "no such file", path, 2);
             return 1;
         }
         entry_t e;
@@ -249,7 +249,8 @@ static int list_dir(const char *path, bool show_header)
             printf("%s\n", path);
             return 0;
         }
-        dprintf(STDERR_FILENO, "ls: %s: cannot open (%ld)\n", path, -fd);
+        lp_diag("ls", "cannot access", NULL, "cannot open",
+                path, (int)-fd);
         return 1;
     }
 

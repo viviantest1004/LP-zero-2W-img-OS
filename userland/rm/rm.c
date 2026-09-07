@@ -23,11 +23,15 @@ static bool recursive = false;
 static bool force     = false;
 static int  failures  = 0;
 
+/* GNU says `rm: cannot remove 'x': No such file or directory` for every
+ * failure, whatever the failure was, and quotes the name. Matching that
+ * exactly matters more here than the extra precision our own wording
+ * had, because this is one of the first errors anybody sees. */
 static void oops(const char *what, const char *path, long rc)
 {
     if (force && rc == -ENOENT)
         return;
-    dprintf(STDERR_FILENO, "rm: %s: %s (%ld)\n", path, what, -rc);
+    lp_diag("rm", "cannot remove", NULL, what, path, (int)-rc);
     failures = 1;
 }
 

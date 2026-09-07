@@ -93,7 +93,7 @@ int main(int argc, char **argv)
 
         long fd = lp_open(argv[i], O_RDONLY, 0);
         if (fd < 0) {
-            dprintf(STDERR_FILENO, "wc: %s: cannot open\n", argv[i]);
+            lp_diag("wc", NULL, NULL, "cannot open", argv[i], (int)-fd);
             rc = 1;
             continue;
         }

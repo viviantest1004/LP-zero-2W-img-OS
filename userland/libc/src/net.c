@@ -770,8 +770,17 @@ static long http_do(const char *method, const char *url,
     /* A caller that only wants to know the request arrived passes no
      * destination - a heartbeat, for instance, where the reply is
      * "200" and nothing else. */
-    long out = dest ? lp_open(dest, O_WRONLY | O_CREAT | O_TRUNC, 0644)
-                    : lp_open("/dev/null", O_WRONLY, 0);
+    /* "-" means standard output, the way it does for the https path
+     * already. That is what makes `wget -O- <url> | grep ...` work, and
+     * that one-liner is most of what anybody does with an HTTP client
+     * on a server. Writing to a file first and reading it back needs a
+     * writable directory, which a machine whose root is in RAM does not
+     * always have where you are standing. */
+    bool to_stdout = dest && dest[0] == '-' && dest[1] == '\0';
+    long out;
+    if (to_stdout)   out = STDOUT_FILENO;
+    else if (dest)   out = lp_open(dest, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    else             out = lp_open("/dev/null", O_WRONLY, 0);
     if (out < 0) {
         dprintf(STDERR_FILENO, "cannot write %s\n", dest ? dest : "/dev/null");
         lp_close((int)fd);
@@ -830,23 +839,33 @@ static long http_do(const char *method, const char *url,
         }
 
         if (in_body && i < n) {
-            lp_write((int)out, buf + i, (size_t)(n - i));
+            /* 200 이 아니면 몸통을 쓰지 않는다.
+             *
+             * 파일로 받을 때는 뒤에서 지우면 됐다. 표준출력으로 보낼
+             * 때는 지울 수가 없어서, 401 오류 페이지가 파이프 저쪽의
+             * 입력이 되어 버린다 - `wget -O- ... | grep` 이 오류
+             * 페이지 안의 글자를 찾아 성공한 것처럼 구는 것이 가장
+             * 나쁜 꼴이다. 상태 줄은 몸통보다 먼저 오므로 여기서
+             * 이미 알고 있다. */
+            if (!have_status || status == 200)
+                lp_write((int)out, buf + i, (size_t)(n - i));
             written += n - i;
         }
     }
 
-    lp_close((int)out);
+    if (!to_stdout)
+        lp_close((int)out);
     lp_close((int)fd);
 
     if (!have_status) {
         dprintf(STDERR_FILENO,
                 "%s: no HTTP status line in the reply\n", url);
-        if (dest) lp_unlink(dest);
+        if (dest && !to_stdout) lp_unlink(dest);
         return -1;
     }
     if (status != 200) {
         dprintf(STDERR_FILENO, "%s: the server said %d\n", url, status);
-        if (dest)
+        if (dest && !to_stdout)
             lp_unlink(dest);
         return -1;
     }
@@ -867,17 +886,17 @@ static long http_do(const char *method, const char *url,
      * the caller knows the difference. */
     if (bad_read) {
         dprintf(STDERR_FILENO, "%s: the connection broke mid-transfer\n", url);
-        if (dest) lp_unlink(dest);
+        if (dest && !to_stdout) lp_unlink(dest);
         return -1;
     }
     if (content_length >= 0 && written != content_length) {
         dprintf(STDERR_FILENO,
                 "%s: got %ld bytes, the server said %ld - discarding it\n",
                 url, written, content_length);
-        if (dest) lp_unlink(dest);
+        if (dest && !to_stdout) lp_unlink(dest);
         return -1;
     }
-    if (content_length < 0 && dest)
+    if (content_length < 0 && dest && !to_stdout)
         dprintf(STDERR_FILENO,
                 "%s: the server sent no length, so a short download"
                 " cannot be detected here\n", url);

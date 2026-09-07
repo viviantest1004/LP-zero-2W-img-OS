@@ -28,44 +28,68 @@
 
 /* Time zone table.
  *
- * Doing this properly needs tzdata, which is tens of megabytes. There is
- * no room for that here, so we use fixed offsets only. The cost is that
- * daylight saving is not tracked - zones that use it are marked, and in
- * summer you shift by hand. Korea, Japan, China and India have no DST,
- * so those are always exact. */
+ * Doing this properly needs tzdata, which is tens of megabytes and this
+ * root lives in RAM. So the offsets are here and the daylight-saving
+ * rules are in the libc, computed rather than looked up.
+ *
+ * This used to say "zones that use DST are marked, shift by hand in
+ * summer". That is not a time zone, it is a chore with a deadline:
+ * twice a year every timestamp on the machine is an hour wrong until
+ * somebody remembers, and a log written across the change cannot be
+ * read at all. The four rules below cover every zone in this table and
+ * none of them has changed in twenty years. */
 typedef struct {
     const char *name;      /* what you type to pick it */
-    const char *abbr;      /* short name, shown with the time */
-    int         minutes;   /* offset from UTC */
-    bool        dst;       /* uses daylight saving (we do not follow it) */
+    const char *abbr;      /* short name in winter */
+    const char *summer;    /* short name in summer, or the same */
+    int         minutes;   /* standard offset from UTC */
+    lp_dst_t    rule;      /* which daylight-saving rule, if any */
 } zone_t;
 
 static const zone_t ZONES[] = {
-    { "UTC",                 "UTC",   0,           false },
-    { "Asia/Seoul",          "KST",   9 * 60,      false },
-    { "Asia/Tokyo",          "JST",   9 * 60,      false },
-    { "Asia/Shanghai",       "CST",   8 * 60,      false },
-    { "Asia/Hong_Kong",      "HKT",   8 * 60,      false },
-    { "Asia/Taipei",         "TWT",   8 * 60,      false },
-    { "Asia/Singapore",      "SGT",   8 * 60,      false },
-    { "Asia/Bangkok",        "ICT",   7 * 60,      false },
-    { "Asia/Jakarta",        "WIB",   7 * 60,      false },
-    { "Asia/Kolkata",        "IST",   5 * 60 + 30, false },
-    { "Asia/Kathmandu",      "NPT",   5 * 60 + 45, false },
-    { "Asia/Dubai",          "GST",   4 * 60,      false },
-    { "Europe/Moscow",       "MSK",   3 * 60,      false },
-    { "Europe/Istanbul",     "TRT",   3 * 60,      false },
-    { "Europe/Berlin",       "CET",   1 * 60,      true  },
-    { "Europe/Paris",        "CET",   1 * 60,      true  },
-    { "Europe/London",       "GMT",   0,           true  },
-    { "America/Sao_Paulo",   "BRT",  -3 * 60,      false },
-    { "America/New_York",    "EST",  -5 * 60,      true  },
-    { "America/Chicago",     "CST",  -6 * 60,      true  },
-    { "America/Denver",      "MST",  -7 * 60,      true  },
-    { "America/Los_Angeles", "PST",  -8 * 60,      true  },
-    { "Pacific/Honolulu",    "HST", -10 * 60,      false },
-    { "Australia/Sydney",    "AEST", 10 * 60,      true  },
-    { "Pacific/Auckland",    "NZST", 12 * 60,      true  },
+    { "UTC",                 "UTC",  "UTC",    0,           LP_DST_NONE },
+    { "Asia/Seoul",          "KST",  "KST",    9 * 60,      LP_DST_NONE },
+    { "Asia/Tokyo",          "JST",  "JST",    9 * 60,      LP_DST_NONE },
+    { "Asia/Shanghai",       "CST",  "CST",    8 * 60,      LP_DST_NONE },
+    { "Asia/Hong_Kong",      "HKT",  "HKT",    8 * 60,      LP_DST_NONE },
+    { "Asia/Taipei",         "TWT",  "TWT",    8 * 60,      LP_DST_NONE },
+    { "Asia/Singapore",      "SGT",  "SGT",    8 * 60,      LP_DST_NONE },
+    { "Asia/Bangkok",        "ICT",  "ICT",    7 * 60,      LP_DST_NONE },
+    { "Asia/Jakarta",        "WIB",  "WIB",    7 * 60,      LP_DST_NONE },
+    { "Asia/Kolkata",        "IST",  "IST",    5 * 60 + 30, LP_DST_NONE },
+    { "Asia/Kathmandu",      "NPT",  "NPT",    5 * 60 + 45, LP_DST_NONE },
+    { "Asia/Dubai",          "GST",  "GST",    4 * 60,      LP_DST_NONE },
+    { "Europe/Moscow",       "MSK",  "MSK",    3 * 60,      LP_DST_NONE },
+    { "Europe/Istanbul",     "TRT",  "TRT",    3 * 60,      LP_DST_NONE },
+    { "Europe/Berlin",       "CET",  "CEST",   1 * 60,      LP_DST_EU   },
+    { "Europe/Paris",        "CET",  "CEST",   1 * 60,      LP_DST_EU   },
+    { "Europe/Madrid",       "CET",  "CEST",   1 * 60,      LP_DST_EU   },
+    { "Europe/Rome",         "CET",  "CEST",   1 * 60,      LP_DST_EU   },
+    { "Europe/Amsterdam",    "CET",  "CEST",   1 * 60,      LP_DST_EU   },
+    { "Europe/Warsaw",       "CET",  "CEST",   1 * 60,      LP_DST_EU   },
+    { "Europe/Stockholm",    "CET",  "CEST",   1 * 60,      LP_DST_EU   },
+    { "Europe/Athens",       "EET",  "EEST",   2 * 60,      LP_DST_EU   },
+    { "Europe/Helsinki",     "EET",  "EEST",   2 * 60,      LP_DST_EU   },
+    { "Europe/Lisbon",       "WET",  "WEST",   0,           LP_DST_EU   },
+    { "Europe/Dublin",       "GMT",  "IST",    0,           LP_DST_EU   },
+    { "Europe/London",       "GMT",  "BST",    0,           LP_DST_EU   },
+    { "America/Sao_Paulo",   "BRT",  "BRT",   -3 * 60,      LP_DST_NONE },
+    { "America/Bogota",      "COT",  "COT",   -5 * 60,      LP_DST_NONE },
+    { "America/Toronto",     "EST",  "EDT",   -5 * 60,      LP_DST_US   },
+    { "America/New_York",    "EST",  "EDT",   -5 * 60,      LP_DST_US   },
+    { "America/Chicago",     "CST",  "CDT",   -6 * 60,      LP_DST_US   },
+    { "America/Mexico_City", "CST",  "CST",   -6 * 60,      LP_DST_NONE },
+    { "America/Denver",      "MST",  "MDT",   -7 * 60,      LP_DST_US   },
+    { "America/Phoenix",     "MST",  "MST",   -7 * 60,      LP_DST_NONE },
+    { "America/Vancouver",   "PST",  "PDT",   -8 * 60,      LP_DST_US   },
+    { "America/Los_Angeles", "PST",  "PDT",   -8 * 60,      LP_DST_US   },
+    { "America/Anchorage",   "AKST", "AKDT",  -9 * 60,      LP_DST_US   },
+    { "Pacific/Honolulu",    "HST",  "HST",  -10 * 60,      LP_DST_NONE },
+    { "Australia/Perth",     "AWST", "AWST",   8 * 60,      LP_DST_NONE },
+    { "Australia/Brisbane",  "AEST", "AEST",  10 * 60,      LP_DST_NONE },
+    { "Australia/Sydney",    "AEST", "AEDT",  10 * 60,      LP_DST_AU   },
+    { "Australia/Melbourne", "AEST", "AEDT",  10 * 60,      LP_DST_AU   },
+    { "Pacific/Auckland",    "NZST", "NZDT",  12 * 60,      LP_DST_NZ   },
 };
 #define NZONES ((int)(sizeof(ZONES) / sizeof(ZONES[0])))
 
@@ -103,13 +127,14 @@ static void offset_text(int minutes, char *buf, size_t cap)
 
 static void list_zones(void)
 {
-    printf("Zones you can pick (fixed offset, DST not tracked):\n\n");
+    printf("Zones you can pick. Daylight saving is followed"
+           " automatically.\n\n");
     for (int i = 0; i < NZONES; i++) {
         char off[16];
         offset_text(ZONES[i].minutes, off, sizeof(off));
         printf("  %-20s %-5s %-10s%s\n",
                ZONES[i].name, ZONES[i].abbr, off,
-               ZONES[i].dst ? "uses DST - shift by hand in summer" : "");
+               ZONES[i].rule != LP_DST_NONE ? ZONES[i].summer : "");
     }
     printf("\n  date -z Asia/Seoul     pick by name\n");
     printf("  date -z KST            or by short name\n");
@@ -118,37 +143,28 @@ static void list_zones(void)
 
 /* The file holds "<minutes> <label>". The label is only for display, so
  * a file with just a number still works. */
+/* The libc reads the same file and applies the daylight-saving rule, so
+ * this is the whole of it now. Parsing it a second time here is how the
+ * two used to drift. */
 static void load_zone(void)
 {
-    char buf[64];
-    long fd = lp_open(TZ_FILE, O_RDONLY, 0);
-    if (fd < 0)
-        return;
-    long n = lp_read((int)fd, buf, sizeof(buf) - 1);
-    lp_close((int)fd);
-    if (n <= 0)
-        return;
-    buf[n] = '\0';
-
-    tz_minutes = atoi(buf);
-
-    char *p = buf;
-    while (*p && *p != ' ' && *p != '\t') p++;
-    while (*p == ' ' || *p == '\t')       p++;
-    char *end = p;
-    while (*end && *end != '\n' && *end != ' ') end++;
-    *end = '\0';
-
-    if (*p)
-        strlcpy(tz_label, p, sizeof(tz_label));
-    else
-        offset_text(tz_minutes, tz_label, sizeof(tz_label));
+    s64 now = lp_time();
+    tz_minutes = lp_tz_offset(now);
+    strlcpy(tz_label, lp_tz_label(now), sizeof(tz_label));
 }
 
-static bool save_zone(int minutes, const char *label)
+/* "<minutes> <winter label> <rule> <summer label>".
+ *
+ * The rule and the summer name are on the same line because every
+ * program on the machine reads this file through lp_localtime, and a
+ * second file to keep in step is a second file to get out of step. */
+static bool save_zone(int minutes, const char *label,
+                      const char *rule, const char *summer)
 {
-    char buf[80];
-    int  len = snprintf(buf, sizeof(buf), "%d %s\n", minutes, label);
+    char buf[96];
+    int  len = snprintf(buf, sizeof(buf), "%d %s %s %s\n",
+                        minutes, label, rule ? rule : "-",
+                        summer ? summer : label);
 
     long fd = lp_open(TZ_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
@@ -323,17 +339,32 @@ int main(int argc, char **argv)
             return 2;
         }
 
-        if (!save_zone(minutes, label))
+        const char *rulename = "-";
+        if (z) {
+            switch (z->rule) {
+            case LP_DST_EU: rulename = "EU"; break;
+            case LP_DST_US: rulename = "US"; break;
+            case LP_DST_AU: rulename = "AU"; break;
+            case LP_DST_NZ: rulename = "NZ"; break;
+            default:        rulename = "-";  break;
+            }
+        }
+        if (!save_zone(minutes, label, rulename, z ? z->summer : label))
             return 1;
 
-        tz_minutes = minutes;
-        strlcpy(tz_label, label, sizeof(tz_label));
+        /* Re-read through the libc so what is printed next is what every
+         * other program will now see, rather than what this one just
+         * decided. If those two ever differ it is this line that finds
+         * out, and finding out immediately is the point. */
+        s64 now = lp_time();
+        tz_minutes = lp_tz_offset(now);
+        strlcpy(tz_label, lp_tz_label(now), sizeof(tz_label));
 
-        if (z && z->dst)
-            printf("note: %s uses daylight saving. We keep a fixed offset,\n"
-                   "      so shift by one hour yourself in summer.\n", z->name);
+        if (z && z->rule != LP_DST_NONE)
+            printf("%s follows daylight saving; the clock shifts by"
+                   " itself.\n", z->name);
 
-        print_time(lp_time(), tz_minutes, tz_label);
+        print_time(now, tz_minutes, tz_label);
         return 0;
     }
 
@@ -354,8 +385,11 @@ int main(int argc, char **argv)
             return 2;
         }
 
-        /* The input is in the configured zone; the kernel wants UTC. */
-        s64 t = lp_timegm(&tm) - (s64)tz_minutes * 60;
+        /* The input is in the configured zone; the kernel wants UTC.
+         * lp_timelocal does the daylight-saving arithmetic, which a
+         * plain subtraction cannot: in the week before the change the
+         * offset is not the one in force at the moment being named. */
+        s64 t = lp_timelocal(&tm);
 
         if (lp_settime(t) < 0) {
             dprintf(STDERR_FILENO, "date: cannot set the clock (are you root?)\n");

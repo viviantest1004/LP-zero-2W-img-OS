@@ -83,6 +83,31 @@ dhcp -d
 
 ntp -d
 
+# The instance's own SSH key, on EC2.
+#
+#   On AWS the key is not in the image. It is chosen when the instance is
+#   launched and handed over through 169.254.169.254, so an image that
+#   does not fetch it boots perfectly and is unreachable forever - the
+#   worst failure there is, because nothing is broken and there is
+#   nothing to fix from outside.
+#
+#   The address arrives after rc has finished (dhcp is a service too), so
+#   this waits rather than deciding at boot that there is no metadata
+#   service. On anything that is not EC2 it gives up in two seconds and
+#   sleeps; the link-local address is answered in under a millisecond or
+#   not at all.
+?/bin/ec2 ec2 -d
+
+# Scheduled jobs.
+#
+#   Reads /data/crontab, or /etc/crontab if there is none. With neither
+#   it sleeps rather than exiting - a one-shot that exits would be
+#   restarted by this supervisor every second forever, and "no jobs" is
+#   the normal state for most machines.
+#
+#   Times are UTC. See `cron -h`.
+?/bin/cron cron -d
+
 
 # Log collector.
 #   Without this, everything printed goes to the console and is gone as
