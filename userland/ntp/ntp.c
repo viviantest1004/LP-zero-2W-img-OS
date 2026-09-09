@@ -281,11 +281,106 @@ static int run_daemon(const char **servers)
     return 0;   /* not reached */
 }
 
+/* The newest timestamp on anything in a directory, and on the directory
+ * itself. Zero if it cannot be read.
+ *
+ * A file's mtime is a fact about the past: whatever wrote it did so at
+ * that moment, so the current time cannot be earlier. That makes the
+ * filesystem a clock of last resort, and a much better one than the
+ * build date:
+ *
+ *   /boot   was written by a PC when the card was made. Its mtimes are
+ *           that PC's clock - usually minutes before the first boot.
+ *   /data   was written by this board the last time it ran. Its mtimes
+ *           move forward on their own, every boot, for ever.
+ *
+ * Neither is the right time and neither claims to be. Both are true
+ * lower bounds, and the true bound closest to now is the one to use. */
+static s64 newest_mtime(const char *dir)
+{
+    s64 newest = 0;
+    lp_stat_t st;
+
+    if (lp_stat(dir, &st, true) == 0)
+        newest = st.mtime;
+
+    long fd = lp_open(dir, O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0)
+        return newest;
+
+    char buf[4096];
+    for (;;) {
+        long n = sys_getdents((int)fd, buf, sizeof buf);
+        if (n <= 0)
+            break;
+        /* getdents64 packs variable-length records back to back:
+         *   u64 d_ino; s64 d_off; u16 d_reclen; u8 d_type; char name[] */
+        for (long off = 0; off < n; ) {
+            u16 reclen;
+            memcpy(&reclen, buf + off + 16, sizeof reclen);
+            if (reclen == 0)
+                break;
+            const char *name = buf + off + 19;
+            off += reclen;
+            if (name[0] == '.')
+                continue;
+            char path[512];
+            snprintf(path, sizeof path, "%s/%s", dir, name);
+            if (lp_stat(path, &st, false) == 0 && st.mtime > newest)
+                newest = st.mtime;
+        }
+    }
+    lp_close((int)fd);
+    return newest;
+}
+
+/* A file holding one decimal number of seconds since 1970, and nothing
+ * else. Missing or unreadable is 0, which loses to everything. */
+static s64 load_epoch_file(const char *path)
+{
+    char buf[32];
+    long fd = lp_open(path, O_RDONLY, 0);
+    if (fd < 0)
+        return 0;
+    long n = lp_read((int)fd, buf, sizeof buf - 1);
+    lp_close((int)fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+    return (s64)strtoll(buf, NULL, 10);
+}
+
 int main(int argc, char **argv)
 {
     /* -r: restore the saved time without a network. Used early in boot. */
     if (argc > 1 && strcmp(argv[1], "-r") == 0) {
         s64 saved = load_clock();
+
+        /* When the image was built, as a floor.
+         *
+         * A first boot has no saved time, and a board with no
+         * battery-backed clock therefore starts at 1970 - where it stays
+         * until the network comes up. If the network is the thing that
+         * is broken, that is for ever, and every line in the log carries
+         * the same 1970-01-01 timestamp. You cannot tell what happened
+         * before what, which is exactly what you need when the network
+         * is what you are trying to fix.
+         *
+         * This image cannot have been running before it was built, so
+         * the build time is a lower bound that is always true and is
+         * never in the future. It is not the right time and does not
+         * claim to be - report() says where the time came from - but it
+         * orders the log and it stops certificate checks failing by
+         * fifty years instead of by minutes. */
+        /* Every lower bound we have, best last. Each one is a moment
+         * this machine cannot possibly be earlier than. */
+        s64 floor = load_epoch_file("/etc/build-epoch");   /* image built */
+        s64 t;
+        if ((t = newest_mtime("/boot")) > floor) floor = t;  /* card written */
+        if ((t = newest_mtime("/data")) > floor) floor = t;  /* last run */
+        if ((t = newest_mtime("/data/log")) > floor) floor = t;
+        if (floor > saved)
+            saved = floor;
         /* The hardware clock, if this machine has one, is better than
          * the saved timestamp: it kept counting while the power was off.
          * The kernel has usually already applied it, in which case the
@@ -298,16 +393,26 @@ int main(int argc, char **argv)
             dprintf(STDERR_FILENO, "ntp: no saved time\n");
             return 1;
         }
+        bool from_floor = (floor == saved && load_clock() < floor);
         /* Never move the clock backwards. */
         if (lp_time() >= saved) {
+            /* Say what it was anyway. "Already ahead" on its own leaves
+             * you unable to tell a good saved time from a floor of
+             * 1970, and that is exactly the question being asked when
+             * somebody runs this by hand. */
             printf("ntp: the clock is already ahead of that\n");
+            report(saved);
             return 0;
         }
         if (lp_settime(saved) < 0) {
             dprintf(STDERR_FILENO, "ntp: cannot set the clock (are you root?)\n");
             return 1;
         }
-        printf("ntp: restored the saved time (not from the network)\n");
+        if (from_floor)
+            printf("ntp: no time was saved - starting from the newest thing"
+                   " on the card, which cannot be in the future\n");
+        else
+            printf("ntp: restored the saved time (not from the network)\n");
         report(saved);
         return 0;
     }

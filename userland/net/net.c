@@ -603,6 +603,172 @@ static int set_static(int argc, char **argv, int first)
     return 0;
 }
 
+
+/* ── WiFi power save ──────────────────────────────────────────────────
+ *
+ * The chip is allowed to sleep between beacons. It saves a little power
+ * and it costs you the machine: a board left idle stops answering,
+ * while staying up - the LED is on, the USB link is fine, and ssh times
+ * out. The router lost track of a station that was asleep when it
+ * asked. On a board whose whole purpose is to sit somewhere and be
+ * reachable, that is not a trade worth making.
+ *
+ * There is no module parameter and no sysfs file for it. brcmfmac
+ * exposes it only through nl80211, which is generic netlink, which
+ * means two round trips: ask the controller which family id "nl80211"
+ * has today (it is assigned at load time and is not a constant), then
+ * send NL80211_CMD_SET_POWER_SAVE to it.
+ *
+ * The numbers below are from the kernel's own uapi headers, read at the
+ * version this image ships, not copied from memory.
+ */
+/* AF_NETLINK is not in net.h: this libc's socket layer is for the
+ * internet, and netlink is the kernel talking to itself. */
+#define AF_NETLINK             16
+#define NETLINK_GENERIC        16
+#define GENL_ID_CTRL           16
+#define CTRL_CMD_GETFAMILY      3
+#define CTRL_ATTR_FAMILY_ID     1
+#define CTRL_ATTR_FAMILY_NAME   2
+
+#define NL80211_CMD_SET_POWER_SAVE  61
+#define NL80211_CMD_GET_POWER_SAVE  62
+#define NL80211_ATTR_IFINDEX         3
+#define NL80211_ATTR_PS_STATE       93
+#define NL80211_PS_DISABLED          0
+#define NL80211_PS_ENABLED           1
+
+#define NLM_F_REQUEST  0x01
+#define NLM_F_ACK      0x04
+#define NLMSG_ERROR    0x02
+#define NLMSG_DONE     0x03
+
+typedef struct { u32 len; u16 type; u16 flags; u32 seq; u32 pid; } nlhdr_t;
+typedef struct { u8 cmd; u8 version; u16 reserved; } genlhdr_t;
+typedef struct { u16 nla_len; u16 nla_type; } nlattr_t;
+
+static u32 nl_seq;
+
+/* Netlink pads every attribute to four bytes. */
+static u32 nla_put(u8 *buf, u32 off, u16 type, const void *val, u16 len)
+{
+    nlattr_t a = { (u16)(sizeof a + len), type };
+    memcpy(buf + off, &a, sizeof a);
+    memcpy(buf + off + sizeof a, val, len);
+    u32 total = (u32)(sizeof a + len);
+    u32 padded = (total + 3u) & ~3u;
+    for (u32 i = total; i < padded; i++)
+        buf[off + i] = 0;
+    return off + padded;
+}
+
+/* Send one message and read the reply into buf. Returns the reply
+ * length, or -errno. */
+static long nl_talk(int fd, u8 *buf, u32 len, u8 *reply, u32 cap)
+{
+    if (lp_write(fd, buf, len) < 0)
+        return -1;
+    for (;;) {
+        long n = lp_read(fd, reply, cap);
+        if (n <= 0)
+            return -1;
+        nlhdr_t h;
+        memcpy(&h, reply, sizeof h);
+        if (h.type == NLMSG_ERROR) {
+            s32 err;
+            memcpy(&err, reply + sizeof h, sizeof err);
+            return err;             /* 0 is the ACK we asked for */
+        }
+        return n;
+    }
+}
+
+/* The family id the kernel gave nl80211 this boot. */
+static int nl80211_family(int fd)
+{
+    u8 buf[512], rep[8192];
+    memset(buf, 0, sizeof buf);
+
+    nlhdr_t  h = { 0, GENL_ID_CTRL, NLM_F_REQUEST, ++nl_seq, 0 };
+    genlhdr_t g = { CTRL_CMD_GETFAMILY, 1, 0 };
+    memcpy(buf, &h, sizeof h);
+    memcpy(buf + sizeof h, &g, sizeof g);
+    u32 off = nla_put(buf, (u32)(sizeof h + sizeof g), CTRL_ATTR_FAMILY_NAME,
+                      "nl80211", 8);
+    h.len = off;
+    memcpy(buf, &h, sizeof h);
+
+    long n = nl_talk(fd, buf, off, rep, sizeof rep);
+    if (n <= 0)
+        return -1;
+
+    /* Walk the attributes for the id. */
+    u32 p = (u32)(sizeof(nlhdr_t) + sizeof(genlhdr_t));
+    while (p + sizeof(nlattr_t) <= (u32)n) {
+        nlattr_t a;
+        memcpy(&a, rep + p, sizeof a);
+        if (a.nla_len < sizeof a)
+            break;
+        if (a.nla_type == CTRL_ATTR_FAMILY_ID && a.nla_len >= sizeof a + 2) {
+            u16 id;
+            memcpy(&id, rep + p + sizeof a, sizeof id);
+            return (int)id;
+        }
+        p += (a.nla_len + 3u) & ~3u;
+    }
+    return -1;
+}
+
+static int set_powersave(const char *iface, bool on)
+{
+    int idx = 0;
+    if (net_if_index(iface, &idx) < 0 || idx <= 0) {
+        dprintf(STDERR_FILENO, "net: no interface called %s\n", iface);
+        return 1;
+    }
+
+    long fd = lp_socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
+    if (fd < 0) {
+        dprintf(STDERR_FILENO, "net: cannot open netlink (%ld)\n", -fd);
+        return 1;
+    }
+
+    int fam = nl80211_family((int)fd);
+    if (fam < 0) {
+        dprintf(STDERR_FILENO,
+                "net: this kernel has no nl80211 - no WiFi driver is loaded\n");
+        lp_close((int)fd);
+        return 1;
+    }
+
+    u8 buf[512], rep[8192];
+    memset(buf, 0, sizeof buf);
+    nlhdr_t  h = { 0, (u16)fam, NLM_F_REQUEST | NLM_F_ACK, ++nl_seq, 0 };
+    genlhdr_t g = { NL80211_CMD_SET_POWER_SAVE, 0, 0 };
+    memcpy(buf, &h, sizeof h);
+    memcpy(buf + sizeof h, &g, sizeof g);
+    u32 off = (u32)(sizeof h + sizeof g);
+    u32 ifidx = (u32)idx;
+    off = nla_put(buf, off, NL80211_ATTR_IFINDEX, &ifidx, sizeof ifidx);
+    u32 state = on ? NL80211_PS_ENABLED : NL80211_PS_DISABLED;
+    off = nla_put(buf, off, NL80211_ATTR_PS_STATE, &state, sizeof state);
+    h.len = off;
+    memcpy(buf, &h, sizeof h);
+
+    long r = nl_talk((int)fd, buf, off, rep, sizeof rep);
+    lp_close((int)fd);
+
+    if (r != 0) {
+        dprintf(STDERR_FILENO,
+                "net: the driver refused to change power save (%ld)\n", r);
+        return 1;
+    }
+    printf("net: power save %s on %s\n", on ? "on" : "off", iface);
+    if (!on)
+        printf("net:   the chip stays awake, so the router does not lose it\n");
+    return 0;
+}
+
 static void usage(void)
 {
     printf("net - set up the network, and say where it broke\n\n");
@@ -613,7 +779,8 @@ static void usage(void)
     printf("  net wifi forget           stop joining it\n");
     printf("  net dhcp [interface]      ask the router for an address\n");
     printf("  net static <ip> <mask> <gateway> [dns]\n");
-    printf("  net dns <server>...       set the nameservers\n\n");
+    printf("  net dns <server>...       set the nameservers\n");
+    printf("  net powersave off|on [if]  keep the WiFi chip awake\n\n");
     printf("'net wifi' saves to the boot partition as well as here,\n");
     printf("because that copy wins at every boot - writing only the local\n");
     printf("one looks like it worked until you reboot.\n\n");
@@ -658,6 +825,15 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(cmd, "static") == 0) return set_static(argc, argv, 2);
+    if (strcmp(cmd, "powersave") == 0) {
+        if (argc < 3 || (strcmp(argv[2], "off") != 0 &&
+                         strcmp(argv[2], "on") != 0)) {
+            dprintf(STDERR_FILENO, "usage: net powersave off|on [interface]\n");
+            return 2;
+        }
+        return set_powersave(argc > 3 ? argv[3] : "wlan0",
+                             strcmp(argv[2], "on") == 0);
+    }
     if (strcmp(cmd, "dns") == 0) {
         if (argc < 3) {
             dprintf(STDERR_FILENO, "usage: net dns <server>...\n");

@@ -466,7 +466,16 @@ echo "[rc] reading settings from the boot partition"
 # while the file exists on /boot, /boot is the source of truth, and
 # editing the copy on the machine achieves nothing. To manage the
 # setting from the machine instead, delete the file from /boot.
-cp -q /boot/wpa_supplicant.conf /data/wpa_supplicant.conf && echo "[rc]   took the WiFi settings (delete it from /boot to manage them here)"
+if cp -q /boot/wpa_supplicant.conf /data/wpa_supplicant.conf; then
+    # FAT has no permissions, so everything read from /boot arrives 0755.
+    # This file holds the WiFi password. World-readable and executable is
+    # wrong for it twice over, and defend says so on every boot -
+    # "/data/wpa_supplicant.conf is executable, and that is a place for
+    # data" - which trains whoever owns the board to skim past defend's
+    # output, which is where the reports that matter also are.
+    chmod 0600 /data/wpa_supplicant.conf
+    echo "[rc]   took the WiFi settings (delete it from /boot to manage them here)"
+fi
 
 echo "[rc] SSH keys"
 # Losing the data partition must not lock the owner out of their own
@@ -523,6 +532,39 @@ echo "[rc] WiFi configuration"
 # setting from the machine: delete the file from /boot and this one
 # wins from then on.
 cat /boot/wpa_supplicant.conf > /etc/wpa.conf || cat /data/wpa_supplicant.conf > /etc/wpa.conf || cat /etc/wpa_supplicant.conf > /etc/wpa.conf
+# The working copy has the password in it too, and it is on the RAM root
+# where every process can reach it.
+chmod 0600 /etc/wpa.conf
+
+# Keep the WiFi chip awake.
+#
+# brcmfmac enables power save by default: the chip sleeps between
+# beacons, saves a little current, and stops answering. What that looks
+# like from outside is a board that boots fine, works fine, and then a
+# few idle minutes later is gone - LED on, USB link up, ssh timing out -
+# until something wakes it. The router dropped a station that was asleep
+# when it asked. On a board whose whole job is to sit somewhere and be
+# reachable that is not a trade worth making, and it is the single most
+# reported symptom on this hardware.
+#
+# There is no module parameter and no sysfs file for it; nl80211 is the
+# only way, which is what `net powersave` speaks.
+#
+# The wait is for the firmware. brcmfmac creates wlan0 only after the
+# firmware has loaded off the card, which takes a second or two on a
+# Zero W, and rc gets here before that. Five seconds is generous for
+# that and short enough not to be felt on a board with no WiFi at all.
+i=0
+while [ $i -lt 10 ]; do
+    if [ -e /sys/class/net/wlan0 ]; then
+        net powersave off wlan0 > /dev/null 2>&1 \
+            && echo "[rc]   WiFi power save off (the chip stays reachable)" \
+            || echo "[rc]   could not turn WiFi power save off - 'net powersave off' to retry"
+        break
+    fi
+    sleep 0.5
+    i=`expr $i + 1`
+done
 
 echo "[rc] checking the SSH host key"
 # dropbear makes a new host key when the file is missing (-R), but a file

@@ -326,8 +326,18 @@ for tool in e2fsck mke2fs; do
     fi
 done
 
+# When this image was built.
+#
+# A board with no battery-backed clock starts at 1970 on its first boot
+# and stays there until the network gives it a time. If the network is
+# the broken thing, that is for ever, and every log line carries the
+# same timestamp. `ntp -r` uses this as a floor: not the right time, but
+# a true lower bound, and enough to put the log in order.
+date +%s > "${ROOT_DIR}/etc/build-epoch"
+log "etc/build-epoch  $(cat "${ROOT_DIR}/etc/build-epoch") ($(date -u -d @"$(cat "${ROOT_DIR}/etc/build-epoch")" '+%Y-%m-%d %H:%M:%S') UTC)"
+
 echo ""
-log "etc/: rc, wpa_supplicant.conf, authorized_keys, passwd, group, motd, boot-tools.sha256"
+log "etc/: rc, wpa_supplicant.conf, authorized_keys, passwd, group, motd, boot-tools.sha256, build-epoch"
 
 # ── 장치 노드 ────────────────────────────────────────────────────
 # 커널은 init 실행 전 /dev/console 을 열어 fd 0,1,2 로 준다.

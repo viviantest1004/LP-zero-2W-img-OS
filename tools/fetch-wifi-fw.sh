@@ -66,6 +66,52 @@ for f in "${OPTIONAL[@]}"; do
     fi
 done
 
+# ── CLM, from linux-firmware ─────────────────────────────────────
+#
+# The regulatory/channel table. Without it brcmfmac says
+#
+#   brcmf_c_process_clm_blob: no clm_blob available (err=-2),
+#                             device may have limited channels
+#
+# and the chip falls back to a conservative channel set with no
+# per-channel transmit power calibration.
+#
+# It is not in RPi-Distro/firmware-nonfree under the brcmfmac name,
+# which is why looking for it there finds nothing: upstream it lives in
+# linux-firmware under Cypress's own name, cyfmac43430-sdio.clm_blob,
+# and the brcmfmac name is a symlink to it. A symlink is not something
+# raw.githubusercontent serves as a file, so fetching the brcmfmac name
+# returns 404 and the conclusion "this chip has no CLM" - which is what
+# we concluded, and it was wrong.
+LF_BASE="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain"
+echo ""
+echo "linux-firmware 에서 CLM 받는 중..."
+if curl --fail --location --silent --show-error --retry 4 --retry-delay 2 \
+        --retry-all-errors -o "${OUT}/brcmfmac43430-sdio.clm_blob" \
+        "${LF_BASE}/cypress/cyfmac43430-sdio.clm_blob"; then
+    printf "  OK    %-34s %s bytes\n" "brcmfmac43430-sdio.clm_blob" \
+        "$(stat -c%s "${OUT}/brcmfmac43430-sdio.clm_blob")"
+else
+    rm -f "${OUT}/brcmfmac43430-sdio.clm_blob"
+    printf "  없음  brcmfmac43430-sdio.clm_blob (채널이 제한될 수 있습니다)\n"
+fi
+
+# ── Board-name aliases ───────────────────────────────────────────
+#
+# brcmfmac asks for the NVRAM under the board's device-tree name first
+# and falls back to the generic one. Upstream the board name is a
+# symlink to the generic file - the contents are the same - so this is
+# not different calibration, it is the same file under the name the
+# driver looks for first. It costs a kilobyte and removes a failed
+# firmware request from every boot log.
+echo ""
+echo "보드 이름 별칭 생성"
+for board in "raspberrypi,model-zero-w" "raspberrypi,model-zero-2-w"; do
+    src="${OUT}/brcmfmac43430-sdio.txt"
+    [[ -f "$src" ]] && { cp "$src" "${OUT}/brcmfmac43430-sdio.${board}.txt"; \
+        printf "  brcmfmac43430-sdio.%s.txt\n" "$board"; }
+done
+
 # BCM43430/2 보드용 별칭.
 # 드라이버가 43430c0 이라는 이름으로 요청하지만 배포되는 파일은 43436 이다.
 # 심볼릭 링크가 아니라 복사본으로 둔다 - FAT 파티션이나 cpio 를 거칠 때
