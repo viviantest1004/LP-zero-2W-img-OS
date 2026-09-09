@@ -65,6 +65,42 @@
 #define INDEX     "/data/pkg/index"
 #define TMP_FILE  "/data/pkg/.download"
 
+/* ── Which packages this machine can run ─────────────────────────────
+ *
+ * A package holds compiled programs, so an index that mixes the three
+ * machines this system runs on would hand an aarch64 binary to a Pi
+ * Zero W. It would install perfectly and then fail at exec with
+ * "cannot execute binary file", which reads like a corrupt download.
+ *
+ * So the repository has one index per architecture, and the name is
+ * decided here at compile time - the binary asking for the index is
+ * itself proof of what the machine is. */
+#if defined(__x86_64__)
+#  define PKG_ARCH "amd64"
+#elif defined(__aarch64__)
+#  define PKG_ARCH "arm64"
+#elif defined(__arm__)
+#  define PKG_ARCH "armv6"
+#else
+#  error "pkg has no repository name for this architecture"
+#endif
+
+/* Where packages come from when nobody has said otherwise.
+ *
+ * There is a default at all because the alternative was what this used
+ * to do: refuse every command with "no repository set (pkg repo <url>)"
+ * on a machine where there was no URL to type - nothing was published
+ * anywhere. A package manager with no packages is not a feature that
+ * needs configuring, it is a feature that does not exist.
+ *
+ * raw.githubusercontent.com rather than a release page: it is a plain
+ * static file served over TLS, with no API, no token and no redirect to
+ * a signed URL that expires. Change it with `pkg repo <url>` - a
+ * directory of files on any web server will do, and tools/mkpkg.sh
+ * builds one. */
+#define DEFAULT_REPO \
+    "https://raw.githubusercontent.com/viviantest1004/LP-zero-2W-img-OS/main/repo"
+
 /* SHA-256 is in the libc - sha256sum wants it too, and one copy of a
  * hash function is the right number. See lp_sha256_file in unistd.h. */
 
@@ -519,16 +555,30 @@ static int cmd_remove(const char *name)
     return 0;
 }
 
-static bool repo_url(char *out, size_t size)
+/* The repository somebody chose, or the built-in one. */
+static bool repo_base(char *out, size_t size)
 {
     char buf[512];
-    if (proc_read(REPO_FILE, buf, sizeof(buf)) <= 0)
+    if (proc_read(REPO_FILE, buf, sizeof(buf)) > 0) {
+        char *nl = strchr(buf, '\n');
+        if (nl) *nl = '\0';
+        if (buf[0]) {
+            strlcpy(out, buf, size);
+            return true;
+        }
+    }
+    strlcpy(out, DEFAULT_REPO, size);
+    return true;
+}
+
+/* That, with this machine's architecture on the end - which is the
+ * directory the index and the packages are actually in. */
+static bool repo_url(char *out, size_t size)
+{
+    char base[512];
+    if (!repo_base(base, sizeof(base)))
         return false;
-    char *nl = strchr(buf, '\n');
-    if (nl) *nl = '\0';
-    if (!buf[0])
-        return false;
-    strlcpy(out, buf, size);
+    snprintf(out, size, "%s/" PKG_ARCH, base);
     return true;
 }
 
@@ -537,11 +587,13 @@ static int cmd_repo(const char *url)
     char cur[512];
 
     if (!url) {
-        if (repo_url(cur, sizeof(cur)))
-            printf("%s\n", cur);
-        else
-            printf("no repository set. Set one with:\n"
-                   "  pkg repo https://your.server/lpzero\n");
+        char base[512];
+        repo_base(base, sizeof(base));
+        repo_url(cur, sizeof(cur));
+        printf("%s\n", base);
+        if (strcmp(base, DEFAULT_REPO) == 0)
+            printf("  (the built-in default)\n");
+        printf("  packages for this machine come from %s\n", cur);
         return 0;
     }
 
@@ -565,10 +617,8 @@ static int cmd_repo(const char *url)
 static int cmd_update(void)
 {
     char base[512];
-    if (!repo_url(base, sizeof(base))) {
-        dprintf(STDERR_FILENO, "pkg: no repository set (pkg repo <url>)\n");
+    if (!repo_url(base, sizeof(base)))
         return 1;
-    }
 
     ensure_dirs();
 
@@ -670,19 +720,28 @@ static int cmd_search(const char *text)
 static int cmd_install(const char *name)
 {
     char base[512];
-    if (!repo_url(base, sizeof(base))) {
-        dprintf(STDERR_FILENO,
-                "pkg: no repository set.\n"
-                "     pkg repo <url>, then pkg update\n"
-                "     or install a file you already have: pkg add <file.tar>\n");
+    if (!repo_url(base, sizeof(base)))
         return 1;
-    }
 
     entry_t e;
     if (!index_find(name, &e)) {
-        dprintf(STDERR_FILENO,
-                "pkg: %s is not in the index (try 'pkg update')\n", name);
-        return 1;
+        /* No index yet, or an old one. Fetch it and look again rather
+         * than telling somebody to type `pkg update` first: they have
+         * already said what they want, and the machine knows how to
+         * find out whether it can be had. Only once, though - a second
+         * failure is a package that is not there. */
+        if (!lp_exists(INDEX)) {
+            if (cmd_update() != 0)
+                return 1;
+        }
+        if (!index_find(name, &e)) {
+            dprintf(STDERR_FILENO,
+                    "pkg: %s is not in %s\n", name, base);
+            dprintf(STDERR_FILENO,
+                    "pkg:   `pkg update` refreshes the list,"
+                    " `pkg search` shows what is in it\n");
+            return 1;
+        }
     }
 
     ensure_dirs();
