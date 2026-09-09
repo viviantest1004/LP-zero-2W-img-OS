@@ -292,9 +292,29 @@ This partition is FAT32, so Windows and macOS can both see it.
 Edit the two files below and the next boot picks them up. You do not
 have to burn the card again.
 
-  authorized_keys       The SSH public key allowed to log in.
-                        *** Without this, nobody can connect. ***
-                        On the PC you will connect from:
+  authorized_keys       The SSH public keys allowed to log in.
+
+                        You do not have to fill this in. On its first
+                        boot, a card with no key in it makes one for
+                        itself and leaves the private half here as
+
+                            lp_ssh_key
+
+                        along with the ssh command to use it, printed on
+                        the console. That key is generated on the board,
+                        is different on every machine, and has never
+                        existed anywhere else - so copy it off, keep it,
+                        and it is yours:
+
+                            ssh -i lp_ssh_key root@<the address it got>
+
+                        (Copy it somewhere your PC keeps private and
+                        chmod 600 it; ssh refuses a key file the whole
+                        machine can read.)
+
+                        To use your own key instead, put its public half
+                        here before the first boot. On the PC you will
+                        connect from:
                             ssh-keygen -t ed25519 -f ~/.ssh/lpzero
                             type %USERPROFILE%\.ssh\lpzero.pub   (Windows)
                             cat ~/.ssh/lpzero.pub                (macOS/Linux)
@@ -327,15 +347,16 @@ have to burn the card again.
   cmdline.txt           The kernel command line.
 
 How to connect
-  1. Fill in the two files above
+  1. Fill in wpa_supplicant.conf (authorized_keys is optional - see above)
   2. Put the card in and apply power
   3. Find the address it was given, in your router's admin page
      (it is also printed on the serial console)
   4. ssh -i ~/.ssh/lpzero root@<that address>
+     (or ssh -i lp_ssh_key, using the key the board made for itself)
 
 Password authentication was left out of the build entirely. On a machine
-open to a network a password is just a target for brute force. With no
-public key, nobody gets in - including you.
+open to a network a password is just a target for brute force. Only a
+key gets in - so keep lp_ssh_key, or replace it with your own.
 
 This partition is labelled LPZERO, and the machine will not mount one
 that is not. That matters when booting from USB with some other SD card
@@ -539,7 +560,12 @@ if command -v debugfs >/dev/null 2>&1; then
     # 첫 부팅에 쓸 WiFi 설정. SD 를 다시 굽지 않고 여기만 고쳐서
     # 공유기 설정을 바꿀 수 있다.
     WPA_SRC="${REPO_ROOT}/boot/rootfs-overlay/etc/wpa_supplicant.conf"
-    [[ -f "$WPA_SRC" ]] && d_put "$WPA_SRC" wpa_supplicant.conf \
+    # 0100644 을 명시한다. debugfs 의 write 가 원본 모드를 따라가는
+    # 버전이 있어서, 실행 권한이 붙은 채로 들어가면 defend 가 매 부팅
+    # "/data/wpa_supplicant.conf is executable, and that is a place for
+    # data" 를 보고한다. 설정 파일 하나 때문에 보안 도구가 늑대를
+    # 외치게 두면, 진짜 보고를 사람이 안 읽게 된다.
+    [[ -f "$WPA_SRC" ]] && d_put "$WPA_SRC" wpa_supplicant.conf 0100644 \
         && log "데이터: wpa_supplicant.conf"
 
     # 파이썬을 시스템(initramfs)이 아니라 여기에 두는 이유는 크기다.

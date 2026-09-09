@@ -484,8 +484,29 @@ echo "[rc] SSH keys"
 #             any filesystem can reach it; only writing a new card can.
 #
 # authkey exits non-zero when the result is empty, which is the one state
-# worth shouting about.
-authkey || echo "[rc]   ** nobody can log in over SSH. Run `authkey new` here - it makes a key and prints how to connect."
+# worth doing something about - and doing something is better than saying
+# something. A card with no key is unreachable, this board has no
+# ethernet and no passwords, and the only other route is to power it
+# down and find a computer with a card slot.
+#
+# So a fresh card makes itself a key: generated here from the kernel's
+# randomness, different on every machine, and never anywhere else. The
+# private half lands on the FAT boot partition, which any computer can
+# read, and `authkey new` prints the ssh command to use it.
+#
+# This is what was already happening, by accident. The line used to be
+#
+#   authkey || echo "... Run `authkey new` here ..."
+#
+# and those backticks are command substitution inside a double-quoted
+# string: the sentence meant to tell somebody to run it ran it. The
+# effect was right and nothing said so, the message came out mangled
+# around the captured output, and it would have quietly stopped the day
+# the shell learned to warn about backticks.
+if ! authkey; then
+    echo "[rc]   no key can log in yet - making one for this machine"
+    authkey new
+fi
 
 echo "[rc] WiFi configuration"
 # The boot partition wins, then the data partition, then the image.
