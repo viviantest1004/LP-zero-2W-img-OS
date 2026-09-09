@@ -38,18 +38,34 @@
 #include "stdlib.h"
 #include "unistd.h"
 #include "disk.h"
+#include "net.h"
 
 #define ROOT        "/data/debian"
 #define MARKER      ROOT "/etc/debian_version"
-#define SOURCES     ROOT "/etc/apt/sources.list"
+/* Where the list of mirrors goes.
+ *
+ * The deb822 file under sources.list.d, not the one-line
+ * /etc/apt/sources.list. Debian moved to this format in trixie and the
+ * base image ships one already; writing the old file as well left every
+ * suite configured twice, and apt then printed six "is configured
+ * multiple times" warnings before and after every single command. It
+ * still worked, and it looked broken, which for a package manager is
+ * nearly as bad. */
+#define SOURCES     ROOT "/etc/apt/sources.list.d/debian.sources"
+#define OLD_SOURCES ROOT "/etc/apt/sources.list"
 #define RESOLV      ROOT "/etc/resolv.conf"
 
-/* Which Debian, and where from.
+/* Which Debian.
  *
- * Bookworm rather than the newest: this is a board that gets left
- * alone for months, and the point of a stable release is that its
- * package versions stop moving. */
-#define SUITE       "bookworm"
+ * trixie - Debian 13, the current stable release. A stable release is
+ * the point: this is a board that gets left alone for months and its
+ * package versions should stop moving.
+ *
+ * It is also the only suite all three architectures have. The armel
+ * branch carries trixie and stable and no bookworm at all, so pinning
+ * bookworm - which is what this said before - would have left the Pi
+ * Zero W with nothing to install even after everything else was fixed. */
+#define SUITE       "trixie"
 
 /* http, not https, and deliberately.
  *
@@ -75,19 +91,61 @@
  * CA store, so it works - and the file itself says so. */
 #define MIRROR      "http://deb.debian.org/debian"
 
-/* The base tarball. debuerreotype builds these - they are what the
- * official Debian container images are made from, one per architecture,
- * and they are a plain tar of a working Debian root. */
-#define BASE_URL_BASE \
-    "https://github.com/debuerreotype/docker-debian-artifacts/raw/dist-"
+/* ── The base filesystem, and where it comes from ────────────────────
+ *
+ * debuerreotype builds these: they are what the official Debian
+ * container images are made from, one per architecture, and each is a
+ * plain gzipped tar of a working Debian root. They are committed to a
+ * git branch, so raw.githubusercontent.com serves them as static files
+ * over TLS - no API, no token, no expiring signed URL.
+ *
+ * The "slim" variant, which is the same tree with the documentation
+ * and locales left out: 28MB instead of 47MB to fetch and 98MB instead
+ * of 142MB on the card, with apt and dpkg both present. On a board
+ * whose whole system image is 11MB that difference is worth having.
+ *
+ * This used to go through a Python script to images.linuxcontainers.org,
+ * which fetched a .tar.xz and unpacked it with Python's tarfile. Two
+ * problems with that, and the second is fatal: there is no Python on
+ * this image, and the only 32-bit ARM build that server has is armhf,
+ * which is ARMv7 and will not execute one instruction on a Pi Zero W.
+ * Now the download is net_http_get, the decompression is our gzip and
+ * the unpacking is our tar, and nothing else has to be installed first.
+ */
 
+/* Debian's name for the machine, and debuerreotype's name for the
+ * branch, which are not the same string - the branch is named after the
+ * Docker platform (arm64v8, arm32v5) and the port is named after the
+ * ABI (arm64, armel).
+ *
+ * armel and not armhf for the Pi Zero W. armhf has an ARMv7 baseline;
+ * the ARM1176 in a Zero W is ARMv6, and every armhf binary that uses a
+ * movw or a Thumb-2 encoding - which is most of them - dies with SIGILL
+ * on it. armel's baseline is ARMv5TE, which an ARM1176 runs. This is
+ * the same distinction that made the rest of this port use an armel
+ * cross compiler; see tools/build-thirdparty.sh. */
 #if defined(__x86_64__)
-#  define DEB_ARCH "amd64"
+#  define DEB_ARCH   "amd64"
+#  define DEB_BRANCH "amd64"
 #elif defined(__aarch64__)
-#  define DEB_ARCH "arm64"
+#  define DEB_ARCH   "arm64"
+#  define DEB_BRANCH "arm64v8"
+#elif defined(__arm__)
+#  define DEB_ARCH   "armel"
+#  define DEB_BRANCH "arm32v5"
 #else
-#  define DEB_ARCH "unknown"
+#  error "apt has no Debian architecture for this machine"
 #endif
+
+#define BASE_URL \
+    "https://raw.githubusercontent.com/debuerreotype/" \
+    "docker-debian-artifacts/dist-" DEB_BRANCH "/" SUITE \
+    "/slim/oci/blobs/rootfs.tar.gz"
+
+/* Where the download and the intermediate tar live while unpacking. On
+ * /data, not /tmp: /tmp is in RAM here and this is a hundred megabytes. */
+#define TARGZ  "/data/.debian-base.tar.gz"
+#define TARBALL "/data/.debian-base.tar"
 
 static const char *me = "apt";
 
@@ -233,16 +291,9 @@ static int cmd_setup(bool quiet)
         return 0;
     }
 
-    if (strcmp(DEB_ARCH, "unknown") == 0) {
-        dprintf(STDERR_FILENO,
-                "%s: this build does not know what Debian calls its own"
-                " architecture\n", me);
-        return 1;
-    }
-
     printf("%s: setting up Debian %s (%s) under %s\n",
            me, SUITE, DEB_ARCH, ROOT);
-    printf("%s:   this downloads about 95MB and unpacks to about 440MB.\n",
+    printf("%s:   this downloads about 28MB and unpacks to about 98MB.\n",
            me);
     printf("%s:   Measured, not estimated - a Debian base is not small,\n",
            me);
@@ -252,17 +303,17 @@ static int cmd_setup(bool quiet)
            " undoes all of it.\n", me, ROOT);
     printf("\n");
 
-    /* Room to work: the tarball, plus what it unpacks to, plus slack
-     * for the first apt update. Checking now beats filling the data
-     * partition and finding out when something else fails. */
+    /* Room to work: the download, the tar it decompresses to, the tree
+     * that comes out of it, and slack for the first apt update. About
+     * 230MB at the peak; 500MB leaves room to install something
+     * afterwards, which is the point of setting this up at all.
+     *
+     * Checking now beats filling the data partition and finding out
+     * when something else fails - a tree that is there but half
+     * unpacked is harder to recover from than one that never started. */
     u64 freeb = 0, totalb = 0;
     if (lp_fs_space("/data", &freeb, &totalb) == 0) {
-        /* 440MB unpacked, plus the archive while it is being unpacked,
-         * plus room for apt's own lists and whatever gets installed
-         * next. Running the data partition dry half way through leaves
-         * a tree that is there but broken, which is harder to recover
-         * from than not starting. */
-        u64 need = 900ULL * 1024 * 1024;
+        u64 need = 500ULL * 1024 * 1024;
         if (freeb < need) {
             dprintf(STDERR_FILENO,
                     "%s: /data has %lu MB free and this needs about %lu MB.\n",
@@ -277,35 +328,56 @@ static int cmd_setup(bool quiet)
 
     mkdirs(ROOT);
 
-    /* The download and the unpack are in /etc/apt-setup.py.
+    /* ── download, decompress, unpack ────────────────────────────────
      *
-     * Working out which build is current means reading an HTML index;
-     * the archive is xz and full of device nodes, hard links and setuid
-     * bits. Python does all three properly and our tar does none of
-     * them - it reads uncompressed ustar, which is the right amount of
-     * tar for pkg and nowhere near enough for a Debian root.
-     *
-     * Python is here whenever glibc is, and glibc is what makes running
-     * Debian binaries possible at all. An image without it could not
-     * have run apt anyway. */
-    const char *py = exists("/data/bin/python") ? "/data/bin/python"
-                   : exists("/data/python/bin/python3.12")
-                     ? "/data/python/bin/python3.12" : NULL;
-    if (!py) {
+     * Three of our own programs and nothing else. net_http_get does TLS
+     * with the roots compiled into the libc and follows the redirect
+     * GitHub answers with; gzip does the whole of DEFLATE in a 32KB
+     * window, so a 95MB stream costs the same memory as a 4KB one; tar
+     * restores hard links, device nodes, setuid bits, ownership and
+     * times, which a Debian root needs all of - without them the tree
+     * unpacks and then cannot su, cannot mount and cannot passwd. */
+    lp_unlink(TARGZ);
+    lp_unlink(TARBALL);
+
+    printf("%s: fetching %s\n", me, BASE_URL);
+    long got = net_http_get(BASE_URL, TARGZ);
+    if (got < 0) {
         dprintf(STDERR_FILENO,
-                "%s: this needs Python, which is not on this image.\n"
-                "%s:   An image without Python has no glibc either, and\n"
-                "%s:   Debian binaries cannot run without one.\n",
-                me, me, me);
+                "%s: the download failed.\n"
+                "%s:   `net` says whether this machine can reach anything,"
+                " and\n"
+                "%s:   HTTPS fails outright when the clock is far wrong -"
+                " try `ntp`.\n", me, me, me);
+        lp_unlink(TARGZ);
+        return 1;
+    }
+    printf("%s: %ld MB downloaded, decompressing\n", me, got / 1048576);
+
+    /* gzip -d leaves TARBALL where TARGZ was and removes TARGZ, so the
+     * two never both exist at full size. */
+    char *gz_args[] = { (char *)"gzip", (char *)"-d", (char *)TARGZ, NULL };
+    if (run_wait("/bin/gzip", gz_args) != 0 || !exists(TARBALL)) {
+        dprintf(STDERR_FILENO,
+                "%s: could not decompress the download - it was not"
+                " gzip, or the transfer was damaged\n", me);
+        lp_unlink(TARGZ);
+        lp_unlink(TARBALL);
         return 1;
     }
 
-    char *py_args[] = {
-        (char *)py, (char *)"/etc/apt-setup.py",
-        (char *)DEB_ARCH, (char *)ROOT, (char *)"/data/ssl/cert.pem", NULL
-    };
-    if (run_wait(py, py_args) != 0)
+    printf("%s: unpacking into %s\n", me, ROOT);
+    char *tar_args[] = { (char *)"tar", (char *)"-x",
+                         (char *)TARBALL, (char *)ROOT, NULL };
+    int trc = run_wait("/bin/tar", tar_args);
+    lp_unlink(TARBALL);
+    if (trc != 0) {
+        dprintf(STDERR_FILENO,
+                "%s: unpacking failed. A half-unpacked tree is worse than"
+                " none -\n"
+                "%s:   `rm -rf %s` and try again.\n", me, me, ROOT);
         return 1;
+    }
 
     if (!exists(MARKER)) {
         dprintf(STDERR_FILENO,
@@ -317,22 +389,37 @@ static int cmd_setup(bool quiet)
     /* Where packages come from. The base tarball ships a sources.list
      * pointing at a snapshot, which is right for a container built to
      * be reproducible and wrong for a machine that wants updates. */
-    mkdirs(ROOT "/etc/apt");
+    mkdirs(ROOT "/etc/apt/sources.list.d");
+
+    /* The base image ships a one-line sources.list too, and anything
+     * left in it is a second copy of every suite below. */
+    lp_unlink(OLD_SOURCES);
+
     if (!write_file(SOURCES,
         "# Written by `apt setup` on linux-LP.\n"
         "#\n"
         "# http, not https: what makes a package trustworthy here is its\n"
-        "# signature, checked against the Debian archive keys in\n"
-        "# /etc/apt/trusted.gpg.d. TLS would add a second thing that can\n"
-        "# fail - a board with no clock, or a network that inspects TLS -\n"
-        "# without adding anything an attacker could otherwise do.\n"
+        "# signature, checked against the Debian archive keys named in\n"
+        "# Signed-By below, and apt refuses anything that does not\n"
+        "# verify. TLS would add a second thing that can fail - a board\n"
+        "# with no clock, or a network that inspects TLS - without adding\n"
+        "# anything an attacker could otherwise do.\n"
         "#\n"
-        "# Change http to https below if you would rather the network could\n"
-        "# not see which packages you install. It works; the base image\n"
-        "# carries a CA store.\n"
-        "deb " MIRROR " " SUITE " main contrib non-free-firmware\n"
-        "deb " MIRROR "-security " SUITE "-security main contrib non-free-firmware\n"
-        "deb " MIRROR " " SUITE "-updates main contrib non-free-firmware\n")) {
+        "# Change http to https below if you would rather the network\n"
+        "# could not see which packages you install. It works; the base\n"
+        "# image carries a CA store.\n"
+        "\n"
+        "Types: deb\n"
+        "URIs: " MIRROR "\n"
+        "Suites: " SUITE " " SUITE "-updates\n"
+        "Components: main contrib non-free-firmware\n"
+        "Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp\n"
+        "\n"
+        "Types: deb\n"
+        "URIs: " MIRROR "-security\n"
+        "Suites: " SUITE "-security\n"
+        "Components: main contrib non-free-firmware\n"
+        "Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp\n")) {
         dprintf(STDERR_FILENO,
                 "%s: cannot write %s - apt would have nowhere to fetch from\n",
                 me, SOURCES);

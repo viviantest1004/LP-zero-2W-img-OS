@@ -466,7 +466,16 @@ echo "[rc] reading settings from the boot partition"
 # while the file exists on /boot, /boot is the source of truth, and
 # editing the copy on the machine achieves nothing. To manage the
 # setting from the machine instead, delete the file from /boot.
-cp -q /boot/wpa_supplicant.conf /data/wpa_supplicant.conf && echo "[rc]   took the WiFi settings (delete it from /boot to manage them here)"
+if cp -q /boot/wpa_supplicant.conf /data/wpa_supplicant.conf; then
+    # FAT has no permissions, so everything read from /boot arrives 0755.
+    # This file holds the WiFi password. World-readable and executable is
+    # wrong for it twice over, and defend says so on every boot -
+    # "/data/wpa_supplicant.conf is executable, and that is a place for
+    # data" - which trains whoever owns the board to skim past defend's
+    # output, which is where the reports that matter also are.
+    chmod 0600 /data/wpa_supplicant.conf
+    echo "[rc]   took the WiFi settings (delete it from /boot to manage them here)"
+fi
 
 echo "[rc] SSH keys"
 # Losing the data partition must not lock the owner out of their own
@@ -484,8 +493,29 @@ echo "[rc] SSH keys"
 #             any filesystem can reach it; only writing a new card can.
 #
 # authkey exits non-zero when the result is empty, which is the one state
-# worth shouting about.
-authkey || echo "[rc]   ** nobody can log in over SSH. Run `authkey new` here - it makes a key and prints how to connect."
+# worth doing something about - and doing something is better than saying
+# something. A card with no key is unreachable, this board has no
+# ethernet and no passwords, and the only other route is to power it
+# down and find a computer with a card slot.
+#
+# So a fresh card makes itself a key: generated here from the kernel's
+# randomness, different on every machine, and never anywhere else. The
+# private half lands on the FAT boot partition, which any computer can
+# read, and `authkey new` prints the ssh command to use it.
+#
+# This is what was already happening, by accident. The line used to be
+#
+#   authkey || echo "... Run `authkey new` here ..."
+#
+# and those backticks are command substitution inside a double-quoted
+# string: the sentence meant to tell somebody to run it ran it. The
+# effect was right and nothing said so, the message came out mangled
+# around the captured output, and it would have quietly stopped the day
+# the shell learned to warn about backticks.
+if ! authkey; then
+    echo "[rc]   no key can log in yet - making one for this machine"
+    authkey new
+fi
 
 echo "[rc] WiFi configuration"
 # The boot partition wins, then the data partition, then the image.
@@ -502,6 +532,39 @@ echo "[rc] WiFi configuration"
 # setting from the machine: delete the file from /boot and this one
 # wins from then on.
 cat /boot/wpa_supplicant.conf > /etc/wpa.conf || cat /data/wpa_supplicant.conf > /etc/wpa.conf || cat /etc/wpa_supplicant.conf > /etc/wpa.conf
+# The working copy has the password in it too, and it is on the RAM root
+# where every process can reach it.
+chmod 0600 /etc/wpa.conf
+
+# Keep the WiFi chip awake.
+#
+# brcmfmac enables power save by default: the chip sleeps between
+# beacons, saves a little current, and stops answering. What that looks
+# like from outside is a board that boots fine, works fine, and then a
+# few idle minutes later is gone - LED on, USB link up, ssh timing out -
+# until something wakes it. The router dropped a station that was asleep
+# when it asked. On a board whose whole job is to sit somewhere and be
+# reachable that is not a trade worth making, and it is the single most
+# reported symptom on this hardware.
+#
+# There is no module parameter and no sysfs file for it; nl80211 is the
+# only way, which is what `net powersave` speaks.
+#
+# The wait is for the firmware. brcmfmac creates wlan0 only after the
+# firmware has loaded off the card, which takes a second or two on a
+# Zero W, and rc gets here before that. Five seconds is generous for
+# that and short enough not to be felt on a board with no WiFi at all.
+i=0
+while [ $i -lt 10 ]; do
+    if [ -e /sys/class/net/wlan0 ]; then
+        net powersave off wlan0 > /dev/null 2>&1 \
+            && echo "[rc]   WiFi power save off (the chip stays reachable)" \
+            || echo "[rc]   could not turn WiFi power save off - 'net powersave off' to retry"
+        break
+    fi
+    sleep 0.5
+    i=`expr $i + 1`
+done
 
 echo "[rc] checking the SSH host key"
 # dropbear makes a new host key when the file is missing (-R), but a file
@@ -554,6 +617,44 @@ echo "[rc] loopback"
 # being absent.
 ifconfig lo 127.0.0.1 netmask 255.0.0.0 || echo "[rc]   no loopback address"
 ifconfig lo up || echo "[rc]   ** 127.0.0.1 is unreachable - anything that binds to localhost will fail"
+
+echo "[rc] the USB way in"
+# usb0 gets an address before anything touches the wireless, and keeps
+# it whatever the wireless does afterwards.
+#
+# The reason is a failure seen on the board: brcmfmac loses its firmware
+# a few minutes after boot, and the thread that notices is holding RTNL
+# when it wedges. RTNL is one lock for all of networking, so from that
+# moment nothing can change any interface - dhcp cannot bring usb0 up,
+# `ifconfig usb0 up` blocks, and a board whose wireless died takes the
+# wired path down with it. On a headless machine that is the difference
+# between "the WiFi is broken" and "the machine is gone".
+#
+# The lock stops changes, not traffic. A link that was already
+# configured keeps carrying packets while the lock is held - so the way
+# to keep a way in is to configure it before the wireless exists at all.
+# This runs before wpa_supplicant, which init starts after this script.
+#
+# A link-local address is enough: this is a cable to one PC, there is no
+# router on it, and 169.254.0.0/16 is what both ends would negotiate
+# anyway. The last two bytes come from the interface's own MAC so two
+# boards on one desk do not collide.
+if [ -e /sys/class/net/usb0 ]; then
+    o5=`cut -d: -f5 /sys/class/net/usb0/address`
+    o6=`cut -d: -f6 /sys/class/net/usb0/address`
+    a=`printf '%d' 0x$o5`
+    b=`printf '%d' 0x$o6`
+    # 0 and 255 are the network and broadcast of their own /24, and
+    # 169.254.0.x and 169.254.255.x are reserved by RFC 3927.
+    if [ "$a" = "0" ]; then a=1; fi
+    if [ "$a" = "255" ]; then a=254; fi
+    if [ "$b" = "0" ]; then b=1; fi
+    if [ "$b" = "255" ]; then b=254; fi
+    ll=169.254.$a.$b
+    ifconfig usb0 $ll netmask 255.255.0.0 > /dev/null 2>&1 && ifconfig usb0 up > /dev/null 2>&1 && echo "[rc]   usb0 is up at $ll - ssh there over the USB cable" || echo "[rc]   usb0 is here but would not come up"
+else
+    echo "[rc]   no usb0 yet (nothing plugged into the USB port, or the gadget is off)"
+fi
 
 echo "[rc] name resolution"
 # A fallback nameserver, written before DHCP runs and overwritten by it

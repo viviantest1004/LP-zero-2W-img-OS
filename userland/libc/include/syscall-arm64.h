@@ -114,6 +114,8 @@
 #define SYS_wait4           260
 #define SYS_getrandom       278
 
+#define SYS_utimensat      88      
+
 /* ── Raw system call wrappers ──
  * The registers must be named explicitly, or the compiler picks its own.
  * The "memory" clobber says the call may change memory. */

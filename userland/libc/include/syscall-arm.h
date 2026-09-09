@@ -115,6 +115,12 @@
  * There is no downside. A relative timeout does not care about 2038,
  * and 414 has been in every kernel since 5.1. */
 #define SYS_ppoll           414
+
+/* utimensat_time64, not the utimensat at 348, for the same reason as
+ * every other _time64 call here: this libc's timespec is two 64-bit
+ * words on every architecture, and handing that to the 32-bit call
+ * makes the kernel read a seconds field that is half a timestamp. */
+#define SYS_utimensat       412
 #define SYS_openat          322
 #define SYS_mkdirat         323
 #define SYS_mknodat         324

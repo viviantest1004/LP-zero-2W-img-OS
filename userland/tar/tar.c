@@ -9,11 +9,28 @@
  * Without it, packages could only be built somewhere else and only
  * inspected by installing them.
  *
- * No compression. The only decompressor on this system is inside the
- * kernel and not reachable from here; the archive is larger and the
- * code that has to be right is a third of the size, which for something
- * that runs as root and unpacks files someone else made is the better
- * trade.
+ * No compression here. `gzip -dc` is a separate program and does the
+ * whole of DEFLATE in a 32KB window, so the pipeline is two commands
+ * rather than one program with a decompressor bolted inside it.
+ *
+ * ── What extraction restores, and why it has to ──
+ *
+ * This started as the smallest thing that could open a package: names,
+ * directories, symlinks, contents. That is enough for a package we
+ * built ourselves and nowhere near enough for a Debian root filesystem,
+ * which `apt` unpacks with this. Measured against GNU tar on a real
+ * Debian trixie base, the old version got 5,440 of 5,440 entries'
+ * timestamps wrong, dropped the setuid bit from su, mount, passwd and
+ * five others, turned /tmp and /var/tmp from 1777 into 755, opened
+ * /root from 0700 to 0755, gave /etc/shadow away from group shadow, and
+ * wrote a zero-byte file where perl's hard link should have been - and
+ * exited 0 with nothing on stderr.
+ *
+ * So it now carries: hard links, device nodes and FIFOs, the setuid,
+ * setgid and sticky bits, owner and group, and mtime. And it refuses a
+ * header type it does not implement instead of writing the pseudo-entry
+ * out as a real file, which is what turned a GNU long-name header into
+ * a file called ././@LongLink.
  *
  * Extraction refuses absolute paths and any component that is "..".
  * That is how an archive escapes the directory it was meant to stay in,
@@ -23,16 +40,22 @@
 #include "string.h"
 #include "stdio.h"
 #include "unistd.h"
+#include "stdlib.h"
+#include "syscall.h"
 
 #define BLOCK        512
 #define NAME_OFF       0
 #define MODE_OFF     100
+#define UID_OFF      108
+#define GID_OFF      116
 #define SIZE_OFF     124
 #define MTIME_OFF    136
 #define CHKSUM_OFF   148
 #define TYPE_OFF     156
 #define LINK_OFF     157
 #define MAGIC_OFF    257
+#define DEVMAJOR_OFF 329
+#define DEVMINOR_OFF 337
 #define PREFIX_OFF   345
 
 #define DIRENT_RECLEN 16
@@ -41,6 +64,23 @@
 #define DT_DIR        4
 
 static u8 block[BLOCK];
+
+/* The data buffer is separate from the header block and much bigger.
+ * See the copy loop in walk() for why 32KB rather than 512 bytes. */
+static u8 databuf[32768];
+
+static const char *type_name(char type)
+{
+    switch (type) {
+    case '5': return "dir ";
+    case '2': return "link";
+    case '1': return "hard";
+    case '3': return "chr ";
+    case '4': return "blk ";
+    case '6': return "fifo";
+    default:  return "file";
+    }
+}
 
 static u64 from_octal(const u8 *field, int len)
 {
@@ -91,16 +131,106 @@ static bool path_is_safe(const char *p)
     return true;
 }
 
+/* Create every directory above `path`, but not `path` itself.
+ *
+ * The "but not itself" is load-bearing. Every directory entry in a tar
+ * carries a trailing slash, so with the name as it comes out of the
+ * header this loop created the directory too - at 0755 - and the branch
+ * below that would have made it with the right mode then found it
+ * already there and left it alone. Every directory in every archive
+ * came out 0755: /root world-readable, /tmp not sticky. The names are
+ * stripped of their trailing slash before they get here now, and this
+ * says so out loud in case they stop being. */
 static void make_parents(const char *path)
 {
     char work[1024];
     strlcpy(work, path, sizeof(work));
+    size_t len = strlen(work);
+    while (len > 1 && work[len - 1] == '/')
+        work[--len] = '\0';
     for (char *p = work + 1; *p; p++) {
         if (*p != '/') continue;
         *p = '\0';
         if (!lp_is_dir(work))
             lp_mkdir(work, 0755);
         *p = '/';
+    }
+}
+
+/* ── Putting back what the header says ───────────────────────────────
+ *
+ * Owner, then permissions, then time, in that order and not another.
+ *
+ * chown clears the setuid and setgid bits - the kernel does that on
+ * purpose, so that giving a file away cannot hand somebody a program
+ * that runs as its old owner. So the chmod has to come second or the
+ * bits are lost again, which is exactly what happens if these two are
+ * written in the order they read naturally.
+ *
+ * And the time last, because the other two are writes and a write
+ * updates ctime; mtime is what anything looking at the tree will read.
+ */
+#define AT_SYMLINK_NOFOLLOW 0x100
+
+/* utimensat with two timespecs: access time then modification time.
+ * Both get the header's mtime - ustar carries no atime, and "now" would
+ * be a worse answer than the only one we have. */
+static void set_times(const char *path, u64 mtime, int flags)
+{
+    s64 times[4] = { (s64)mtime, 0, (s64)mtime, 0 };
+    sys_call4(SYS_utimensat, AT_FDCWD, (long)path, (long)times, flags);
+}
+
+static void restore_meta(const char *path, u32 mode, u32 uid, u32 gid,
+                         u64 mtime)
+{
+    lp_chown(path, uid, gid);
+    lp_chmod(path, mode & 07777);
+    set_times(path, mtime, 0);
+}
+
+/* ── Directory times, held back to the end ───────────────────────────
+ *
+ * A directory's mtime changes every time something is created inside
+ * it, so setting it when the directory is made is setting it before
+ * everything that will undo it. Unpacking a Debian base left 526 of
+ * 3,263 entries dated "now" for this reason.
+ *
+ * So directories get their owner and mode at once - both are needed
+ * before anything can be written inside - and their time at the end,
+ * after nothing more will be written. This is what GNU tar does, for
+ * the same reason.
+ */
+typedef struct dirtime {
+    struct dirtime *next;
+    u64  mtime;
+    char path[];
+} dirtime_t;
+
+static dirtime_t *dirtimes;
+
+static void remember_dirtime(const char *path, u64 mtime)
+{
+    size_t n = strlen(path) + 1;
+    dirtime_t *d = malloc(sizeof *d + n);
+    if (!d)
+        return;         /* the tree is right; only its dates are not */
+    memcpy(d->path, path, n);
+    d->mtime = mtime;
+    d->next  = dirtimes;
+    dirtimes = d;
+}
+
+/* Deepest first, which is the order they were pushed in reverse - and
+ * the order that matters, because setting a child's time writes to the
+ * parent and would undo the parent's. */
+static void apply_dirtimes(void)
+{
+    while (dirtimes) {
+        dirtime_t *d = dirtimes;
+        dirtimes = d->next;
+        set_times(d->path, d->mtime, 0);
+        free(d);
     }
 }
 
@@ -260,6 +390,20 @@ static int create(const char *archive, char **paths, int npaths)
 
 /* ── Listing and extracting ───────────────────────────────────────── */
 
+/* Step over an entry's data without looking at it. */
+static void skip_data(long fd, u64 blocks)
+{
+    u64 remaining = blocks * BLOCK;
+    while (remaining) {
+        size_t want = remaining < sizeof databuf
+                    ? (size_t)remaining : sizeof databuf;
+        long got = lp_read((int)fd, databuf, want);
+        if (got <= 0)
+            return;
+        remaining -= (u64)got;
+    }
+}
+
 static int walk(const char *archive, const char *into, bool extract)
 {
     long fd = lp_open(archive, O_RDONLY, 0);
@@ -298,14 +442,38 @@ static int walk(const char *archive, const char *into, bool extract)
 
         u64  size   = from_octal(block + SIZE_OFF, 12);
         u32  mode   = (u32)from_octal(block + MODE_OFF, 8);
+        u32  uid    = (u32)from_octal(block + UID_OFF, 8);
+        u32  gid    = (u32)from_octal(block + GID_OFF, 8);
+        u64  mtime  = from_octal(block + MTIME_OFF, 12);
         char type   = (char)block[TYPE_OFF];
         u64  blocks = (size + BLOCK - 1) / BLOCK;
+        if (mode == 0)
+            mode = (type == '5') ? 0755 : 0644;
+
+        /* The link name, wanted by both '2' and '1'. ustar gives it 100
+         * bytes with no terminator when it fills them. */
+        char target[101];
+        memcpy(target, block + LINK_OFF, 100);
+        target[100] = '\0';
+
+        /* A directory entry carries a trailing slash. Take it off once,
+         * here, so that every path below is the name of the thing and
+         * not the name of the thing plus a separator. */
+        {
+            size_t nl = strlen(name);
+            while (nl > 1 && name[nl - 1] == '/')
+                name[--nl] = '\0';
+        }
 
         if (!extract) {
-            const char *what = type == '5' ? "dir " : type == '2' ? "link" : "file";
-            printf("%s %8llu  %s\n", what, (unsigned long long)size, name);
-            for (u64 b = 0; b < blocks; b++)
-                lp_read((int)fd, block, BLOCK);
+            const char *what = type_name(type);
+            if (type == '2' || type == '1')
+                printf("%s %8llu  %s -> %s\n", what,
+                       (unsigned long long)size, name, target);
+            else
+                printf("%s %8llu  %s\n", what,
+                       (unsigned long long)size, name);
+            skip_data(fd, blocks);
             continue;
         }
 
@@ -319,48 +487,147 @@ static int walk(const char *archive, const char *into, bool extract)
         char full[1024];
         snprintf(full, sizeof(full), "%s/%s", into, name);
 
-        if (type == '5') {
+        switch (type) {
+        case '5':
             make_parents(full);
             if (!lp_is_dir(full))
-                lp_mkdir(full, mode ? mode : 0755);
+                lp_mkdir(full, mode & 07777);
+            /* Unconditionally, not only when we just made it: a
+             * directory that already exists still has to end up with
+             * the mode the archive says. */
+            lp_chown(full, uid, gid);
+            lp_chmod(full, mode & 07777);
+            remember_dirtime(full, mtime);
+            continue;
+
+        case '2':
+            make_parents(full);
+            lp_unlink(full);
+            if (lp_symlink(target, full) < 0) {
+                dprintf(STDERR_FILENO, "tar: cannot link %s -> %s\n",
+                        full, target);
+                rc = 1;
+            }
+            /* No chmod or chown here. Both follow the link, so they
+             * would change whatever it points at - which in a Debian
+             * root is usually a real file somewhere else in the same
+             * tree. A symlink's own mode means nothing on Linux.
+             *
+             * The time does have to be the link's own, though, which is
+             * what AT_SYMLINK_NOFOLLOW is for. Without it this dated
+             * the target instead, and /etc/alternatives - which is
+             * nothing but symlinks - came out entirely wrong. */
+            set_times(full, mtime, AT_SYMLINK_NOFOLLOW);
+            continue;
+
+        case '1': {
+            /* A hard link. Its target is a path inside the archive, so
+             * it is relative to where we are unpacking - not to the
+             * machine's own root, which is what makes this two lines
+             * instead of one.
+             *
+             * There is exactly one in a Debian base: perl5.40.1 to
+             * perl. Falling through to the regular-file branch, which
+             * is what used to happen, wrote a zero-byte perl - and
+             * quite a lot of Debian is maintainer scripts in perl. */
+            char to[1024];
+            snprintf(to, sizeof(to), "%s/%s", into, target);
+            make_parents(full);
+            lp_unlink(full);
+            if (lp_link(to, full) < 0) {
+                dprintf(STDERR_FILENO,
+                        "tar: cannot hard-link %s to %s\n", full, to);
+                rc = 1;
+            }
             continue;
         }
 
-        if (type == '2') {
-            char target[101];
-            memcpy(target, block + LINK_OFF, 100);
-            target[100] = '\0';
+        case '3': case '4': case '6': {
+            /* Character device, block device, FIFO. A Debian base
+             * carries none of these - its /dev is deliberately empty -
+             * but an archive of a running system does, and writing one
+             * out as an empty regular file is the kind of wrong that is
+             * only noticed much later. */
+            u32 maj = (u32)from_octal(block + DEVMAJOR_OFF, 8);
+            u32 min = (u32)from_octal(block + DEVMINOR_OFF, 8);
+            mode_t kind = type == '3' ? LP_S_IFCHR
+                        : type == '4' ? LP_S_IFBLK : LP_S_IFIFO;
             make_parents(full);
             lp_unlink(full);
-            lp_symlink(target, full);
+            /* The device number, in the layout the kernel wants:
+             * 12 bits of major and 20 of minor, interleaved. Not
+             * (major << 8 | minor), which is the ancient 16-bit form
+             * and silently wrong for anything with a minor over 255. */
+            u64 dev = ((u64)(maj & 0xfff) << 8) | (min & 0xff)
+                    | ((u64)(min & ~0xffu) << 12);
+            if (lp_mknod(full, kind | (mode & 07777), dev) < 0) {
+                dprintf(STDERR_FILENO, "tar: cannot create %s\n", full);
+                rc = 1;
+                continue;
+            }
+            restore_meta(full, mode, uid, gid, mtime);
             continue;
+        }
+
+        case '0': case '\0': case '7':
+            break;              /* a regular file - handled below */
+
+        default:
+            /* Anything else is a header this tar does not implement:
+             * GNU's 'L' and 'K' long names, PAX 'x' and 'g' records,
+             * GNU sparse and volume headers. They used to fall through
+             * to the regular-file branch, which turned a long-name
+             * header into a real file called ././@LongLink holding the
+             * path, and then wrote the actual entry under its truncated
+             * name. Stopping is the only honest answer: the tree would
+             * be wrong in a way nothing downstream could detect. */
+            dprintf(STDERR_FILENO,
+                    "tar: %s: header type '%c' is not supported\n",
+                    name, type ? type : '0');
+            lp_close((int)fd);
+            return 1;
         }
 
         make_parents(full);
-        long out = lp_open(full, O_WRONLY | O_CREAT | O_TRUNC,
-                           mode ? (mode & 0777) : 0644);
+        long out = lp_open(full, O_WRONLY | O_CREAT | O_TRUNC, mode & 0777);
         if (out < 0) {
             dprintf(STDERR_FILENO, "tar: cannot write %s\n", full);
             rc = 1;
-            for (u64 b = 0; b < blocks; b++)
-                lp_read((int)fd, block, BLOCK);
+            skip_data(fd, blocks);
             continue;
         }
 
+        /* 32KB at a time, not 512 bytes. A Debian base is 138MB in
+         * 269,820 blocks, and one read and one write per block is over
+         * half a million system calls - on a 1GHz ARM1176 with an SD
+         * card that is the difference between a couple of minutes and
+         * long enough that people conclude it has hung. */
         u64 left = size;
-        for (u64 b = 0; b < blocks; b++) {
-            if (lp_read((int)fd, block, BLOCK) < BLOCK)
-                break;
-            size_t want = left < BLOCK ? (size_t)left : BLOCK;
-            lp_write((int)out, block, want);
-            left -= want;
+        u64 remaining = blocks * BLOCK;
+        bool short_read = false;
+        while (remaining) {
+            size_t want = remaining < sizeof databuf
+                        ? (size_t)remaining : sizeof databuf;
+            long got = lp_read((int)fd, databuf, want);
+            if (got < (long)want) { short_read = true; break; }
+            remaining -= (u64)got;
+            size_t use = left < (u64)got ? (size_t)left : (size_t)got;
+            if (use)
+                lp_write((int)out, databuf, use);
+            left -= use;
         }
         lp_close((int)out);
-        if (mode)
-            lp_chmod(full, mode & 0777);
+        if (short_read) {
+            dprintf(STDERR_FILENO, "tar: %s: truncated\n", archive);
+            lp_close((int)fd);
+            return 1;
+        }
+        restore_meta(full, mode, uid, gid, mtime);
     }
 
     lp_close((int)fd);
+    if (extract)
+        apply_dirtimes();
     return rc;
 }
 
