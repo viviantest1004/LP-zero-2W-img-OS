@@ -476,6 +476,185 @@ static int drop_vanished(void)
 
 /* ── listening ───────────────────────────────────────────────────── */
 
+
+/* ── Putting the system's own /data back ──────────────────────────────
+ *
+ * Pulling the card out of a running board does not stop it. The root
+ * filesystem is inside the kernel image and lives in RAM, so the shell,
+ * SSH and the network all carry on. What stops is /data: ext4 sees the
+ * I/O errors, remounts itself read-only exactly as it was told to, and
+ * then the device disappears from under it.
+ *
+ * Push the card back in and the kernel enumerates it again - and until
+ * now nothing noticed. The board went on running with /data as a plain
+ * directory on the RAM root: writes succeeded, went nowhere, and were
+ * gone at the next boot. Everything that matters lives there - the SSH
+ * host key, the logs, the saved clock, /root - so that is a machine
+ * quietly lying about having saved things.
+ *
+ * scan_and_mount refuses to touch the boot disk, which is right for
+ * /media: a second path to /data with different mount options is how a
+ * filesystem gets corrupted rather than merely full. This is the other
+ * case, and the only one that may touch it: putting the system's own
+ * data partition back exactly where it belongs.
+ */
+#define DATA_LABEL      "LPZERODATA"
+#define DATA_POINT      "/data"
+
+/* Said once per disappearance, not once per uevent. */
+static bool complained_missing = false;
+
+/* Is /data a real filesystem we can still write to?
+ *
+ * Not a mount at all means the card never arrived or has gone. Mounted
+ * read-only means ext4 hit corruption and stopped writing - which is
+ * the state errors=remount-ro exists to reach, and one this can recover
+ * from by checking the filesystem and mounting it again. */
+static bool data_is_healthy(bool *mounted_ro)
+{
+    *mounted_ro = false;
+
+    long fd = lp_open("/proc/mounts", O_RDONLY, 0);
+    if (fd < 0)
+        return false;
+    char buf[8192];
+    long got = lp_read((int)fd, buf, sizeof buf - 1);
+    lp_close((int)fd);
+    if (got <= 0)
+        return false;
+    buf[got] = '\0';
+
+    for (char *line = buf; line && *line; ) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+
+        /* device point type options ... */
+        char *p1 = strchr(line, ' ');
+        if (p1) {
+            char *p2 = strchr(p1 + 1, ' ');
+            if (p2) {
+                *p2 = '\0';
+                if (strcmp(p1 + 1, DATA_POINT) == 0) {
+                    char *p3 = strchr(p2 + 1, ' ');       /* type */
+                    if (p3) {
+                        char *opts = p3 + 1;
+                        char *end = strchr(opts, ' ');
+                        if (end) *end = '\0';
+                        /* "ro" is the first option when it is set. */
+                        if (strncmp(opts, "ro,", 3) == 0 ||
+                            strcmp(opts, "ro") == 0)
+                            *mounted_ro = true;
+                    }
+                    return !*mounted_ro;
+                }
+            }
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+    return false;                       /* not mounted at all */
+}
+
+/* Run a program and wait. Returns its exit status, or -1. */
+static int run_wait(const char *path, char *const argv[])
+{
+    long pid = lp_fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        lp_execve(path, argv, environ);
+        lp_exit(127);
+    }
+    int status = 0;
+    lp_waitpid((pid_t)pid, &status, 0);
+    return (status & 0x7f) ? -1 : ((status >> 8) & 0xff);
+}
+
+/* The partition that says it is ours, if the kernel can see one. */
+static bool find_data_partition(char *out, size_t n)
+{
+    blk_t disks[16];
+    int nd = disk_list(disks, 16);
+    for (int i = 0; i < nd; i++) {
+        blk_t parts[16];
+        int np = disk_parts(disks[i].path, parts, 16);
+        for (int j = 0; j < np; j++) {
+            if (strcmp(parts[j].label, DATA_LABEL) == 0) {
+                strlcpy(out, parts[j].path, n);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* Called whenever a block device appears. Cheap when there is nothing
+ * to do: one read of /proc/mounts. */
+static void recover_data(void)
+{
+    bool ro = false;
+    if (data_is_healthy(&ro))
+        return;                         /* mounted and writable */
+
+    char dev[64];
+    if (!find_data_partition(dev, sizeof dev)) {
+        /* Say it, but only when the answer changes.
+         *
+         * This runs on every block device event, and on a board with a
+         * USB hub that is several a second. But saying nothing at all
+         * is worse: the state being described - /data is a directory in
+         * RAM, everything written there will be gone at the next boot -
+         * looks exactly like a working machine from a shell prompt. */
+        if (!complained_missing) {
+            complained_missing = true;
+            if (ro)
+                printf("automount: /data is read-only and the card that"
+                       " carries it is gone\n");
+            else
+                printf("automount: /data is not mounted and no partition"
+                       " labelled %s is here\n", DATA_LABEL);
+            printf("automount:   anything written to /data now is in RAM"
+                   " and will be gone at the next boot\n");
+            printf("automount:   put the card back and this mounts it"
+                   " again by itself\n");
+        }
+        return;
+    }
+
+    if (ro) {
+        /* Unmount the read-only remains first. A second mount of the
+         * same filesystem on top of the first does not replace it. */
+        printf("automount: /data went read-only - checking %s\n", dev);
+        char *u[] = { (char *)"umount", (char *)DATA_POINT, NULL };
+        run_wait("/bin/umount", u);
+    } else {
+        printf("automount: %s is back - putting /data back\n", dev);
+    }
+
+    /* Check it before mounting it. The card was pulled out of a
+     * filesystem that was probably mid-write, which is exactly what
+     * fsck is for, and mounting first would replay a journal over
+     * damage this could have repaired. */
+    char *f[] = { (char *)"fsck", dev, NULL };
+    run_wait("/bin/fsck", f);
+
+    /* The same options /etc/rc uses. A data partition has no business
+     * carrying a setuid binary or a device node. */
+    char *m[] = { (char *)"mount", (char *)"-o",
+                  (char *)"errors=remount-ro,nosuid,nodev",
+                  dev, (char *)DATA_POINT, NULL };
+    if (run_wait("/bin/mount", m) == 0) {
+        printf("automount: /data is back on %s\n", dev);
+        complained_missing = false;     /* say it again if it goes again */
+        /* /root is a bind mount from /data. It followed the card out. */
+        char *b[] = { (char *)"mount", (char *)"-o", (char *)"bind",
+                      (char *)"/data/root", (char *)"/root", NULL };
+        run_wait("/bin/mount", b);
+    } else {
+        printf("automount: %s is there but will not mount - `fsck %s`\n",
+               dev, dev);
+    }
+}
+
 /* One uevent. Returns true when it is a block device appearing or
  * disappearing - which is the only kind we act on. */
 static bool parse_uevent(const char *msg, size_t len,
@@ -536,6 +715,11 @@ static int watch(void)
 
     printf("automount: watching for drives\n");
 
+    /* Once at the start, for the card that was already back before this
+     * began watching - a restart of this service, or a board that came
+     * up with no card and had one pushed in before the daemon ran. */
+    recover_data();
+
     char buf[UEVENT_BUF];
     for (;;) {
         long got = lp_recvfrom((int)fd, buf, sizeof buf - 1, 0, NULL, NULL);
@@ -559,6 +743,10 @@ static int watch(void)
                 lp_sleep_ms(50);
 
             printf("automount: %s appeared\n", devname);
+            /* Before /media: if this is the system's own data
+             * partition coming back, it belongs at /data, and
+             * scan_and_mount would rightly refuse to touch it. */
+            recover_data();
             scan_and_mount(true);
         } else if (strcmp(action, "remove") == 0) {
             drop_vanished();
