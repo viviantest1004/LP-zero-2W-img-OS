@@ -1304,19 +1304,31 @@ static void show_short(void)
         bool has_mc  = readnum("/sys/class/thermal/thermal_zone0/temp", &mc);
 
         char extra[48];
-        if (has_cur && has_mc)
-            snprintf(extra, sizeof extra, "%ld MHz, %ld.%ld C",
-                     cur / 1000, mc / 1000, (mc % 1000) / 100);
-        else if (has_cur)
-            snprintf(extra, sizeof extra, "%ld MHz, no temperature sensor",
-                     cur / 1000);
+        if (has_cur)
+            snprintf(extra, sizeof extra, "%ld MHz", cur / 1000);
         else if (has_mc)
-            snprintf(extra, sizeof extra, "%ld.%ld C", mc / 1000,
-                     (mc % 1000) / 100);
+            strlcpy(extra, "no cpufreq driver", sizeof extra);
         else
             strlcpy(extra, "no cpufreq or sensor here", sizeof extra);
 
         P(L "%s x%d, %s", "cpu", model, cores, extra);
+
+        /* Its own line when there is a sensor, rather than tacked onto
+         * the end of the cpu line. On a board in a case, in a cupboard,
+         * under load, this is the number that explains why it got slow -
+         * and it was the easiest thing on the screen to miss.
+         *
+         * No line at all when there is no sensor: the cpu line above
+         * already says so, and a summary is a dozen lines or it is not
+         * a summary. */
+        if (has_mc) {
+            char kind[64];
+            if (!slurp("/sys/class/thermal/thermal_zone0/type",
+                       kind, sizeof kind))
+                strlcpy(kind, "thermal_zone0", sizeof kind);
+            P(L "%ld.%ld C   (%s)", "temperature",
+              mc / 1000, (mc % 1000) / 100, kind);
+        }
     }
 
     if (proc_read("/proc/meminfo", scratch, sizeof scratch) > 0) {
