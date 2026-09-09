@@ -618,6 +618,44 @@ echo "[rc] loopback"
 ifconfig lo 127.0.0.1 netmask 255.0.0.0 || echo "[rc]   no loopback address"
 ifconfig lo up || echo "[rc]   ** 127.0.0.1 is unreachable - anything that binds to localhost will fail"
 
+echo "[rc] the USB way in"
+# usb0 gets an address before anything touches the wireless, and keeps
+# it whatever the wireless does afterwards.
+#
+# The reason is a failure seen on the board: brcmfmac loses its firmware
+# a few minutes after boot, and the thread that notices is holding RTNL
+# when it wedges. RTNL is one lock for all of networking, so from that
+# moment nothing can change any interface - dhcp cannot bring usb0 up,
+# `ifconfig usb0 up` blocks, and a board whose wireless died takes the
+# wired path down with it. On a headless machine that is the difference
+# between "the WiFi is broken" and "the machine is gone".
+#
+# The lock stops changes, not traffic. A link that was already
+# configured keeps carrying packets while the lock is held - so the way
+# to keep a way in is to configure it before the wireless exists at all.
+# This runs before wpa_supplicant, which init starts after this script.
+#
+# A link-local address is enough: this is a cable to one PC, there is no
+# router on it, and 169.254.0.0/16 is what both ends would negotiate
+# anyway. The last two bytes come from the interface's own MAC so two
+# boards on one desk do not collide.
+if [ -e /sys/class/net/usb0 ]; then
+    o5=`cut -d: -f5 /sys/class/net/usb0/address`
+    o6=`cut -d: -f6 /sys/class/net/usb0/address`
+    a=`printf '%d' 0x$o5`
+    b=`printf '%d' 0x$o6`
+    # 0 and 255 are the network and broadcast of their own /24, and
+    # 169.254.0.x and 169.254.255.x are reserved by RFC 3927.
+    if [ "$a" = "0" ]; then a=1; fi
+    if [ "$a" = "255" ]; then a=254; fi
+    if [ "$b" = "0" ]; then b=1; fi
+    if [ "$b" = "255" ]; then b=254; fi
+    ll=169.254.$a.$b
+    ifconfig usb0 $ll netmask 255.255.0.0 > /dev/null 2>&1 && ifconfig usb0 up > /dev/null 2>&1 && echo "[rc]   usb0 is up at $ll - ssh there over the USB cable" || echo "[rc]   usb0 is here but would not come up"
+else
+    echo "[rc]   no usb0 yet (nothing plugged into the USB port, or the gadget is off)"
+fi
+
 echo "[rc] name resolution"
 # A fallback nameserver, written before DHCP runs and overwritten by it
 # when it succeeds.

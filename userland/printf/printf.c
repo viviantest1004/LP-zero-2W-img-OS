@@ -144,17 +144,33 @@ int main(int argc, char **argv)
                 out(buf, strlen(buf));
                 break;
             case 'd': case 'i': case 'u': case 'x': case 'X': case 'o': {
+                /* "ll", not "l": the value below is s64, and a long is
+                 * four bytes on a 32-bit machine - so %ld there would
+                 * print half of it and read the wrong stack slot. */
+                spec[s++] = 'l';
                 spec[s++] = 'l';
                 spec[s++] = (conv == 'i') ? 'd' : conv;
                 spec[s] = '\0';
                 char *end;
-                long v = strtol(arg, &end, (conv == 'x' || conv == 'X') ? 16 : 10);
+                /* Base 0, not 10: GNU takes the C prefixes here, so
+                 * `printf '%d' 0x2a` is 42 and not 0. It matters more
+                 * than it looks - reading a MAC address or a mode out
+                 * of /sys and turning it into a number goes through
+                 * exactly this, and the wrong answer is a plausible
+                 * one. strtoll, so a value past two billion survives on
+                 * a 32-bit machine. */
+                /* Base 0 whatever the conversion is. Reading the
+                 * argument as hex for %x looked reasonable and meant
+                 * `printf '%x' 255` printed 255: parsed as 0x255, then
+                 * printed back as hex. The conversion says how to write
+                 * the number, not how to read it. */
+                s64 v = strtoll(arg, &end, 0);
                 if (end == arg && *arg) {
                     dprintf(STDERR_FILENO,
                             "printf: \"%s\" is not a number\n", arg);
                     return 1;
                 }
-                snprintf(buf, sizeof buf, spec, v);
+                snprintf(buf, sizeof buf, spec, (long long)v);
                 out(buf, strlen(buf));
                 break;
             }
