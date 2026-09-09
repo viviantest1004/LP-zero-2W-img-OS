@@ -73,10 +73,16 @@ DATA_START_SECTOR=270336        # 4 + 128 = 132MiB
 #   amd64  a PC or a desktop VM: one bzImage, which carries the EFI stub
 #          itself, as EFI/BOOT/BOOTX64.EFI. No GPU firmware, no device
 #          tree - a PC describes itself through ACPI.
+#   armv6  a Pi Zero W: a zImage the GPU firmware loads, and nothing
+#          else. There is no UEFI on that board, and a 32-bit ARM
+#          zImage is not a PE executable, so there is no second copy.
 LP_ARCH="${LP_ARCH:-arm64}"
 if [[ "$LP_ARCH" == "amd64" ]]; then
     EFI_BOOT_NAME="BOOTX64.EFI"
     KERNEL_OUT_DIR="${REPO_ROOT}/kernel/out-amd64"
+elif [[ "$LP_ARCH" == "armv6" ]]; then
+    EFI_BOOT_NAME=""
+    KERNEL_OUT_DIR="${REPO_ROOT}/kernel/out-armv6"
 else
     EFI_BOOT_NAME="BOOTAA64.EFI"
     KERNEL_OUT_DIR="${REPO_ROOT}/kernel/out"
@@ -100,6 +106,13 @@ if [[ "$MODE" == "linux" && "$LP_ARCH" == "amd64" ]]; then
     CONFIG_SRC=""
     DTB=""
     [[ -f "$KERNEL" ]] || die "kernel/out-amd64/bzImage 가 없습니다. 'make kernel-amd64' 를 먼저 실행하세요."
+elif [[ "$MODE" == "linux" && "$LP_ARCH" == "armv6" ]]; then
+    KERNEL="${KERNEL_OUT_DIR}/zImage"
+    KERNEL_NAME="$LINUX_IMAGE_ARMV6"
+    CONFIG_SRC="${REPO_ROOT}/boot/config-armv6.txt"
+    DTB="${KERNEL_OUT_DIR}/bcm2708-rpi-zero-w.dtb"
+    [[ -f "$KERNEL" ]] || die "kernel/out-armv6/zImage 가 없습니다. 'LP_ARCH=armv6 ./kernel/build.sh' 를 먼저 실행하세요."
+    [[ -f "$DTB" ]]    || die "kernel/out-armv6 에 Zero W DTB 가 없습니다."
 elif [[ "$MODE" == "linux" ]]; then
     KERNEL="${KERNEL_OUT_DIR}/Image"
     KERNEL_NAME="$LINUX_IMAGE"
@@ -186,7 +199,7 @@ if [[ "$MODE" == "linux" && -n "$DTB" ]]; then
 
     # disable-bt 오버레이가 있어야 PL011 이 헤더 핀으로 나온다.
     # 없으면 부팅은 되는데 시리얼에 아무것도 안 보인다.
-    OVL_DIR="${REPO_ROOT}/kernel/out/overlays"
+    OVL_DIR="${KERNEL_OUT_DIR}/overlays"
     if [[ -d "$OVL_DIR" ]] && compgen -G "${OVL_DIR}/*.dtbo" >/dev/null; then
         mmd -i "$PART_IMG" ::overlays 2>/dev/null || true
         for o in "${OVL_DIR}"/*.dtbo; do
@@ -237,7 +250,12 @@ if [[ "$MODE" == "linux" ]]; then
     # 주체가 EFI 부트 서비스이므로 실기 Pi 에서는 쓸 수 없고, 그쪽은
     # config.txt 의 kernel= 이 가리키는 압축되지 않은 Image 를 그대로
     # 쓴다. 두 파일이 같은 커널이라는 점이 중요하다.
-    if [[ "$LP_ARCH" == "amd64" ]]; then
+    if [[ "$LP_ARCH" == "armv6" ]]; then
+        # A 32-bit ARM zImage is not a PE executable and this board has
+        # no UEFI to load one. The GPU firmware copy is the only copy.
+        EFI_KERNEL=""
+        EFI_LABEL=""
+    elif [[ "$LP_ARCH" == "amd64" ]]; then
         # bzImage already carries the EFI stub and its own decompressor,
         # so there is nothing to pair it with.
         EFI_KERNEL="$KERNEL"
@@ -250,7 +268,9 @@ if [[ "$MODE" == "linux" ]]; then
             EFI_LABEL="Image - 비압축"
         fi
     fi
-    if python3 -c "
+    if [[ -z "$EFI_KERNEL" ]]; then
+        :   # armv6: no UEFI path on this board
+    elif python3 -c "
 import struct, sys
 d = open('$EFI_KERNEL','rb').read(0x100)
 sys.exit(0 if d[:2] == b'MZ' and d[struct.unpack_from('<I', d, 0x3c)[0]:][:4] == b'PE\\0\\0' else 1)
@@ -436,12 +456,39 @@ UEFIEOF
     #
     # Both are checked against /etc/boot-tools.sha256 - which is inside
     # the kernel image - before anything runs them as root.
+    # One directory per machine. arm64 keeps the original path; the
+    # others are underneath it.
+    #
+    # This used to be one directory for everything, and the amd64 image
+    # therefore carried an aarch64 e2fsck. Nothing complained: the file
+    # copied fine, the card looked right, and the only way to find out
+    # was to damage /data on a PC and watch the repair fail at exec.
+    # So the architecture is checked here, and a tool for the wrong
+    # machine is left off the card rather than shipped.
+    PREBUILT="${REPO_ROOT}/userland/prebuilt"
+    [[ "$LP_ARCH" == "arm64" ]] || PREBUILT="${PREBUILT}/${LP_ARCH}"
     for tool in e2fsck mke2fs mke2fs.conf; do
-        SRC="${REPO_ROOT}/userland/prebuilt/${tool}"
-        if [[ -f "$SRC" ]]; then
-            mcopy -o -i "$PART_IMG" "$SRC" "::${tool}"
-            log "복사: $(printf '%-36s' "$tool")($(stat -c%s "$SRC") bytes)"
+        SRC="${PREBUILT}/${tool}"
+        if [[ ! -f "$SRC" ]]; then
+            echo "  경고: ${tool} 이 ${PREBUILT} 에 없습니다"
+            echo "        'LP_ARCH=${LP_ARCH} ./tools/build-fsck.sh' 로 만드세요."
+            echo "        없으면 기기에서 /data 를 고칠 수 없습니다."
+            continue
         fi
+        m="$(elf_machine_of "$SRC")"
+        want=""
+        case "$LP_ARCH" in
+            arm64) want=0xb7 ;;
+            amd64) want=0x3e ;;
+            armv6) want=0x28 ;;
+        esac
+        if [[ -n "$m" && -n "$want" && "$m" != "$want" ]]; then
+            die "${SRC} 는 ${LP_ARCH} 용이 아닙니다 (e_machine ${m}).
+       이 파일은 부팅 중 root 로 실행됩니다. 아키텍처가 다르면
+       실패하는 시점이 '/data 가 이미 깨진 뒤'입니다."
+        fi
+        mcopy -o -i "$PART_IMG" "$SRC" "::${tool}"
+        log "복사: $(printf '%-36s' "$tool")($(stat -c%s "$SRC") bytes)"
     done
 
     log "복사: README.txt                          (설정 안내)"

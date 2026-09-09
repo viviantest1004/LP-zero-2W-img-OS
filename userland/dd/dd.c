@@ -41,7 +41,9 @@
 static bool parse_size(const char *s, u64 *out)
 {
     char *end;
-    long v = strtol(s, &end, 10);
+    /* strtoll: a long is four bytes on a 32-bit machine, so
+     * "skip=3000" with bs=1M parsed as a negative number there. */
+    s64 v = strtoll(s, &end, 10);
     if (end == s || v < 0)
         return false;
 

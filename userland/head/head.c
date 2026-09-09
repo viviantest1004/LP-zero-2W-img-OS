@@ -19,7 +19,7 @@
 static char  iobuf[65536];
 static char  delim = '\n';
 static bool  by_bytes = false;
-static long  count = 10;
+static s64   count = 10;
 static bool  from_end = false;      /* the count was written -N */
 
 static void out(const char *p, size_t n)
@@ -36,7 +36,7 @@ static void out(const char *p, size_t n)
 /* head -n N / head -c N: the plain direction. */
 static void first(int fd)
 {
-    long left = count;
+    s64 left = count;
     if (left <= 0)
         return;
     for (;;) {
@@ -165,7 +165,7 @@ static void set_count(const char *s, const char *prog)
     from_end = (*s == '-');
     if (from_end) s++;
     char *end;
-    long v = strtol(s, &end, 10);
+    s64 v = strtoll(s, &end, 10);
     if (end == s || *end) {
         dprintf(STDERR_FILENO, "%s: invalid number of %s: '%s%s'\n", prog,
                 by_bytes ? "bytes" : "lines", from_end ? "-" : "", s);

@@ -48,7 +48,7 @@ typedef struct {
     u64  cpu_ticks;      /* utime + stime */
     u64  prev_ticks;
     long rss_kb;
-    double cpu_pct;
+    u32    cpu_tenths;      /* percent times ten - see below */
 } proc_t;
 
 static proc_t procs[MAX_PROCS];
@@ -240,8 +240,14 @@ static void scan_procs(void)
              * numbers actually mean. */
             u64 used = (p->cpu_ticks > p->prev_ticks)
                        ? p->cpu_ticks - p->prev_ticks : 0;
-            p->cpu_pct = (delta_total > 0)
-                       ? (double)used * 100.0 / (double)delta_total : 0.0;
+            /* Percent to one decimal, in integers. This used to go
+             * through a double for one number on the screen, which
+             * pulled the whole floating-point runtime into a libc that
+             * has none - and on ARMv6, where the conversion itself is a
+             * library call, it did not link at all. used*1000 cannot
+             * overflow here: these are tick counts over one interval. */
+            p->cpu_tenths = (delta_total > 0)
+                          ? (u32)(used * 1000 / delta_total) : 0;
 
             nprocs++;
         }
@@ -269,7 +275,7 @@ static void sort_procs(void)
             switch (sort_by) {
             case SORT_MEM: after = procs[j].rss_kb  < key.rss_kb;  break;
             case SORT_PID: after = procs[j].pid     > key.pid;     break;
-            default:       after = procs[j].cpu_pct < key.cpu_pct; break;
+            default:       after = procs[j].cpu_tenths < key.cpu_tenths; break;
             }
             if (!after) break;
             procs[j + 1] = procs[j];
@@ -373,9 +379,10 @@ static void print_procs(int rows)
         else
             snprintf(mem, sizeof(mem), "%ld KB", p->rss_kb);
 
-        /* No %f in our printf, so scale the percent by hand. */
-        long whole = (long)p->cpu_pct;
-        long frac  = (long)((p->cpu_pct - (double)whole) * 10.0);
+        /* No %f in our printf, and no doubles anywhere: the value is
+         * already tenths of a percent. */
+        long whole = (long)(p->cpu_tenths / 10);
+        long frac  = (long)(p->cpu_tenths % 10);
 
         printf("%7d %7d %4ld.%ld %9s %c %s\n",
                p->pid, p->ppid, whole, frac, mem, p->state, p->name);

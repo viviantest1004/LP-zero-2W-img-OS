@@ -143,13 +143,65 @@ static void add_row(const char *dev, const char *dir, const char *type)
     nrows++;
 }
 
+/* An absolute path, with . and .. taken out.
+ *
+ * The mount points in /proc/mounts are absolute, so a relative path
+ * matches none of them: `df .` answered "not on any mounted
+ * filesystem", which is a strange thing to be told about the directory
+ * you are standing in. This does not resolve symlinks - the longest
+ * matching mount point is still the answer for the name as written,
+ * which is what df reports. */
+static bool abspath(const char *path, char *out, size_t cap)
+{
+    char buf[1024];
+    if (path[0] == '/') {
+        strlcpy(buf, path, sizeof buf);
+    } else {
+        char cwd[768];
+        if (lp_getcwd(cwd, sizeof cwd) < 0)
+            return false;
+        if (strcmp(path, ".") == 0)
+            strlcpy(buf, cwd, sizeof buf);
+        else
+            snprintf(buf, sizeof buf, "%s/%s", cwd, path);
+    }
+
+    /* Walk the components, dropping "." and popping on "..". */
+    size_t n = 0;
+    out[0] = '\0';
+    const char *p = buf;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        const char *seg = p;
+        while (*p && *p != '/') p++;
+        size_t len = (size_t)(p - seg);
+        if (len == 1 && seg[0] == '.')
+            continue;
+        if (len == 2 && seg[0] == '.' && seg[1] == '.') {
+            while (n > 0 && out[n - 1] != '/') n--;
+            if (n > 1) n--;              /* drop the slash, keep the root */
+            out[n] = '\0';
+            continue;
+        }
+        if (n + len + 2 > cap) return false;
+        out[n++] = '/';
+        memcpy(out + n, seg, len);
+        n += len;
+        out[n] = '\0';
+    }
+    if (n == 0) { strlcpy(out, "/", cap); }
+    return true;
+}
+
 /* Which mount a path belongs to: the longest mount point it starts at. */
 static void row_for_path(const char *path, char mounts[][3][256], int nm)
 {
     int best = -1;
     size_t bestlen = 0;
     char real[1024];
-    strlcpy(real, path, sizeof real);
+    if (!abspath(path, real, sizeof real))
+        strlcpy(real, path, sizeof real);
 
     for (int i = 0; i < nm; i++) {
         size_t l = strlen(mounts[i][1]);

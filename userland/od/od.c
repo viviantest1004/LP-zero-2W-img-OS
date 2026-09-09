@@ -151,7 +151,7 @@ static void parse_type(const char *s)
 static u64 parse_num(const char *s)
 {
     char *end;
-    u64 v = (u64)strtol(s, &end, (s[0] == '0' && s[1] == 'x') ? 16 : 10);
+    u64 v = (u64)strtoll(s, &end, (s[0] == '0' && s[1] == 'x') ? 16 : 10);
     switch (*end) {
     case 'b': v *= 512; break;
     case 'k': case 'K': v *= 1024; break;
@@ -220,7 +220,17 @@ int main(int argc, char **argv)
     u64 off = 0;
     size_t have = 0;
 
-    /* -j skips without seeking, so it works on a pipe too. */
+    /* Seek first, and only read through the skipped bytes when seeking
+     * is not possible - a pipe. Reading was the whole implementation
+     * once, which was correct and meant `od -j 3G` on a card read three
+     * gigabytes through a 1GHz core before printing its first line. */
+    if (skip_bytes) {
+        s64 landed = lp_lseek((int)fd, (off_t)skip_bytes, SEEK_SET);
+        if (landed >= 0 && (u64)landed == skip_bytes) {
+            off = skip_bytes;
+            skip_bytes = 0;
+        }
+    }
     while (skip_bytes) {
         unsigned char junk[4096];
         size_t want = skip_bytes > sizeof junk ? sizeof junk : (size_t)skip_bytes;

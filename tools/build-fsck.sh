@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
-# build-fsck.sh - e2fsck 를 aarch64 정적 바이너리로 크로스 빌드한다.
+# build-fsck.sh - e2fsck 를 정적 바이너리로 크로스 빌드한다.
+#
+#   LP_ARCH=arm64 (기본) / armv6 / amd64
 #
 # 왜 이게 시스템 이미지(initramfs) 안에 들어가야 하는가:
 #
@@ -29,21 +31,88 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${REPO_ROOT}/tools/common.sh"
 
 THIRDPARTY="${THIRDPARTY:-${WORK}}"
-E2FS_SRC="${E2FS_SRC:-${THIRDPARTY}/e2fsprogs-1.47.0}"
-E2FS_TAR="${THIRDPARTY}/e2fsprogs.tar.gz"
-OUT="${REPO_ROOT}/userland/prebuilt"
 JOBS="${JOBS:-$(nproc)}"
-CROSS=aarch64-linux-gnu-
 
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 step() { printf '\n==> %s\n' "$*"; }
 
-command -v "${CROSS}gcc" >/dev/null || die "${CROSS}gcc 가 없습니다"
+# LP_ARCH picks the machine. This program is run as root, at boot, on a
+# filesystem that is already damaged - so it has to be built for the
+# board it will run on, and a wrong one is not a build error but a card
+# that cannot be repaired on the machine it belongs to.
+LP_ARCH="${LP_ARCH:-arm64}"
+case "$LP_ARCH" in
+    arm64)
+        CROSS=aarch64-linux-gnu-
+        HOST=aarch64-linux-gnu
+        CC_FOR_TARGET="aarch64-linux-gnu-gcc"
+        # arm64 keeps the original layout so existing trees still work.
+        OUT="${REPO_ROOT}/userland/prebuilt"
+        SRC_ROOT="${THIRDPARTY}"
+        ;;
+    armv6)
+        # The same story as dropbear: Debian's armhf glibc is ARMv7 and
+        # its libgcc is Thumb-2, neither of which an ARM1176 can run.
+        # This links against the ARMv6 musl that build-thirdparty.sh
+        # builds, through the wrapper it leaves behind.
+        CROSS=arm-linux-gnueabi-
+        HOST=arm-linux-gnueabi
+        CC_FOR_TARGET="${THIRDPARTY}/armv6/musl-gcc"
+        OUT="${REPO_ROOT}/userland/prebuilt/armv6"
+        SRC_ROOT="${THIRDPARTY}/armv6"
+        [[ -x "$CC_FOR_TARGET" ]] || \
+            die "${CC_FOR_TARGET} 가 없습니다. 'LP_ARCH=armv6 ./tools/build-thirdparty.sh' 를 먼저 실행하세요."
+        ;;
+    amd64)
+        CROSS=
+        HOST=x86_64-linux-gnu
+        CC_FOR_TARGET="gcc"
+        OUT="${REPO_ROOT}/userland/prebuilt/amd64"
+        SRC_ROOT="${THIRDPARTY}/amd64"
+        ;;
+    *)  die "LP_ARCH 는 arm64 / armv6 / amd64 중 하나여야 합니다" ;;
+esac
+
+# On a 32-bit machine, llseek.c falls back to declaring the _llseek
+# syscall with the kernel's old _syscall5 macro, which no libc has
+# shipped for fifteen years and which does not compile. Saying that file
+# offsets are 64 bits takes the branch above it instead, where plain
+# lseek is already the 64-bit call.
+#
+# HAVE_LSEEK64 for the same file in lib/blkid, whose version of that
+# fallback does not look at _FILE_OFFSET_BITS at all. musl has lseek64 -
+# as `#define lseek64 lseek`, since its off_t is already 64 bits - and
+# configure's test looks for a function symbol, so it decides musl does
+# not have it while separately deciding the prototype is there.
+#
+# Through CPPFLAGS, not CFLAGS: the static-library rule these files are
+# built by uses CFLAGS_STLIB, which configure sets itself and which
+# ignores anything passed in as CFLAGS. CPPFLAGS is in all three.
+if [[ "$LP_ARCH" == "armv6" ]]; then
+    EXTRA_CFLAGS="-D_FILE_OFFSET_BITS=64 -DHAVE_LSEEK64=1"
+else
+    EXTRA_CFLAGS=""
+fi
+
+E2FS_SRC="${E2FS_SRC:-${SRC_ROOT}/e2fsprogs-1.47.0}"
+E2FS_TAR="${THIRDPARTY}/e2fsprogs.tar.gz"
+E2FS_URL="https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.0/e2fsprogs-1.47.0.tar.gz"
+
+command -v "${CROSS:-}gcc" >/dev/null || die "${CROSS:-}gcc 가 없습니다"
+mkdir -p "$SRC_ROOT"
 
 if [[ ! -d "$E2FS_SRC" ]]; then
-    [[ -f "$E2FS_TAR" ]] || die "소스도 tarball 도 없습니다: $E2FS_TAR"
+    if [[ ! -f "$E2FS_TAR" ]]; then
+        step "소스 받기"
+        curl --fail --location --silent --show-error \
+             --retry 4 --retry-delay 2 --retry-all-errors \
+             --output "$E2FS_TAR" "$E2FS_URL" \
+            || die "e2fsprogs 다운로드 실패"
+    fi
     step "압축 해제"
-    tar xf "$E2FS_TAR" -C "$THIRDPARTY"
+    # Into the per-machine directory: configure records the compiler and
+    # the host triple in the tree, so one tree cannot serve two machines.
+    tar xf "$E2FS_TAR" -C "$SRC_ROOT"
 fi
 
 cd "$E2FS_SRC"
@@ -61,7 +130,7 @@ if [[ ! -f Makefile || "${RECONFIGURE:-0}" == "1" ]]; then
     # 환경에서는 없는 aarch64 libuuid 를 찾다가 configure 가 멈춘다.
     # 번들된 것을 그대로 쓰면 정적으로 함께 링크된다.
     ./configure \
-        --host=aarch64-linux-gnu \
+        --host="$HOST" \
         --build=x86_64-linux-gnu \
         --disable-nls \
         --disable-uuidd \
@@ -73,10 +142,11 @@ if [[ ! -f Makefile || "${RECONFIGURE:-0}" == "1" ]]; then
         --disable-defrag \
         --disable-e2initrd-helper \
         --disable-testio-debug \
-        CC="${CROSS}gcc" \
-        AR="${CROSS}ar" \
-        RANLIB="${CROSS}ranlib" \
+        CC="$CC_FOR_TARGET" \
+        AR="${CROSS:-}ar" \
+        RANLIB="${CROSS:-}ranlib" \
         CFLAGS="-Os" \
+        CPPFLAGS="${EXTRA_CFLAGS}" \
         LDFLAGS="-static" \
         > /tmp/e2fs-conf.log 2>&1 \
         || { tail -25 /tmp/e2fs-conf.log; die "configure 실패"; }
@@ -111,10 +181,10 @@ for tool in e2fsck mke2fs; do
     [[ -f "$BIN" ]] || die "${tool} 이 만들어지지 않았습니다"
 
     cp "$BIN" "${OUT}/${tool}"
-    "${CROSS}strip" "${OUT}/${tool}"
+    "${CROSS:-}strip" "${OUT}/${tool}"
 
     # 동적 링크로 나오면 우리 시스템에서 실행되지 않는다. 여기서 잡는다.
-    INTERP=$("${CROSS}readelf" -l "${OUT}/${tool}" 2>/dev/null \
+    INTERP=$("${CROSS:-}readelf" -l "${OUT}/${tool}" 2>/dev/null \
              | grep -c "interpreter" || true)
     [[ "$INTERP" == "0" ]] \
         || die "${tool} 이 정적이 아닙니다 - 이 시스템에는 로더가 없습니다"

@@ -18,7 +18,33 @@ long lp_open(const char *path, int flags, mode_t mode)
 long lp_close(int fd)                    { return sys_call1(SYS_close, fd); }
 long lp_read(int fd, void *b, size_t n)  { return sys_call3(SYS_read, fd, (long)b, (long)n); }
 long lp_write(int fd, const void *b, size_t n) { return sys_call3(SYS_write, fd, (long)b, (long)n); }
-long lp_lseek(int fd, off_t o, int w)    { return sys_call3(SYS_lseek, fd, o, w); }
+/* lseek, with an offset that does not fit in a register on every
+ * machine.
+ *
+ * On a 64-bit machine this is the one syscall. On 32-bit ARM, lseek at
+ * 19 takes and returns a 32-bit offset: it works perfectly up to two
+ * gigabytes and then stops, which is not an error anybody sees. `dd
+ * skip=3000` read from the start of the file instead of 3GB in, and
+ * `wc -c` on a 5GB file said 1GB - the top bits, quietly gone.
+ *
+ * _llseek is the call for it: the offset goes in as two halves and the
+ * answer comes back through a pointer, because there is nowhere else to
+ * put 64 bits. The return type here is s64 for the same reason - a long
+ * on this machine cannot hold the answer. */
+s64 lp_lseek(int fd, off_t o, int w)
+{
+#if defined(__arm__)
+    s64 result = 0;
+    long r = sys_call5(SYS_llseek, fd,
+                       (long)((u64)o >> 32), (long)((u64)o & 0xffffffffu),
+                       (long)&result, w);
+    if (r < 0)
+        return r;
+    return result;
+#else
+    return sys_call3(SYS_lseek, fd, (long)o, w);
+#endif
+}
 
 long lp_dup(int fd) { return sys_call1(SYS_dup, fd); }
 
@@ -92,14 +118,29 @@ long sys_getdents(int fd, void *buf, size_t size) { return sys_call3(SYS_getdent
 #define S_IFMT          0170000
 #define S_IFDIR         0040000
 
+static long try_statx(const char *path, lp_stat_t *out, bool follow_symlink);
+
 static long stat_mode(const char *path, u32 *mode_out)
 {
+#if defined(__arm__)
+    /* 32-bit ARM has no newfstatat at all, and its fstatat64 struct is
+     * a different shape again. statx is the same shape on every machine
+     * and has been in the kernel since 4.11, which is far older than
+     * anything this image ships with, so ARM simply uses it. */
+    lp_stat_t st;
+    long r = try_statx(path, &st, true);
+    if (r < 0)
+        return r;
+    *mode_out = st.mode;
+    return 0;
+#else
     u8 buf[STAT_BUF_SIZE];
     long r = sys_call4(SYS_newfstatat, AT_FDCWD, (long)path, (long)buf, 0);
     if (r < 0)
         return r;
     *mode_out = *(u32 *)(buf + STAT_MODE_OFF);
     return 0;
+#endif
 }
 
 bool lp_exists(const char *path)
@@ -191,9 +232,15 @@ static long try_statx(const char *path, lp_stat_t *out, bool follow_symlink)
 
 long lp_stat(const char *path, lp_stat_t *out, bool follow_symlink)
 {
-    if (try_statx(path, out, follow_symlink) == 0)
+    long sx = try_statx(path, out, follow_symlink);
+    if (sx == 0)
         return 0;
 
+#if defined(__arm__)
+    /* No newfstatat here, and no second layout worth carrying: statx is
+     * the one call, so its error is the answer. */
+    return sx;
+#else
     u8 buf[STAT_BUF_SIZE];
     long r = sys_call4(SYS_newfstatat, AT_FDCWD, (long)path, (long)buf,
                        follow_symlink ? 0 : AT_SYMLINK_NOFOLLOW);
@@ -227,6 +274,7 @@ long lp_stat(const char *path, lp_stat_t *out, bool follow_symlink)
     out->btime_ns = 0;
     out->has_btime = false;
     return 0;
+#endif
 }
 
 /* Set a file's length. truncate and `> file` both want it, and it is
@@ -868,47 +916,91 @@ int lp_getpriority(pid_t pid)
 }
 
 /* ── Filesystem space ─────────────────────────────────────────────────
- * struct statfs64 on arm64, the three fields we need:
- *    8  f_bsize    block size
- *   16  f_blocks   blocks in total
- *   32  f_bavail   blocks an ordinary user may still use
- * f_bfree (24) is larger: it includes the 5% ext4 keeps back for root.
- * f_bavail is the honest number. */
-#define STATFS_BUF_SIZE   120
-#define STATFS_OFF_BSIZE    8
-#define STATFS_OFF_BLOCKS  16
-#define STATFS_OFF_BAVAIL  32
+ *
+ * Two different calls and two different structures, because the kernel
+ * has one shape for 64-bit machines and another for 32-bit ones.
+ *
+ * On a 64-bit machine, statfs fills a struct whose every field is 64
+ * bits. On a 32-bit one, statfs (99) fills a struct whose every field
+ * is 32 bits - a 16GB card does not fit in it - and statfs64 (266) is
+ * the one with 64-bit block counts. statfs64 takes the size of the
+ * structure as its second argument, because more than one version of
+ * it has shipped, and on ARM the structure is packed to four bytes, so
+ * the field offsets are not the 64-bit ones either.
+ *
+ * Reading the 64-bit layout on the 32-bit machine is what `df` did
+ * before this: it printed 17650703386236652 1K-blocks for a 186MB
+ * ramdisk, and guard reported "/data has -327968716MB left". Neither
+ * looked like a type error. They looked like a broken filesystem.
+ *
+ * f_bfree includes the few percent ext4 keeps back for root; f_bavail
+ * is what an ordinary process may still write, and is the honest one. */
+#if defined(__arm__)
+/* struct statfs64, packed to 4 bytes: 84 bytes total. The u64 fields
+ * all land on multiples of 8 anyway, but they are read through memcpy
+ * because nothing in the definition promises that. */
+#define STATFS_SIZE        84
+#define STATFS_BUF_SIZE    88
+#define STATFS_CALL(p, b)  sys_call3(SYS_statfs64, (long)(p), STATFS_SIZE, (long)(b))
+#define SFS_TYPE(b)        fs_u32((b),  0)
+#define SFS_BSIZE(b)       fs_u32((b),  4)
+#define SFS_BLOCKS(b)      fs_u64((b),  8)
+#define SFS_BFREE(b)       fs_u64((b), 16)
+#define SFS_BAVAIL(b)      fs_u64((b), 24)
+#define SFS_FILES(b)       fs_u64((b), 32)
+#define SFS_FFREE(b)       fs_u64((b), 40)
+#define SFS_NAMELEN(b)     fs_u32((b), 56)
+#define SFS_FRSIZE(b)      fs_u32((b), 60)
+#else
+#define STATFS_BUF_SIZE    120
+#define STATFS_CALL(p, b)  sys_call2(SYS_statfs, (long)(p), (long)(b))
+#define SFS_TYPE(b)        fs_u64((b),  0)
+#define SFS_BSIZE(b)       fs_u64((b),  8)
+#define SFS_BLOCKS(b)      fs_u64((b), 16)
+#define SFS_BFREE(b)       fs_u64((b), 24)
+#define SFS_BAVAIL(b)      fs_u64((b), 32)
+#define SFS_FILES(b)       fs_u64((b), 40)
+#define SFS_FFREE(b)       fs_u64((b), 48)
+#define SFS_NAMELEN(b)     fs_u64((b), 64)
+#define SFS_FRSIZE(b)      fs_u64((b), 72)
+#endif
 
-/* statfs, in full. df needs every field of it: the total is one number,
- * what is used is another, and what an ordinary process may still write
- * is a third - ext4 keeps a few percent back for root, and reporting
- * the difference between total and used as "free" overstates it by
- * exactly the reserve that keeps a full disk recoverable. */
-#define STATFS_OFF_TYPE     0
-#define STATFS_OFF_BFREE   24
-#define STATFS_OFF_FILES   40
-#define STATFS_OFF_FFREE   48
-#define STATFS_OFF_NAMELEN 64
-#define STATFS_OFF_FRSIZE  72
+static inline u64 fs_u64(const u8 *b, unsigned off)
+{
+    u64 v;
+    memcpy(&v, b + off, sizeof v);
+    return v;
+}
+
+#if defined(__arm__)
+/* Only the 32-bit layout has 32-bit fields, and an unused function is
+ * an error in this build. */
+static inline u64 fs_u32(const u8 *b, unsigned off)
+{
+    u32 v;
+    memcpy(&v, b + off, sizeof v);
+    return v;
+}
+#endif
 
 long lp_statfs(const char *path, lp_statfs_t *out)
 {
     u8 buf[STATFS_BUF_SIZE];
     memset(buf, 0, sizeof(buf));
 
-    long rc = sys_call2(SYS_statfs, (long)path, (long)buf);
+    long rc = STATFS_CALL(path, buf);
     if (rc < 0)
         return rc;
 
-    out->type    = *(u64 *)(buf + STATFS_OFF_TYPE);
-    out->bsize   = *(u64 *)(buf + STATFS_OFF_BSIZE);
-    out->blocks  = *(u64 *)(buf + STATFS_OFF_BLOCKS);
-    out->bfree   = *(u64 *)(buf + STATFS_OFF_BFREE);
-    out->bavail  = *(u64 *)(buf + STATFS_OFF_BAVAIL);
-    out->files   = *(u64 *)(buf + STATFS_OFF_FILES);
-    out->ffree   = *(u64 *)(buf + STATFS_OFF_FFREE);
-    out->namelen = *(u64 *)(buf + STATFS_OFF_NAMELEN);
-    out->frsize  = *(u64 *)(buf + STATFS_OFF_FRSIZE);
+    out->type    = SFS_TYPE(buf);
+    out->bsize   = SFS_BSIZE(buf);
+    out->blocks  = SFS_BLOCKS(buf);
+    out->bfree   = SFS_BFREE(buf);
+    out->bavail  = SFS_BAVAIL(buf);
+    out->files   = SFS_FILES(buf);
+    out->ffree   = SFS_FFREE(buf);
+    out->namelen = SFS_NAMELEN(buf);
+    out->frsize  = SFS_FRSIZE(buf);
     if (out->frsize == 0) out->frsize = out->bsize;
     return 0;
 }
@@ -918,13 +1010,13 @@ long lp_fs_space(const char *path, u64 *free_bytes, u64 *total_bytes)
     u8 buf[STATFS_BUF_SIZE];
     memset(buf, 0, sizeof(buf));
 
-    long rc = sys_call2(SYS_statfs, (long)path, (long)buf);
+    long rc = STATFS_CALL(path, buf);
     if (rc < 0)
         return rc;
 
-    u64 bsize  = *(u64 *)(buf + STATFS_OFF_BSIZE);
-    u64 blocks = *(u64 *)(buf + STATFS_OFF_BLOCKS);
-    u64 avail  = *(u64 *)(buf + STATFS_OFF_BAVAIL);
+    u64 bsize  = SFS_BSIZE(buf);
+    u64 blocks = SFS_BLOCKS(buf);
+    u64 avail  = SFS_BAVAIL(buf);
 
     if (free_bytes)  *free_bytes  = avail * bsize;
     if (total_bytes) *total_bytes = blocks * bsize;

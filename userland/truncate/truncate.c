@@ -70,7 +70,9 @@ int main(int argc, char **argv)
         if (*p == '+') { adjust = 1; p++; }
         else if (*p == '-') { adjust = -1; p++; }
         char *end;
-        amount = strtol(p, &end, 10);
+        /* strtoll, so `truncate -s 5G` still means 5G on a 32-bit
+         * machine rather than whatever is left of it. */
+        amount = strtoll(p, &end, 10);
         switch (*end) {
         case 'K': case 'k': amount *= 1024; break;
         case 'M': case 'm': amount *= 1048576; break;

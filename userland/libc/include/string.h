@@ -59,6 +59,10 @@ size_t utf8_next(const char *s, size_t len, size_t idx);
 /* The screen width of s[0..len) once drawn. */
 size_t utf8_str_width(const char *s, size_t len);
 
-long   strtol(const char *s, char **end, int base);
+long      strtol(const char *s, char **end, int base);
+/* The same parse, full width. On a 32-bit machine a long stops at two
+ * billion; anything that means a file size, an offset or a date needs
+ * this one. */
+long long strtoll(const char *s, char **end, int base);
 
 #endif /* _LP_STRING_H */

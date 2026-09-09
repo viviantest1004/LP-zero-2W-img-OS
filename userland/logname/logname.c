@@ -48,7 +48,10 @@ static bool from_loginuid(void)
         return false;
     char *end;
     long v = strtol(buf, &end, 10);
-    if (end == buf || v < 0 || v == 4294967295L)
+    /* (uid_t)-1 is the "no such user" sentinel. On a 32-bit machine a
+     * long cannot hold it, so the comparison has to be done in the
+     * width the value actually has. */
+    if (end == buf || v < 0 || (unsigned long long)v == 4294967295ULL)
         return false;
     lp_user_t u;
     if (!lp_user_by_uid((uid_t)v, &u))

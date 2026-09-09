@@ -175,9 +175,10 @@ echo "외부 프로그램:"
 # On the first amd64 image that filled the screen and nothing else was
 # readable.
 DROPBEAR_SRC="${THIRD}/dropbear-2024.86"
-if [[ "${LP_ARCH:-arm64}" == "amd64" ]]; then
-    DROPBEAR_SRC="${THIRD}/dropbear-amd64"
-fi
+case "${LP_ARCH:-arm64}" in
+    amd64) DROPBEAR_SRC="${THIRD}/dropbear-amd64" ;;
+    armv6) DROPBEAR_SRC="${THIRD}/armv6/dropbear-2024.86" ;;
+esac
 copy_third "${DROPBEAR_SRC}/dropbear"    dropbear    || true
 copy_third "${DROPBEAR_SRC}/dropbearkey" dropbearkey || true
 # wpa_supplicant, for the machine this image is for. Same reason as
@@ -185,9 +186,10 @@ copy_third "${DROPBEAR_SRC}/dropbearkey" dropbearkey || true
 # copy, it fails at exec, and WiFi comes up as "Exec format error" on a
 # board that otherwise looks fine.
 WPA_SRC="${THIRD}/wpa_supplicant-2.11/wpa_supplicant"
-if [[ "${LP_ARCH:-arm64}" == "amd64" ]]; then
-    WPA_SRC="${THIRD}/wpa-amd64/wpa_supplicant"
-fi
+case "${LP_ARCH:-arm64}" in
+    amd64) WPA_SRC="${THIRD}/wpa-amd64/wpa_supplicant" ;;
+    armv6) WPA_SRC="${THIRD}/armv6/wpa_supplicant-2.11/wpa_supplicant" ;;
+esac
 copy_third "${WPA_SRC}/wpa_supplicant" wpa_supplicant || true
 copy_third "${WPA_SRC}/wpa_cli"        wpa_cli        || true
 
@@ -304,8 +306,14 @@ MOTD
 # 손댈 수 없다. 해시가 다르면 fsck 는 실행하지 않는다.
 # 형식은 sha256sum 이 쓰는 것 그대로: "<해시>  <이름>".
 : > "${ROOT_DIR}/etc/boot-tools.sha256"
+# One directory per machine, matching what mksdcard.sh puts on the card.
+# Hashing the arm64 e2fsck into an armv6 image would not be a wrong
+# number in a file, it would be a board that refuses to repair itself:
+# the hash never matches, so fsck never runs.
+PREBUILT="${HERE}/prebuilt"
+[[ "${LP_ARCH:-arm64}" == "arm64" ]] || PREBUILT="${PREBUILT}/${LP_ARCH}"
 for tool in e2fsck mke2fs; do
-    src="${HERE}/prebuilt/${tool}"
+    src="${PREBUILT}/${tool}"
     if [[ -f "$src" ]]; then
         printf '%s  %s\n' \
             "$(sha256sum "$src" | cut -d' ' -f1)" "$tool" \
@@ -314,7 +322,7 @@ for tool in e2fsck mke2fs; do
     else
         # 없으면 줄도 쓰지 않는다. 기대 해시가 없으면 실행을 거부하는
         # 쪽을 택한다 - 자동 복구나 --format 을 잃을 뿐이다.
-        log "경고: prebuilt/${tool} 이 없습니다"
+        log "경고: ${PREBUILT#"${HERE}/"}/${tool} 이 없습니다"
     fi
 done
 

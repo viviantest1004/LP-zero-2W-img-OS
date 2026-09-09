@@ -109,7 +109,9 @@ long  lp_write(int fd, const void *buf, size_t n);
 #define SEEK_SET  0
 #define SEEK_CUR  1
 #define SEEK_END  2
-long  lp_lseek(int fd, off_t off, int whence);
+/* s64, not long: on a 32-bit machine a long cannot hold a file offset,
+ * and the value that comes back would be the low half of one. */
+s64   lp_lseek(int fd, off_t off, int whence);
 long  lp_dup(int fd);
 long  lp_dup2(int oldfd, int newfd);
 long  lp_pipe(int fds[2]);

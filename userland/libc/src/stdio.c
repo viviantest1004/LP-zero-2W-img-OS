@@ -171,8 +171,22 @@ static void format(sink_t *s, const char *fmt, va_list ap)
             }
         }
 
-        int longness = 0;
-        while (*fmt == 'l' || *fmt == 'z') { longness++; fmt++; }
+        /* How wide the argument is.
+         *
+         * This used to be a count that anything above zero treated as
+         * 64 bits, which was right on both 64-bit machines and wrong on
+         * a 32-bit one: there `%ld` is four bytes and `%lld` is eight,
+         * and reading eight for a `%ld` takes the next argument's
+         * bytes with it. Every number after the first came out as
+         * garbage, which is how `expr 2 + 3` printed 0.
+         *
+         * `z` is size_t, which is a pointer width - 8 on the 64-bit
+         * machines and 4 here. */
+        int longness = 0;             /* 0 int, 1 long, 2 long long */
+        while (*fmt == 'l') { longness++; fmt++; }
+        if (*fmt == 'z') { longness = (sizeof(size_t) == 8) ? 2 : 1; fmt++; }
+        if (longness == 1 && sizeof(long) == 8) longness = 2;
+        bool wide = (longness >= 2);
 
         switch (*fmt) {
         case 'c':
@@ -194,26 +208,35 @@ static void format(sink_t *s, const char *fmt, va_list ap)
             break;
         }
         case 'd': case 'i':
-            emit_int(s, longness ? va_arg(ap, s64) : (s64)va_arg(ap, s32),
+            emit_int(s, wide ? va_arg(ap, s64)
+                      : (longness ? (s64)va_arg(ap, long) : (s64)va_arg(ap, s32)),
                      width, left_align, zero_pad);
             break;
         case 'u':
-            emit_uint(s, longness ? va_arg(ap, u64) : (u64)va_arg(ap, u32),
+            emit_uint(s, wide ? va_arg(ap, u64)
+                       : (longness ? (u64)va_arg(ap, unsigned long)
+                                   : (u64)va_arg(ap, u32)),
                       10, false, width, left_align, zero_pad);
             break;
         /* Octal, which exists for exactly one reason on this system:
          * file permissions are read and written in it, and 0755 spelled
          * out in decimal is 493. */
         case 'o':
-            emit_uint(s, longness ? va_arg(ap, u64) : (u64)va_arg(ap, u32),
+            emit_uint(s, wide ? va_arg(ap, u64)
+                       : (longness ? (u64)va_arg(ap, unsigned long)
+                                   : (u64)va_arg(ap, u32)),
                       8, false, width, left_align, zero_pad);
             break;
         case 'x':
-            emit_uint(s, longness ? va_arg(ap, u64) : (u64)va_arg(ap, u32),
+            emit_uint(s, wide ? va_arg(ap, u64)
+                       : (longness ? (u64)va_arg(ap, unsigned long)
+                                   : (u64)va_arg(ap, u32)),
                       16, false, width, left_align, zero_pad);
             break;
         case 'X':
-            emit_uint(s, longness ? va_arg(ap, u64) : (u64)va_arg(ap, u32),
+            emit_uint(s, wide ? va_arg(ap, u64)
+                       : (longness ? (u64)va_arg(ap, unsigned long)
+                                   : (u64)va_arg(ap, u32)),
                       16, true, width, left_align, zero_pad);
             break;
         case 'p':

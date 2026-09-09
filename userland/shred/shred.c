@@ -105,7 +105,7 @@ int main(int argc, char **argv)
         case 'x': break;
         case 's': {
             char *end;
-            want_size = strtol(g.arg, &end, 10);
+            want_size = strtoll(g.arg, &end, 10);
             switch (*end) {
             case 'K': case 'k': want_size *= 1024; break;
             case 'M': case 'm': want_size *= 1048576; break;

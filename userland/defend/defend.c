@@ -752,7 +752,8 @@ static bool save_bans(void)
     for (int i = 0; i < nbans; i++) {
         char host[20];
         ipv4_format(bans[i].addr, host);
-        dprintf((int)fd, "%s %ld %d\n", host, bans[i].when, bans[i].fails);
+        dprintf((int)fd, "%s %lld %d\n", host,
+                (long long)bans[i].when, bans[i].fails);
     }
     lp_close((int)fd);
     if (lp_rename(F_BANS ".new", F_BANS) != 0) {
@@ -1980,8 +1981,9 @@ static void save_state(void)
     long fd = lp_open(F_STATE, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0)
         return;
-    dprintf((int)fd, "checks %ld\nlast %ld\nbanned %ld\n",
-            st_checks, st_last, st_banned_total);
+    dprintf((int)fd, "checks %lld\nlast %lld\nbanned %lld\n",
+            (long long)st_checks, (long long)st_last,
+            (long long)st_banned_total);
     lp_close((int)fd);
 }
 
@@ -2058,7 +2060,7 @@ static int cmd_status(void)
     load_baseline();
 
     when_str(st_last, buf, sizeof buf);
-    printf("checks run     %ld, last at %s\n", st_checks, buf);
+    printf("checks run     %lld, last at %s\n", (long long)st_checks, buf);
 
     when_str(base_when, buf, sizeof buf);
     printf("baseline       %s", buf);
@@ -2068,8 +2070,8 @@ static int cmd_status(void)
         printf("  (%d items)", nbase);
     printf("\n");
 
-    printf("blocked        %d now, %ld since this file was created\n",
-           nbans, st_banned_total);
+    printf("blocked        %d now, %lld since this file was created\n",
+           nbans, (long long)st_banned_total);
 
     if (nbans > 0) {
         s64 now = lp_time();
@@ -2081,8 +2083,8 @@ static int cmd_status(void)
             when_str(bans[i].when, at, sizeof at);
             s64 left = bans[i].when + BAN_SECS - now;
             if (left < 0) left = 0;
-            printf("%-16s %-8d %-24s %ld hours\n",
-                   host, bans[i].fails, at, left / 3600);
+            printf("%-16s %-8d %-24s %lld hours\n",
+                   host, bans[i].fails, at, (long long)(left / 3600));
         }
         printf("\n`defend unban <address>` lets one back in.\n");
     }
@@ -2155,7 +2157,7 @@ static int cmd_baseline(void)
     dprintf((int)fd,
             "# What defend expects to find. Anything not listed here is\n"
             "# reported. Edit it by hand or run `defend baseline` again.\n");
-    dprintf((int)fd, "# recorded %ld\n", lp_time());
+    dprintf((int)fd, "# recorded %lld\n", (long long)lp_time());
     for (int i = 0; i < nlisten; i++)
         dprintf((int)fd, "%s\n", listen_line[i]);
     for (int i = 0; i < nkeylines; i++)

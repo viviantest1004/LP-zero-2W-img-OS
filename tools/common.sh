@@ -22,6 +22,12 @@ KERNEL_IMAGE="$(_read_kernel_image)"
 LINUX_IMAGE="$(_read_mk_var LINUX_IMAGE)"
 : "${LINUX_IMAGE:=Image}"
 
+# The Pi Zero W kernel has its own name. Two boards, two instruction
+# sets, two files that cannot be swapped for each other - and nothing
+# about a file called "kernel.img" says which one you have.
+LINUX_IMAGE_ARMV6="$(_read_mk_var LINUX_IMAGE_ARMV6)"
+: "${LINUX_IMAGE_ARMV6:=zImage}"
+
 # ── 빌드 산출물이 놓이는 곳 ──────────────────────────────────────
 #
 # 커널 소스, 서드파티 소스, 크로스 sysroot, 파이썬 스테이징 - 저장소에
@@ -84,6 +90,7 @@ check_tree_arch() {
     case "$arch" in
         amd64) want=0x3e; name="x86-64"  ;;
         arm64) want=0xb7; name="aarch64" ;;
+        armv6) want=0x28; name="32-bit ARM" ;;
         *) die "check_tree_arch: unknown architecture '${arch}'" ;;
     esac
 

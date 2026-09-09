@@ -153,7 +153,15 @@ char *strdup(const char *s)
     return p;
 }
 
-long strtol(const char *s, char **end, int base)
+/* strtoll is the real one; strtol is it narrowed to a long.
+ *
+ * They were one function returning `long` until this OS was built for
+ * a 32-bit machine, where a long is four bytes. Everything that parses
+ * a number - expr, seek offsets, timestamps - went through it, so on
+ * that machine a file offset or an arithmetic result silently stopped
+ * at two billion. The parse itself is the same either way; only the
+ * width of the answer differs, so there is one body and a wrapper. */
+long long strtoll(const char *s, char **end, int base)
 {
     while (*s == ' ' || *s == '\t' || *s == '\n') s++;
 
@@ -168,7 +176,7 @@ long strtol(const char *s, char **end, int base)
         base = (s[0] == '0') ? 8 : 10;
     }
 
-    long val = 0;
+    long long val = 0;
     for (;;) {
         int d;
         if (*s >= '0' && *s <= '9')      d = *s - '0';
@@ -183,6 +191,11 @@ long strtol(const char *s, char **end, int base)
 
     if (end) *end = (char *)s;
     return neg ? -val : val;
+}
+
+long strtol(const char *s, char **end, int base)
+{
+    return (long)strtoll(s, end, base);
 }
 
 

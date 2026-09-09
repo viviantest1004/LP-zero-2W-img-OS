@@ -615,7 +615,7 @@ static bool index_find(const char *name, entry_t *e)
 
         strlcpy(e->name,    fields[0], sizeof(e->name));
         strlcpy(e->version, fields[1], sizeof(e->version));
-        e->size = strtol(fields[2], NULL, 10);
+        e->size = strtoll(fields[2], NULL, 10);
         strlcpy(e->sha,     fields[3], sizeof(e->sha));
         strlcpy(e->file,    fields[4], sizeof(e->file));
         found = true;

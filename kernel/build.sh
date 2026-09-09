@@ -37,7 +37,18 @@ LP_ARCH="${LP_ARCH:-arm64}"
 # are not. LP_BUILD_DIR overrides it if somebody really means to.
 BUILD_DIR="${LP_BUILD_DIR:-${LPZERO_WORK}/build-${LP_ARCH}}"
 
-if [[ "$LP_ARCH" == "amd64" ]]; then
+if [[ "$LP_ARCH" == "armv6" ]]; then
+    # A Pi Zero W. ARCH=arm, not arm64 - a different instruction set and
+    # a different kernel entirely, sharing only the Broadcom peripherals.
+    ARCH=arm
+    CROSS=arm-linux-gnueabihf-
+    KCONFIG_NAME=lp-zero-armv6.config
+    # Regenerated every time, from the arm64 config and the armv6
+    # fragment, for the same reason as amd64: hand-merging gets the
+    # order wrong and merge_config keeps the last answer.
+    "${REPO_ROOT}/tools/mkarmv6config.sh" >/dev/null
+    OUT_SUBDIR="${LP_OUT_SUBDIR:-out-armv6}"
+elif [[ "$LP_ARCH" == "amd64" ]]; then
     ARCH=x86_64
     CROSS=
     KCONFIG_NAME=lp-zero-amd64.config
@@ -91,7 +102,13 @@ fi
 mkdir -p "$BUILD_DIR" "$OUT_DIR"
 
 # ── 1. 공식 defconfig ────────────────────────────────────────────
-if [[ "$LP_ARCH" == "amd64" ]]; then
+if [[ "$LP_ARCH" == "armv6" ]]; then
+    # bcmrpi_defconfig is the Pi 1 / Pi Zero / Zero W config: ARMv6,
+    # one core. bcm2835_defconfig is the mainline-style one and does not
+    # carry the downstream board support this tree has.
+    step "bcmrpi_defconfig 적용 (Pi 1 / Zero / Zero W 공용 ARMv6 설정)"
+    make "${MAKE_ARGS[@]}" bcmrpi_defconfig >/dev/null
+elif [[ "$LP_ARCH" == "amd64" ]]; then
     # There is no vendor defconfig for "a PC", so start from the
     # kernel's own x86_64_defconfig and cut it down with the fragment.
     step "x86_64_defconfig 적용"
@@ -189,6 +206,44 @@ step "빌드 시작 (-j${JOBS}) — 몇 분 걸립니다"
 # 감싼 것으로, UEFI 부팅 경로(QEMU/UTM)에서 FAT 파티션 공간을 절반 넘게
 # 아낀다. 실기 Pi 는 GPU 펌웨어가 압축을 풀 줄 모르므로 Image 를 그대로
 # 쓴다 - 그래서 둘 다 만든다.
+if [[ "$LP_ARCH" == "armv6" ]]; then
+    # zImage, not Image: on 32-bit ARM the kernel carries its own
+    # decompressor and the GPU firmware jumps straight into it. There is
+    # no EFI path on this board, so there is nothing to build twice.
+    time make "${MAKE_ARGS[@]}" -j"$JOBS" zImage dtbs
+
+    step "결과"
+    cp "${BUILD_DIR}/arch/arm/boot/zImage" "${OUT_DIR}/zImage"
+    printf "  zImage %s bytes (%.1f MB)\n" \
+        "$(stat -c%s "${OUT_DIR}/zImage")" \
+        "$(echo "scale=2; $(stat -c%s "${OUT_DIR}/zImage")/1048576" | bc)"
+
+    DTB_SRC="${BUILD_DIR}/arch/arm/boot/dts/broadcom/bcm2708-rpi-zero-w.dtb"
+    if [[ -f "$DTB_SRC" ]]; then
+        cp "$DTB_SRC" "${OUT_DIR}/"
+        echo "  DTB   $(stat -c%s "${OUT_DIR}/bcm2708-rpi-zero-w.dtb") bytes"
+    else
+        echo "  경고: Zero W DTB 를 찾지 못했습니다"
+    fi
+
+    # disable-bt moves PL011 off the Bluetooth chip and onto the header
+    # pins; without it the board boots with nothing on the serial
+    # console. dwc2 puts the one micro-USB port into OTG mode.
+    OVL_DIR="${BUILD_DIR}/arch/arm/boot/dts/overlays"
+    mkdir -p "${OUT_DIR}/overlays"
+    for ovl in disable-bt dwc2; do
+        if [[ -f "${OVL_DIR}/${ovl}.dtbo" ]]; then
+            cp "${OVL_DIR}/${ovl}.dtbo" "${OUT_DIR}/overlays/"
+            echo "  오버레이 ${ovl}.dtbo"
+        else
+            echo "  경고: ${ovl}.dtbo 를 찾지 못했습니다"
+        fi
+    done
+    echo
+    echo "완료: ${OUT_DIR}"
+    exit 0
+fi
+
 if [[ "$LP_ARCH" == "amd64" ]]; then
     # bzImage carries the EFI stub itself on x86, so there is one image
     # rather than the Image + vmlinuz.efi pair arm64 needs, and there

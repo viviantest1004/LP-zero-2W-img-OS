@@ -22,6 +22,12 @@ qemu-out/
 userland/rootfs/
 userland/initramfs.cpio.gz
 kernel/out/
+# The Pi Zero W kernel and the rootfs it is built from. Same reason as
+# kernel/out/: build products that kernel/build.sh remakes from the
+# config beside it.
+kernel/out-armv6/
+userland/rootfs-armv6/
+userland/rootfs-amd64/
 # 배포 이미지.
 #
 # 원래는 통째로 제외했다. 지금은 이미지와 체크섬만 추적한다 -

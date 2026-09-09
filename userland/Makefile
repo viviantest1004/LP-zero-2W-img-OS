@@ -19,6 +19,7 @@ OBJDUMP ?= llvm-objdump
 #
 #   make            -> arm64, the Pi Zero 2 W and arm64 VMs
 #   make ARCH=amd64 -> x86-64, an ordinary desktop or VM
+#   make ARCH=armv6 -> 32-bit ARM, the Pi Zero W and Pi 1
 ARCH ?= arm64
 
 ifeq ($(ARCH),amd64)
@@ -32,6 +33,19 @@ ifeq ($(ARCH),amd64)
   HOSTNAME ?= linux-lp
   OSTITLE  ?= linux-LP
   OSMACHINE ?= amd64 PC or virtual machine  -  built from scratch
+else ifeq ($(ARCH),armv6)
+  # The Pi Zero W is an ARM1176: ARMv6, one core, 32 bits, and no NEON.
+  # armv6kz is what the chip actually is - the k adds the SMP-ish
+  # instructions Linux wants and the z adds TrustZone, both of which the
+  # kernel expects to be there on a BCM2835.
+  TARGET   := arm-linux-gnueabihf
+  CPUFLAGS := -march=armv6kz -mfpu=vfp -mfloat-abi=hard -marm
+  OBJDIR   := build-armv6
+  BINDIR   := bin-armv6
+  OSNAME   ?= LP-zero
+  HOSTNAME ?= lpzero
+  OSTITLE  ?= test_a_123_LPzeroW_img
+  OSMACHINE ?= Raspberry Pi Zero W  -  built from scratch
 else ifeq ($(ARCH),arm64)
   TARGET   := aarch64-linux-gnu
   CPUFLAGS := -mcpu=cortex-a53
@@ -42,7 +56,7 @@ else ifeq ($(ARCH),arm64)
   OSTITLE  ?= test_a_123_LPzero2W_img
   OSMACHINE ?= Raspberry Pi Zero 2 W  -  built from scratch
 else
-  $(error ARCH must be arm64 or amd64, not "$(ARCH)")
+  $(error ARCH must be arm64, armv6 or amd64, not "$(ARCH)")
 endif
 
 LIBC_DIR := libc

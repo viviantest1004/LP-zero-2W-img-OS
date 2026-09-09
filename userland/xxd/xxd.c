@@ -303,7 +303,7 @@ int main(int argc, char **argv)
         }
         else if (strncmp(pp, "-o", 2) == 0) {
             if (attached && strncmp("ffset", attached, 5) != 0) {
-                displayoff = (u64)strtol(attached, NULL, 0);
+                displayoff = (u64)strtoll(attached, NULL, 0);
             } else {
                 int rel = 0, neg = 0;
                 if (i + 1 >= argc) usage();
@@ -323,13 +323,13 @@ int main(int argc, char **argv)
             else usage();
             if (value[0] == '+') relseek++;
             if (value[relseek] == '-') negseek++;
-            seekoff = strtol(value + relseek + negseek, NULL, 0);
+            seekoff = strtoll(value + relseek + negseek, NULL, 0);
         }
         else if (strncmp(pp, "-l", 2) == 0) {
             if (attached && strncmp("en", attached, 2) != 0) value = attached;
             else if (i + 1 < argc) value = argv[++i];
             else usage();
-            length = strtol(value, NULL, 0);
+            length = strtoll(value, NULL, 0);
         }
         else if (strncmp(pp, "-n", 2) == 0) {
             if (attached && strncmp("ame", attached, 3) != 0) value = attached;

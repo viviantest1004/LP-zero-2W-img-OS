@@ -23,7 +23,7 @@ static char iobuf[65536];
 static char delim    = '\n';
 static bool by_bytes = false;
 static bool from_start = false;      /* the count was written +N */
-static long count    = 10;
+static s64 count    = 10;
 
 static void out(const char *p, size_t n)
 {
@@ -187,7 +187,7 @@ static void set_count(const char *s)
     from_start = (*s == '+');
     if (*s == '+' || *s == '-') s++;
     char *end;
-    long v = strtol(s, &end, 10);
+    s64 v = strtoll(s, &end, 10);
     if (end == s || *end) {
         dprintf(STDERR_FILENO, "tail: invalid number of %s: '%s'\n",
                 by_bytes ? "bytes" : "lines", s);

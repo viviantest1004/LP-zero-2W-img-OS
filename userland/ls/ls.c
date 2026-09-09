@@ -123,13 +123,15 @@ static void mode_string(u32 mode, char *out)
 static void human_size(u64 n, char *out, size_t size)
 {
     if (!opt_human) {
-        snprintf(out, size, "%lu", (unsigned long)n);
+        /* %llu, not %lu: a long is four bytes on a 32-bit machine and
+         * a 5GB file then listed as 1GB. */
+        snprintf(out, size, "%llu", (unsigned long long)n);
         return;
     }
     static const char *unit[] = { "", "K", "M", "G", "T" };
     int u = 0;
     while (n >= 10240 && u < 4) { n /= 1024; u++; }
-    snprintf(out, size, "%lu%s", (unsigned long)n, unit[u]);
+    snprintf(out, size, "%llu%s", (unsigned long long)n, unit[u]);
 }
 
 /* The date column.

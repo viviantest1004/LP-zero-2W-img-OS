@@ -33,7 +33,7 @@ static void name_for(char *out, size_t cap, const char *prefix, long n)
 static u64 parse_size(const char *s)
 {
     char *end;
-    u64 v = (u64)strtol(s, &end, 10);
+    u64 v = (u64)strtoll(s, &end, 10);
     switch (*end) {
     case 'K': case 'k': v *= 1024; break;
     case 'M': case 'm': v *= 1048576; break;
@@ -63,7 +63,7 @@ int main(int argc, char **argv)
         case 'l': lines = strtol(g.arg, NULL, 10); bytes = chunks = 0; break;
         case 'b': bytes = parse_size(g.arg); lines = 0; chunks = 0; break;
         case 'C': bytes = parse_size(g.arg); lines = 0; chunks = 0; break;
-        case 'n': chunks = (u64)strtol(g.arg, NULL, 10); lines = 0; bytes = 0; break;
+        case 'n': chunks = (u64)strtoll(g.arg, NULL, 10); lines = 0; bytes = 0; break;
         case 'a': suffix_len = (int)strtol(g.arg, NULL, 10); break;
         case 'd': numeric_suffix = true; break;
         case 'S': add_suffix = g.arg; break;

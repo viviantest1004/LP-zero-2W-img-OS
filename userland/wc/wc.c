@@ -14,7 +14,10 @@
 #include "stdio.h"
 #include "unistd.h"
 
-typedef struct { long lines, words, chars; } count_t;
+/* s64, not long. On a 32-bit machine a long stops at two billion, and
+ * `wc -c` on a file bigger than that reported the remainder rather than
+ * failing - the one kind of wrong answer that looks like a real one. */
+typedef struct { s64 lines, words, chars; } count_t;
 
 static void count_fd(int fd, count_t *c)
 {
@@ -56,7 +59,7 @@ static void count_fd(int fd, count_t *c)
  * sizes the column to the largest number it is about to print - across
  * every file, so the lines still line up - and that means the counts
  * have to be collected before any of them is printed. */
-static int digits(long v)
+static int digits(s64 v)
 {
     int n = 1;
     while (v >= 10) { v /= 10; n++; }
@@ -67,9 +70,9 @@ static void report(const count_t *c, bool l, bool w, bool ch,
                    const char *name, int width)
 {
     bool first = true;
-    if (l)  { printf("%*ld", first ? width : width + 1, c->lines); first = false; }
-    if (w)  { printf("%*ld", first ? width : width + 1, c->words); first = false; }
-    if (ch) { printf("%*ld", first ? width : width + 1, c->chars); first = false; }
+    if (l)  { printf("%*lld", first ? width : width + 1, (long long)c->lines); first = false; }
+    if (w)  { printf("%*lld", first ? width : width + 1, (long long)c->words); first = false; }
+    if (ch) { printf("%*lld", first ? width : width + 1, (long long)c->chars); first = false; }
     if (name) printf(" %s", name);
     printf("\n");
 }
@@ -97,7 +100,7 @@ int main(int argc, char **argv)
     if (files == 0) {
         count_t c = { 0, 0, 0 };
         count_fd(STDIN_FILENO, &c);
-        long m = 0;
+        s64 m = 0;
         if (l && c.lines > m) m = c.lines;
         if (w && c.words > m) m = c.words;
         if (ch && c.chars > m) m = c.chars;
@@ -134,7 +137,7 @@ int main(int argc, char **argv)
         total.chars += c.chars;
     }
 
-    long m = 0;
+    s64 m = 0;
     for (int i = 0; i < seen; i++) {
         if (l  && got[i].lines > m) m = got[i].lines;
         if (w  && got[i].words > m) m = got[i].words;

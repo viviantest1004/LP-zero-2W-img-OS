@@ -66,6 +66,49 @@ lp_sigreturn_trampoline:
     syscall
 .size lp_sigreturn_trampoline, . - lp_sigreturn_trampoline
 
+#elif defined(__arm__)
+
+/* ── ARM, 32-bit (the Pi Zero W) ──
+ *
+ * The same stack the kernel builds everywhere, in words half the size:
+ * argc at sp, argv from sp+4, envp past argv's NULL. AAPCS wants the
+ * first three arguments in r0-r2 and the stack 8-byte aligned at a
+ * call, which is a weaker rule than the 64-bit one but still a rule.
+ *
+ * environ is loaded through a literal pool rather than an adrp/add
+ * pair - ARMv6 has no adrp, and the pool is what the assembler gives
+ * you instead.
+ */
+.section .text._start, "ax"
+.global _start
+.type _start, %function
+
+_start:
+    mov     fp, #0                  /* stop stack unwinding here      */
+    mov     lr, #0
+
+    ldr     r0, [sp]                /* r0 = argc                      */
+    add     r1, sp, #4              /* r1 = argv                      */
+
+    /* envp = argv + (argc+1)*4, just past argv's terminating NULL */
+    add     r2, r0, #1
+    add     r2, r1, r2, lsl #2      /* r2 = envp                      */
+
+    ldr     r3, =environ
+    str     r2, [r3]                /* so getenv() can find it        */
+
+    bic     sp, sp, #7              /* AAPCS: 8-byte aligned at a call */
+
+    bl      main
+
+    mov     r7, #248                /* SYS_exit_group                 */
+    svc     #0
+
+1:  b       1b                      /* not reached                    */
+
+.size _start, . - _start
+.ltorg
+
 #else /* __aarch64__ */
 
 .section .text._start, "ax"

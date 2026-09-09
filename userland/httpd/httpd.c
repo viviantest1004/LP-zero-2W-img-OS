@@ -280,9 +280,10 @@ static void log_request(const char *addr, const char *method,
 
     char line[420];
     int n = snprintf(line, sizeof line,
-                     "%04d-%02d-%02dT%02d:%02d:%02dZ %s %s %s %d %lu\n",
+                     "%04d-%02d-%02dT%02d:%02d:%02dZ %s %s %s %d %llu\n",
                      tm.year, tm.mon, tm.day, tm.hour, tm.min, tm.sec,
-                     addr, shortmethod, shortpath, status, bytes);
+                     addr, shortmethod, shortpath, status,
+                     (unsigned long long)bytes);
     if (n > 0) {
         if (n > (int)sizeof line - 1)
             n = (int)sizeof line - 1;   /* snprintf returns what it wanted */
@@ -856,7 +857,8 @@ static bool send_file(conn_t *c, const char *full, const lp_stat_t *st,
         *status = 416;
         *sent = 0;
         char extra[80];
-        snprintf(extra, sizeof extra, "Content-Range: bytes */%lu\r\n", size);
+        snprintf(extra, sizeof extra, "Content-Range: bytes */%llu\r\n",
+                 (unsigned long long)size);
         return send_error(c, 416, extra, keepalive, head_only ? "HEAD" : "GET");
     }
 
@@ -879,12 +881,14 @@ static bool send_file(conn_t *c, const char *full, const lp_stat_t *st,
                      "Date: %s\r\n"
                      "Last-Modified: %s\r\n"
                      "Content-Type: %s\r\n"
-                     "Content-Range: bytes %lu-%lu/%lu\r\n"
-                     "Content-Length: %lu\r\n"
+                     "Content-Range: bytes %llu-%llu/%llu\r\n"
+                     "Content-Length: %llu\r\n"
                      "Accept-Ranges: bytes\r\n"
                      "Connection: %s\r\n\r\n",
-                     date, lastmod, content_type(full), first, last, size,
-                     length, keepalive ? "keep-alive" : "close");
+                     date, lastmod, content_type(full),
+                     (unsigned long long)first, (unsigned long long)last,
+                     (unsigned long long)size, (unsigned long long)length,
+                     keepalive ? "keep-alive" : "close");
     } else {
         *status = 200;
         n = snprintf(hdr, sizeof hdr,
@@ -892,10 +896,11 @@ static bool send_file(conn_t *c, const char *full, const lp_stat_t *st,
                      "Date: %s\r\n"
                      "Last-Modified: %s\r\n"
                      "Content-Type: %s\r\n"
-                     "Content-Length: %lu\r\n"
+                     "Content-Length: %llu\r\n"
                      "Accept-Ranges: bytes\r\n"
                      "Connection: %s\r\n\r\n",
-                     date, lastmod, content_type(full), length,
+                     date, lastmod, content_type(full),
+                     (unsigned long long)length,
                      keepalive ? "keep-alive" : "close");
     }
 

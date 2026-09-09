@@ -33,9 +33,13 @@ static const char *peek(void)     { return pos < ac ? av[pos] : NULL; }
 static const char *take(void)     { return pos < ac ? av[pos++] : NULL; }
 static bool at(const char *s)     { const char *t = peek(); return t && strcmp(t, s) == 0; }
 
-typedef struct { bool is_num; long num; char str[4096]; } val_t;
+/* The value type is s64, not long: on a 32-bit machine a long is four
+ * bytes, and `expr 2147483647 + 1` answered -2147483648. GNU expr uses
+ * intmax_t for the same reason. A command that answers differently on
+ * one machine is worse than one that is missing. */
+typedef struct { bool is_num; s64 num; char str[4096]; } val_t;
 
-static val_t make_num(long v)
+static val_t make_num(s64 v)
 {
     val_t r; r.is_num = true; r.num = v; r.str[0] = '\0'; return r;
 }
@@ -47,33 +51,33 @@ static val_t make_str(const char *s)
 static const char *text(const val_t *v, char *tmp, size_t cap)
 {
     if (!v->is_num) return v->str;
-    snprintf(tmp, cap, "%ld", v->num);
+    snprintf(tmp, cap, "%lld", (long long)v->num);
     return tmp;
 }
 
-static bool as_number(const val_t *v, long *out)
+static bool as_number(const val_t *v, s64 *out)
 {
     if (v->is_num) { *out = v->num; return true; }
     const char *s = v->str;
     while (*s == ' ') s++;
     if (!*s) return false;
     char *end;
-    long n = strtol(s, &end, 10);
+    s64 n = strtoll(s, &end, 10);
     if (*end) return false;
     *out = n;
     return true;
 }
 
-static long need_number(const val_t *v)
+static s64 need_number(const val_t *v)
 {
-    long n;
+    s64 n;
     if (!as_number(v, &n)) die("non-integer argument");
     return n;
 }
 
 static bool truthy(const val_t *v)
 {
-    long n;
+    s64 n;
     if (as_number(v, &n)) return n != 0;
     return v->str[0] != '\0';
 }
@@ -94,18 +98,18 @@ static val_t parse_primary(void)
     if (strcmp(t, "length") == 0) {
         val_t a = parse_primary();
         char tmp[32];
-        return make_num((long)strlen(text(&a, tmp, sizeof tmp)));
+        return make_num((s64)strlen(text(&a, tmp, sizeof tmp)));
     }
     if (strcmp(t, "substr") == 0) {
         val_t s = parse_primary(), p = parse_primary(), l = parse_primary();
         char tmp[32];
         const char *str = text(&s, tmp, sizeof tmp);
-        long from, len, slen = (long)strlen(str);
+        s64 from, len, slen = (s64)strlen(str);
         if (!as_number(&p, &from) || !as_number(&l, &len)) return make_str("");
         if (from < 1 || from > slen || len < 1) return make_str("");
         if (from - 1 + len > slen) len = slen - (from - 1);
         char out[4096];
-        if (len > (long)sizeof out - 1) len = (long)sizeof out - 1;
+        if (len > (s64)sizeof out - 1) len = (s64)sizeof out - 1;
         memcpy(out, str + from - 1, (size_t)len);
         out[len] = '\0';
         return make_str(out);
@@ -115,7 +119,7 @@ static val_t parse_primary(void)
         char t1[32], t2[32];
         const char *str = text(&s, t1, sizeof t1);
         const char *set = text(&c, t2, sizeof t2);
-        for (long i = 0; str[i]; i++)
+        for (s64 i = 0; str[i]; i++)
             if (strchr(set, str[i])) return make_num(i + 1);
         return make_num(0);
     }
@@ -126,7 +130,7 @@ static val_t parse_primary(void)
     }
 
     char *end;
-    long n = strtol(t, &end, 10);
+    s64 n = strtoll(t, &end, 10);
     if (*t && !*end) return make_num(n);
     return make_str(t);
 }
@@ -179,7 +183,7 @@ static val_t parse_mul(void)
     while (at("*") || at("/") || at("%")) {
         char op = take()[0];
         val_t r = parse_match();
-        long a = need_number(&l), b = need_number(&r);
+        s64 a = need_number(&l), b = need_number(&r);
         if ((op == '/' || op == '%') && b == 0) die("division by zero");
         l = make_num(op == '*' ? a * b : op == '/' ? a / b : a % b);
     }
@@ -192,7 +196,7 @@ static val_t parse_add(void)
     while (at("+") || at("-")) {
         char op = take()[0];
         val_t r = parse_mul();
-        long a = need_number(&l), b = need_number(&r);
+        s64 a = need_number(&l), b = need_number(&r);
         l = make_num(op == '+' ? a + b : a - b);
     }
     return l;
@@ -210,7 +214,7 @@ static val_t parse_cmp(void)
         take();
         val_t r = parse_add();
 
-        long a, b;
+        s64 a, b;
         int c;
         if (as_number(&l, &a) && as_number(&r, &b))
             c = (a < b) ? -1 : (a > b) ? 1 : 0;

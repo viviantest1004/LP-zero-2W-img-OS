@@ -69,7 +69,7 @@ static void row(const char *name, int depth, bool is_part)
     u64 sectors = 0;
 
     snprintf(path, sizeof path, "/sys/class/block/%s/size", name);
-    if (sysval(path, v, sizeof v)) sectors = (u64)strtol(v, NULL, 10);
+    if (sysval(path, v, sizeof v)) sectors = (u64)strtoll(v, NULL, 10);
     human(size, sizeof size, sectors * 512);
 
     snprintf(path, sizeof path, "/sys/class/block/%s/dev", name);
