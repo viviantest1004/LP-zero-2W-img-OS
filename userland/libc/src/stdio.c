@@ -423,6 +423,21 @@ void page_begin(void)
     page_tty   = -1;
     page_own_tty = false;
 
+    /* Paging is for a person at a screen. Anything else - a pipe, a
+     * file, `ssh board sysinfo` with no terminal on the far end - gets
+     * the whole output and no prompt.
+     *
+     * This asks twice, on purpose. lp_term_size failing was already the
+     * guard, and it is a good one: TIOCGWINSZ returns ENOTTY on a pipe.
+     * But that is a guarantee that rests on an ioctl failing, and a
+     * paged command that stops halfway through a pipe is exactly the
+     * bug that makes a headless machine unscriptable - nothing comes
+     * back, and the reason is a prompt nobody can see. So the intent is
+     * written down as well: if stdout is not a terminal, do not page.
+     */
+    if (!lp_isatty(STDOUT_FILENO))
+        return;
+
     int rows = 0, cols = 0;
     if (lp_term_size(STDOUT_FILENO, &rows, &cols) < 0)
         return;                      /* redirected: nothing to page */
