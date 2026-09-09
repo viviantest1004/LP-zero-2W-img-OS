@@ -30,6 +30,7 @@
 #define SYS_unlinkat        35
 #define SYS_linkat          37
 #define SYS_ftruncate       46
+#define SYS_shutdown       210
 #define SYS_fsync           82
 #define SYS_mknodat         33
 #define SYS_symlinkat       36

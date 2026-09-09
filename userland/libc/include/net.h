@@ -89,6 +89,8 @@ long lp_setsockopt(int fd, int level, int opt, const void *val, u32 len);
  * couple of dozen only makes a queue nobody gets to in time. */
 #define SOMAXCONN 128
 long lp_listen(int fd, int backlog);
+/* Half-close: 0 stops reading, 1 stops writing, 2 both. */
+long lp_shutdown(int fd, int how);
 
 /* Take the next connection off the queue. `addr` may be NULL when the
  * caller does not care who it is; when it is not, *addrlen must hold

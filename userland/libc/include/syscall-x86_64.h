@@ -93,6 +93,7 @@
 #define SYS_renameat         264
 #define SYS_linkat           265
 #define SYS_ftruncate         77
+#define SYS_shutdown          48
 #define SYS_fsync             74
 #define SYS_mknodat          259
 #define SYS_symlinkat        266

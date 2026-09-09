@@ -49,6 +49,16 @@ long lp_setsockopt(int fd, int level, int opt, const void *val, u32 len)
     return sys_call5(SYS_setsockopt, fd, level, opt, (long)val, (long)len);
 }
 
+/* Close one direction of a socket while leaving the other open.
+ *
+ * `nc host 80 < request` has to say "that is all I am sending" or the
+ * server waits forever for a request that has already finished. how is
+ * 0 read, 1 write, 2 both. */
+long lp_shutdown(int fd, int how)
+{
+    return sys_call2(SYS_shutdown, fd, how);
+}
+
 long lp_listen(int fd, int backlog)
 {
     return sys_call2(SYS_listen, fd, backlog);
