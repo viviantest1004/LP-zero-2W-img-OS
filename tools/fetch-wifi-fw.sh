@@ -66,35 +66,30 @@ for f in "${OPTIONAL[@]}"; do
     fi
 done
 
-# ── CLM, from linux-firmware ─────────────────────────────────────
+# ── No CLM blob for the BCM43430, and that is correct ────────────
 #
-# The regulatory/channel table. Without it brcmfmac says
+# brcmfmac says this at every boot:
 #
 #   brcmf_c_process_clm_blob: no clm_blob available (err=-2),
 #                             device may have limited channels
 #
-# and the chip falls back to a conservative channel set with no
-# per-channel transmit power calibration.
+# It reads like something is missing. It is not. The CLM - the
+# regulatory and per-channel power table - is compiled into
+# brcmfmac43430-sdio.bin for this chip, which is why Raspberry Pi ship
+# no separate blob for it and why the message appears on Raspberry Pi
+# OS too.
 #
-# It is not in RPi-Distro/firmware-nonfree under the brcmfmac name,
-# which is why looking for it there finds nothing: upstream it lives in
-# linux-firmware under Cypress's own name, cyfmac43430-sdio.clm_blob,
-# and the brcmfmac name is a symlink to it. A symlink is not something
-# raw.githubusercontent serves as a file, so fetching the brcmfmac name
-# returns 404 and the conclusion "this chip has no CLM" - which is what
-# we concluded, and it was wrong.
-LF_BASE="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain"
-echo ""
-echo "linux-firmware 에서 CLM 받는 중..."
-if curl --fail --location --silent --show-error --retry 4 --retry-delay 2 \
-        --retry-all-errors -o "${OUT}/brcmfmac43430-sdio.clm_blob" \
-        "${LF_BASE}/cypress/cyfmac43430-sdio.clm_blob"; then
-    printf "  OK    %-34s %s bytes\n" "brcmfmac43430-sdio.clm_blob" \
-        "$(stat -c%s "${OUT}/brcmfmac43430-sdio.clm_blob")"
-else
-    rm -f "${OUT}/brcmfmac43430-sdio.clm_blob"
-    printf "  없음  brcmfmac43430-sdio.clm_blob (채널이 제한될 수 있습니다)\n"
-fi
+# There IS a file called cyfmac43430-sdio.clm_blob in linux-firmware,
+# and it is a trap. It belongs to Cypress's own firmware
+# (cyfmac43430-sdio.bin), not to the Broadcom firmware this image
+# carries. A CLM has to match the firmware it is loaded next to. We
+# shipped it once, on the strength of a report that the file was
+# missing, and the board came up with no wlan0 at all - which is worse
+# than a log line, and was the one WiFi change in that image.
+#
+# So: no CLM for 43430. The 43436 and 43430c0 blobs above are a
+# different matter - those chips ship their CLM separately, and the
+# files here are the ones that match their firmware.
 
 # ── Board-name aliases ───────────────────────────────────────────
 #
