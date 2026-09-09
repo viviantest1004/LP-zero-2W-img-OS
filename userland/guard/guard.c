@@ -253,6 +253,12 @@ typedef struct {
 } svc_pid_t;
 
 static svc_pid_t svc_pids[MAX_SVC_PIDS];
+
+/* How long each service has been in D, in milliseconds. Indexed the
+ * same as svc_pids and reset whenever the pid in a slot changes. */
+static u32   svc_d_ms[MAX_SVC_PIDS];
+static pid_t svc_d_pid[MAX_SVC_PIDS];
+static bool  svc_d_said[MAX_SVC_PIDS];
 static int       nsvc_pids;
 static bool      svc_pids_read;      /* did the file exist at all */
 
@@ -454,6 +460,53 @@ static long read_rss_kb(pid_t pid)
  * parentheses and a name is allowed to contain ')' itself - so we find
  * the LAST one and count from there. What follows the paren is field 3,
  * and utime is field 14, so eleven fields get skipped. */
+/* ── A service stuck inside the kernel ────────────────────────────────
+ *
+ * The failure this exists for, seen on the board: brcmfmac loses its
+ * firmware a few minutes after boot, and the thread that notices is
+ * holding RTNL when it wedges. RTNL is one lock for all of networking,
+ * so wpa_supplicant blocks in brcmf_fil_cmd_data_set, dhcp blocks in
+ * devinet_ioctl waiting for the same lock, and six kworkers sit in D.
+ *
+ * Everything guard already watches says the machine is fine. Memory is
+ * free, no process is burning CPU - they are all asleep - the
+ * temperature is normal, and the watchdog daemon is still being
+ * scheduled, so it keeps petting and the hardware never fires. The
+ * board stays up for ever in a state where nothing about the network
+ * can be changed. That was the gap: "the kernel is alive but nothing
+ * can talk" had no detector.
+ *
+ * D is "uninterruptible sleep": waiting on something in the kernel that
+ * will not take a signal. A second or two of it is ordinary - that is
+ * what a disk read looks like. A service in it for a minute and a half
+ * is not waiting, it is stuck, and nothing in user space can unstick
+ * it: the process cannot be killed, and every other route to the
+ * network wants the lock it is holding.
+ */
+#define STUCK_D_REPORT_MS   30000     /* say something */
+#define STUCK_D_REBOOT_MS   90000     /* and then do something */
+
+/* Field 3 of /proc/<pid>/stat: R, S, D, Z and the rest. It comes right
+ * after the command name, which is in brackets and may itself contain
+ * spaces and brackets - so the last ')' is the anchor, as read_cpu_ticks
+ * does for the same reason. */
+static char read_state(pid_t pid)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+
+    char buf[512];
+    if (proc_read(path, buf, sizeof(buf)) <= 0)
+        return '?';
+
+    char *p = strrchr(buf, ')');
+    if (!p)
+        return '?';
+    p++;
+    while (*p == ' ') p++;
+    return *p ? *p : '?';
+}
+
 static u64 read_cpu_ticks(pid_t pid)
 {
     char path[64];
@@ -1504,6 +1557,75 @@ static bool kill_largest(pid_t self, long need_kb)
     return true;
 }
 
+/* Nothing in user space can unwedge this, so the only move left is to
+ * start again. Two mechanisms, in that order, because the clean one can
+ * hang on exactly the lock that is stuck.
+ *
+ * The watchdog daemon has to stop first. It is a separate process, it
+ * is still being scheduled, and it will go on petting the hardware
+ * through a reboot that never completes - which is why the board sat
+ * there for ever instead of resetting. With it gone, the timer that
+ * /etc/rc armed runs out and the hardware resets the board whatever
+ * the kernel is doing.
+ *
+ * Then ask for a clean reboot. If it works, it works; if it hangs
+ * inside a reboot notifier waiting for RTNL, the hardware has it. */
+static void reboot_wedged(const char *what, u32 ms)
+{
+    dprintf(STDERR_FILENO,
+            "guard: ** %s has been stuck in the kernel for %us\n",
+            what, ms / 1000);
+    dprintf(STDERR_FILENO,
+            "guard:    this is the state where the machine is up and no\n");
+    dprintf(STDERR_FILENO,
+            "guard:    part of the network can be touched. Rebooting.\n");
+
+    for (int i = 0; i < nsvc_pids; i++) {
+        if (strcmp(svc_pids[i].name, "watchdog") == 0) {
+            dprintf(STDERR_FILENO,
+                    "guard:    stopping the watchdog daemon first, so the"
+                    " hardware timer is the backstop\n");
+            lp_kill(svc_pids[i].pid, 9);
+        }
+    }
+
+    lp_sync();
+    lp_reboot(LINUX_REBOOT_CMD_RESTART);
+    dprintf(STDERR_FILENO,
+            "guard: ** the reboot was refused - waiting for the watchdog\n");
+}
+
+/* Called once per pass. Cheap: one small read per service. */
+static void check_stuck_services(u32 elapsed_ms)
+{
+    for (int i = 0; i < nsvc_pids; i++) {
+        if (svc_d_pid[i] != svc_pids[i].pid) {
+            svc_d_pid[i]  = svc_pids[i].pid;   /* a restart is a fresh start */
+            svc_d_ms[i]   = 0;
+            svc_d_said[i] = false;
+        }
+
+        if (read_state(svc_pids[i].pid) != 'D') {
+            svc_d_ms[i]   = 0;
+            svc_d_said[i] = false;
+            continue;
+        }
+
+        svc_d_ms[i] += elapsed_ms;
+
+        if (svc_d_ms[i] >= STUCK_D_REBOOT_MS) {
+            reboot_wedged(svc_pids[i].name, svc_d_ms[i]);
+            svc_d_ms[i] = 0;            /* do not ask twice a second */
+        } else if (svc_d_ms[i] >= STUCK_D_REPORT_MS && !svc_d_said[i]) {
+            svc_d_said[i] = true;
+            dprintf(STDERR_FILENO,
+                    "guard: %s has been in uninterruptible sleep for %us -"
+                    " watching it\n",
+                    svc_pids[i].name, svc_d_ms[i] / 1000);
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     long reserve_kb = RESERVE_MB * 1024;
@@ -1679,6 +1801,10 @@ int main(int argc, char **argv)
                 lp_sync();
             if (slow_passes == BOOT_OK_PASSES)
                 clear_boot_count();
+
+            /* A service stuck inside the kernel. Everything else here
+             * would call this machine healthy. */
+            check_stuck_services(ms_since_slow);
 
             ms_since_slow = 0;
         }
