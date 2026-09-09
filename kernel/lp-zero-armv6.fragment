@@ -119,3 +119,12 @@ CONFIG_RASPBERRYPI_POWER=y
 # and the USB network link, which is the way into a board whose WiFi
 # is misbehaving, is simply not there.
 CONFIG_USB_ZERO=n
+
+# ── The console font ───────────────────────────────────────────
+# CONFIG_FONTS is the "choose which fonts to build" menu. Without it
+# only the default 8x16 is compiled in, and fbcon quietly falls back to
+# it - so cmdline.txt asking for font:TER16x32 did nothing at all, and
+# nothing said so. On a 1080p screen 8x16 is about two millimetres tall.
+CONFIG_FONTS=y
+CONFIG_FONT_TER16x32=y
+CONFIG_FONT_8x16=y

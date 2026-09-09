@@ -35,6 +35,34 @@ dtoverlay=disable-bt
 # ★ 반드시 "USB" 라고 인쇄된 포트에 꽂아야 한다. PWR IN 은 전원 전용이다.
 dtoverlay=dwc2,dr_mode=otg
 
+# ── HDMI ────────────────────────────────────────────────────────
+# hdmi_force_hotplug: drive the HDMI output even when the firmware
+# cannot read a monitor on it at power-on.
+#
+# Without this the Pi decides at boot whether anything is plugged in,
+# and if the answer is no it never turns the output on - so a monitor
+# switched on after the board, a cheap adapter or a passive HDMI switch
+# all produce a completely dark screen on a board that is running
+# perfectly. There is no way to tell that apart from a board that did
+# not boot, which is the worst kind of failure to hand somebody.
+#
+# The cost is that the output is driven with nothing attached, which on
+# this board is a few milliamps.
+hdmi_force_hotplug=1
+
+# If the screen is still dark, the sledgehammer is
+#
+#   hdmi_safe=1
+#
+# which forces 640x480 at maximum compatibility and ignores the
+# monitor's EDID entirely. It is ugly and it works on everything. Add
+# it here, on the FAT partition, from any PC.
+#
+# And to find out whether the GPU is driving the output at all, take
+# out disable_splash=1 below: the rainbow square is drawn by the
+# firmware before Linux starts, so seeing it means the HDMI path works
+# and the problem is later.
+
 # ── 부팅 시간 ───────────────────────────────────────────────────
 disable_splash=1
 boot_delay=0
