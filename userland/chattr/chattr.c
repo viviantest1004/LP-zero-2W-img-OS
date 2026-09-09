@@ -38,10 +38,15 @@
 #include "stdio.h"
 #include "unistd.h"
 
-/* The generic filesystem flag ioctls. Same numbers on every
- * architecture: _IOR('f', 1, long) and _IOW('f', 2, long). */
-#define FS_IOC_GETFLAGS  0x80086601
-#define FS_IOC_SETFLAGS  0x40086602
+/* The generic filesystem flag ioctls.
+ *
+ * NOT the same number on every architecture, which is what the comment
+ * here used to claim: the argument is a long, the size of the argument
+ * is part of the ioctl number, and a long is four bytes on the Pi Zero
+ * W. Written out as the 64-bit values these came back ENOTTY there, so
+ * chattr could neither read nor set a flag on a 32-bit build. */
+#define FS_IOC_GETFLAGS  LP_IOR('f', 1, long)
+#define FS_IOC_SETFLAGS  LP_IOW('f', 2, long)
 
 #define FS_APPEND_FL     0x00000020
 #define FS_IMMUTABLE_FL  0x00000010

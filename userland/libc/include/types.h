@@ -43,7 +43,12 @@ typedef unsigned int        mode_t;
 typedef unsigned int        uid_t;
 typedef unsigned int        gid_t;
 
+/* Guarded because the compiler's own stddef.h defines it identically,
+ * and anything that includes both - BearSSL's headers do - would
+ * otherwise fail the build on a redefinition that changes nothing. */
+#ifndef NULL
 #define NULL ((void *)0)
+#endif
 
 typedef _Bool bool;
 #define true  1

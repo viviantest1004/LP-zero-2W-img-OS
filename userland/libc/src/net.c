@@ -10,10 +10,7 @@
 #include "unistd.h"
 #include "stdio.h"
 #include "stdlib.h"
-
-/* Mozilla's root certificates, put on the data partition by
- * tools/mksdcard.sh. Only used for https:// - see net_https_get. */
-#define CA_BUNDLE "/data/ssl/cert.pem"
+#include "tls.h"
 
 long lp_socket(int family, int type, int proto)
 {
@@ -510,31 +507,54 @@ qtype:
     return result;
 }
 
-/* ── Fetching a file over HTTP ────────────────────────────────────────
+/* ── Fetching a file, over HTTP or HTTPS ──────────────────────────────
  *
- * GET, one connection, no redirects, no chunked encoding, no HTTPS.
+ * GET or POST, one connection, HTTP/1.1 with Connection: close.
  *
- * That last one is the real limit and worth being plain about: there is
- * no TLS in this userland, so this cannot talk to an https:// URL at
- * all. What it is for is a file on a server you already trust, checked
- * afterwards against a hash you got some other way. For anything else,
- * python3 has a full TLS stack and is on /data.
+ * 1.1 and not 1.0, which is what this used to send. The reason is not
+ * taste: raw.githubusercontent.com answers an HTTP/1.0 request with
  *
- * HTTP/1.0 with Connection: close, because then the end of the body is
- * the end of the connection and there is no chunked encoding to decode. */
+ *     HTTP/1.1 426 Upgrade Required
+ *
+ * and so does everything else behind that kind of front end. A client
+ * that speaks 1.0 cannot fetch a file from GitHub at all, which is
+ * where the packages are. The price of 1.1 is that the server may send
+ * the body in chunks instead of giving a length up front, so there is a
+ * decoder for that below - about forty lines, and not optional.
+ *
+ * https:// works here, in this process, with the certificate checked
+ * against the roots compiled into this libc (tls.c, tls-roots.c). It
+ * used to be handed to python3 on the data partition, which meant that
+ * fetching anything over TLS needed a Python that could only be
+ * installed by fetching it over TLS. That is not a limitation, it is a
+ * system that cannot start, and it is why `pkg` and `apt` did not work
+ * on a freshly written card.
+ *
+ * Redirects are followed, up to five. Not a nicety: every download from
+ * a GitHub release is a redirect to a storage host, so a client that
+ * does not follow one cannot fetch a package at all.
+ */
 
-/* Split "http://host[:port]/path" apart. false if it is not one. */
+/* Split "http://host[:port]/path" or the https:// form apart.
+ * false if it is neither. */
 static bool url_split(const char *url, char *host, size_t hsize,
-                      int *port, char *path, size_t psize)
+                      int *port, char *path, size_t psize, bool *tls)
 {
-    static const char scheme[] = "http://";
-    if (strncmp(url, scheme, sizeof(scheme) - 1) != 0)
+    const char *p;
+
+    if (strncmp(url, "https://", 8) == 0) {
+        *tls  = true;
+        *port = 443;
+        p     = url + 8;
+    } else if (strncmp(url, "http://", 7) == 0) {
+        *tls  = false;
+        *port = 80;
+        p     = url + 7;
+    } else {
         return false;
+    }
 
-    const char *p = url + sizeof(scheme) - 1;
     size_t i = 0;
-    *port = 80;
-
     while (*p && *p != '/' && *p != ':' && i < hsize - 1)
         host[i++] = *p++;
     host[i] = '\0';
@@ -551,189 +571,27 @@ static bool url_split(const char *url, char *host, size_t hsize,
     return true;
 }
 
-/* ── HTTPS ────────────────────────────────────────────────────────
- *
- * There is no TLS in this userland and there is not going to be. A
- * hand-written TLS stack is the one piece of code in a system like this
- * that is both very hard to get right and catastrophic when it is
- * wrong, and getting it wrong is silent - a certificate that is not
- * really checked looks exactly like one that is.
- *
- * CPython has a real one, with OpenSSL statically linked into it, and
- * it is already on the data partition for other reasons. So an https://
- * URL is handed to it. That costs a few seconds of interpreter startup
- * and only works on an image that carries Python, which is the honest
- * trade: the alternative is either no HTTPS at all or a bad HTTPS.
- *
- * The certificates come from /data/ssl/cert.pem - Mozilla's root list,
- * copied in by tools/build-sysroot.sh, deliberately not the build
- * machine's own bundle, which in a CI container has that CI's TLS
- * interception CA in it. */
-static const char *find_python(void)
+/* ── one connection, either kind ─────────────────────────────────── */
+
+typedef struct {
+    int       fd;
+    lp_tls_t *tls;          /* NULL on a plain connection */
+} conn_t;
+
+static bool conn_open(conn_t *c, const char *host, int port, bool want_tls)
 {
-    static const char *candidates[] = {
-        "/data/python/bin/python3.12",
-        "/data/bin/python3",
-        "/bin/python3",
-        0
-    };
-    for (int i = 0; candidates[i]; i++)
-        if (lp_exists(candidates[i]))
-            return candidates[i];
-    return 0;
-}
-
-static long net_https(const char *method, const char *url,
-                      const char *body, const char *dest)
-{
-    const char *py = find_python();
-    if (!py) {
-        dprintf(STDERR_FILENO,
-                "%s: https needs python3, which is not on this image.\n"
-                "  This userland has no TLS of its own - see net.c.\n"
-                "  An http:// URL works without it.\n", url);
-        return -1;
-    }
-    if (!lp_exists(CA_BUNDLE)) {
-        dprintf(STDERR_FILENO,
-                "%s: no root certificates at %s, so nothing could be\n"
-                "  checked. Refusing rather than trusting whatever answers.\n",
-                url, CA_BUNDLE);
-        return -1;
-    }
-
-    /* Everything the child needs is in argv; nothing is interpolated
-     * into the program text, so a URL cannot become code.
-     *
-     * The exception handling is not decoration. Left to itself, a
-     * rejected certificate comes out of Python as forty lines of
-     * traceback through urllib and ssl, and the one line that says what
-     * went wrong is in the middle of it. A command that failed should
-     * say so in a sentence. */
-    static const char *prog =
-        "import os,ssl,sys,urllib.request\n"
-        "m,url,ca,dest,body=sys.argv[1:6]\n"
-        "n=0\n"
-        "try:\n"
-        "    c=ssl.create_default_context(cafile=ca)\n"
-        "    d=body.encode() if body else None\n"
-        "    h={'Content-Type':'application/json'} if body else {}\n"
-        "    q=urllib.request.Request(url,data=d,headers=h,method=m)\n"
-        "    r=urllib.request.urlopen(q,timeout=30,context=c)\n"
-        "    f=open(dest,'wb') if dest!='-' else None\n"
-        "    while True:\n"
-        "        b=r.read(65536)\n"
-        "        if not b: break\n"
-        "        n+=len(b)\n"
-        "        if f: f.write(b)\n"
-        "    if f: f.close()\n"
-        "except Exception as e:\n"
-        "    m=str(e).replace('\\n',' ')\n"
-        "    sys.stderr.write('https: '+m+'\\n')\n"
-        "    if 'CERTIFICATE_VERIFY' in m:\n"
-        "        sys.stderr.write('  checked against '+ca+'. A clock that"
-        " is wrong makes every\\n  certificate look invalid, so try ntp"
-        " before anything else.\\n')\n"
-        "    try:\n"
-        "        if dest!='-': os.unlink(dest)\n"
-        "    except OSError: pass\n"
-        "    sys.exit(4)\n"
-        "sys.exit(0)\n";
-
-    char *argv[] = { (char *)py, (char *)"-c", (char *)prog,
-                     (char *)method, (char *)url, (char *)CA_BUNDLE,
-                     (char *)(dest ? dest : "-"),
-                     (char *)(body ? body : ""), 0 };
-
-    pid_t pid = lp_fork();
-    if (pid < 0) {
-        dprintf(STDERR_FILENO, "%s: cannot start %s\n", url, py);
-        return -1;
-    }
-    if (pid == 0) {
-        lp_execve(py, argv, environ);
-        lp_exit(127);
-    }
-
-    int status = 0;
-    lp_waitpid(pid, &status, 0);
-    int code = LP_WIFEXITED(status) ? LP_WEXITSTATUS(status) : -1;
-    if (code != 0) {
-        /* Code 4 means the child already said what was wrong. */
-        if (code == 127)
-            dprintf(STDERR_FILENO, "%s: could not run %s\n", url, py);
-        else if (code == 3)
-            dprintf(STDERR_FILENO, "%s: the server sent nothing\n", url);
-        else if (code != 4)
-            dprintf(STDERR_FILENO, "%s: download failed\n", url);
-        return -1;
-    }
-
-    if (!dest)
-        return 0;                   /* asked for nothing, got nothing */
-
-    lp_stat_t st;
-    if (lp_stat(dest, &st, true) < 0)
-        return -1;
-    return (long)st.size;
-}
-
-/* One function behind both net_http_get and net_http_post: the two
- * differ by a word in the request line and whether a body follows. */
-static char lower_ch(char c)
-{
-    return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
-}
-
-/* Find "Name:" in a set of HTTP headers and read the number after it.
- * Case-insensitive on the name, because header names are. Returns -1
- * when it is not there or is not a number. */
-static long header_value_long(const char *head, const char *name)
-{
-    size_t nlen = strlen(name);
-
-    for (const char *p = head; *p; ) {
-        size_t i = 0;
-        while (i < nlen && p[i] &&
-               lower_ch(p[i]) == lower_ch(name[i]))
-            i++;
-        if (i == nlen) {
-            const char *v = p + nlen;
-            while (*v == ' ' || *v == '\t') v++;
-            if (*v < '0' || *v > '9')
-                return -1;
-            return strtol(v, NULL, 10);
-        }
-        while (*p && *p != '\n') p++;
-        if (*p) p++;
-    }
-    return -1;
-}
-
-static long http_do(const char *method, const char *url,
-                    const char *body, const char *dest)
-{
-    char host[128], path[512];
-    int  port;
-
-    if (strncmp(url, "https://", 8) == 0)
-        return net_https(method, url, body, dest);
-
-    if (!url_split(url, host, sizeof(host), &port, path, sizeof(path))) {
-        dprintf(STDERR_FILENO,
-                "%s: this is not an http:// or https:// URL\n", url);
-        return -1;
-    }
+    c->fd  = -1;
+    c->tls = NULL;
 
     u32 addr = net_resolve(host);
     if (addr == 0) {
         dprintf(STDERR_FILENO, "cannot resolve %s\n", host);
-        return -1;
+        return false;
     }
 
     long fd = lp_socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
-        return -1;
+        return false;
 
     s64 tv[2] = { 20, 0 };
     lp_setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO_NEW, tv, sizeof(tv));
@@ -752,40 +610,293 @@ static long http_do(const char *method, const char *url,
     if (lp_connect((int)fd, &sa, sizeof(sa)) < 0) {
         dprintf(STDERR_FILENO, "cannot connect to %s:%d\n", host, port);
         lp_close((int)fd);
+        return false;
+    }
+
+    c->fd = (int)fd;
+    if (want_tls) {
+        c->tls = lp_tls_open(c->fd, host);
+        if (!c->tls) {
+            lp_close(c->fd);
+            c->fd = -1;
+            return false;
+        }
+    }
+    return true;
+}
+
+static long conn_write(conn_t *c, const void *b, size_t n)
+{
+    return c->tls ? lp_tls_write(c->tls, b, n) : lp_write(c->fd, b, n);
+}
+
+static long conn_read(conn_t *c, void *b, size_t n)
+{
+    return c->tls ? lp_tls_read(c->tls, b, n) : lp_read(c->fd, b, n);
+}
+
+static void conn_close(conn_t *c)
+{
+    if (c->tls) lp_tls_close(c->tls);
+    if (c->fd >= 0) lp_close(c->fd);
+    c->tls = NULL;
+    c->fd  = -1;
+}
+
+/* ── headers ─────────────────────────────────────────────────────── */
+
+static char lower_ch(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+}
+
+/* Find "Name:" in a set of HTTP headers and hand back what follows.
+ * Case-insensitive on the name, because header names are.
+ * The match has to start a line: "Content-Length:" must not be found
+ * inside "X-Original-Content-Length:". */
+static const char *header_find(const char *head, const char *name)
+{
+    size_t nlen = strlen(name);
+
+    for (const char *p = head; *p; ) {
+        size_t i = 0;
+        while (i < nlen && p[i] &&
+               lower_ch(p[i]) == lower_ch(name[i]))
+            i++;
+        if (i == nlen) {
+            const char *v = p + nlen;
+            while (*v == ' ' || *v == '\t') v++;
+            return v;
+        }
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+    }
+    return NULL;
+}
+
+/* The number after a header, or -1 when it is not there or is not one. */
+static long header_value_long(const char *head, const char *name)
+{
+    const char *v = header_find(head, name);
+    if (!v || *v < '0' || *v > '9')
+        return -1;
+    return strtol(v, NULL, 10);
+}
+
+/* The text after a header, to the end of the line. */
+static bool header_value_str(const char *head, const char *name,
+                             char *out, size_t size)
+{
+    const char *v = header_find(head, name);
+    if (!v)
+        return false;
+    size_t i = 0;
+    while (v[i] && v[i] != '\r' && v[i] != '\n' && i < size - 1) {
+        out[i] = v[i];
+        i++;
+    }
+    out[i] = '\0';
+    return i > 0;
+}
+
+/* ── chunked transfer encoding ───────────────────────────────────
+ *
+ * HTTP/1.1 lets a server start sending before it knows how much there
+ * is, by cutting the body into pieces each prefixed with its length in
+ * hex. It is not optional to understand: a server may use it for any
+ * response, and GitHub does.
+ *
+ * This is a state machine rather than a loop over a whole body because
+ * a chunk header can be split across two reads - the size of one read
+ * has nothing to do with the size of a chunk - and a decoder that
+ * assumes otherwise works on every small file and corrupts large ones.
+ */
+typedef enum {
+    CH_SIZE,        /* reading the hex length line */
+    CH_DATA,        /* copying chunk_remain bytes through */
+    CH_CRLF,        /* the CRLF that follows a chunk's data */
+    CH_TRAILER,     /* headers after the last chunk */
+    CH_DONE
+} chunk_state_t;
+
+typedef struct {
+    chunk_state_t state;
+    u64  remain;
+    char line[80];
+    int  nline;
+    bool blank;     /* the trailer line so far is empty */
+} chunk_t;
+
+static void chunk_init(chunk_t *c)
+{
+    c->state  = CH_SIZE;
+    c->remain = 0;
+    c->nline  = 0;
+    c->blank  = true;
+}
+
+/* Feed `n` bytes; write the decoded body to `out`.
+ * Returns how many body bytes were written, or -1 on a malformed body. */
+static long chunk_feed(chunk_t *c, const char *p, long n, int out, bool write_it)
+{
+    long produced = 0;
+    long i = 0;
+
+    while (i < n && c->state != CH_DONE) {
+        switch (c->state) {
+        case CH_SIZE: {
+            char ch = p[i++];
+            if (ch == '\n') {
+                c->line[c->nline] = '\0';
+                /* "1a3f" or "1a3f;name=value" - the extension is
+                 * allowed and means nothing to us. */
+                u64 v = 0;
+                bool any = false;
+                for (int k = 0; c->line[k]; k++) {
+                    char d = c->line[k];
+                    int  digit;
+                    if      (d >= '0' && d <= '9') digit = d - '0';
+                    else if (d >= 'a' && d <= 'f') digit = d - 'a' + 10;
+                    else if (d >= 'A' && d <= 'F') digit = d - 'A' + 10;
+                    else break;
+                    v = v * 16 + (u64)digit;
+                    any = true;
+                }
+                if (!any)
+                    return -1;
+                c->nline = 0;
+                if (v == 0) {
+                    c->state = CH_TRAILER;
+                    c->blank = true;
+                } else {
+                    c->remain = v;
+                    c->state  = CH_DATA;
+                }
+            } else if (ch != '\r' && c->nline < (int)sizeof c->line - 1) {
+                c->line[c->nline++] = ch;
+            }
+            break;
+        }
+        case CH_DATA: {
+            long avail = n - i;
+            long take  = (c->remain < (u64)avail) ? (long)c->remain : avail;
+            if (write_it)
+                lp_write(out, p + i, (size_t)take);
+            produced   += take;
+            i          += take;
+            c->remain  -= (u64)take;
+            if (c->remain == 0)
+                c->state = CH_CRLF;
+            break;
+        }
+        case CH_CRLF:
+            if (p[i] == '\n')
+                c->state = CH_SIZE;
+            i++;
+            break;
+        case CH_TRAILER: {
+            char ch = p[i++];
+            if (ch == '\n') {
+                if (c->blank)
+                    c->state = CH_DONE;
+                c->blank = true;
+            } else if (ch != '\r') {
+                c->blank = false;
+            }
+            break;
+        }
+        case CH_DONE:
+            break;
+        }
+    }
+    return produced;
+}
+
+/* Does the response say chunked?
+ *
+ * The value is a list - "gzip, chunked" is legal - and chunked, when it
+ * is there at all, is always the last item. So looking for the word
+ * anywhere in the value is enough, and a list parser is not needed.
+ * Case-insensitive, because header values of this kind are. */
+static bool header_says_chunked(const char *head)
+{
+    const char *v = header_find(head, "Transfer-Encoding:");
+    if (!v)
+        return false;
+    for (; *v && *v != '\r' && *v != '\n'; v++) {
+        static const char want[] = "chunked";
+        size_t k = 0;
+        while (want[k] && lower_ch(v[k]) == want[k])
+            k++;
+        if (want[k] == '\0')
+            return true;
+    }
+    return false;
+}
+
+/* ── one request ─────────────────────────────────────────────────── */
+
+/* Returns the number of body bytes written, or -1.
+ *
+ * A redirect is not a failure here: `redirect` comes back holding the
+ * Location and the return is 0, so the caller can go round again. */
+static long http_once(const char *method, const char *url,
+                      const char *body, const char *dest,
+                      char *redirect, size_t rsize)
+{
+    char host[128], path[512];
+    int  port;
+    bool want_tls;
+
+    redirect[0] = '\0';
+
+    if (!url_split(url, host, sizeof(host), &port, path, sizeof(path),
+                   &want_tls)) {
+        dprintf(STDERR_FILENO,
+                "%s: this is not an http:// or https:// URL\n", url);
         return -1;
     }
+
+    conn_t c;
+    if (!conn_open(&c, host, port, want_tls))
+        return -1;
 
     char req[768];
     int  rn;
     if (body) {
         rn = snprintf(req, sizeof(req),
-                      "%s %s HTTP/1.0\r\n"
+                      "%s %s HTTP/1.1\r\n"
                       "Host: %s\r\n"
                       "User-Agent: lpzero\r\n"
+                      "Accept-Encoding: identity\r\n"
                       "Content-Type: application/json\r\n"
                       "Content-Length: %lu\r\n"
                       "Connection: close\r\n\r\n",
                       method, path, host, (unsigned long)strlen(body));
     } else {
         rn = snprintf(req, sizeof(req),
-                      "%s %s HTTP/1.0\r\n"
+                      "%s %s HTTP/1.1\r\n"
                       "Host: %s\r\n"
                       "User-Agent: lpzero\r\n"
+                      "Accept-Encoding: identity\r\n"
                       "Connection: close\r\n\r\n", method, path, host);
     }
-    lp_write((int)fd, req, (size_t)rn);
-    if (body)
-        lp_write((int)fd, body, strlen(body));
+    if (conn_write(&c, req, (size_t)rn) < 0 ||
+        (body && conn_write(&c, body, strlen(body)) < 0) ||
+        (c.tls && lp_tls_flush(c.tls) < 0)) {
+        conn_close(&c);
+        return -1;
+    }
 
     /* A caller that only wants to know the request arrived passes no
      * destination - a heartbeat, for instance, where the reply is
-     * "200" and nothing else. */
-    /* "-" means standard output, the way it does for the https path
-     * already. That is what makes `wget -O- <url> | grep ...` work, and
-     * that one-liner is most of what anybody does with an HTTP client
-     * on a server. Writing to a file first and reading it back needs a
-     * writable directory, which a machine whose root is in RAM does not
-     * always have where you are standing. */
+     * "200" and nothing else.
+     *
+     * "-" means standard output. That is what makes `wget -O- <url> |
+     * grep ...` work, and that one-liner is most of what anybody does
+     * with an HTTP client on a server. Writing to a file first and
+     * reading it back needs a writable directory, which a machine whose
+     * root is in RAM does not always have where you are standing. */
     bool to_stdout = dest && dest[0] == '-' && dest[1] == '\0';
     long out;
     if (to_stdout)   out = STDOUT_FILENO;
@@ -793,7 +904,7 @@ static long http_do(const char *method, const char *url,
     else             out = lp_open("/dev/null", O_WRONLY, 0);
     if (out < 0) {
         dprintf(STDERR_FILENO, "cannot write %s\n", dest ? dest : "/dev/null");
-        lp_close((int)fd);
+        conn_close(&c);
         return -1;
     }
 
@@ -813,14 +924,22 @@ static long http_do(const char *method, const char *url,
      * to can. Twelve bytes or fewer and have_status stayed false, which
      * skipped the status check entirely and handed a 404 page back as a
      * downloaded file; a later read and buf+9 pointed into the middle
-     * of a header and gave a nonsense number. */
-    char  head[512];
+     * of a header and gave a nonsense number.
+     *
+     * 2KB of header, not 512 bytes: a GitHub redirect carries a signed
+     * URL in Location that is longer than that on its own, and a header
+     * buffer that fills up before Location arrives turns a redirect
+     * into "the server said 302" and a failed download. */
+    char  head[2048];
     int   nhead = 0;
     long  content_length = -1;
     bool  bad_read = false;
+    bool  chunked = false;
+    chunk_t chunk;
+    chunk_init(&chunk);
 
     for (;;) {
-        long n = lp_read((int)fd, buf, sizeof(buf));
+        long n = conn_read(&c, buf, sizeof(buf));
         if (n < 0) { bad_read = true; break; }
         if (n == 0)
             break;
@@ -831,10 +950,10 @@ static long http_do(const char *method, const char *url,
                 head[nhead++] = buf[k];
             head[nhead] = '\0';
             for (; i < n; i++) {
-                char c = buf[i];
-                if ((match == 0 || match == 2) && c == '\r')      match++;
-                else if ((match == 1 || match == 3) && c == '\n') match++;
-                else                                              match = (c == '\r');
+                char ch = buf[i];
+                if ((match == 0 || match == 2) && ch == '\r')      match++;
+                else if ((match == 1 || match == 3) && ch == '\n') match++;
+                else                                               match = (ch == '\r');
                 if (match == 4) { i++; in_body = true; break; }
             }
 
@@ -845,6 +964,9 @@ static long http_do(const char *method, const char *url,
                     have_status = true;
                 }
                 content_length = header_value_long(head, "Content-Length:");
+                chunked        = header_says_chunked(head);
+                if (status >= 300 && status < 400)
+                    header_value_str(head, "Location:", redirect, rsize);
             }
         }
 
@@ -857,15 +979,29 @@ static long http_do(const char *method, const char *url,
              * 페이지 안의 글자를 찾아 성공한 것처럼 구는 것이 가장
              * 나쁜 꼴이다. 상태 줄은 몸통보다 먼저 오므로 여기서
              * 이미 알고 있다. */
-            if (!have_status || status == 200)
-                lp_write((int)out, buf + i, (size_t)(n - i));
-            written += n - i;
+            bool keep = (!have_status || status == 200);
+            if (chunked) {
+                long got = chunk_feed(&chunk, buf + i, n - i, (int)out, keep);
+                if (got < 0) {
+                    dprintf(STDERR_FILENO,
+                            "%s: the server's chunked body is malformed\n", url);
+                    bad_read = true;
+                    break;
+                }
+                written += got;
+                if (chunk.state == CH_DONE)
+                    break;
+            } else {
+                if (keep)
+                    lp_write((int)out, buf + i, (size_t)(n - i));
+                written += n - i;
+            }
         }
     }
 
     if (!to_stdout)
         lp_close((int)out);
-    lp_close((int)fd);
+    conn_close(&c);
 
     if (!have_status) {
         dprintf(STDERR_FILENO,
@@ -873,6 +1009,13 @@ static long http_do(const char *method, const char *url,
         if (dest && !to_stdout) lp_unlink(dest);
         return -1;
     }
+
+    /* A redirect is the caller's business, not a failure. */
+    if (status >= 300 && status < 400 && redirect[0]) {
+        if (dest && !to_stdout) lp_unlink(dest);
+        return 0;
+    }
+
     if (status != 200) {
         dprintf(STDERR_FILENO, "%s: the server said %d\n", url, status);
         if (dest && !to_stdout)
@@ -899,19 +1042,106 @@ static long http_do(const char *method, const char *url,
         if (dest && !to_stdout) lp_unlink(dest);
         return -1;
     }
-    if (content_length >= 0 && written != content_length) {
+    /* A chunked body carries its own end marker - the zero-length chunk
+     * - so a truncated one is detectable without a Content-Length, and
+     * this is where it gets detected. */
+    if (chunked && chunk.state != CH_DONE) {
+        dprintf(STDERR_FILENO,
+                "%s: the body stopped before its last chunk - discarding it\n",
+                url);
+        if (dest && !to_stdout) lp_unlink(dest);
+        return -1;
+    }
+    if (!chunked && content_length >= 0 && written != content_length) {
         dprintf(STDERR_FILENO,
                 "%s: got %ld bytes, the server said %ld - discarding it\n",
                 url, written, content_length);
         if (dest && !to_stdout) lp_unlink(dest);
         return -1;
     }
-    if (content_length < 0 && dest && !to_stdout)
+    if (!chunked && content_length < 0 && dest && !to_stdout)
         dprintf(STDERR_FILENO,
                 "%s: the server sent no length, so a short download"
                 " cannot be detected here\n", url);
 
     return written;
+}
+
+/* ── redirects ───────────────────────────────────────────────────── */
+
+/* Turn whatever a Location header said into a URL we can fetch.
+ *
+ * Servers are allowed to send a path instead of a whole URL, and some
+ * do. Resolving it needs the URL we asked for, which is why this takes
+ * both. Anything that is neither absolute nor rooted at "/" is refused
+ * rather than guessed at - a wrong guess here fetches the wrong file
+ * and says nothing. */
+static bool resolve_location(const char *base, const char *loc,
+                             char *out, size_t size)
+{
+    if (strncmp(loc, "http://", 7) == 0 || strncmp(loc, "https://", 8) == 0) {
+        strlcpy(out, loc, size);
+        return true;
+    }
+    if (loc[0] != '/')
+        return false;
+
+    /* Keep scheme://host[:port] from the URL we asked for. */
+    const char *p = strstr(base, "://");
+    if (!p)
+        return false;
+    p += 3;
+    const char *slash = strchr(p, '/');
+    size_t prefix = slash ? (size_t)(slash - base) : strlen(base);
+    if (prefix + strlen(loc) + 1 > size)
+        return false;
+    memcpy(out, base, prefix);
+    out[prefix] = '\0';
+    strlcat(out, loc, size);
+    return true;
+}
+
+/* One function behind both net_http_get and net_http_post: the two
+ * differ by a word in the request line and whether a body follows. */
+static long http_do(const char *method, const char *url,
+                    const char *body, const char *dest)
+{
+    char current[1024];
+    char next[1024];
+
+    strlcpy(current, url, sizeof current);
+
+    /* Five. Enough for the two or three a real download takes - a
+     * release asset goes github.com -> objects.githubusercontent.com -
+     * and few enough that a server redirecting to itself stops instead
+     * of spinning. */
+    for (int hop = 0; hop < 5; hop++) {
+        char loc[1024];
+        long n = http_once(method, current, body, dest, loc, sizeof loc);
+        if (n < 0)
+            return -1;
+        if (!loc[0])
+            return n;
+
+        if (!resolve_location(current, loc, next, sizeof next)) {
+            dprintf(STDERR_FILENO,
+                    "%s: redirected somewhere this cannot follow: %s\n",
+                    current, loc);
+            return -1;
+        }
+        strlcpy(current, next, sizeof current);
+
+        /* A POST that is redirected becomes a GET, which is what every
+         * browser does with 302 and 303 and what servers expect. The
+         * body is not sent again. */
+        if (body) {
+            method = "GET";
+            body   = NULL;
+        }
+    }
+
+    dprintf(STDERR_FILENO, "%s: too many redirects\n", url);
+    return -1;
 }
 
 long net_http_get(const char *url, const char *dest)

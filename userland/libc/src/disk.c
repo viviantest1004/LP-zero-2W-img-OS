@@ -6,7 +6,9 @@
 #include "unistd.h"
 
 #define BLKRRPART    0x125F      /* _IO(0x12, 95)  re-read the whole table */
-#define BLKGETSIZE64 0x80081272  /* _IOR(0x12, 114, size_t)  size in bytes */
+/* LP_BLKGETSIZE64 is built from sizeof(size_t) in unistd.h: the number
+ * is not the same on a 32-bit machine, and the constant that used to be
+ * written out here was the 64-bit one. */
 #define BLKPG        0x1269      /* _IO(0x12, 105) change one partition */
 
 #define BLKPG_RESIZE_PARTITION  3
@@ -64,7 +66,7 @@ static long dev_ioctl(const char *path, unsigned long req, void *arg, int flags)
 u64 disk_bytes(const char *dev)
 {
     u64 n = 0;
-    if (dev_ioctl(dev, BLKGETSIZE64, &n, O_RDONLY) < 0)
+    if (dev_ioctl(dev, LP_BLKGETSIZE64, &n, O_RDONLY) < 0)
         return 0;
     return n;
 }

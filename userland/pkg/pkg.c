@@ -35,9 +35,14 @@
  * as coming from the server it claims to, and then the hashes mean what
  * they look like they mean.
  *
- * So set an https:// repository. It works now - the download goes
- * through python3 on /data, which has a real TLS stack, and the
- * certificate is checked against Mozilla's roots in /data/ssl/cert.pem.
+ * So the repository is https, and the default one is. The TLS is in
+ * our own libc (BearSSL, with Mozilla's roots compiled in), so there is
+ * nothing to install first and no certificate file that can be missing.
+ * That was not always true: this used to shell out to python3 on the
+ * data partition, and python3 could only be installed by downloading
+ * it - over TLS. A package manager that needs a package manager to work
+ * is one that never works, and on a freshly written card it did not.
+ *
  * An http:// repository still works, and pkg says so out loud when the
  * repository is one, because the difference is not cosmetic.
  *
@@ -734,11 +739,12 @@ static void usage(void)
     printf("are relative and land under %s, so bin/foo becomes\n", ROOT);
     printf("%s/bin/foo - which is already on PATH.\n\n", ROOT);
     printf("Everything downloaded is checked against the SHA-256 in the\n");
-    printf("index. The index itself comes over plain HTTP, because there\n");
-    printf("is no TLS in this userland: that catches corruption and a bad\n");
-    printf("mirror, not somebody who can rewrite your traffic. When that\n");
-    printf("matters, fetch the file with python3 over HTTPS, check it\n");
-    printf("yourself, and use 'pkg add'.\n");
+    printf("index, and the index itself comes over HTTPS with the\n");
+    printf("certificate checked, so the hashes mean what they look like\n");
+    printf("they mean. What is still missing is a signature: a server\n");
+    printf("that has been broken into serves bad packages over a\n");
+    printf("perfectly valid certificate. For something that matters,\n");
+    printf("fetch the file yourself, check it, and use 'pkg add'.\n");
 }
 
 int main(int argc, char **argv)

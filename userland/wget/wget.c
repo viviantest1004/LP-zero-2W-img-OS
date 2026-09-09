@@ -3,12 +3,12 @@
  *   wget <url> [file]
  *   wget -O <file> <url>
  *
- * http:// is fetched here. https:// is handed to python3 on /data,
- * which has a real TLS stack with OpenSSL inside it - there is none in
- * this userland, and writing one would be the worst possible place to
- * be nearly right. So https costs a few seconds of interpreter startup
- * and needs an image that carries Python; see net_https_get in
- * libc/src/net.c.
+ * http:// and https:// both work, in this process. The TLS is BearSSL
+ * compiled into our libc and the root certificates are compiled in with
+ * it, so there is nothing to install and no certificate file to be
+ * missing - see libc/src/tls.c.
+ *
+ * Redirects are followed, up to five.
  *
  * With no file name given, the last part of the URL path is used.
  */
@@ -24,9 +24,9 @@ int main(int argc, char **argv)
         printf("usage: wget <url> [file]\n");
         printf("       wget -O <file> <url>\n");
         printf("       wget -O- <url>          to standard output\n");
-        printf("  https:// works too, by way of python3 on /data -\n");
-        printf("  a few seconds slower to start, and it checks the\n");
-        printf("  certificate against /data/ssl/cert.pem\n");
+        printf("  https:// works, and the certificate is checked\n");
+        printf("  against the root list built into this system.\n");
+        printf("  Redirects are followed.\n");
         return argc < 2 ? 2 : 0;
     }
 

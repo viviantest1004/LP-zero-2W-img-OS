@@ -98,6 +98,51 @@ long  lp_signal_default(int sig);
 #define LINUX_REBOOT_CMD_RESTART  0x01234567
 #define LINUX_REBOOT_CMD_POWER_OFF 0x4321FEDC
 
+/* ── ioctl numbers ─────────────────────────────────────────────────
+ *
+ * An ioctl number has the size of its argument encoded in it, and the
+ * kernel compares the whole number. So a request whose argument is a
+ * size_t or a long is a DIFFERENT NUMBER on a 32-bit machine than on a
+ * 64-bit one, and a constant copied from a 64-bit header comes back
+ * ENOTTY on the Pi Zero W - the call fails, the caller sees a zero, and
+ * nothing says why.
+ *
+ * That is not hypothetical: BLKGETSIZE64 was written out as 0x80081272,
+ * which is its value where size_t is 8 bytes. On ARMv6 it is 0x80041272,
+ * so `expandfs` could not read the size of the card and never grew
+ * /data past the 124MB it is built with, on any card of any size. `disk`
+ * and `lsblk` showed 0 bytes for every device for the same reason.
+ *
+ * These build the number instead of quoting it. arm, arm64 and x86-64
+ * all use the asm-generic encoding below; the architectures that do not
+ * (mips, powerpc, sparc, alpha) are not ones we target.
+ */
+#define _LP_IOC_NRBITS    8
+#define _LP_IOC_TYPEBITS  8
+#define _LP_IOC_SIZEBITS 14
+#define _LP_IOC_NRSHIFT   0
+#define _LP_IOC_TYPESHIFT (_LP_IOC_NRSHIFT + _LP_IOC_NRBITS)
+#define _LP_IOC_SIZESHIFT (_LP_IOC_TYPESHIFT + _LP_IOC_TYPEBITS)
+#define _LP_IOC_DIRSHIFT  (_LP_IOC_SIZESHIFT + _LP_IOC_SIZEBITS)
+
+#define _LP_IOC(dir, type, nr, size) \
+    (((unsigned long)(dir)  << _LP_IOC_DIRSHIFT)  | \
+     ((unsigned long)(type) << _LP_IOC_TYPESHIFT) | \
+     ((unsigned long)(nr)   << _LP_IOC_NRSHIFT)   | \
+     ((unsigned long)(size) << _LP_IOC_SIZESHIFT))
+
+/* dir: 0 none, 1 write (userland -> kernel), 2 read, 3 both.
+ * "read" and "write" are from the caller's point of view. */
+#define LP_IO(type, nr)          _LP_IOC(0u, (type), (nr), 0)
+#define LP_IOR(type, nr, t)      _LP_IOC(2u, (type), (nr), sizeof(t))
+#define LP_IOW(type, nr, t)      _LP_IOC(1u, (type), (nr), sizeof(t))
+#define LP_IOWR(type, nr, t)     _LP_IOC(3u, (type), (nr), sizeof(t))
+
+/* The size of a block device in bytes. The argument is always a u64 -
+ * the kernel says so in its own header - but the number is built from
+ * size_t because that is what the kernel's macro was written with. */
+#define LP_BLKGETSIZE64  LP_IOR(0x12, 114, size_t)
+
 extern char **environ;
 
 /* ── Files ── */

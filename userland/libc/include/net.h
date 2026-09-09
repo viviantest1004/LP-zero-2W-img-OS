@@ -148,14 +148,18 @@ long net_add_default_route(const char *ifname, u32 gw_be);
 u32  net_resolve(const char *host);
 
 /* ── HTTP ── */
-/* Fetch an http:// URL into a file. Returns the bytes written, or -1
- * with a message on stderr. No HTTPS: there is no TLS here. */
+/* Fetch an http:// or https:// URL into a file. Returns the bytes
+ * written, or -1 with a message on stderr.
+ *
+ * TLS is done here, in this process, against the root certificates
+ * compiled into this libc - see tls.c. Redirects are followed, which
+ * matters because a download from a release page is always one. */
 long net_http_get(const char *url, const char *dest);
 
 /* POST a body and throw the reply away, or keep it in `dest`.
  * `dest` may be NULL when only "did it arrive" matters - a heartbeat,
- * for instance. Returns the reply's size, or -1. https:// goes through
- * python3 the same way net_http_get does. */
+ * for instance. Returns the reply's size, or -1. https:// works the
+ * same way it does for net_http_get. */
 long net_http_post(const char *url, const char *body, const char *dest);
 
 /* "192.168.0.1" -> u32 in network order. false on failure. */

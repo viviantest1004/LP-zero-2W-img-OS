@@ -70,3 +70,7 @@ kernel/out-amd64-disk/
 # The compiled file manager. Built in the Debian chroot against the same
 # GTK the image ships, by tools/mkdesktop.sh.
 desktop/files/lp-files
+
+# 오브젝트 디렉터리 (아키텍처별)
+userland/build-*/
+*.a

@@ -125,7 +125,10 @@ static int check_label(const char *part)
 
 /* Block device ioctls */
 #define BLKRRPART      0x125F      /* _IO(0x12, 95)  re-read partition table */
-#define BLKGETSIZE64   0x80081272  /* _IOR(0x12, 114, size_t)  size in bytes */
+/* The size ioctl is LP_BLKGETSIZE64, from unistd.h. It used to be
+ * written out as 0x80081272 here, which is its value only where size_t
+ * is eight bytes - on the Pi Zero W the call returned ENOTTY and this
+ * program quietly did nothing on every card ever put in one. */
 #define BLKPG          0x1269      /* _IO(0x12, 105) change one partition */
 
 /* BLKPG: tell the kernel the new size of a single partition.
@@ -288,7 +291,7 @@ static void write_part_count(u8 *mbr, int index, u32 count)
 static bool grow_partition(u64 *new_bytes_out)
 {
     u64 dev_bytes = 0;
-    long rc = dev_ioctl(DEV_DISK, BLKGETSIZE64, &dev_bytes, O_RDONLY);
+    long rc = dev_ioctl(DEV_DISK, LP_BLKGETSIZE64, &dev_bytes, O_RDONLY);
     if (rc < 0) {
         dprintf(STDERR_FILENO, "expandfs: cannot get the size of %s (%ld)\n",
                 DEV_DISK, -rc);
@@ -522,7 +525,7 @@ int main(int argc, char **argv)
         long fd = lp_open(DEV_PART, O_RDONLY, 0);
         if (fd >= 0) {
             u64 sz = 0;
-            sys_call3(SYS_ioctl, (long)fd, BLKGETSIZE64, (long)&sz);
+            sys_call3(SYS_ioctl, (long)fd, (long)LP_BLKGETSIZE64, (long)&sz);
             lp_close((int)fd);
             part_bytes = sz;
         }
