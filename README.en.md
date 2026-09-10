@@ -289,6 +289,17 @@ Watches memory, temperature, voltage, CPU and disk.
 
 init watches guard in turn; kill it and it is back within a second.
 
+### `temp`
+
+How hot the board is, in one line. `temp -a` for every sensor, `temp -w`
+to keep watching, `temp -c` for the bare number.
+
+Printed next to the temperature is the GPU firmware's **undervoltage
+record**, which is why this is a command of its own: a thin cable does
+not crash the board, it corrupts the SD card three weeks later, and this
+is the only place that fact is kept. A board that is cool and being
+throttled is being throttled for the power, not the heat.
+
 ### There is always a way back
 
 A hardware watchdog restarts a wedged board. Five boots that fail to last
