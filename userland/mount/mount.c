@@ -362,8 +362,48 @@ int main(int argc, char **argv)
      * there immediately or not at all, and four seconds of waiting for
      * each would be four seconds added to every boot. */
     if (strncmp(src, "/dev/", 5) == 0 && wait_for_it) {
-        for (long waited = 0; !lp_exists(src) && waited < 4000; waited += 50)
+        long waited = 0;
+        for (; !lp_exists(src) && waited < 4000; waited += 50)
             lp_sleep_ms(50);
+
+        /* The node existing is not the same as the disk answering.
+         *
+         * A USB stick registers its partitions as soon as the kernel
+         * has read the table, and /dev/sda1 appears then - but the
+         * device can still refuse reads for a moment after that while
+         * the SCSI layer finishes with it. Waiting only for the node
+         * meant the label was read out of a device that had nothing to
+         * say yet, which came back as no label at all, and the mount
+         * was refused with
+         *
+         *     /dev/sda1 is not labelled LPZERO - leaving it alone
+         *
+         * on a stick that is labelled LPZERO. On a board booted from
+         * USB that is /boot missing for the whole session: no
+         * authorized_keys, no firewall.conf, and no e2fsck or
+         * resize2fs - so the data partition is neither checked nor
+         * grown, at that boot or any later one.
+         *
+         * So wait for the answer, not for the node. When a label is
+         * wanted, the label matching IS the device answering; when one
+         * is not, a readable first sector is. Same four seconds, and a
+         * device that is genuinely there costs one 50ms tick at most. */
+        for (; waited < 4000; waited += 50) {
+            if (want_label) {
+                if (label_matches(src, want_label))
+                    break;
+            } else {
+                long fd = lp_open(src, O_RDONLY, 0);
+                if (fd >= 0) {
+                    char probe[512];
+                    long n = lp_read((int)fd, probe, sizeof probe);
+                    lp_close((int)fd);
+                    if (n == (long)sizeof probe)
+                        break;
+                }
+            }
+            lp_sleep_ms(50);
+        }
     }
 
     /* A device that is not there is not an error worth a kernel log

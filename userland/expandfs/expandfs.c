@@ -528,13 +528,28 @@ static bool grow_filesystem(u64 part_bytes)
  * it up and only then does /dev/sda appear, which takes the better part
  * of a second. Without this the boot looks at an empty /dev, decides
  * there is no storage and carries on in RAM. */
+/* The node existing is not the same as the disk answering. A USB stick
+ * registers its partitions the moment the kernel has read the table, so
+ * the node appears then - but reads can still fail for a moment after
+ * that while the SCSI layer finishes with it, and everything this
+ * program does starts by reading the partition table. So wait for a
+ * readable first sector, not for a name in /dev. */
 static bool wait_for_dev(const char *path, long timeout_ms)
 {
     for (long waited = 0; ; waited += 50) {
-        if (lp_exists(path))
-            return true;
+        if (lp_exists(path)) {
+            long fd = lp_open(path, O_RDONLY, 0);
+            if (fd >= 0) {
+                char probe[512];
+                long n = lp_read((int)fd, probe, sizeof probe);
+                lp_close((int)fd);
+                if (n == (long)sizeof probe)
+                    return true;
+            }
+        }
         if (waited >= timeout_ms)
-            return false;
+            return lp_exists(path);   /* there, but not talking - let the
+                                       * caller fail with a real error */
         lp_sleep_ms(50);
     }
 }
