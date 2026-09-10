@@ -70,7 +70,12 @@ guard -r 32 -w 64
 #   away, and /data/log/messages held not a single wireless line - so
 #   when the board associated and then dropped in a loop, the one line
 #   that says why (CTRL-EVENT-DISCONNECTED ... reason=15) was nowhere.
-?/sys/class/net/wlan0 wpa_supplicant -s -i wlan0 -c /etc/wpa.conf
+#   It goes through /etc/wpa-start rather than straight to the binary,
+#   so that `touch /boot/wpa-debug` on the card - from any PC, no
+#   reflash - turns on the full frame-by-frame log on the next boot.
+#   When wireless will not associate there is no other way to ask for
+#   that, because asking needs the wireless.
+?/sys/class/net/wlan0 sh /etc/wpa-start
 
 # The SSH server.
 #   -F  stay in the foreground. init can only supervise a child that
@@ -154,7 +159,8 @@ watchdog -t 15
 #   checkable afterwards rather than something to take on trust.
 beacon -d
 
-# Drives that get plugged in.
+# Drives that get plugged in - and the card this system boots from being
+# pulled out of a running board.
 #   Without this, a USB stick or an external disk appears in `disk` and
 #   nowhere else: you have to be logged in, know it came up as sdb1, and
 #   know what filesystem is on it. Nobody plugs a drive into a headless
@@ -168,6 +174,32 @@ beacon -d
 #
 #   It also runs one scan at startup, so a drive that was already
 #   attached at boot is mounted too.
+#
+#   THE SECOND JOB IS THE IMPORTANT ONE, and it is the reason this line
+#   has to be in this file and not in /etc/rc.
+#
+#   /data is on the SD card, /root is a bind mount off it, /boot is the
+#   other partition on it, and /bin /sbin /lib /usr /opt and /srv are
+#   six overlays whose upper layer is on it. Pull the card out of a
+#   running board and all nine are mounts with no disk under them: the
+#   kernel and the root filesystem are in RAM and perfectly fine, but
+#   every command a person could type is gone, so nothing on the machine
+#   can be started to put it right. It was the one failure with no way
+#   back at all short of pulling the power.
+#
+#   This daemon is the way back, and it works only because it is already
+#   running when the card goes - its own pages come from the RAM root,
+#   and it takes the mounts down with the umount2 syscall rather than by
+#   running /bin/umount, which is on the card that just left. After that
+#   /bin is the system image again and the board is fully usable; put
+#   the card back and it checks it, mounts it and rebuilds the overlays
+#   by itself.
+#
+#   init restarts it if it dies, which is most of why it belongs here.
+#   The one case that cannot be recovered from is this process dying
+#   while the card is out, because init would then have to exec
+#   /bin/automount off the dead card to bring it back - so it does as
+#   little as possible in that state and never exits on its own.
 automount -d
 
 # Watching for the things that actually happen to a small board on the
