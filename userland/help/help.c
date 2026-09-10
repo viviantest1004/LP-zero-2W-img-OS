@@ -249,6 +249,8 @@ static const entry_t KNOWN[] = {
     { "passwd",   "system",  "change a password",           "passwd [user]" },
     { "voice",    "system",  "GNU's wording, or this system's own", "voice [gnu|lp]" },
     { "temp",     "system",  "how hot the board is",        "temp [-a] [-c] [-w [secs]]" },
+    { "wifi",     "network", "why the wireless will not connect, and what works",
+                                                 "wifi [fix [-k] | log]" },
     { "nc",       "network", "connect or listen on a socket", "nc [-l] [-p PORT] [host] [port]" },
 
     { NULL, NULL, NULL, NULL }
