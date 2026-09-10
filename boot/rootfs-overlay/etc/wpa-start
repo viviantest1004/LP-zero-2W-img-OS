@@ -1,0 +1,27 @@
+# wpa-start - start wpa_supplicant, with the debugging switch on the card.
+#
+# init runs this instead of wpa_supplicant directly, for one reason: when
+# the wireless will not associate, the only thing that settles it is
+# wpa_supplicant's own debug log, and there is no way to ask for that on
+# a board you cannot log into because the wireless will not associate.
+#
+# So the switch is a file on the FAT partition, which any PC can write:
+#
+#     touch /boot/wpa-debug      (on the card, from any machine)
+#
+# and the next boot writes everything to /data/log/wpa.log - every frame
+# in and out of the handshake, with "RX EAPOL" on the line that decides
+# whether a failure is the kernel path or the cipher.
+#
+# Off by default because -dd on a working board is a megabyte an hour of
+# nothing.
+
+if test -e /boot/wpa-debug ; then
+    mkdir -p /data/log
+    echo "[wifi] debug logging on - /data/log/wpa.log (delete /boot/wpa-debug to stop)"
+    exec wpa_supplicant -dd -t -f /data/log/wpa.log -i wlan0 -c /etc/wpa.conf
+fi
+
+# -s: to syslog, which here is the /dev/log socket logd listens on, so
+# the CTRL-EVENT lines land in /data/log/messages and survive a reboot.
+exec wpa_supplicant -s -i wlan0 -c /etc/wpa.conf

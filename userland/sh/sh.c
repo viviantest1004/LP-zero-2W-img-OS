@@ -1404,7 +1404,8 @@ static const char *BUILTINS[] = {
      * builtin would only ever know what was hardcoded into the shell. */
     "exit", "cd", "pwd", "echo", "env", "reboot", "poweroff", "halt",
     "test", "[", "true", "false", ":",
-    "read", "shift", "export", "set", "local", "unset", ".", "source", NULL
+    "read", "shift", "export", "set", "local", "unset", ".", "source",
+    "exec", NULL
 };
 
 /* ── local ───────────────────────────────────────────────────────────
@@ -1640,6 +1641,9 @@ static int run_test(char **argv, int argc)
     return 2;
 }
 
+/* Defined below, next to the code that runs programs. */
+static bool resolve_path(const char *cmd, char *out, size_t n);
+
 static bool is_builtin(const char *name)
 {
     for (int i = 0; BUILTINS[i]; i++)
@@ -1656,6 +1660,48 @@ static bool run_builtin(cmd_t *c)
     if (strcmp(cmd, "test") == 0 || strcmp(cmd, "[") == 0) {
         last_status = run_test(c->argv, c->argc);
         return true;
+    }
+
+    /* ── exec ────────────────────────────────────────────────────────
+     *
+     * Replace this shell with the program, keeping the same process id.
+     *
+     * Which sounds like a detail and is not, for one reason: init
+     * supervises services by their process. A script that ends in
+     *
+     *     wpa_supplicant -i wlan0 -c /etc/wpa.conf
+     *
+     * forks it, the shell exits, and init sees the service die one
+     * instant after starting it - so it starts it again, and again,
+     * with a growing delay, for ever. With exec there is no fork and no
+     * second process: the shell BECOMES wpa_supplicant, and init is
+     * watching the thing it meant to watch.
+     *
+     * That is what /etc/wpa-start needs, and it is why this is here.
+     *
+     * `exec` with no arguments is a no-op rather than an error: in a
+     * real shell it applies the redirections to the shell itself, which
+     * this one does not do, and failing would be worse than doing
+     * nothing.
+     *
+     * If the program cannot be run, a real shell exits - the process
+     * was supposed to be replaced and there is nothing left for it to
+     * be. This does the same, with the conventional 127. */
+    if (strcmp(cmd, "exec") == 0) {
+        if (c->argc < 2) {
+            last_status = 0;
+            return true;
+        }
+        char path[512];
+        if (!resolve_path(c->argv[1], path, sizeof(path))) {
+            dprintf(STDERR_FILENO, "sh: exec: %s: command not found\n",
+                    c->argv[1]);
+            lp_exit(127);
+        }
+        long e = lp_execve(path, &c->argv[1], environ);
+        dprintf(STDERR_FILENO, "sh: exec: %s: cannot run it (%ld)\n",
+                path, -e);
+        lp_exit(126);
     }
 
     /* read - the only way a script can ask a question.

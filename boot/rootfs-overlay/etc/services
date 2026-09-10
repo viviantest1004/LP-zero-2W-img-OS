@@ -70,7 +70,12 @@ guard -r 32 -w 64
 #   away, and /data/log/messages held not a single wireless line - so
 #   when the board associated and then dropped in a loop, the one line
 #   that says why (CTRL-EVENT-DISCONNECTED ... reason=15) was nowhere.
-?/sys/class/net/wlan0 wpa_supplicant -s -i wlan0 -c /etc/wpa.conf
+#   It goes through /etc/wpa-start rather than straight to the binary,
+#   so that `touch /boot/wpa-debug` on the card - from any PC, no
+#   reflash - turns on the full frame-by-frame log on the next boot.
+#   When wireless will not associate there is no other way to ask for
+#   that, because asking needs the wireless.
+?/sys/class/net/wlan0 sh /etc/wpa-start
 
 # The SSH server.
 #   -F  stay in the foreground. init can only supervise a child that
