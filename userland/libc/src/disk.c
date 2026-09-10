@@ -21,11 +21,33 @@ typedef struct {
     char volname[64];
 } blkpg_part_t;
 
+/* struct blkpg_ioctl_arg, exactly as include/uapi/linux/blkpg.h has it:
+ *
+ *     int op; int flags; int datalen; void *data;
+ *
+ * There is NO padding field between datalen and data, and writing one
+ * in - which is what this used to do - is not harmless. On a 64-bit
+ * machine a pointer has to start on an 8-byte boundary, so the compiler
+ * puts four bytes of padding there anyway and an explicit `int pad`
+ * lands in exactly that hole: the layout comes out identical and the
+ * ioctl works. On the Pi Zero W a pointer is four bytes and needs no
+ * padding, so the kernel reads `data` from offset 12 - which was the
+ * pad, and the pad is zero. Every BLKPG call on that board therefore
+ * handed the kernel a null pointer and failed.
+ *
+ * What that cost: expandfs writes the new partition table and then has
+ * to tell the running kernel about it. BLKPG is the call that works
+ * while /boot is mounted, and /boot is mounted at that point because
+ * resize2fs lives on it. With BLKPG failing, the fallback BLKRRPART
+ * returned EBUSY for the same reason, the kernel went on believing the
+ * partition was 124MB, and resize2fs - which asks the kernel, not the
+ * table - found nothing to do. On a 64GB card in a Pi Zero W the
+ * filesystem never grew, at any boot, ever.
+ */
 typedef struct {
     int   op;
     int   flags;
     int   datalen;
-    int   pad;
     void *data;
 } blkpg_arg_t;
 
