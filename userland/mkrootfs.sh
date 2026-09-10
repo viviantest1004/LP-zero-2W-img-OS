@@ -206,8 +206,31 @@ copy_third "${WPA_SRC}/wpa_cli"        wpa_cli        || true
 # brcmfmac 드라이버가 /lib/firmware/brcm/ 에서 찾는다.
 if [[ -d "$FW_DIR" ]] && compgen -G "${FW_DIR}/*" >/dev/null; then
     cp "${FW_DIR}"/* "${ROOT_DIR}/lib/firmware/brcm/"
+
+    # 규제 데이터베이스는 brcm/ 이 아니라 한 단계 위다.
+    #
+    # 커널은 이걸 칩 펌웨어가 아니라 "regulatory.db" 라는 이름 그대로
+    # 요청하고, 펌웨어 로더는 /lib/firmware/regulatory.db 를 본다.
+    # brcm/ 안에 두면 정확히 지금까지처럼 못 찾는다:
+    #
+    #   platform regulatory.0: Direct firmware load for regulatory.db
+    #                          failed with error -2
+    #
+    # 서명(.p7s)과 짝이라 둘 다 있어야 한다.
+    for rdb in regulatory.db regulatory.db.p7s; do
+        if [[ -f "${FW_DIR}/${rdb}" ]]; then
+            mv "${ROOT_DIR}/lib/firmware/brcm/${rdb}" \
+               "${ROOT_DIR}/lib/firmware/${rdb}"
+        fi
+    done
+
     echo ""
-    log "lib/firmware/brcm/: $(ls -1 "$FW_DIR" | wc -l)개 파일, $(du -sh "$FW_DIR" | cut -f1)"
+    if [[ -f "${ROOT_DIR}/lib/firmware/regulatory.db" ]]; then
+        log "lib/firmware/regulatory.db  ($(stat -c%s "${ROOT_DIR}/lib/firmware/regulatory.db") bytes, 서명 포함)"
+    else
+        log "경고: regulatory.db 가 없습니다. 무선이 world 도메인으로 떨어집니다."
+    fi
+    log "lib/firmware/brcm/: $(ls -1 "${ROOT_DIR}/lib/firmware/brcm" | wc -l)개 파일"
 else
     echo ""
     log "경고: blobs/brcm 이 비어 있습니다. './tools/fetch-wifi-fw.sh' 를 실행하세요."

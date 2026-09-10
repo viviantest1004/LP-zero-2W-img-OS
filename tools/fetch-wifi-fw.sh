@@ -39,6 +39,35 @@ OPTIONAL=(
     "brcmfmac43436s-sdio.txt"
 )
 
+# ── The regulatory database ──────────────────────────────────────
+#
+# Two files, and they do not live with the Broadcom blobs: they come
+# from wireless-regdb, and they are not per-chip. The
+# kernel loads them as "regulatory.db" and checks the detached
+# signature "regulatory.db.p7s" against certificates compiled into it -
+# CONFIG_CFG80211_REQUIRE_SIGNED_REGDB - so both have to be there or
+# neither counts.
+#
+# Without them the boot log says, every time:
+#
+#     platform regulatory.0: Direct firmware load for regulatory.db
+#                            failed with error -2
+#     cfg80211: failed to load regulatory.db
+#
+# and cfg80211 falls back to the world domain: the most conservative
+# rules that exist, with reduced power and several channels marked
+# no-IR, meaning the station may not transmit on them until it has
+# heard a beacon there. That is a weak link on a board sitting next to
+# its own router.
+# wireless-regdb is where this is made - linux-firmware only carries a
+# copy. Taking it from the source means the database and its signature
+# are the pair upstream built together.
+REGDB_BASE="https://git.kernel.org/pub/scm/linux/kernel/git/sforshee/wireless-regdb.git/plain"
+REGDB=(
+    "regulatory.db"
+    "regulatory.db.p7s"
+)
+
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 command -v curl >/dev/null || die "curl 이 필요합니다"
@@ -65,6 +94,27 @@ for f in "${OPTIONAL[@]}"; do
         printf "  없음  %s (칩에 따라 정상)\n" "$f"
     fi
 done
+
+# 규제 데이터베이스. 서명과 짝이므로 둘 다 받거나 둘 다 버린다.
+echo "linux-firmware 에서 규제 데이터베이스를 받는 중..."
+REGDB_OK=true
+for f in "${REGDB[@]}"; do
+    if curl --fail --location --silent --show-error \
+            --retry 4 --retry-delay 2 --retry-all-errors \
+            --output "${OUT}/$f" "${REGDB_BASE}/$f" 2>/dev/null; then
+        printf "  OK    %-34s %s bytes\n" "$f" "$(stat -c%s "${OUT}/${f}")"
+    else
+        rm -f "${OUT}/${f}"
+        REGDB_OK=false
+        printf "  실패  %s\n" "$f"
+    fi
+done
+if ! $REGDB_OK; then
+    for f in "${REGDB[@]}"; do rm -f "${OUT}/${f}"; done
+    die "규제 데이터베이스를 받지 못했습니다. 서명과 짝이라 하나만 두면
+       커널이 둘 다 무시하고, 무선은 가장 보수적인 world 도메인으로
+       떨어집니다."
+fi
 
 # ── No CLM blob for the BCM43430, and that is correct ────────────
 #

@@ -128,3 +128,57 @@ CONFIG_USB_ZERO=n
 CONFIG_FONTS=y
 CONFIG_FONT_TER16x32=y
 CONFIG_FONT_8x16=y
+
+# ── WiFi power save: off, in the kernel ─────────────────────────────
+#
+# This is the one that costs you the network.
+#
+# CONFIG_CFG80211_DEFAULT_PS=y comes in from the Raspberry Pi defconfig
+# and means cfg80211 turns power save on for every wireless interface as
+# it is created. On a BCM43430 the chip then sleeps between beacons -
+# and the AP sends EAPOL 1/4, the first frame of the WPA2 handshake,
+# immediately after association, to a station that is asleep.
+#
+# What that looks like from outside is exactly what the board did:
+#
+#     wlan0: Associated with 5a:86:94:4c:53:94
+#     wlan0: Authentication with 5a:86:94:4c:53:94 timed out.
+#     wlan0: Added BSSID into ignore list
+#
+# with 33 packets received (beacons, which arrive at TIM boundaries and
+# wake it) and not one EAPOL frame. It reads like a wrong passphrase and
+# is not: a wrong key gets you 4-Way Handshake failed, because the
+# frames arrive and the maths fails. Here nothing arrives at all.
+#
+# There was already a defence against this - `net powersave off wlan0`
+# in /etc/rc - and it is still there. But it is a userspace command
+# speaking generic netlink that has never once been shown to work on a
+# board, because qemu-user permits only NETLINK_ROUTE and there was no
+# other way to run it. Depending on it was the mistake. Turned off in
+# the kernel, the chip never enables power save in the first place, on
+# the very first association, with nothing having to run correctly
+# first.
+#
+# The cost is idle current: a few tens of milliamps on a board that is
+# mains-powered and whose entire purpose is answering the network.
+CONFIG_CFG80211_DEFAULT_PS=n
+
+# ── The regulatory database ─────────────────────────────────────────
+#
+# The boot log says, on every boot:
+#
+#     platform regulatory.0: Direct firmware load for regulatory.db
+#                            failed with error -2
+#     cfg80211: failed to load regulatory.db
+#
+# and it is right - the file was never put on the image. Without it
+# cfg80211 falls back to the world domain, which is the most
+# conservative set of rules there is: reduced power, and several
+# channels marked no-IR, meaning the station may not transmit on them
+# until it has heard a beacon. A marginal link on a board sitting next
+# to its router is what that looks like.
+#
+# The file itself is data, not code - it is fetched by
+# tools/fetch-wifi-fw.sh with its signature (regulatory.db.p7s), which
+# the kernel checks against the certificates it says it loaded on the
+# line above.
