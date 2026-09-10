@@ -416,7 +416,97 @@ static bool grow_partition(u64 *new_bytes_out)
         return false;
     }
 
-    *new_bytes_out = max_count * SECTOR_SIZE;
+    /* Wait for the partition device to actually report the new size.
+     *
+     * Telling the kernel and the kernel having done it are not the same
+     * instant: the block device is torn down and rebuilt, and on a
+     * board that means devtmpfs removing and recreating
+     * /dev/mmcblk0p2. Open it too early and the very next thing -
+     * resize2fs - opens either nothing or the old device, and prints
+     * "No such file or directory" about a partition that is right
+     * there. Three seconds is far longer than it takes and costs
+     * nothing on the normal path, which finishes on the first look. */
+    u64 want = max_count * SECTOR_SIZE;
+    for (int i = 0; i < 60; i++) {
+        u64 have = 0;
+        long fd = lp_open(DEV_PART, O_RDONLY, 0);
+        if (fd >= 0) {
+            sys_call3(SYS_ioctl, (long)fd, (long)LP_BLKGETSIZE64, (long)&have);
+            lp_close((int)fd);
+            if (have == want)
+                break;
+        }
+        lp_sleep_ms(50);
+    }
+
+    *new_bytes_out = want;
+    return true;
+}
+
+/* ── Growing it offline, which is the path that actually runs ────────
+ *
+ * resize2fs on the unmounted partition. This is what `expandfs` does on
+ * a normal boot, and the online ioctl below is only for the case where
+ * something else already has /data mounted.
+ *
+ * It used to be the other way round - mount it, then EXT4_IOC_RESIZE_FS
+ * - and that ioctl asks for two things a board cannot be assumed to
+ * have: CAP_SYS_RESOURCE, and a kernel built with online resize. If
+ * either is missing the call returns EPERM, expandfs prints one line
+ * and gives up, and the card is left with a 60GB partition holding a
+ * 124MB filesystem. Nothing on the next boot fixes it, because by then
+ * the partition is already at full size.
+ *
+ * resize2fs needs none of that. It opens the block device and writes to
+ * it. With no size argument it grows the filesystem to fill whatever
+ * the partition now is, which is exactly the question being asked.
+ *
+ * It is on the boot partition rather than in the system image, like
+ * e2fsck and mke2fs, and boot_tool() checks its SHA-256 against the
+ * list compiled into the kernel before running it as root.
+ */
+static bool grow_offline(void)
+{
+    char tool[128];
+    if (!boot_tool("resize2fs", tool, sizeof tool))
+        return false;
+
+    printf("expandfs: growing the filesystem on %s to fill the partition\n",
+           DEV_PART);
+    /* Say it takes a while before it takes a while.
+     *
+     * Growing to 60GB means writing a few hundred block group
+     * descriptors and their inode tables, and on a 1GHz board with an
+     * SD card that is minutes, not seconds. Silence for that long on
+     * the first boot reads as a hang, and somebody pulls the power -
+     * in the middle of a filesystem resize, which is the one moment
+     * where that actually costs them the card. */
+    printf("expandfs:   on a large card this takes a few minutes."
+           " Do not cut the power.\n");
+
+    char *args[] = { (char *)"resize2fs", (char *)DEV_PART, NULL };
+    pid_t pid = lp_fork();
+    if (pid < 0) {
+        dprintf(STDERR_FILENO, "expandfs: cannot start %s\n", tool);
+        return false;
+    }
+    if (pid == 0) {
+        extern char **environ;
+        lp_execve(tool, args, environ);
+        lp_exit(127);
+    }
+    int status = 0;
+    lp_waitpid(pid, &status, 0);
+    int rc = LP_WIFEXITED(status) ? LP_WEXITSTATUS(status) : -1;
+    if (rc != 0) {
+        dprintf(STDERR_FILENO,
+                "expandfs: resize2fs exited %d.\n"
+                "expandfs:   `fsck %s` and then `expandfs` again -"
+                " resize2fs refuses a filesystem that has not been"
+                " checked.\n", rc, DEV_PART);
+        return false;
+    }
+    printf("expandfs: done\n");
     return true;
 }
 
@@ -560,41 +650,17 @@ int main(int argc, char **argv)
         return k ? 0 : 1;
     }
 
-    if (!lp_is_dir(MOUNT_POINT))
-        lp_mkdir(MOUNT_POINT, 0755);
-
-    /* nosuid and nodev, the same as everywhere else this partition is
-     * mounted. This was the one place that passed 0: /etc/rc and
-     * datadisk both spell out why they matter - they are how a file
-     * written to the card on another machine turns into root on this
-     * one - and expandfs runs before either of them. */
-    long rc = lp_mount(DEV_PART, MOUNT_POINT, "ext4",
-                       MS_NOSUID | MS_NODEV, NULL);
-    if (rc == 0) {
-        mounted_here = true;
-    } else if (rc != -16) {         /* -16 = EBUSY, already mounted */
-        /* Say what state the card is in, not just which call failed.
-         * The partition table has already been rewritten at this point:
-         * the card now has a large partition holding a small
-         * filesystem, which is harmless but looks alarming in `part`
-         * and `lsblk`, and somebody reading "cannot mount" has no way
-         * to know that the next boot finishes the job by itself. */
-        dprintf(STDERR_FILENO,
-                "expandfs: cannot mount %s (%ld).\n"
-                "expandfs:   the partition is grown; the filesystem in it"
-                " is not yet.\n"
-                "expandfs:   this runs again at every boot, so a reboot"
-                " finishes it.\n",
-                DEV_PART, -rc);
-        return 1;
-    }
+    /* Nothing has it mounted, so grow it offline - see grow_offline().
+     * This is the normal boot path: /etc/rc runs expandfs before it
+     * mounts /data, exactly so that this can happen. */
+    (void)mounted_here;
 
     /* Growing a large filesystem can outlast the 120 seconds /etc/rc
      * arms the watchdog for, and a reset partway through leaves the
      * partition bigger than the filesystem in it. */
     pid_t petter = watchdog_petter_start();
 
-    bool ok = grow_filesystem(part_bytes);
+    bool ok = grow_offline();
 
     watchdog_petter_stop(petter);
 

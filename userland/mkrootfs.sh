@@ -321,7 +321,7 @@ MOTD
 # the hash never matches, so fsck never runs.
 PREBUILT="${HERE}/prebuilt"
 [[ "${LP_ARCH:-arm64}" == "arm64" ]] || PREBUILT="${PREBUILT}/${LP_ARCH}"
-for tool in e2fsck mke2fs; do
+for tool in e2fsck mke2fs resize2fs; do
     src="${PREBUILT}/${tool}"
     if [[ -f "$src" ]]; then
         printf '%s  %s\n' \

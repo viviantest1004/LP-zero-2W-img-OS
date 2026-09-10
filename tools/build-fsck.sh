@@ -17,8 +17,17 @@
 #   우리 initramfs 에는 동적 로더가 없다. 정적 바이너리는 로더가 필요
 #   없으므로 glibc 로 정적 링크해도 그대로 돈다.
 #
-# e2fsck 와 mke2fs 만 남기고 나머지(resize2fs, dumpe2fs ...)는 버린다.
-# 파티션을 만들거나 늘리는 일은 이미 mksdcard.sh 와 expandfs 가 한다.
+# e2fsck, mke2fs, resize2fs 만 남기고 나머지(dumpe2fs, debugfs ...)는 버린다.
+#
+# resize2fs 가 여기 있는 이유가 중요하다. expandfs 는 원래 커널의 온라인
+# 리사이즈 ioctl(EXT4_IOC_RESIZE_FS) 하나만 썼는데, 그건 마운트된
+# 파일시스템을 늘리는 방법이고 CAP_SYS_RESOURCE 와 커널의 온라인 리사이즈
+# 지원을 둘 다 요구한다. 하나라도 없으면 파티션만 커지고 파일시스템은
+# 그대로인 채로 조용히 끝난다 - 64GB 카드에 124MB 파일시스템이 남는다.
+#
+# 마운트하기 전에 resize2fs 로 오프라인으로 늘리면 그 조건이 전부
+# 사라진다. 그냥 블록 장치에 쓰는 프로그램이고, 이건 실제로 시험할 수
+# 있다. 온라인 ioctl 은 이미 마운트돼 있을 때만 쓴다.
 #
 # 환경변수:
 #   E2FS_SRC   소스 경로 (기본 thirdparty/e2fsprogs-1.47.0)
@@ -138,7 +147,6 @@ if [[ ! -f Makefile || "${RECONFIGURE:-0}" == "1" ]]; then
         --disable-tdb \
         --disable-debugfs \
         --disable-imager \
-        --disable-resizer \
         --disable-defrag \
         --disable-e2initrd-helper \
         --disable-testio-debug \
@@ -163,8 +171,9 @@ echo "  완료"
 
 # 두 개를 가져간다.
 #
-#   e2fsck   망가진 /data 를 부팅할 때 고친다
-#   mke2fs   새 디스크를 /data 로 만든다 (datadisk --format)
+#   e2fsck    망가진 /data 를 부팅할 때 고친다
+#   mke2fs    새 디스크를 /data 로 만든다 (datadisk --format)
+#   resize2fs 카드 전체를 쓰도록 /data 를 늘린다 (expandfs)
 #
 # 둘 다 부트 파티션(FAT)에 실린다. 시스템 이미지에 넣으면 initramfs 가
 # 램에 상주하므로 3MB 를 영구히 먹는데, 둘 다 평소에는 아무 일도 하지
@@ -173,10 +182,11 @@ echo "  완료"
 step "결과"
 mkdir -p "$OUT"
 
-for tool in e2fsck mke2fs; do
+for tool in e2fsck mke2fs resize2fs; do
     case "$tool" in
-        e2fsck) BIN="${E2FS_SRC}/e2fsck/e2fsck" ;;
-        mke2fs) BIN="${E2FS_SRC}/misc/mke2fs" ;;
+        e2fsck)   BIN="${E2FS_SRC}/e2fsck/e2fsck" ;;
+        mke2fs)   BIN="${E2FS_SRC}/misc/mke2fs" ;;
+        resize2fs) BIN="${E2FS_SRC}/resize/resize2fs" ;;
     esac
     [[ -f "$BIN" ]] || die "${tool} 이 만들어지지 않았습니다"
 

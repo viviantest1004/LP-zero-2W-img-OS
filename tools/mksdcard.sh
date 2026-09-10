@@ -488,7 +488,7 @@ UEFIEOF
     # machine is left off the card rather than shipped.
     PREBUILT="${REPO_ROOT}/userland/prebuilt"
     [[ "$LP_ARCH" == "arm64" ]] || PREBUILT="${PREBUILT}/${LP_ARCH}"
-    for tool in e2fsck mke2fs mke2fs.conf; do
+    for tool in e2fsck mke2fs resize2fs mke2fs.conf; do
         SRC="${PREBUILT}/${tool}"
         if [[ ! -f "$SRC" ]]; then
             echo "  경고: ${tool} 이 ${PREBUILT} 에 없습니다"

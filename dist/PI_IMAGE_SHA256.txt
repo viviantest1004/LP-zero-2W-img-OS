@@ -1,1 +1,1 @@
-e9d72baf0a1a04ee7ac5b39673ca0c8a927387dba445b37d85928215a3fb5330  linux-LP_arm64_Zero2W.img.xz
+7ab2cc2fcdbe79be1e6fd4301e705817cf233e3999ab24321b24c827d7e9386a  linux-LP_arm64_Zero2W.img.xz
