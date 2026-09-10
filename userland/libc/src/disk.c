@@ -11,6 +11,8 @@
  * written out here was the 64-bit one. */
 #define BLKPG        0x1269      /* _IO(0x12, 105) change one partition */
 
+#define BLKPG_ADD_PARTITION     1
+#define BLKPG_DEL_PARTITION     2
 #define BLKPG_RESIZE_PARTITION  3
 
 typedef struct {
@@ -187,6 +189,74 @@ long disk_tell_kernel(const char *disk, int pno, u64 start, u64 len)
 long disk_reread(const char *disk)
 {
     return dev_ioctl(disk, BLKRRPART, NULL, O_RDONLY);
+}
+
+/* ── Making a table the kernel has not read yet take effect ───────────
+ *
+ * Writing the partition table to sector 0 changes nothing about the
+ * running machine: the kernel decided what /dev/sda1 and /dev/sda2 are
+ * when it last looked, and it does not look again on its own.
+ *
+ * BLKRRPART asks it to look again at the whole table, and is the right
+ * answer when it works. It refuses with EBUSY while ANYTHING on the
+ * disk is mounted - which is the common case, not the rare one: you
+ * partition the free space on a stick that already has one partition
+ * mounted, or you grow the data partition on the card you booted from.
+ * "Written. Reboot and it will pick it up" is not an answer for a USB
+ * drive somebody just plugged in.
+ *
+ * BLKPG is the per-partition version and does not care what else is
+ * mounted. So each slot is deleted and added back to match the table we
+ * just wrote. Deleting a slot that is not there fails harmlessly and is
+ * ignored; deleting one that is MOUNTED fails with EBUSY, and that one
+ * is reported, because the caller has just written a table the kernel
+ * is refusing to adopt for a reason the person needs to hear.
+ *
+ * Returns the number of slots the kernel would not accept: 0 means the
+ * table is live. */
+int disk_apply_table(const char *disk, const u8 *mbr)
+{
+    /* The cheap path first. When nothing on the disk is mounted this
+     * re-reads all four slots in one call and gets the extended
+     * partitions right too, which the loop below does not attempt. */
+    if (dev_ioctl(disk, BLKRRPART, NULL, O_RDONLY) >= 0)
+        return 0;
+
+    int refused = 0;
+
+    for (int slot = 1; slot <= DISK_PARTS; slot++) {
+        u8  type; u32 start, count; bool boot;
+        mbr_get(mbr, slot, &type, &start, &count, &boot);
+
+        blkpg_part_t part;
+        memset(&part, 0, sizeof part);
+        part.pno = slot;
+
+        blkpg_arg_t arg;
+        memset(&arg, 0, sizeof arg);
+        arg.datalen = (int)sizeof part;
+        arg.data    = &part;
+
+        /* Out with the old. A slot the kernel does not have gives
+         * ENXIO, which is exactly the state we want it in anyway. */
+        arg.op = BLKPG_DEL_PARTITION;
+        long rc = dev_ioctl(disk, BLKPG, &arg, O_RDONLY);
+        if (rc < 0 && rc != -6 /* ENXIO */ && rc != -22 /* EINVAL */) {
+            refused++;
+            continue;               /* mounted, almost certainly */
+        }
+
+        if (type == PART_TYPE_EMPTY || count == 0)
+            continue;               /* the table says nothing is there */
+
+        part.start  = (s64)start * DISK_SECTOR;
+        part.length = (s64)count * DISK_SECTOR;
+        arg.op      = BLKPG_ADD_PARTITION;
+        if (dev_ioctl(disk, BLKPG, &arg, O_RDONLY) < 0)
+            refused++;
+    }
+
+    return refused;
 }
 
 const char *part_type_name(u8 type)

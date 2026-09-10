@@ -117,6 +117,14 @@ long disk_tell_kernel(const char *disk, int pno, u64 start, u64 len);
  * disk is mounted, which is normal and usually fine to ignore. */
 long disk_reread(const char *disk);
 
+/* Make a table that has just been written take effect on the running
+ * kernel. BLKRRPART when the disk is idle, and slot by slot with BLKPG
+ * when it is not - which is most of the time, because the disk being
+ * repartitioned usually has something mounted on it. Returns how many
+ * slots the kernel refused; 0 means the new table is live and the
+ * device nodes are there. */
+int disk_apply_table(const char *disk, const u8 *mbr);
+
 /* A human name for an MBR type byte: "Linux", "FAT32", "swap", ... */
 const char *part_type_name(u8 type);
 

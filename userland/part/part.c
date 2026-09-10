@@ -198,12 +198,28 @@ static int commit(const char *disk, u8 *mbr, bool assume_yes)
         return 1;
     }
 
-    long rc = disk_reread(disk);
-    if (rc < 0)
-        printf("part: written. The kernel would not re-read the table (%ld) -\n"
-               "      reboot and it will pick it up.\n", -rc);
-    else
-        printf("part: written.\n");
+    /* Written is not the same as in effect. The kernel decided what
+     * the partitions were when it last looked at this disk, and it does
+     * not look again on its own - so without this the new partition has
+     * no device node and nothing can be done with it until a reboot,
+     * which for a USB drive somebody just plugged in is not an answer.
+     *
+     * disk_apply_table re-reads the whole table when the disk is idle,
+     * and goes slot by slot with BLKPG when something on it is mounted.
+     * It returns how many slots the kernel would not take. */
+    int refused = disk_apply_table(disk, mbr);
+    if (refused == 0) {
+        printf("part: written, and the kernel has it. The partitions are"
+               " there now.\n");
+    } else {
+        printf("part: written, but the kernel would not take %d of the"
+               " four slots.\n", refused);
+        printf("      That is what it says when a partition is mounted:"
+               " unmount everything\n"
+               "      on %s and run the same command again, or reboot"
+               " and it picks the\n"
+               "      table up on the way.\n", disk);
+    }
     return 0;
 }
 
