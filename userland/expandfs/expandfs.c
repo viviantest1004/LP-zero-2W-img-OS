@@ -165,10 +165,24 @@ typedef struct {
 /* ext4 online grow. _IOW('f', 16, __u64) */
 #define EXT4_IOC_RESIZE_FS  0x40086610
 
-/* The offsets we need out of struct statfs (arm64) */
-#define STATFS_SIZE     120
-#define STATFS_BSIZE    8
-#define STATFS_BLOCKS   16
+/* struct statfs is read through lp_statfs(), not by reaching into a
+ * byte buffer at fixed offsets.
+ *
+ * It used to be the latter, with a comment saying "(arm64)" - and that
+ * is exactly what it was: the 64-bit layout, read as u64 at offsets 8
+ * and 16, on every architecture. On the Pi Zero W the 32-bit statfs is
+ * a different structure with 32-bit fields, so bsize and blocks came
+ * back as garbage, `want <= blocks` was true against nonsense, and this
+ * printed "the filesystem already fills the partition" and stopped.
+ *
+ * The partition had already been grown by then. So a 64GB card ended up
+ * with a 60GB partition holding a 124MB filesystem, and every boot
+ * afterwards said the partition was already at full size and the
+ * filesystem already filled it. Nothing ever grew, and nothing ever
+ * said anything was wrong.
+ *
+ * libc has had a per-architecture statfs since the ARM port; this file
+ * simply never used it. */
 
 /* Not worth growing for less than this. */
 #define MIN_GROW_MB     16
@@ -409,17 +423,15 @@ static bool grow_partition(u64 *new_bytes_out)
 /* Grow a mounted ext4. */
 static bool grow_filesystem(u64 part_bytes)
 {
-    u8 st[STATFS_SIZE];
-    memset(st, 0, sizeof(st));
-
-    long rc = sys_call2(SYS_statfs, (long)grow_at, (long)st);
+    lp_statfs_t fs;
+    long rc = lp_statfs(grow_at, &fs);
     if (rc < 0) {
         dprintf(STDERR_FILENO, "expandfs: statfs failed (%ld)\n", -rc);
         return false;
     }
 
-    u64 bsize  = *(u64 *)(st + STATFS_BSIZE);
-    u64 blocks = *(u64 *)(st + STATFS_BLOCKS);
+    u64 bsize  = fs.bsize;
+    u64 blocks = fs.blocks;
     if (bsize == 0) {
         dprintf(STDERR_FILENO, "expandfs: cannot determine the block size\n");
         return false;
@@ -561,7 +573,18 @@ int main(int argc, char **argv)
     if (rc == 0) {
         mounted_here = true;
     } else if (rc != -16) {         /* -16 = EBUSY, already mounted */
-        dprintf(STDERR_FILENO, "expandfs: cannot mount %s (%ld)\n",
+        /* Say what state the card is in, not just which call failed.
+         * The partition table has already been rewritten at this point:
+         * the card now has a large partition holding a small
+         * filesystem, which is harmless but looks alarming in `part`
+         * and `lsblk`, and somebody reading "cannot mount" has no way
+         * to know that the next boot finishes the job by itself. */
+        dprintf(STDERR_FILENO,
+                "expandfs: cannot mount %s (%ld).\n"
+                "expandfs:   the partition is grown; the filesystem in it"
+                " is not yet.\n"
+                "expandfs:   this runs again at every boot, so a reboot"
+                " finishes it.\n",
                 DEV_PART, -rc);
         return 1;
     }

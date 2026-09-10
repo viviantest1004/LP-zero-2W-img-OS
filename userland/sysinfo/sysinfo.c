@@ -21,11 +21,12 @@
 #define UTS_MACHINE  260
 #define UTS_SIZE     390
 
-/* struct statfs offsets (arm64) */
-#define STATFS_SIZE    120
-#define STATFS_BSIZE     8
-#define STATFS_BLOCKS   16
-#define STATFS_BAVAIL   32
+/* The filesystem figures come from lp_statfs(), which knows the layout
+ * of every architecture. They used to be read out of a byte buffer at
+ * fixed offsets with a comment saying "(arm64)" - and on the Pi Zero W,
+ * where the 32-bit statfs is a different structure with 32-bit fields,
+ * that is what it printed: whatever those bytes happened to mean. The
+ * disk line was nonsense on every 32-bit board. */
 
 #define CPUFREQ_DIR "/sys/devices/system/cpu/cpu0/cpufreq/"
 
@@ -277,14 +278,13 @@ static void show_memory(void)
 
 static void show_one_fs(const char *path, const char *label)
 {
-    u8 st[STATFS_SIZE];
-    memset(st, 0, sizeof(st));
-    if (sys_call2(SYS_statfs, (long)path, (long)st) < 0)
+    lp_statfs_t fs;
+    if (lp_statfs(path, &fs) < 0)
         return;
 
-    u64 bs     = *(u64 *)(st + STATFS_BSIZE);
-    u64 blocks = *(u64 *)(st + STATFS_BLOCKS);
-    u64 avail  = *(u64 *)(st + STATFS_BAVAIL);
+    u64 bs     = fs.bsize;
+    u64 blocks = fs.blocks;
+    u64 avail  = fs.bavail;
     if (bs == 0 || blocks == 0)
         return;
 

@@ -13,6 +13,21 @@
 # Something that dies instantly gets a growing delay between restarts,
 # and after 20 failures init gives up on it. That stops a busy loop.
 
+# Log collector - FIRST, because everything below it has something to say.
+#
+#   Collects the kernel ring buffer and the /dev/log socket into
+#   /data/log/messages, rotating at 512KB so it can never fill the card.
+#   Without it, everything printed goes to the console and is gone as
+#   soon as it scrolls. If the board wedges overnight there is no record
+#   of what happened - which is when you most want one.
+#
+#   It used to be seventh in this file, after guard, wpa_supplicant,
+#   dropbear, dhcp, ntp and cron. /dev/log does not exist until logd
+#   creates it, so everything those six said while starting - which is
+#   exactly when things go wrong - had nowhere to go. It has no
+#   dependencies of its own, so there is no reason for it to wait.
+logd
+
 # The safety net. THIS LINE IS THE MOST IMPORTANT ONE IN THE FILE.
 #
 #   guard is what kills a runaway before it takes the board down, what
@@ -49,7 +64,13 @@ guard -r 32 -w 64
 #   a virtual machine there is not, and without the condition init spent
 #   its first minute restarting a program that printed a driver error
 #   and exited, twelve times over, about hardware that does not exist.
-?/sys/class/net/wlan0 wpa_supplicant -i wlan0 -c /etc/wpa.conf
+#   -s sends its output to syslog, which here is the /dev/log socket
+#   logd listens on, so the lines end up in /data/log/messages and
+#   survive a reboot. Without it they went to the console and scrolled
+#   away, and /data/log/messages held not a single wireless line - so
+#   when the board associated and then dropped in a loop, the one line
+#   that says why (CTRL-EVENT-DISCONNECTED ... reason=15) was nowhere.
+?/sys/class/net/wlan0 wpa_supplicant -s -i wlan0 -c /etc/wpa.conf
 
 # The SSH server.
 #   -F  stay in the foreground. init can only supervise a child that
@@ -108,14 +129,6 @@ ntp -d
 #   Times are UTC. See `cron -h`.
 ?/bin/cron cron -d
 
-
-# Log collector.
-#   Without this, everything printed goes to the console and is gone as
-#   soon as it scrolls. If the board wedges overnight there is no record
-#   of what happened - which is when you most want one.
-#   Collects the kernel ring buffer and /dev/log into /data/log/messages,
-#   rotating at 512KB so it can never fill the card.
-logd
 
 # Watchdog.
 #   The BCM2835 has a hardware countdown that reboots the board when it

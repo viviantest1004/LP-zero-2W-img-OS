@@ -175,8 +175,17 @@ echo "외부 프로그램:"
 # On the first amd64 image that filled the screen and nothing else was
 # readable.
 DROPBEAR_SRC="${THIRD}/dropbear-2024.86"
+# The path build-thirdparty.sh actually writes to, which is
+# .build/thirdparty/<arch>/<package> for everything except arm64 - that
+# one builds where the sources are unpacked, as it always has.
+#
+# The amd64 entries here used to name dropbear-amd64 and wpa-amd64,
+# which no version of build-thirdparty.sh has ever produced. copy_third
+# ends in "|| true", so the miss was silent and the amd64 image simply
+# kept whatever binary was already committed in the rootfs directory -
+# for as long as that took to notice, which was months.
 case "${LP_ARCH:-arm64}" in
-    amd64) DROPBEAR_SRC="${THIRD}/dropbear-amd64" ;;
+    amd64) DROPBEAR_SRC="${THIRD}/amd64/dropbear-2024.86" ;;
     armv6) DROPBEAR_SRC="${THIRD}/armv6/dropbear-2024.86" ;;
 esac
 copy_third "${DROPBEAR_SRC}/dropbear"    dropbear    || true
@@ -187,7 +196,7 @@ copy_third "${DROPBEAR_SRC}/dropbearkey" dropbearkey || true
 # board that otherwise looks fine.
 WPA_SRC="${THIRD}/wpa_supplicant-2.11/wpa_supplicant"
 case "${LP_ARCH:-arm64}" in
-    amd64) WPA_SRC="${THIRD}/wpa-amd64/wpa_supplicant" ;;
+    amd64) WPA_SRC="${THIRD}/amd64/wpa_supplicant-2.11/wpa_supplicant" ;;
     armv6) WPA_SRC="${THIRD}/armv6/wpa_supplicant-2.11/wpa_supplicant" ;;
 esac
 copy_third "${WPA_SRC}/wpa_supplicant" wpa_supplicant || true

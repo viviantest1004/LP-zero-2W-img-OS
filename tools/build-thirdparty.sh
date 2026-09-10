@@ -301,7 +301,18 @@ fi
 # 비밀번호 인증이 정말 빠졌는지 확인한다. 이것이 이 스크립트가 있는
 # 이유의 절반이다: 설정을 놓친 빌드는 아무 오류도 내지 않고, 그냥
 # 비밀번호로 들어올 수 있는 SSH 서버가 된다.
-if "${CROSS:-}strings" "${DB_DIR}/dropbear" 2>/dev/null | grep -q "^password$"; then
+#
+# 무엇을 찾는가가 중요하다. 예전에는 "^password$" 를 찾았는데, 그
+# 문자열은 auth.h 의 AUTH_METHOD_PASSWORD 정의라서 비밀번호 인증을
+# 꺼서 빌드해도 바이너리에 남는다. 즉 이 검사는 항상 참이었고, 검사가
+# 실제로 돌기 시작한 순간 정상 빌드를 전부 막았다 - 보안 검사가
+# 거짓 양성이면 사람들은 검사를 끄지, 원인을 찾지 않는다.
+#
+# svr-authpasswd.c 의 로그 문구를 찾는다. 이 파일의 내용은 통째로
+# DROPBEAR_SVR_PASSWORD_AUTH 안에 들어 있으므로, 이 문구가 있다는 것은
+# 비밀번호 인증 코드가 실제로 링크됐다는 뜻이다.
+if "${CROSS:-}strings" "${DB_DIR}/dropbear" 2>/dev/null \
+   | grep -qiE "Password auth succeeded|Bad password attempt"; then
     die "dropbear 에 비밀번호 인증이 들어 있습니다. localoptions.h 가 적용되지 않았습니다."
 fi
 log "비밀번호 인증 없음 (공개키만)"

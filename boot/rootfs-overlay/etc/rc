@@ -760,4 +760,29 @@ if test -x /bin/start-desktop ; then
     start-desktop &
 fi
 
+# ── the screen belongs to whoever is sitting at it ──────────────
+#
+# Until this line the kernel prints straight onto the console, which is
+# what you want while booting: if the board dies at second nine, the
+# reason is on the screen.
+#
+# Afterwards it is the opposite. A driver that is unhappy repeats
+# itself, and a line like
+#
+#     [   13.935667] brcmfmac: ... error ...
+#
+# arriving every second lands in the middle of whatever is being typed.
+# The shell is still working - the characters go where they should - but
+# the screen is unusable, and on a board with no other console that is
+# the whole machine.
+#
+# So the console gets level 1 (only a panic) and everything else keeps
+# going to the ring buffer, where `dmesg` reads it and logd copies it to
+# /data/log/messages. Nothing is lost; it just stops being shouted.
+#
+# The four numbers are console, default, minimum, boot-time default.
+echo "1 4 1 7" > /proc/sys/kernel/printk \
+    || echo "[rc]   kernel messages will keep printing over the console"
+
 echo "[rc] done (init starts SSH from /etc/services)"
+echo "[rc]   kernel messages now go to the log only - 'dmesg' to read them"
