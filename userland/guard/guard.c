@@ -26,10 +26,12 @@
  *            that caused it in the first place.
  *
  *   CPU      A process spinning at 100% must not make the machine
- *            unreachable. After a minute of it we push it to the back of
- *            the run queue and keep the important processes at the
- *            front. Nothing is ever killed for using the CPU - that may
- *            well be the job you asked for. It only has to yield.
+ *            unreachable. After half a minute of it we push it to the
+ *            back of the run queue and keep the important processes at
+ *            the front. Nothing is ever killed for using the CPU - that
+ *            may well be the job you asked for. It only has to yield,
+ *            and it gets its place back after the same half minute of
+ *            behaving itself.
  *
  *   disk     A full data partition means no logs, no saved clock, no
  *            writes at all. We warn early and drop the old rotated log
@@ -685,9 +687,29 @@ static int scan_processes(proc_t *list, int max, pid_t self)
                 continue;
 
             pid_t pid = (pid_t)strtol(name, NULL, 10);
+            /* Two quite different things are dropped by the test
+             * below, and only one of them is obvious.
+             *
+             * A process that exited between the getdents and the read -
+             * the ordinary race, and the reason the test was written.
+             *
+             * And every kernel thread. A kthread has no address space,
+             * so its statm reads "0 0 0 0 0 0 0" and read_rss_kb says
+             * -1. That is the right answer for all of them - a kworker
+             * cannot be OOM-killed, has no business being niced by us,
+             * and is not what anybody means by a process - but it is
+             * worth writing down, because the count this list produces
+             * is what check_storm compares against STORM_PROCS. On this
+             * board /proc holds about seventy entries of which about ten
+             * are processes, and on a multi-core amd64 machine - which
+             * this system also runs on - kernel threads alone can run to
+             * several hundred. If they were counted, guard would declare
+             * a fork storm on an idle machine and start killing process
+             * groups. They are not, and n means what the storm code
+             * thinks it means. */
             long rss = read_rss_kb(pid);
             if (rss < 0)
-                continue;               /* the process exited meanwhile */
+                continue;
 
             list[n].pid    = pid;
             list[n].rss_kb = rss;
@@ -806,14 +828,22 @@ static bool cpu_is_unboosted(pid_t pid)
     return false;
 }
 
-/* Find the processes holding a core to themselves and, after a minute of
- * it, move them to the back of the queue.
+/* Find the processes holding a core to themselves and, after
+ * HOG_SECONDS of it, move them to the back of the queue.
  *
- * A minute is deliberate. Anything shorter and an ordinary build or a
- * Python script that happens to be busy gets punished for doing its job;
- * what we are actually defending against is the process that never
- * stops. And the punishment is only a nice value - the work still runs,
- * it just no longer decides whether SSH answers. */
+ * Half a minute is deliberate, and it is a compromise. Anything much
+ * shorter and an ordinary build or a Python script that happens to be
+ * busy gets moved for doing its job; anything longer and a board with
+ * every core pinned stays unreachable while the timer runs. It was 60
+ * seconds and is now 30, with a line printed at HOG_NOTICE_SECONDS so
+ * that the answer to "is guard even running" arrives long before the
+ * action does.
+ *
+ * What makes 30 seconds acceptable for legitimate work is that the
+ * punishment is only a nice value: the work still runs, at the same
+ * speed on an idle board, and it stops deciding whether SSH answers.
+ * The same half minute has to pass in the other direction before the
+ * priority is given back, so a build that pauses is not let off. */
 static void check_cpu_hogs(const proc_t *list, int n, pid_t self,
                            long elapsed_ms)
 {

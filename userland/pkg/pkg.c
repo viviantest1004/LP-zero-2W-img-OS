@@ -370,6 +370,110 @@ static bool is_installed(const char *name)
     return lp_exists(p);
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ * Keeping integrity(1) in step
+ * ═══════════════════════════════════════════════════════════════════
+ *
+ * integrity(1) watches the handful of things on /data that survive a
+ * reboot, and three of them are directories this program writes to:
+ * /data/pkg/db, where the record of what is installed lives, and
+ * /data/bin and python's site-packages, where the files in a package
+ * land. So `pkg install jq` - a completely ordinary thing to do - made
+ * the next integrity run announce that something which survives a
+ * reboot had changed, and defend(1) turned that into a security
+ * finding. The board reported itself for working.
+ *
+ * The record therefore follows the tool that is allowed to change it:
+ * once an install or a remove has actually succeeded, we hand integrity
+ * the watched directories WE wrote to and it re-records exactly those.
+ *
+ * Two things this deliberately does not do:
+ *
+ *   - it does not run `integrity -u`, which would accept everything.
+ *     A package installed in the same minute as somebody editing
+ *     /data/rc.local would then have that edit accepted too, silently,
+ *     and rc.local is the whole reason integrity exists.
+ *   - it names only the directories the archive actually touched.
+ *     Installing something that puts nothing in site-packages leaves
+ *     the record for site-packages alone, so a file appearing there
+ *     while we were busy is still reported.
+ *
+ * The list below has to agree with WATCHED[] in integrity.c, which is
+ * the authority; integrity refuses a path it does not watch and says
+ * so, which is what makes a disagreement visible rather than silent.
+ * The files integrity watches which are NOT here - rc.local, users,
+ * groups, authorized_keys - are the ones that decide what runs and who
+ * gets in, and no package has any business writing them: an archive
+ * that does gets reported, which is the point.
+ */
+static const char *ACCEPTABLE[] = {
+    DB_DIR,
+    "/data/bin",
+    "/data/python/lib/python3.12/site-packages",
+    NULL
+};
+#define MAX_ACCEPTABLE 3
+
+static bool touched[MAX_ACCEPTABLE];
+
+static void note_touched(const char *path)
+{
+    for (int i = 0; ACCEPTABLE[i]; i++) {
+        size_t n = strlen(ACCEPTABLE[i]);
+        if (strncmp(path, ACCEPTABLE[i], n) == 0 &&
+            (path[n] == '/' || path[n] == '\0'))
+            touched[i] = true;
+    }
+}
+
+/* Every path in a package's file list, so that an install or a remove
+ * can say which watched directories it changed. */
+static void note_list_file(const char *listp)
+{
+    long fd = lp_open(listp, O_RDONLY, 0);
+    if (fd < 0)
+        return;
+    char line[1024];
+    while (readline((int)fd, line, sizeof(line)) >= 0)
+        if (line[0])
+            note_touched(line);
+    lp_close((int)fd);
+}
+
+static void accept_touched(void)
+{
+    char *argv[MAX_ACCEPTABLE + 3];
+    int   n = 0;
+
+    argv[n++] = (char *)"integrity";
+    argv[n++] = (char *)"-a";
+    for (int i = 0; ACCEPTABLE[i]; i++)
+        if (touched[i])
+            argv[n++] = (char *)ACCEPTABLE[i];
+    argv[n] = NULL;
+
+    if (n == 2)
+        return;                 /* nothing integrity watches was written */
+
+    /* An image built without it. Nothing is watching those paths, so
+     * there is nothing to keep in step and nothing to say. */
+    if (!lp_exists("/bin/integrity"))
+        return;
+
+    pid_t pid = lp_fork();
+    if (pid < 0)
+        return;
+    if (pid == 0) {
+        lp_execve("/bin/integrity", argv, environ);
+        lp_exit(127);
+    }
+    int status = 0;
+    lp_waitpid(pid, &status, 0);
+    /* integrity prints its own reason on stderr if it refused - a path
+     * it does not watch, or a record it could not write. Repeating it
+     * here would only make the same complaint twice. */
+}
+
 static int cmd_list(void)
 {
     long fd = lp_open(DB_DIR, O_RDONLY | O_DIRECTORY, 0);
@@ -483,6 +587,13 @@ static int install_tar(const char *name, const char *version,
     }
 
     lp_sync();
+
+    /* The database entry above is itself a change to a watched
+     * directory, so it counts whatever the archive held. */
+    note_touched(listp);
+    note_list_file(listp);
+    accept_touched();
+
     printf("pkg: installed %s (%ld files)\n", name, n);
     return 0;
 }
@@ -532,6 +643,11 @@ static int cmd_remove(const char *name)
     while (readline((int)fd, line, sizeof(line)) >= 0) {
         if (line[0] == '\0')
             continue;
+        /* Noted before the unlink, because after it the list file is
+         * gone too and there is nothing left to read the paths from.
+         * A file removed from a watched directory changes its listing
+         * exactly as much as one appearing there does. */
+        note_touched(line);
         if (lp_unlink(line) == 0)
             gone++;
         else
@@ -545,6 +661,10 @@ static int cmd_remove(const char *name)
     lp_unlink(infop);
 
     lp_sync();
+
+    note_touched(listp);        /* the database directory, always */
+    accept_touched();
+
     printf("pkg: removed %s (%ld files", name, gone);
     if (kept)
         printf(", %ld were already gone", kept);

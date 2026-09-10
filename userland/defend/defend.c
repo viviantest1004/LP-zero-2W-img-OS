@@ -8,6 +8,7 @@
  *   defend status          what it has seen
  *   defend unban <addr>    let an address back in
  *   defend baseline        record the current state as expected
+ *                          (the first run does this by itself, once)
  *
  * ── This is not an antivirus, and it should not be ──
  * The owner asked for antivirus. A signature scanner would be dishonest
@@ -55,10 +56,29 @@
  * that reading one teaches you the other. It is much smaller: one
  * table, one chain, and every rule is "source address is X, drop".
  *
+ * ── What the system did itself is not a finding ──
+ * Every check here compares what is on the machine against what is
+ * expected, and for a long time it had no idea what this machine's own
+ * software does - so it reported the board for working. A package
+ * installed with pkg changed a directory integrity(1) watches; a
+ * service init was told to supervise held a socket that was not in the
+ * baseline; `persist on` put a distribution's setuid binaries under
+ * /data. Four months of "** something has changed" about things the
+ * owner had asked for, in the same output where the one that mattered
+ * would appear. Each of those is answered where it arises, and each
+ * answer is the same shape: find out what this system did, say so, and
+ * report only the rest.
+ *
  * ── State ──
  * /data/defend/bans       one address per line, with when and why
- * /data/defend/baseline   listeners and SSH keys, as they should be
- * /data/defend/state      counters, so `defend status` has a history
+ * /data/defend/baseline   listeners and SSH keys, as they should be.
+ *                         Written by the FIRST run - on a new image the
+ *                         state at first boot is the expected state -
+ *                         and after that only by `defend baseline`.
+ * /data/defend/state      counters, so `defend status` has a history,
+ *                         and when a baseline was last recorded, which
+ *                         is how "never had one" is told apart from
+ *                         "somebody deleted it"
  *
  * The kernel keeps no nftables table across a reboot, so the bans are
  * re-applied from the file at every start. That is the reason the file
@@ -1171,24 +1191,79 @@ static bool check_auth(void)
  *
  * /data is mounted nosuid,nodev by /etc/rc, so a setuid file there
  * cannot actually gain anybody anything - which is exactly why finding
- * one matters: nothing legitimate on this system creates one, so it is
- * either somebody testing what the mount options are, or the leftovers
- * of an exploit that has not worked out yet.
+ * one in a data directory matters: it is either somebody testing what
+ * the mount options are, or the leftovers of an exploit that has not
+ * worked out yet.
  *
  * /data/debian and /data/python are skipped by default. A Debian tree
  * and a CPython install between them contain thousands of executables
  * and a handful of genuinely setuid binaries, and a report with three
- * thousand lines in it is a report nobody reads. -a includes them. */
+ * thousand lines in it is a report nobody reads. -a includes them.
+ *
+ * ── /data/persist is not a data area, and this used to say it was ──
+ *
+ * The paragraph above used to end "nothing legitimate on this system
+ * creates a setuid file under /data". That has been false since persist
+ * (1) existed, and the wrongness was not academic: /etc/rc runs
+ * `persist on`, which overlays /bin /sbin /lib /usr /opt and /srv with
+ * upper directories under /data/persist. Anything installed into a
+ * system directory - a `make install` into /usr/local, a tarball of
+ * somebody's Debian build unpacked into /usr, a binary copied into
+ * /bin - is written to the card underneath that mount point, and our
+ * tar restores both the setuid bit and the original owner. So a person
+ * who installed anything at all got a page of this:
+ *
+ *   ** /data/persist/usr/bin/su is setuid (mode 4755)
+ *   ** /data/persist/usr/bin/dbus-daemon is owned by uid 103, and
+ *      there is no such user
+ *
+ * every five minutes, for ever, about files the system had put there
+ * itself at their request. Findings like that are worse than no
+ * findings: they teach whoever owns the board that defend's output is
+ * noise, and it is in that same output that the real one appears.
+ *
+ * So the rule is what the directory IS, not where it sits. Under
+ * /data/persist the lower layer is a system directory, so:
+ *
+ *   setuid, setgid          expected. A distribution's binaries carry
+ *                           them, and the overlay is mounted nosuid
+ *                           and nodev exactly as /data is, so the bit
+ *                           does nothing here either way.
+ *   owned by an unknown uid expected. Files unpacked from somebody
+ *                           else's archive carry that machine's uids,
+ *                           and our /etc/passwd has two users in it.
+ *   executable              expected, obviously - it is /usr/bin.
+ *
+ *   world-writable          STILL REPORTED, and this is the point of
+ *                           looking rather than skipping: /data/persist
+ *                           /bin/foo is what runs when root types
+ *                           `foo`, so a mode that lets anybody rewrite
+ *                           it is a way in, and it is a more direct one
+ *                           there than anywhere else under /data.
+ *
+ * -a turns the first three back on, with the system path they shadow in
+ * the message, for the times somebody wants to see everything.
+ *
+ * Note this is a walk of the upper directory, not of the mounted
+ * overlay: what shows up here is only what was installed on top, never
+ * the thousands of files in the image underneath. That is why it can be
+ * walked at all. */
 
 static const char *SKIP_UNLESS_ALL[] = {
     "/data/debian", "/data/python", NULL
 };
 
+/* The overlay upper root, as persist.c calls it. One path rather than
+ * the six leaf names, so that a directory added to persist's list is
+ * covered here on the day it is added rather than on the day somebody
+ * notices. */
+#define UPPER_ROOT "/data/persist"
+
 /* Where a program is meant to live. An executable bit anywhere else
  * under /data is worth a line: /data/log and /data/root hold data. */
 static const char *PROGRAM_DIRS[] = {
     "/data/bin", "/data/pkg", "/data/python", "/data/debian",
-    "/data/glibc", "/data/persist", "/data/sdk", NULL
+    "/data/glibc", UPPER_ROOT, "/data/sdk", NULL
 };
 
 #define MAX_LINES  30          /* per run, before we start counting only */
@@ -1201,6 +1276,22 @@ static bool under(const char *path, const char *dir)
 {
     size_t n = strlen(dir);
     return strncmp(path, dir, n) == 0 && (path[n] == '/' || path[n] == '\0');
+}
+
+/* Is this the upper layer of one of the overlaid system directories?
+ * See the long note above: these are /usr and /bin seen from below, and
+ * the checks that make sense for a data directory do not apply to them. */
+static bool is_system_dir(const char *path)
+{
+    return under(path, UPPER_ROOT);
+}
+
+/* /data/persist/usr/bin/su -> /usr/bin/su: the path a person would
+ * type, which is what a message about that file should name. */
+static const char *overlaid_as(const char *path)
+{
+    const char *rest = path + strlen(UPPER_ROOT);
+    return *rest ? rest : path;
 }
 
 /* /etc/passwd is read from disk on every lookup - there is no name
@@ -1286,15 +1377,24 @@ static void walk(const char *path, int depth)
             if (type == LP_S_IFLNK)
                 continue;
 
-            if (!uid_exists(st.uid)) {
+            bool sysdir = is_system_dir(full);
+
+            if (!uid_exists(st.uid) && (opt_all || !sysdir)) {
                 char h[256], f[192];
                 snprintf(h, sizeof h,
                          "%s is owned by uid %u, and there is no such user",
                          full, (u32)st.uid);
-                snprintf(f, sizeof f,
-                         "a file left by a user that was deleted, or"
-                         " unpacked from somebody else's archive -"
-                         " `chown root %s` or delete it", full);
+                if (sysdir)
+                    snprintf(f, sizeof f,
+                             "this is %s, kept on the data partition -"
+                             " whatever unpacked it carried its own"
+                             " machine's uids. Only -a shows these",
+                             overlaid_as(full));
+                else
+                    snprintf(f, sizeof f,
+                             "a file left by a user that was deleted, or"
+                             " unpacked from somebody else's archive -"
+                             " `chown root %s` or delete it", full);
                 fs_note(h, f);
             }
 
@@ -1319,24 +1419,44 @@ static void walk(const char *path, int depth)
                 continue;
             fs_files++;
 
-            if (perm & (S_ISUID | S_ISGID)) {
+            if ((perm & (S_ISUID | S_ISGID)) && (opt_all || !sysdir)) {
                 char h[256], f[192];
                 snprintf(h, sizeof h, "%s is set%s (mode %04o)", full,
                          (perm & S_ISUID) ? "uid" : "gid", perm);
-                snprintf(f, sizeof f,
-                         "/data is mounted nosuid, so this gains nothing"
-                         " and nothing here creates one - `chmod %04o %s`"
-                         " or delete it",
-                         perm & ~(u32)(S_ISUID | S_ISGID), full);
+                if (sysdir)
+                    snprintf(f, sizeof f,
+                             "this is %s, kept on the data partition."
+                             " Distributions ship setuid binaries and the"
+                             " overlay is mounted nosuid, so the bit does"
+                             " nothing. Only -a shows these",
+                             overlaid_as(full));
+                else
+                    snprintf(f, sizeof f,
+                             "/data is mounted nosuid, so this gains"
+                             " nothing and nothing puts one in a data"
+                             " directory - `chmod %04o %s` or delete it",
+                             perm & ~(u32)(S_ISUID | S_ISGID), full);
                 fs_note(h, f);
             }
 
+            /* Reported wherever it is, /data/persist included: this
+             * one is not an artefact of how the file arrived, and in an
+             * overlaid system directory it is worse than elsewhere -
+             * that file is what runs when root types the command. */
             if (perm & 0002) {
                 char h[256], f[192];
                 snprintf(h, sizeof h, "%s is world-writable (mode %04o)",
                          full, perm);
-                snprintf(f, sizeof f, "anybody who gets a shell can rewrite"
-                         " it - `chmod %04o %s`", perm & ~(u32)0002, full);
+                if (sysdir)
+                    snprintf(f, sizeof f,
+                             "this is %s - anybody who gets a shell can"
+                             " replace what root runs by that name."
+                             " `chmod %04o %s`",
+                             overlaid_as(full), perm & ~(u32)0002, full);
+                else
+                    snprintf(f, sizeof f, "anybody who gets a shell can"
+                             " rewrite it - `chmod %04o %s`",
+                             perm & ~(u32)0002, full);
                 fs_note(h, f);
             }
 
@@ -1380,8 +1500,10 @@ static void check_files(void)
 
     say("defend: /data: %d files in %d directories, %d worth a look%s\n",
         fs_files, fs_dirs, findings - before,
-        opt_all ? "" : " (/data/debian and /data/python skipped, -a"
-                       " includes them)");
+        opt_all ? "" : " (/data/debian and /data/python skipped, and"
+                       " " UPPER_ROOT " judged as the system directories"
+                       " it holds rather than as a data area - -a for"
+                       " all of it)");
     if (fs_extra > 0)
         say("defend:    and %d more of the same, not listed - deal with"
             " the ones above and run it again\n", fs_extra);
@@ -1605,19 +1727,105 @@ static void collect_listeners(void)
     collect_file("/proc/net/udp6", "udp6", true);
 }
 
+/* ── the services init is supervising ────────────────────────────────
+ *
+ * A socket that appeared since the baseline was recorded is the single
+ * most useful thing on this list - unless the process holding it is one
+ * init started out of /etc/services, in which case it is this machine
+ * doing the job it was configured to do. `service add httpd` and a
+ * reboot, and defend reported the httpd it had just been told to run,
+ * every five minutes, as an intrusion.
+ *
+ * init writes the pids it supervises to /var/service.pids, one
+ * "<pid> <name>" per line - guard reads the same file to decide what it
+ * must not kill. It is on the root filesystem, which is a copy in RAM
+ * of the kernel image, and it is writable by root alone, so the name a
+ * process is supervised under is not something the process can choose
+ * for itself the way /proc/<pid>/comm is.
+ *
+ * Read fresh on every pass: a service that died and came back has a new
+ * pid, and the old one may by then belong to something else entirely -
+ * a stale entry here would be exactly the wrong thing to trust.
+ *
+ * This does not lower the bar for an attacker. Adding a line to
+ * /data/services needs root, and root can simply run `defend baseline`
+ * and have anything at all recorded as expected. What it removes is the
+ * report that says nothing. The socket is still printed, still named,
+ * still attributed - it just is not called news. */
+#define SERVICE_PIDS "/var/service.pids"
+#define MAX_SVC 32
+
+static struct { int pid; char name[24]; } svc[MAX_SVC];
+static int nsvc;
+
+static void read_service_pids(void)
+{
+    nsvc = 0;
+
+    char buf[2048];
+    if (proc_read(SERVICE_PIDS, buf, sizeof buf) <= 0)
+        return;             /* an old init, or /var was not writable */
+
+    char *p = buf;
+    while (*p && nsvc < MAX_SVC) {
+        char *eol = strchr(p, '\n');
+        if (eol) *eol = '\0';
+
+        char *sp = strchr(p, ' ');
+        if (sp) {
+            *sp = '\0';
+            int pid = (int)strtol(p, NULL, 10);
+            if (pid > 0) {
+                svc[nsvc].pid = pid;
+                strlcpy(svc[nsvc].name, sp + 1, sizeof svc[0].name);
+                nsvc++;
+            }
+        }
+
+        if (!eol) break;
+        p = eol + 1;
+    }
+}
+
+/* The name init supervises this pid under, or NULL. */
+static const char *service_name_of(int pid)
+{
+    if (pid <= 0)
+        return NULL;
+    for (int i = 0; i < nsvc; i++)
+        if (svc[i].pid == pid)
+            return svc[i].name;
+    return NULL;
+}
+
+/* owner_of writes the holder as "412/dropbear", or "-" when the socket
+ * could not be traced back to a process. */
+static int holder_pid(const char *who)
+{
+    if (!who || who[0] < '0' || who[0] > '9')
+        return 0;
+    return (int)strtol(who, NULL, 10);
+}
+
 static void check_listeners(void)
 {
     collect_listeners();
+    read_service_pids();
 
     say("defend: listening: %d socket%s\n",
         nlisten, nlisten == 1 ? "" : "s");
 
+    /* The first run records one, so getting here means either that it
+     * could not be written - no /data - or that it was recorded once
+     * and has since been deleted, which first_baseline has already
+     * reported. Either way there is nothing to compare against, and
+     * listing what is open is the most useful thing left to do. */
     if (!base_exists) {
         for (int i = 0; i < nlisten; i++)
             say("defend:    %s\n", listen_line[i]);
-        say("defend:    no baseline recorded - run `defend baseline`"
-            " once this is the set you expect, and anything new after"
-            " that gets reported\n");
+        say("defend:    there is no baseline to compare these against."
+            " `defend baseline` records one, once this is the set you"
+            " expect\n");
         return;
     }
 
@@ -1636,7 +1844,19 @@ static void check_listeners(void)
         const char *who = strrchr(listen_line[i], ' ');
         who = who ? who + 1 : "-";
 
+        const char *svcname = service_name_of(holder_pid(who));
+
         if (!was) {
+            /* Said, not reported: a person reading this should see the
+             * socket and be told why it is not being counted against
+             * the machine, rather than have it quietly left out. */
+            if (svcname) {
+                say("defend:    %s is held by %s, which init supervises"
+                    " as \"%s\" - the system doing what /etc/services"
+                    " says, not something new. `defend baseline` puts it"
+                    " in the baseline\n", key + 7, who, svcname);
+                continue;
+            }
             char msg[224];
             snprintf(msg, sizeof msg,
                      "new listener: %s, held by %s - it was not there when"
@@ -1651,6 +1871,17 @@ static void check_listeners(void)
         waswho = waswho ? waswho + 1 : "-";
         if (strcmp(waswho, "-") != 0 && strcmp(who, "-") != 0 &&
             strcmp(waswho, who) != 0) {
+            /* The holder changing is its own kind of news - except when
+             * the new holder is supervised, which is what a restart
+             * looks like: same service, same port, new pid. Reporting
+             * that would mean a finding every time init restarted
+             * anything, which is the thing init is for. */
+            if (svcname) {
+                say("defend:    %s is held by %s now and by %s in the"
+                    " baseline - init supervises it as \"%s\", so this is"
+                    " a restart\n", key + 7, who, waswho, svcname);
+                continue;
+            }
             char msg[224];
             snprintf(msg, sizeof msg,
                      "%s is now held by %s, and the baseline says %s",
@@ -1925,8 +2156,9 @@ static void check_keys(void)
         say("defend:    %s\n", key_line[i] + 4);
 
     if (!base_exists) {
-        say("defend:    no baseline recorded - `defend baseline`, and a"
-            " key added after that gets reported\n");
+        say("defend:    there is no baseline to compare these against."
+            " `defend baseline`, and a key added after that gets"
+            " reported\n");
         return;
     }
 
@@ -1957,6 +2189,14 @@ static void check_keys(void)
 /* ── the run ─────────────────────────────────────────────────────── */
 
 static s64 st_checks, st_last, st_banned_total;
+/* When a baseline was last recorded, kept here as well as in the
+ * baseline file itself. Two files rather than one, deliberately: it is
+ * what tells "this machine has never had a baseline" apart from "the
+ * baseline has been deleted", and those want opposite answers - the
+ * first is a new image and gets one recorded, the second is somebody
+ * removing the thing that would have reported them and gets said out
+ * loud. See first_baseline below. */
+static s64 st_baselined;
 
 static void load_state(void)
 {
@@ -1972,6 +2212,7 @@ static void load_state(void)
         if      (strcmp(line, "checks") == 0)  st_checks = v;
         else if (strcmp(line, "last") == 0)    st_last = v;
         else if (strcmp(line, "banned") == 0)  st_banned_total = v;
+        else if (strcmp(line, "baselined") == 0) st_baselined = v;
     }
     lp_close((int)fd);
 }
@@ -1981,9 +2222,9 @@ static void save_state(void)
     long fd = lp_open(F_STATE, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0)
         return;
-    dprintf((int)fd, "checks %lld\nlast %lld\nbanned %lld\n",
+    dprintf((int)fd, "checks %lld\nlast %lld\nbanned %lld\nbaselined %lld\n",
             (long long)st_checks, (long long)st_last,
-            (long long)st_banned_total);
+            (long long)st_banned_total, (long long)st_baselined);
     lp_close((int)fd);
 }
 
@@ -1996,10 +2237,96 @@ static void when_str(s64 t, char *out, size_t cap)
              tm.year, tm.mon, tm.day, tm.hour, tm.min, tm.sec);
 }
 
+/* Written down by `defend baseline`, below - and by the first run. */
+static bool write_baseline(void);
+
+/* ── the first run, and only the first ──────────────────────────────
+ *
+ * Every check that compares against the baseline needs one to exist,
+ * and until this the only way to get one was for somebody to read the
+ * line "no baseline recorded - run `defend baseline`" and act on it.
+ * Nobody did. defend runs as a service on a board that is meant to sit
+ * unattended for months, so what that line actually produced was the
+ * same nag every five minutes for the life of the machine, while three
+ * of the five checks quietly did nothing at all. A check that is off
+ * and says so once every five minutes reads, after the second day, like
+ * a check that is on.
+ *
+ * On a freshly written image the state at first boot IS the expected
+ * state: the sockets are the services in /etc/services, and the keys
+ * are whatever was put on the card. So record it, say clearly that that
+ * is what happened, and start comparing.
+ *
+ * Exactly once, and this is the part that has to be right. The trigger
+ * is the baseline file not existing, and the state file remembers that
+ * one was written. So:
+ *
+ *   no file, never recorded  a new image. Record it.
+ *   no file, recorded before the baseline has been DELETED since. That
+ *                            is what somebody covering their tracks
+ *                            leaves behind - re-recording here would
+ *                            adopt whatever they have just installed as
+ *                            correct, which is precisely backwards. So
+ *                            it is reported and nothing is written; a
+ *                            person types `defend baseline` if it was
+ *                            them.
+ *
+ * Deleting the state file as well gets a new baseline, and there is no
+ * defence against that from here - but `defend status` then says the
+ * board has run no checks at all, which is its own kind of loud. */
+static void first_baseline(void)
+{
+    if (st_baselined > 0) {
+        char when[64];
+        when_str(st_baselined, when, sizeof when);
+        char msg[224];
+        snprintf(msg, sizeof msg,
+                 "the baseline recorded at %s is gone, so nothing is being"
+                 " compared against it", when);
+        report(msg);
+        tell("defend:    it is %s. Deleting it is how a new listener or"
+             " a new key stops being reported - if that was not you,"
+             " look at what is listening before recording another\n",
+             F_BASELINE);
+        tell("defend:    `defend baseline` records one from the state"
+             " this machine is in now\n");
+        return;
+    }
+
+    if (!write_baseline())
+        return;                 /* write_baseline said why on stderr */
+
+    load_baseline();            /* compare against what we just wrote */
+
+    printf("defend: first run on this machine - recorded %d listening"
+           " socket%s and %d ssh key%s as the expected state\n",
+           nlisten, nlisten == 1 ? "" : "s",
+           nkeylines, nkeylines == 1 ? "" : "s");
+    for (int i = 0; i < nlisten; i++)
+        printf("defend:    %s\n", listen_line[i] + 7);
+    for (int i = 0; i < nkeylines; i++)
+        printf("defend:    %s\n", key_line[i] + 4);
+    printf("defend:    anything that appears after this is reported."
+           " `defend baseline` records it again after you install"
+           " something that listens\n");
+
+    /* The console scrolls away and this happens once in the life of a
+     * board, so it belongs in the file that survives. Without it there
+     * is no way to tell afterwards which boot decided what "expected"
+     * means on this machine. */
+    if (opt_daemon)
+        lp_log("defend", "first run - recorded the current listeners and"
+                         " ssh keys as the baseline");
+}
+
 static int run_once(bool full)
 {
     findings = 0;
     load_baseline();
+
+    /* Before any check that compares against it. */
+    if (!base_exists)
+        first_baseline();
 
     bool changed = prune_bans();
     int  before  = nbans;
@@ -2062,13 +2389,19 @@ static int cmd_status(void)
     when_str(st_last, buf, sizeof buf);
     printf("checks run     %lld, last at %s\n", (long long)st_checks, buf);
 
-    when_str(base_when, buf, sizeof buf);
-    printf("baseline       %s", buf);
-    if (!base_exists)
-        printf("  - nothing recorded; run `defend baseline`");
-    else
-        printf("  (%d items)", nbase);
-    printf("\n");
+    if (base_exists) {
+        when_str(base_when, buf, sizeof buf);
+        printf("baseline       %s  (%d items)\n", buf, nbase);
+    } else if (st_baselined > 0) {
+        /* Recorded once and no longer there. Said here as well as by
+         * the checks themselves, because `defend status` is what
+         * somebody looks at when they want one answer. */
+        when_str(st_baselined, buf, sizeof buf);
+        printf("baseline       ** recorded %s, and the file is GONE\n",
+               buf);
+    } else {
+        printf("baseline       none yet - the first run records one\n");
+    }
 
     printf("blocked        %d now, %lld since this file was created\n",
            nbans, (long long)st_banned_total);
@@ -2143,7 +2476,10 @@ static int cmd_unban(const char *addr)
     return 0;
 }
 
-static int cmd_baseline(void)
+/* Collecting and writing it, with no reporting of its own: the first
+ * run records a baseline without anybody having typed the command, and
+ * that path wants to say something quite different about it. */
+static bool write_baseline(void)
 {
     collect_listeners();
     collect_keys();
@@ -2152,7 +2488,7 @@ static int cmd_baseline(void)
     if (fd < 0) {
         dprintf(STDERR_FILENO,
                 "defend: cannot write %s - is /data mounted?\n", F_BASELINE);
-        return 1;
+        return false;
     }
     dprintf((int)fd,
             "# What defend expects to find. Anything not listed here is\n"
@@ -2167,8 +2503,19 @@ static int cmd_baseline(void)
     if (lp_rename(F_BASELINE ".new", F_BASELINE) != 0) {
         lp_unlink(F_BASELINE ".new");
         dprintf(STDERR_FILENO, "defend: could not replace %s\n", F_BASELINE);
-        return 1;
+        return false;
     }
+
+    st_baselined = lp_time();
+    save_state();
+    return true;
+}
+
+static int cmd_baseline(void)
+{
+    load_state();               /* so the counters are not lost */
+    if (!write_baseline())
+        return 1;
 
     printf("defend: recorded %d listening socket%s and %d ssh key%s\n",
            nlisten, nlisten == 1 ? "" : "s",
@@ -2200,13 +2547,14 @@ static void usage(void)
     printf("     world-writable, owned by no user, executable in a\n");
     printf("     place that holds data\n");
     printf("  3  every listening socket and who holds it, against the\n");
-    printf("     baseline\n");
+    printf("     baseline, minus the ones init supervises\n");
     printf("  4  integrity(1), for what survives a reboot\n");
     printf("  5  every ssh key that can log in, with its fingerprint\n\n");
     printf("  -d           keep running, checking every %d seconds\n",
            DEFAULT_INTERVAL);
     printf("  -i <seconds> change that interval\n");
-    printf("  -a           walk /data/debian and /data/python too\n");
+    printf("  -a           walk /data/debian and /data/python too, and\n");
+    printf("               judge %s as a data area\n", UPPER_ROOT);
     printf("  -n           say what would be blocked, block nothing\n\n");
     printf("State is in %s. Exit 1 means something wants a decision.\n",
            DIR_STATE);

@@ -106,6 +106,46 @@ static uid_t next_uid(void)
     return 0;
 }
 
+/* ── telling integrity(1) that this was us ───────────────────────────
+ *
+ * integrity(1) hashes /data/users and /data/groups at every boot, and it
+ * is right to: those two files are appended to /etc/passwd and /etc/group
+ * at boot, so a line added to either is a user - possibly uid 0 - that
+ * arrives again at every boot off a partition a card reader can write.
+ *
+ * But `useradd bob` is the intended way to put a line there, and it made
+ * the next boot report that something which survives a reboot had
+ * changed, and defend(1) turn that into a security finding. So when we
+ * have just written those files ourselves, we re-record exactly those
+ * two paths and nothing else - `integrity -a` copies the rest of the
+ * record through untouched, so an edit to /data/rc.local in the same
+ * window is still reported at the next check.
+ *
+ * The uid 0 rule is unaffected and is the real defence here: useradd
+ * refuses to write such a line and `useradd --merge` refuses to read one
+ * back at boot. This only stops the machine reporting its own bookkeeping
+ * as an intrusion. */
+static void integrity_accept_users(void)
+{
+    if (!lp_exists("/bin/integrity"))
+        return;                 /* an image without it watches nothing */
+
+    char *argv[] = { (char *)"integrity", (char *)"-a",
+                     (char *)EXTRA_USERS, (char *)EXTRA_GROUP, NULL };
+
+    pid_t pid = lp_fork();
+    if (pid < 0)
+        return;
+    if (pid == 0) {
+        lp_execve("/bin/integrity", argv, environ);
+        lp_exit(127);
+    }
+    int st = 0;
+    lp_waitpid(pid, &st, 0);
+    /* integrity says on stderr why it refused, if it did. Saying it
+     * twice helps nobody. */
+}
+
 static int append_line(const char *path, const char *line)
 {
     long fd = lp_open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -389,9 +429,11 @@ int main(int argc, char **argv)
          * change visible now instead of only after a reboot. */
         remove_user_from("/etc/passwd", name);
         remove_user_from("/etc/group", name);
-        if (rc == 0)
+        if (rc == 0) {
+            integrity_accept_users();   /* a user leaving is us too */
             printf("userdel: %s is gone. Their files are not - they still\n"
                    "         belong to uid %d.\n", name, (int)u.uid);
+        }
         return rc;
     }
 
@@ -437,6 +479,10 @@ int main(int argc, char **argv)
     /* Make it true now as well as after the next boot. */
     append_line("/etc/passwd", line);
     append_line("/etc/group", gline);
+
+    /* Both files on /data have just been written by us, so the record
+     * of them follows. */
+    integrity_accept_users();
 
     /* Somewhere to put their files, owned by them. Without this the
      * user exists and has nowhere to write, which shows up later as a

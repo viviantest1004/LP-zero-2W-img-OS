@@ -200,6 +200,39 @@ static int load(const char *path)
     return added;
 }
 
+/* Defined below, next to the other things this shells out to. */
+static int run(const char *path, char *const argv[]);
+
+/* ── telling integrity(1) that this was us ───────────────────────────
+ *
+ * integrity(1) hashes /root/.ssh/authorized_keys at every boot, because
+ * a line added to it is how somebody who got in once gets in again. We
+ * rewrite that file ourselves whenever a key is recovered from the boot
+ * partition or the image, and that is most first boots - so integrity
+ * announced "a file that survives a reboot has changed" at the boot
+ * after every one of them, and defend(1) made it a security finding.
+ * The one change on this machine that arrived through the documented,
+ * intended route was the one being reported as an intrusion.
+ *
+ * So we hand integrity that one path, and only that one: `integrity -a`
+ * re-records it and copies the rest of its record through untouched, so
+ * an edit to /data/rc.local in the same window is still reported.
+ *
+ * What this does NOT do is touch defend's own baseline of authorized
+ * keys. That baseline holds a fingerprint per key and is the check that
+ * says WHICH key appeared; adopting a new key into it from here would
+ * throw away the single most useful thing defend has to say. `authkey
+ * add` prints the reminder instead - a person decides that one. */
+static void integrity_accept_keys(void)
+{
+    if (!lp_exists("/bin/integrity"))
+        return;                 /* an image without it watches nothing */
+
+    char *argv[] = { (char *)"integrity", (char *)"-a",
+                     (char *)LIVE, NULL };
+    run("/bin/integrity", argv);
+}
+
 static bool write_live(void)
 {
     /* The directory may not be there on a boot where /data did not
@@ -216,6 +249,11 @@ static bool write_live(void)
         lp_write((int)fd, "\n", 1);
     }
     lp_close((int)fd);
+
+    /* Here rather than in each of the three callers: every route that
+     * ends in this file being rewritten is one of ours, and a caller
+     * added later would otherwise reintroduce the false report. */
+    integrity_accept_keys();
     return true;
 }
 
@@ -391,6 +429,15 @@ static int cmd_new(void)
     printf("\n  The key is in dropbear's format. OpenSSH reads it; if\n"
            "  yours does not, `dropbearconvert dropbear openssh` on any\n"
            "  machine that has it will convert it.\n");
+
+    /* Same reason as in `authkey add`: defend's list of keys allowed to
+     * log in is a decision, not something a command takes on somebody's
+     * behalf, so the person who just made a key is told how to record
+     * it while they are still looking at the screen. */
+    if (lp_exists("/bin/defend"))
+        printf("\n  `defend baseline` records this key as expected;"
+               " until then\n"
+               "  defend reports it as a key it has not seen before.\n");
     return 0;
 }
 
@@ -470,6 +517,15 @@ static int cmd_add(const char *file)
            nkeys - before, (nkeys - before) == 1 ? "" : "s", nkeys);
     if (my_address(addr, sizeof addr))
         printf("authkey:   ssh root@%s\n", addr);
+    /* defend keeps its own list of the keys that are allowed to log in,
+     * on purpose: a key nobody expected is the finding it exists for, so
+     * nothing adopts one into that list on a person's behalf. Said here
+     * because this is the moment the person is looking, and the
+     * alternative is defend reporting their own key at every full scan
+     * from now until somebody works out why. */
+    if (lp_exists("/bin/defend"))
+        printf("authkey:   `defend baseline` if you want defend to stop"
+               " calling this key new\n");
     return bad ? 1 : 0;
 }
 

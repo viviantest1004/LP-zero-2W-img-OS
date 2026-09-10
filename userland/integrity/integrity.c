@@ -3,6 +3,7 @@
  *   integrity            check against what was recorded, then record
  *   integrity -c         check only, change nothing
  *   integrity -u         accept what is there now as correct
+ *   integrity -a <path>  accept just these paths, leave the rest alone
  *   integrity -l         list what is watched and its current hash
  *
  * ── Why this is small enough to be worth doing ──
@@ -34,6 +35,43 @@
  * change the record beside it - so this is aimed at the ordinary case
  * of automated malware and mistakes, not at somebody who has read this
  * comment. It costs almost nothing, and the alternative was nothing.
+ *
+ * ── Why -a exists, and why it is not -u ──
+ * Three of the watched paths are directories our own commands write to
+ * in the course of doing exactly what they were asked. `pkg install jq`
+ * puts a file in /data/bin and two in /data/pkg/db; `useradd bob` adds a
+ * line to /data/users; authkey rewrites authorized_keys every time it
+ * recovers a key from the boot partition. Every one of those made the
+ * next run of this program announce that something which survives a
+ * reboot had changed, and defend(1) turned that into a security finding.
+ * A check that cries wolf after an ordinary install is a check people
+ * learn to skip, and then it is worth nothing on the day it is right.
+ *
+ * So the record follows the commands that are ALLOWED to change it: each
+ * of them runs `integrity -a <the path it just wrote>` when it succeeds.
+ *
+ * -a and not -u, and this distinction is the whole point. -u accepts
+ * EVERYTHING as it stands now. A package installed at 03:00 while
+ * somebody was editing /data/rc.local would, with -u, adopt the new
+ * rc.local as correct in the same breath - the one change we exist to
+ * catch, swallowed by the one we do not care about. -a rewrites only the
+ * lines it is given and copies the rest of the record through untouched,
+ * so a change to anything the installer did not write is still sitting
+ * there to be reported at the next run.
+ *
+ * Two more rules make -a safe to call from a program:
+ *
+ *   - an argument that is not one of the watched paths below is a
+ *     mistake in the caller, not something to guess at, so it is an
+ *     error and it says which path it did not recognise. Silently
+ *     ignoring it is how a caller ends up accepting nothing at all for
+ *     a year without anybody noticing.
+ *   - with no record on disk it accepts nothing, quietly. Creating the
+ *     record here would mean that deleting /data/.integrity and waiting
+ *     for the next `pkg install` is enough to have this machine adopt
+ *     whatever state it is in. Only a plain `integrity` run - the one
+ *     /etc/rc does at boot - creates the record, and defend reports a
+ *     record that has gone missing.
  */
 #include "types.h"
 #include "string.h"
@@ -64,6 +102,11 @@ static const watch_t WATCHED[] = {
       "appended to /etc/passwd at boot - a uid 0 line here is root" },
     { "/data/groups", WATCH_FILE,
       "appended to /etc/group at boot - membership of any group" },
+    /* The three directories below are also the three that pkg(1) writes
+     * to when somebody installs a package, which is why `integrity -a`
+     * exists - see the header. Their entries change during ordinary use
+     * of this machine; the four files above it do not, and a program of
+     * ours asking to accept one of those is a much bigger claim. */
     { "/data/bin", WATCH_DIR,
       "on PATH - anything here can be run by name" },
     { "/data/pkg/db", WATCH_DIR,
@@ -197,6 +240,91 @@ static bool save_record(void)
     return true;
 }
 
+/* ── accepting a few paths and no others ─────────────────────────────
+ *
+ * Write the record back with the current hash for the entries marked
+ * accepted and the RECORDED hash for every other one, so that a change
+ * somewhere else in the list survives this and is still reported at the
+ * next run. That copying-through is the whole difference between this
+ * and -u.
+ *
+ * An entry that has no recorded hash at all - the list grew since the
+ * record was written - gets the current one, which is what the next
+ * plain run would have done with it anyway. */
+static bool save_record_except(const bool *accepted)
+{
+    long fd = lp_open(RECORD, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0)
+        return false;
+    for (int i = 0; WATCHED[i].path; i++) {
+        const char *keep = (accepted[i] || !was_hash[i][0])
+                           ? now_hash[i] : was_hash[i];
+        dprintf((int)fd, "%s  %s\n", keep, WATCHED[i].path);
+    }
+    lp_close((int)fd);
+    return true;
+}
+
+/* `integrity -a <path>...`, called by pkg, useradd and authkey when one
+ * of them has just written a watched path itself. Silent when it works:
+ * this runs inside somebody else's command, and a line of ours after
+ * every `pkg install` is the sort of noise that makes people stop
+ * reading the output of the command they actually typed. */
+static int accept_paths(char **paths, int npaths)
+{
+    static bool accepted[MAX_WATCH];
+
+    measure();
+    load_record();
+
+    bool have_record = false;
+    for (int i = 0; WATCHED[i].path; i++)
+        if (was_hash[i][0]) { have_record = true; break; }
+
+    if (!have_record) {
+        /* Nothing recorded, so nothing to accept, and nothing to say
+         * either. This is the ordinary state on a first boot: /etc/rc
+         * merges the SSH keys - which calls this - some way before it
+         * runs `integrity`, so a line here would put "nothing has been
+         * recorded" on the console of every brand new card, about a
+         * machine that is perfectly fine and is about to record it.
+         *
+         * A record that is missing at any other time is worth knowing
+         * about, and it is already covered: defend's check_integrity
+         * looks for /data/.integrity by name and reports its absence
+         * with what it means. One report of it, in the place that
+         * exists to report things. */
+        return 0;
+    }
+
+    int rc = 0;
+    for (int a = 0; a < npaths; a++) {
+        int found = -1;
+        for (int i = 0; WATCHED[i].path; i++)
+            if (strcmp(WATCHED[i].path, paths[a]) == 0) { found = i; break; }
+
+        if (found < 0) {
+            dprintf(STDERR_FILENO,
+                    "integrity: %s is not one of the watched paths, so"
+                    " accepting it would mean nothing\n", paths[a]);
+            dprintf(STDERR_FILENO,
+                    "integrity:   `integrity -l` lists them\n");
+            rc = 2;
+            continue;
+        }
+        accepted[found] = true;
+    }
+
+    if (rc != 0)
+        return rc;              /* change nothing when the caller is wrong */
+
+    if (!save_record_except(accepted)) {
+        dprintf(STDERR_FILENO, "integrity: cannot write %s\n", RECORD);
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     bool check_only = false, update = false, list = false;
@@ -205,13 +333,29 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "-c") == 0) check_only = true;
         else if (strcmp(argv[i], "-u") == 0) update = true;
         else if (strcmp(argv[i], "-l") == 0) list = true;
+        else if (strcmp(argv[i], "-a") == 0) {
+            /* Everything after -a is a path, and -a answers on its own -
+             * so a caller building the argument list does not have to
+             * think about what else is on the line. */
+            if (i + 1 >= argc) {
+                dprintf(STDERR_FILENO,
+                        "integrity: -a wants the paths to accept, e.g."
+                        " `integrity -a /data/bin`\n");
+                return 2;
+            }
+            return accept_paths(&argv[i + 1], argc - i - 1);
+        }
         else if (strcmp(argv[i], "-h") == 0) {
-            printf("usage: integrity [-c] [-u] [-l]\n");
+            printf("usage: integrity [-c] [-u] [-l] [-a <path>...]\n");
             printf("  Watches the few things that survive a reboot and\n");
             printf("  can make something run again or let someone in.\n\n");
             printf("  (no option)  check, report, then record\n");
             printf("  -c           check only, record nothing\n");
             printf("  -u           accept what is there now as correct\n");
+            printf("  -a <path>..  accept only these watched paths and\n");
+            printf("               leave the record for the others alone.\n");
+            printf("               pkg, useradd and authkey use this when\n");
+            printf("               they have just written one themselves\n");
             printf("  -l           list what is watched\n\n");
             printf("  Exit 1 means something changed.\n");
             return 0;
