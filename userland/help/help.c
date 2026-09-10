@@ -248,6 +248,7 @@ static const entry_t KNOWN[] = {
     { "sync",     "system",  "write everything out to disk", "sync" },
     { "passwd",   "system",  "change a password",           "passwd [user]" },
     { "voice",    "system",  "GNU's wording, or this system's own", "voice [gnu|lp]" },
+    { "temp",     "system",  "how hot the board is",        "temp [-a] [-c] [-w [secs]]" },
     { "nc",       "network", "connect or listen on a socket", "nc [-l] [-p PORT] [host] [port]" },
 
     { NULL, NULL, NULL, NULL }

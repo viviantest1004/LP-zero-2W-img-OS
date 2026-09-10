@@ -332,6 +332,21 @@ have to burn the card again.
                         does nothing. To manage WiFi from the machine
                         instead, delete this file.
 
+  wpa-debug             Create this file - it can be empty - and the
+                        next boot writes every step of the wireless
+                        connection to /data/log/wpa.log: each frame in
+                        and out, the association, and the four-way
+                        handshake that follows it.
+
+                        It exists because when the wireless will not
+                        connect there is no other way to ask for that
+                        log, since asking needs the wireless. Any PC can
+                        make the file - this partition is FAT32.
+
+                        Delete it again when you are done. On a board
+                        that is working it writes about a megabyte an
+                        hour of nothing.
+
   firewall.conf         Which ports this machine accepts. The firewall
                         is on by default and always keeps SSH open;
                         this file is where you open anything else, or
@@ -353,6 +368,17 @@ How to connect
      (it is also printed on the serial console)
   4. ssh -i ~/.ssh/lpzero root@<that address>
      (or ssh -i lp_ssh_key, using the key the board made for itself)
+
+If the WiFi will not connect
+  1. touch wpa-debug on this partition (an empty file is enough)
+  2. Boot the board and let it try for a minute
+  3. Put the card back in a PC. The log is on the second partition, at
+     /data/log/wpa.log - or read it on the machine with
+     `more /data/log/wpa.log` if you can still get in over USB.
+
+  The line that decides everything is "RX EAPOL": if it is there, the
+  access point answered and the problem is the key or the cipher; if it
+  is not, nothing came back and the problem is earlier than that.
 
 Password authentication was left out of the build entirely. On a machine
 open to a network a password is just a target for brute force. Only a
