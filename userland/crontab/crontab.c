@@ -291,6 +291,40 @@ static int check(const char *label)
     return bad;
 }
 
+/* ── telling integrity(1) that this was us ───────────────────────────
+ *
+ * integrity(1) hashes the handful of files that decide whether
+ * something runs again after a reboot, and /data/crontab is one of
+ * them: cron reads it and runs what is in it as root, on a clock. That
+ * is exactly why it is watched, and exactly why the machine must not
+ * report its own bookkeeping as an intrusion - `crontab -e` is the
+ * intended way to change it.
+ *
+ * `integrity -a` re-records only the path named and copies the rest of
+ * the record through untouched, so an edit to /data/rc.local or to
+ * authorized_keys in the same window is still reported at the next
+ * check. */
+static void integrity_accept(const char *path)
+{
+    if (!lp_exists("/bin/integrity"))
+        return;                 /* an image without it watches nothing */
+
+    char *argv[] = { (char *)"integrity", (char *)"-a",
+                     (char *)path, NULL };
+
+    pid_t pid = lp_fork();
+    if (pid < 0)
+        return;
+    if (pid == 0) {
+        lp_execve("/bin/integrity", argv, environ);
+        lp_exit(127);
+    }
+    int st = 0;
+    lp_waitpid(pid, &st, 0);
+    /* integrity says on stderr why it refused, if it did. Saying it
+     * twice helps nobody. */
+}
+
 /* ── Putting it in place ──
  *
  * Into a temporary file beside the real one, then rename. cron re-reads
@@ -329,6 +363,7 @@ static bool install(const char *target)
         return false;
     }
     lp_sync();
+    integrity_accept(target);
     return true;
 }
 

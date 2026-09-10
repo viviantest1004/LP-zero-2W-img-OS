@@ -175,6 +175,40 @@ static bool is_disabled(const char *name)
     return found;
 }
 
+/* ── telling integrity(1) that this was us ───────────────────────────
+ *
+ * integrity(1) hashes the handful of files that decide whether
+ * something runs again after a reboot, and /data/services is one of them: it is
+ * read as root and what is in it starts as root. That is exactly why
+ * it is watched, and exactly why the machine must not report its own
+ * bookkeeping as an intrusion - `service add` is the intended way to put a
+ * line there.
+ *
+ * `integrity -a` re-records only the paths named and copies the rest
+ * of the record through untouched, so an edit to /data/rc.local or to
+ * authorized_keys in the same window is still reported at the next
+ * check. */
+static void integrity_accept(const char *path)
+{
+    if (!lp_exists("/bin/integrity"))
+        return;                 /* an image without it watches nothing */
+
+    char *argv[] = { (char *)"integrity", (char *)"-a",
+                     (char *)path, NULL };
+
+    pid_t pid = lp_fork();
+    if (pid < 0)
+        return;
+    if (pid == 0) {
+        lp_execve("/bin/integrity", argv, environ);
+        lp_exit(127);
+    }
+    int st = 0;
+    lp_waitpid(pid, &st, 0);
+    /* integrity says on stderr why it refused, if it did. Saying it
+     * twice helps nobody. */
+}
+
 static int set_disabled(const char *name, bool off)
 {
     /* Read what is there, write it back with this name added or gone.
@@ -225,6 +259,7 @@ static int set_disabled(const char *name, bool off)
         lp_write((int)out, kept, used);
     lp_close((int)out);
     lp_sync();
+    integrity_accept(DISABLED);
     return 0;
 }
 
@@ -474,6 +509,8 @@ static int rewrite_user(const char *drop_name, const char *add_line)
         dprintf(STDERR_FILENO, "service: could not replace %s\n", USER_SVC);
         return 1;
     }
+    lp_sync();
+    integrity_accept(USER_SVC);
     return 0;
 }
 

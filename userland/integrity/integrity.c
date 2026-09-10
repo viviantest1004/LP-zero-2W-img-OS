@@ -20,6 +20,9 @@
  *   /data/rc.local                  runs as root at every boot
  *   /root/.ssh/authorized_keys      who may log in
  *   /data/users, /data/groups       who exists, and with which uid
+ *   /data/services                  init starts these as root at boot
+ *   /data/services.disabled         and this is what stops one starting
+ *   /data/crontab                   cron runs these as root, on a clock
  *
  * A short list, short enough to hash on every boot and compare, which
  * turns "we would never know" into "it says so at boot and in sysinfo".
@@ -102,6 +105,12 @@ static const watch_t WATCHED[] = {
       "appended to /etc/passwd at boot - a uid 0 line here is root" },
     { "/data/groups", WATCH_FILE,
       "appended to /etc/group at boot - membership of any group" },
+    { "/data/services", WATCH_FILE,
+      "init starts what is listed here, as root, at every boot" },
+    { "/data/services.disabled", WATCH_FILE,
+      "a name here stops that service starting - guard and defend included" },
+    { "/data/crontab", WATCH_FILE,
+      "cron runs these as root, on a schedule" },
     /* The three directories below are also the three that pkg(1) writes
      * to when somebody installs a package, which is why `integrity -a`
      * exists - see the header. Their entries change during ordinary use
