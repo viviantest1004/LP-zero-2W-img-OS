@@ -40,6 +40,41 @@
  * wins - that is what "on top" means. `persist` on its own lists what
  * is up there, and `persist forget <name>` removes one file so the
  * image's copy shows through again.
+ *
+ * ── `persist on` is not a boot-time-only command any more ──
+ *
+ * It used to be run exactly once, from /etc/rc, and everything here
+ * could assume a machine that had just started. It cannot any more.
+ *
+ * The upper layer of all six of these overlays is on the SD card. Pull
+ * the card out of a running board and every one of them is a mount
+ * whose disk has gone - which is to say /bin, /sbin, /lib, /usr, /opt
+ * and /srv are all dead, and there is no command left on the machine to
+ * run. automount(8) is the daemon that handles that: it is already
+ * running, its own pages come from the RAM root, and it detaches the
+ * six with umount2(MNT_DETACH) so that /bin is the system image again
+ * and the board is usable. When the card comes back it mounts /data
+ * again and runs `persist on` a second time to rebuild them.
+ *
+ * So this has to work on a live system with processes running, not only
+ * on a freshly booted one. Two things follow, and both are handled
+ * below rather than assumed:
+ *
+ *   Some of the six may already be overlaid and some not, if the card
+ *   was pulled halfway through something. Each is looked at on its own
+ *   and one that is already up is left alone.
+ *
+ *   A mount can be refused with EBUSY, which does not happen at boot
+ *   and is not obvious when it does. overlayfs marks the upper and work
+ *   directories in use for as long as the overlay's superblock exists,
+ *   and a superblock outlives umount2(MNT_DETACH) until the last
+ *   process holding a file in it goes away - which, for /bin, is every
+ *   process on the machine, because each has its own executable open
+ *   there. When the card was physically removed this does not arise:
+ *   the filesystem underneath is destroyed with the device and comes
+ *   back as a new one with new inodes. When the card never left - ext4
+ *   went read-only under it and was remounted - it can. mount_one says
+ *   so in those words rather than printing a number.
  */
 #include "unistd.h"
 #include "stdio.h"
@@ -137,10 +172,27 @@ static bool mount_one(const char *dir, bool loud)
     long rc = lp_mount("overlay", dir, "overlay",
                        MS_NOSUID | MS_NODEV, opts);
     if (rc < 0) {
-        if (loud)
+        if (loud) {
             dprintf(STDERR_FILENO,
                     "persist: cannot keep %s (%ld) - files written there"
                     " will be lost at the next boot\n", dir, -rc);
+            /* EBUSY here means one thing and it is not "the directory is
+             * busy". overlayfs refuses to use an upper or work directory
+             * that another overlay superblock still claims, and a
+             * superblock detached with MNT_DETACH lives on until the
+             * last process with a file open in it exits. That is every
+             * process on the machine where /bin is concerned. It cannot
+             * be waited out and there is nothing to unmount - the mount
+             * is already gone from the tree - so say what it is and what
+             * clears it. */
+            if (-rc == 16 /* EBUSY */)
+                dprintf(STDERR_FILENO,
+                        "persist:   %s is still claimed by the overlay"
+                        " that was taken down, and will be until every\n"
+                        "persist:   process started before then has"
+                        " exited. A reboot is the reliable way back.\n",
+                        upper);
+        }
         return false;
     }
     return true;

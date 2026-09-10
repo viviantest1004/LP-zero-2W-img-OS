@@ -203,6 +203,12 @@ echo "[rc] the boot partition"
 # this runs long before that. Without it, a board booted from a USB
 # stick came up with no /boot at all - and so with no authorized key,
 # which on a machine reached only over SSH is the same as gone.
+#
+# This is not the only place /boot gets mounted any more. Pull the card
+# out of a running board and automount detaches /boot along with
+# everything else on the card, and mounts it again - read-only, label
+# checked, same as here - when the card comes back. If the options on
+# this line change, change them there too: automount.c, bring_back().
 mkdir -p /boot
 mount -L LPZERO -o ro /dev/mmcblk0p1 /boot || mount -L LPZERO -o ro /dev/vda1 /boot || mount -L LPZERO -o ro /dev/nvme0n1p1 /boot || mount -L LPZERO -w -o ro /dev/sda1 /boot || echo "[rc]   could not read the boot partition"
 
@@ -273,6 +279,13 @@ echo "[rc] storage"
 # These stay on one line each: our shell has no line continuation, and a
 # trailing backslash would be passed through as an argument.
 #
+# And these options are duplicated in one other place on purpose:
+# automount re-mounts /data with exactly this set when the card is
+# pulled out of a running board and put back. Two mounts of one
+# filesystem with different options is how a filesystem gets corrupted
+# rather than merely full, so if errors=remount-ro,nosuid,nodev changes
+# here it has to change in automount.c, bring_back(), as well.
+#
 # On a disk-rooted machine the partition being grown is the root itself,
 # already mounted at /, and /data is a directory on it rather than a
 # partition of its own - so there is nothing to mount and the whole
@@ -305,6 +318,14 @@ echo "[rc] keeping what gets installed"
 # This has to happen before anything else installs or writes programs,
 # and after /data is mounted, which is why it is here and not lower
 # down. `persist` on its own lists what is being kept.
+#
+# This is no longer the only time it runs. Those six overlays have their
+# upper layer on the card, so pulling the card out of a running board
+# kills all six at once - and with them every command on the machine.
+# automount detaches them with umount2(MNT_DETACH), which puts /bin back
+# to the system image so the board is usable again, and runs `persist
+# on` a second time once the card is back. persist copes with being run
+# on a live system; see the note at the top of persist.c.
 persist on || echo "[rc]   things installed into the system will NOT survive a reboot"
 
 # And the individual /etc files somebody asked to keep. /etc itself has
@@ -454,6 +475,8 @@ if grep -q " / ext4 " /proc/mounts
 then
     mkdir -p /root/.ssh || echo "[rc]   cannot make /root/.ssh"
 else
+    # automount binds this back the same way after the card has been
+    # pulled and put in again - automount.c, bring_back().
     mkdir -p /data/root/.ssh && mount -o bind /data/root /root || echo "[rc]   home is in RAM (lost on reboot)"
 fi
 
