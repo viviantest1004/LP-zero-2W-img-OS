@@ -123,66 +123,20 @@ static int check_label(const char *part)
             strcmp(label, OUR_LABEL2) == 0) ? 1 : 0;
 }
 
-/* Block device ioctls */
-#define BLKRRPART      0x125F      /* _IO(0x12, 95)  re-read partition table */
-/* The size ioctl is LP_BLKGETSIZE64, from unistd.h. It used to be
+/* The BLKPG and BLKRRPART calls that tell a running kernel a partition
+ * changed size live in the libc, as disk_tell_kernel(). They used to be
+ * copied out here as well, with their own copy of struct
+ * blkpg_ioctl_arg - and that copy carried a padding field the kernel
+ * does not have, which made every BLKPG call from this program fail on
+ * a 32-bit machine and is why a 64GB card never grew in a Pi Zero W.
+ * One definition now, in the one place that owns block devices, so
+ * there is nowhere for the two to drift apart again.
+ *
+ * The size ioctl is LP_BLKGETSIZE64, from unistd.h. It used to be
  * written out as 0x80081272 here, which is its value only where size_t
  * is eight bytes - on the Pi Zero W the call returned ENOTTY and this
- * program quietly did nothing on every card ever put in one. */
-#define BLKPG          0x1269      /* _IO(0x12, 105) change one partition */
-
-/* BLKPG: tell the kernel the new size of a single partition.
- *
- * BLKRRPART re-reads the whole table, and the kernel refuses that with
- * EBUSY while any partition on the disk is mounted. /boot is mounted
- * before this runs - e2fsck lives there - so BLKRRPART now always
- * fails, and without this the first boot would grow the partition,
- * fail to tell the kernel, and then fail the filesystem resize with
- * ENOSPC because the kernel still believes the old size.
- *
- * BLKPG changes one partition and does not care what else is mounted.
- * The kernel checks that the start offset is unchanged, so it cannot be
- * used to move a partition out from under a mounted filesystem - only
- * to resize the one we just resized in the table. */
-#define BLKPG_RESIZE_PARTITION  3
-
-typedef struct {
-    s64  start;                /* bytes, must match what the kernel has */
-    s64  length;               /* bytes, the new size */
-    int  pno;
-    char devname[64];
-    char volname[64];
-} blkpg_partition_t;
-
-/* struct blkpg_ioctl_arg, exactly as include/uapi/linux/blkpg.h has it:
- *
- *     int op; int flags; int datalen; void *data;
- *
- * There is NO padding field between datalen and data, and writing one
- * in - which is what this used to do - is not harmless. On a 64-bit
- * machine a pointer has to start on an 8-byte boundary, so the compiler
- * puts four bytes of padding there anyway and an explicit `int pad`
- * lands in exactly that hole: the layout comes out identical and the
- * ioctl works. On the Pi Zero W a pointer is four bytes and needs no
- * padding, so the kernel reads `data` from offset 12 - which was the
- * pad, and the pad is zero. Every BLKPG call on that board therefore
- * handed the kernel a null pointer and failed.
- *
- * What that cost: expandfs writes the new partition table and then has
- * to tell the running kernel about it. BLKPG is the call that works
- * while /boot is mounted, and /boot is mounted at that point because
- * resize2fs lives on it. With BLKPG failing, the fallback BLKRRPART
- * returned EBUSY for the same reason, the kernel went on believing the
- * partition was 124MB, and resize2fs - which asks the kernel, not the
- * table - found nothing to do. On a 64GB card in a Pi Zero W the
- * filesystem never grew, at any boot, ever.
+ * program quietly did nothing on every card ever put in one.
  */
-typedef struct {
-    int   op;
-    int   flags;
-    int   datalen;
-    void *data;
-} blkpg_arg_t;
 
 /* ext4 online grow. _IOW('f', 16, __u64) */
 #define EXT4_IOC_RESIZE_FS  0x40086610
@@ -409,21 +363,9 @@ static bool grow_partition(u64 *new_bytes_out)
      * here because /boot is. BLKRRPART is the fallback for a kernel or
      * a device that does not do BLKPG; it re-reads the whole table and
      * returns EBUSY whenever anything on the disk is in use. */
-    blkpg_partition_t part;
-    memset(&part, 0, sizeof part);
-    part.start  = (s64)start * SECTOR_SIZE;
-    part.length = (s64)max_count * SECTOR_SIZE;
-    part.pno    = PART_INDEX;
-
-    blkpg_arg_t arg;
-    memset(&arg, 0, sizeof arg);
-    arg.op      = BLKPG_RESIZE_PARTITION;
-    arg.datalen = (int)sizeof part;
-    arg.data    = &part;
-
-    rc = dev_ioctl(DEV_DISK, BLKPG, &arg, O_RDONLY);
-    if (rc < 0)
-        rc = dev_ioctl(DEV_DISK, BLKRRPART, NULL, O_RDONLY);
+    rc = disk_tell_kernel(DEV_DISK, PART_INDEX,
+                          (u64)start * SECTOR_SIZE,
+                          (u64)max_count * SECTOR_SIZE);
 
     if (rc < 0) {
         /* The table on the card is right; the kernel just has not taken
