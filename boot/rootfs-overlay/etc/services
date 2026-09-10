@@ -75,7 +75,13 @@ guard -r 32 -w 64
 #   reflash - turns on the full frame-by-frame log on the next boot.
 #   When wireless will not associate there is no other way to ask for
 #   that, because asking needs the wireless.
-?/sys/class/net/wlan0 sh /etc/wpa-start
+#   =wpa_supplicant names it. Without that init would call this service
+#   "sh", which is argv[0] of what it actually runs - and then
+#   `service status wpa_supplicant` answers that there is no such
+#   service on a machine that is running it, guard protects a name
+#   nobody recognises, and defend reports the SSH port as held by
+#   something init supervises as "sh".
+?/sys/class/net/wlan0 =wpa_supplicant sh /etc/wpa-start
 
 # The SSH server.
 #   -F  stay in the foreground. init can only supervise a child that

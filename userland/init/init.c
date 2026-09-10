@@ -214,6 +214,15 @@ typedef struct {
                                        rescan can tell "already running" from
                                        "new" without rebuilding the argv */
     char  *argv[MAX_SVC_ARGS + 1];
+    /* What this service is CALLED, which is not always argv[0].
+     *
+     * `service status wpa_supplicant`, guard's protection list and
+     * defend's "which supervised service holds this socket" all work by
+     * name, and they all read it from here. A service that runs through
+     * a wrapper - "sh /etc/wpa-start" - has argv[0] "sh", and calling it
+     * that makes every one of those answer about the wrong thing, or
+     * about nothing. So a line may say what it is called. */
+    char   name[64];
     pid_t  pid;
     int    fails;                   /* consecutive failures */
     s64    retry_at;                /* monotonic ms to start it again, 0 = none */
@@ -280,7 +289,7 @@ static void publish_service_pids(void)
     for (int i = 0; i < nservices; i++)
         if (services[i].pid > 0)
             dprintf((int)fd, "%d %s\n",
-                    (int)services[i].pid, services[i].argv[0]);
+                    (int)services[i].pid, services[i].name);
     lp_close((int)fd);
 }
 
@@ -339,6 +348,28 @@ static bool parse_service(const char *line, service_t *svc)
         while (*p && *p != ' ' && *p != '\t') p++;
     }
     svc->argv[n] = NULL;
+    if (n == 0)
+        return false;
+
+    /* "=name" as the first word says what this service is called, and
+     * is then dropped from the command. Without it the name is argv[0],
+     * which is what it has always been and is right for every service
+     * that is simply its own program.
+     *
+     *   =wpa_supplicant sh /etc/wpa-start
+     *
+     * is "wpa_supplicant" to `service`, to guard and to defend, and
+     * "sh /etc/wpa-start" to execve. Before this it was "sh" to all
+     * three, so `service status wpa_supplicant` answered that there is
+     * no such service on a machine that was running it. */
+    if (svc->argv[0][0] == '=' && svc->argv[0][1] != '\0' && n > 1) {
+        strlcpy(svc->name, svc->argv[0] + 1, sizeof svc->name);
+        for (int i = 0; i < n; i++)
+            svc->argv[i] = svc->argv[i + 1];
+        n--;
+    } else {
+        strlcpy(svc->name, svc->argv[0], sizeof svc->name);
+    }
     return n > 0;
 }
 
@@ -346,7 +377,7 @@ static void start_service(service_t *svc)
 {
     pid_t pid = lp_fork();
     if (pid < 0) {
-        dprintf(STDERR_FILENO, "init: fork failed for %s\n", svc->argv[0]);
+        dprintf(STDERR_FILENO, "init: fork failed for %s\n", svc->name);
         svc->pid = -1;
         return;
     }
@@ -447,9 +478,9 @@ static void load_services_from(const char *path)
             }
             if (parse_service(cmd, &services[nservices])) {
                 if (safe_mode() &&
-                    !wanted_in_safe_mode(services[nservices].argv[0])) {
+                    !wanted_in_safe_mode(services[nservices].name)) {
                     printf("init: safe mode - not starting %s\n",
-                           services[nservices].argv[0]);
+                           services[nservices].name);
                     if (!eol) break;
                     p = eol + 1;
                     continue;
@@ -457,7 +488,7 @@ static void load_services_from(const char *path)
                 start_service(&services[nservices]);
                 services[nservices].started_at = lp_monotonic_ms();
                 printf("init: started service %s (pid %d)\n",
-                       services[nservices].argv[0],
+                       services[nservices].name,
                        (int)services[nservices].pid);
                 nservices++;
             }
@@ -538,7 +569,7 @@ static void rescan_user_services(void)
                     start_service(&services[nservices]);
                     services[nservices].started_at = lp_monotonic_ms();
                     printf("init: started service %s (pid %d) - added since"
-                           " boot\n", services[nservices].argv[0],
+                           " boot\n", services[nservices].name,
                            (int)services[nservices].pid);
                     nservices++;
                 }
@@ -612,9 +643,9 @@ static bool respawn_service(pid_t dead, int status)
         services[i].pid = -1;
         pids_dirty = true;
 
-        if (service_disabled(services[i].argv[0])) {
+        if (service_disabled(services[i].name)) {
             printf("init: service %s stopped (it is in %s)\n",
-                   services[i].argv[0], DISABLED_FILE);
+                   services[i].name, DISABLED_FILE);
             services[i].retry_at = 0;
             services[i].fails    = 0;
             return true;
@@ -635,20 +666,20 @@ static bool respawn_service(pid_t dead, int status)
         if (LP_WIFEXITED(status) &&
             LP_WEXITSTATUS(status) == LP_EXIT_NO_HARDWARE) {
             printf("init: %s has nothing to do on this machine"
-                   " - not starting it again\n", services[i].argv[0]);
+                   " - not starting it again\n", services[i].name);
             services[i].retry_at = 0;
             services[i].fails    = 0;
             services[i].given_up = true;
             return true;
         }
 
-        bool critical = is_critical(services[i].argv[0]);
+        bool critical = is_critical(services[i].name);
 
         if (services[i].fails > 12 && !critical) {
             dprintf(STDERR_FILENO,
                     "init:   %s keeps failing. Giving up on it.\n"
                     "init:   'service start %s' tries again.\n",
-                    services[i].argv[0], services[i].argv[0]);
+                    services[i].name, services[i].name);
             services[i].retry_at = 0;
             services[i].given_up = true;
             return true;
@@ -669,16 +700,16 @@ static bool respawn_service(pid_t dead, int status)
                     " so init keeps trying.\n"
                     "init:   ** Something is wrong with it. This machine"
                     " is running without it.\n",
-                    services[i].argv[0]);
+                    services[i].name);
 
         int code = LP_WIFEXITED(status) ? LP_WEXITSTATUS(status) : -1;
         dprintf(STDERR_FILENO,
                 "init: service %s exited (code %d) - again in %lds\n",
-                services[i].argv[0], code, wait_ms / 1000);
+                services[i].name, code, wait_ms / 1000);
         {
             char m[160];
             snprintf(m, sizeof m, "service %s exited (code %d), restarting",
-                     services[i].argv[0], code);
+                     services[i].name, code);
             lp_log("init", m);
         }
 
@@ -720,8 +751,8 @@ static void restart_due_services(void)
          * without are restarted whatever the file says. `service` still
          * asks for --force, but that is now a courtesy to the person
          * typing, not the enforcement. */
-        if (service_disabled(s->argv[0])) {
-            if (!is_critical(s->argv[0])) {
+        if (service_disabled(s->name)) {
+            if (!is_critical(s->name)) {
                 s->was_off = true;
                 continue;               /* somebody turned it off */
             }
@@ -732,7 +763,7 @@ static void restart_due_services(void)
                        " without.\n"
                        "init:   Starting it anyway. Remove the line to"
                        " stop seeing this.\n",
-                       s->argv[0], DISABLED_FILE);
+                       s->name, DISABLED_FILE);
             }
         }
 
@@ -757,7 +788,7 @@ static void restart_due_services(void)
         start_service(s);
         s->started_at = lp_monotonic_ms();
         printf("init: started service %s (pid %d)\n",
-               s->argv[0], (int)s->pid);
+               s->name, (int)s->pid);
     }
 
     /* Only when a pid actually changed. This file is read by guard to

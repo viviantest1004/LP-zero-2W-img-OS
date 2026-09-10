@@ -88,11 +88,26 @@ static void load_from(const char *path)
 
         strlcpy(lines[nservices], p, sizeof lines[0]);
 
-        char *end = p;
+        /* "=name" as the first word says what the service is called,
+         * and init drops it before running the rest. It exists for the
+         * services that run through a wrapper: without it,
+         *
+         *     ?/sys/class/net/wlan0 =wpa_supplicant sh /etc/wpa-start
+         *
+         * would be called "sh" here and by init, and `service restart
+         * wpa_supplicant` would answer that there is no such service on
+         * a board that is running it. Read it the same way init does,
+         * or the two disagree about what things are called - which is
+         * worse than either answer on its own. */
+        const char *name_at = p;
+        if (*p == '=' && p[1] && p[1] != ' ' && p[1] != '\t')
+            name_at = p + 1;
+
+        const char *end = name_at;
         while (*end && *end != ' ' && *end != '\t') end++;
-        size_t len = (size_t)(end - p);
+        size_t len = (size_t)(end - name_at);
         if (len >= sizeof names[0]) len = sizeof names[0] - 1;
-        memcpy(names[nservices], p, len);
+        memcpy(names[nservices], name_at, len);
         names[nservices][len] = '\0';
         nservices++;
     }
