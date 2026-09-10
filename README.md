@@ -116,7 +116,8 @@ glibc 바이너리, 그래픽, 보안, 오류 경로, 리다이렉션, 로깅, �
 
 | 이미지 | 어디서 도나 |
 |---|---|
-| `dist/test_a_123_LPzero2W_linux.img.xz` | **라즈베리파이 제로 2 W 실기와 arm64 가상머신 양쪽.** 파이 GPU 가 읽는 압축 안 된 커널과 UEFI 가 읽는 EFI 실행 파일을 둘 다 담았습니다 |
+| `dist/linux-LP_arm64_Zero2W.img.xz` | **라즈베리파이 제로 2 W 실기와 arm64 가상머신 양쪽.** 파이 GPU 가 읽는 압축 안 된 커널과 UEFI 가 읽는 EFI 실행 파일을 둘 다 담았습니다 |
+| `dist/linux-LP_armv6_ZeroW.img.xz` | **라즈베리파이 제로 W (1세대) 실기.** ARM1176 / ARMv6 32비트 - 제로 2 W 와 명령어 집합이 다른 기계라서 별개의 이미지입니다 |
 | `dist/linux-LP_amd64.img.xz` | **일반 PC 와 데스크톱 가상머신.** VMware, VirtualBox, QEMU/KVM, Hyper-V |
 | `dist/test_a_123_LPzero2W_linux-utm.zip` | **arm64 가상머신 전용.** 압축 풀고 더블클릭하면 UTM 이 엽니다 |
 
@@ -168,7 +169,7 @@ cat ~/.ssh/id_ed25519.pub >> /media/BOOT/authorized_keys
 ### SD카드에 굽기
 
 ```bash
-xz -d < test_a_123_LPzero2W_linux.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
+xz -d < linux-LP_arm64_Zero2W.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 **`/dev/sdX` 를 꼭 확인하세요.** 첫 부팅에서 `/data` 가 카드 전체로

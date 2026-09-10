@@ -119,7 +119,8 @@ passes `tests/selftest.sh` with nothing failing on each. More in
 
 | Image | Where it runs |
 |---|---|
-| `dist/test_a_123_LPzero2W_linux.img.xz` | **Raspberry Pi Zero 2 W hardware and arm64 VMs alike.** One image does both: an uncompressed kernel for the Pi's GPU and an EFI executable for UEFI |
+| `dist/linux-LP_arm64_Zero2W.img.xz` | **Raspberry Pi Zero 2 W hardware and arm64 VMs alike.** One image does both: an uncompressed kernel for the Pi's GPU and an EFI executable for UEFI |
+| `dist/linux-LP_armv6_ZeroW.img.xz` | **Raspberry Pi Zero / Zero W hardware.** ARM1176, ARMv6, 32-bit: a different instruction set from the Zero 2 W, so a separate image |
 | `dist/linux-LP_amd64.img.xz` | **Ordinary PCs and desktop VMs.** VMware, VirtualBox, QEMU/KVM, Hyper-V |
 | `dist/test_a_123_LPzero2W_linux-utm.zip` | **arm64 VMs only.** Unzip and double-click; UTM opens it |
 
@@ -171,7 +172,7 @@ There is one user, root. When it does not work: `authkey -l`,
 ### Burning a card
 
 ```bash
-xz -d < test_a_123_LPzero2W_linux.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
+xz -d < linux-LP_arm64_Zero2W.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
 **Check `/dev/sdX`.** On the first boot `/data` grows to fill the card.

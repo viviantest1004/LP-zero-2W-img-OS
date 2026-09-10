@@ -173,10 +173,23 @@
     <p class="for">실기와 arm64 가상머신 둘 다. SD카드에 굽거나 UTM/QEMU에 붙이면 됩니다.<br>
        <span class="en-line">Raspberry Pi Zero 2 W hardware and arm64 VMs alike.</span></p>
     <div class="row">
-      <a class="dl" href="dist/test_a_123_LPzero2W_linux.img.xz">다운로드 / Download</a>
-      <span class="size">30 MB · xz</span>
+      <a class="dl" href="dist/linux-LP_arm64_Zero2W.img.xz">다운로드 / Download</a>
+      <span class="size">22 MB · xz</span>
     </div>
-    <div class="hash"><b>sha256</b><br>fa432a9167188587b10b0d3019942427dafec335958f6a8447c7a83363344e99</div>
+    <div class="hash"><b>sha256</b><br>147ec501a6839a50cae18288a1119b31790338c5d52f5c20d5528b51a3525493</div>
+  </div>
+
+  <div class="card">
+    <h3>라즈베리파이 제로 W</h3>
+    <p class="for">1세대 Zero / Zero W. ARM1176(ARMv6) 32비트 — 제로 2 W 와는 명령어
+       집합이 아예 다른 기계라서 이미지도 별개입니다.<br>
+       <span class="en-line">Pi Zero and Zero W. ARMv6, 32-bit: a different
+       instruction set from the Zero 2 W, so a different image.</span></p>
+    <div class="row">
+      <a class="dl" href="dist/linux-LP_armv6_ZeroW.img.xz">다운로드 / Download</a>
+      <span class="size">11 MB · xz</span>
+    </div>
+    <div class="hash"><b>sha256</b><br>6bd657884018a555fde40a8e602160ee828afadc952046063893ce54f3108c95</div>
   </div>
 
   <div class="card">
@@ -185,9 +198,9 @@
        <span class="en-line">Ordinary PCs and desktop VMs. Boots over UEFI.</span></p>
     <div class="row">
       <a class="dl" href="dist/linux-LP_amd64.img.xz">다운로드 / Download</a>
-      <span class="size">24 MB · xz</span>
+      <span class="size">16 MB · xz</span>
     </div>
-    <div class="hash"><b>sha256</b><br>e608bd8c239fb30947fd30da43071b7ef2b4dd7a1cff2dcab6e86c378201fe88</div>
+    <div class="hash"><b>sha256</b><br>b6e56ccb408ad10ae47550bbbde7452b71fc884b3d0701a9d09d2d49ea5d1651</div>
   </div>
 
   <div class="card">
@@ -197,9 +210,9 @@
        <span class="en-line">A ready-made UTM bundle. Will not boot on the board.</span></p>
     <div class="row">
       <a class="dl" href="dist/test_a_123_LPzero2W_linux-utm.zip">다운로드 / Download</a>
-      <span class="size">28 MB · zip</span>
+      <span class="size">17 MB · zip</span>
     </div>
-    <div class="hash"><b>sha256</b><br>d0cfd87421f707c20309d50cb0dc3291886592ad703d6cf28d969ecfca05951b</div>
+    <div class="hash"><b>sha256</b><br>65c56b50a62c46ab77a45cce59027a95cf843391ac9f4b7e3bc9dc741e78e34e</div>
   </div>
 </div>
 
@@ -216,7 +229,7 @@
 
 <p><strong>SD카드에 굽기</strong> — <code>/dev/sdX</code>를 꼭 확인하세요.
    여기서 재부팅으로 되돌릴 수 없는 실수는 이것 하나뿐입니다.</p>
-<pre>xz -d &lt; test_a_123_LPzero2W_linux.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress</pre>
+<pre>xz -d &lt; linux-LP_arm64_Zero2W.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress</pre>
 
 <p>첫 부팅에서 <code>/data</code> 파티션이 카드 전체로 알아서 늘어납니다.</p>
 
@@ -356,8 +369,8 @@
 </div>
 
 <footer>
-  이미지 빌드: 2026-09-05 · 이 페이지의 크기와 체크섬은 실제 파일에서 만들어집니다<br>
-  <span class="muted">Images built 2026-09-05 · the sizes and checksums on this page are read
+  이미지 빌드: 2026-09-10 · 이 페이지의 크기와 체크섬은 실제 파일에서 만들어집니다<br>
+  <span class="muted">Images built 2026-09-10 · the sizes and checksums on this page are read
   from the files themselves, so they cannot drift</span>
 </footer>
 

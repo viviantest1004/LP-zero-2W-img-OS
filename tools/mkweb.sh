@@ -30,11 +30,12 @@ REPO_URL="${REPO_URL:-https://github.com/viviantest1004/LP-zero-2W-img-OS}"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-PI="test_a_123_LPzero2W_linux.img.xz"
+PI="linux-LP_arm64_Zero2W.img.xz"
+ZEROW="linux-LP_armv6_ZeroW.img.xz"
 AMD="linux-LP_amd64.img.xz"
 UTM="test_a_123_LPzero2W_linux-utm.zip"
 
-for f in "$PI" "$AMD" "$UTM"; do
+for f in "$PI" "$ZEROW" "$AMD" "$UTM"; do
     [[ -f "${DIST}/${f}" ]] || die "dist/${f} 가 없습니다. ./tools/mkdist.sh 를 먼저 실행하세요."
 done
 
@@ -57,6 +58,9 @@ size_of() { human "$(stat -c%s "${DIST}/$1")"; }
 BUILD_DATE="$(date -u -r "${DIST}/${AMD}" '+%Y-%m-%d')"
 
 sed -e "s|@PI_NAME@|${PI}|g" \
+    -e "s|@ZEROW_NAME@|${ZEROW}|g" \
+    -e "s|@ZEROW_SIZE@|$(size_of "$ZEROW")|g" \
+    -e "s|@ZEROW_HASH@|$(hash_of "$ZEROW")|g" \
     -e "s|@PI_SIZE@|$(size_of "$PI")|g" \
     -e "s|@PI_HASH@|$(hash_of "$PI")|g" \
     -e "s|@AMD_NAME@|${AMD}|g" \

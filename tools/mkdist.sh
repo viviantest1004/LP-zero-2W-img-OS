@@ -6,10 +6,16 @@
 #         QEMU, UTM and UTM SE. UEFI only, so it carries one compressed
 #         kernel (vmlinuz.efi, 11MB) and no GPU firmware.
 #
-#   dist/test_a_123_LPzero2W_linux.img.xz      arm64, a real Pi Zero 2 W.
+#   dist/linux-LP_arm64_Zero2W.img.xz          arm64, a real Pi Zero 2 W.
 #         Also boots in a VM. It has to carry the uncompressed 22MB
 #         kernel and start.elf, because the Broadcom GPU firmware loads
 #         the kernel itself and cannot decompress one.
+#
+#   dist/linux-LP_armv6_ZeroW.img.xz           armv6, a real Pi Zero W.
+#         A different instruction set, not a smaller version of the same
+#         one: an ARM1176 runs no aarch64 instruction at all. Its own
+#         userland, its own kernel, its own dropbear, and a zImage the
+#         GPU firmware loads.
 #
 #   dist/linux-LP_amd64.img.xz                 amd64, a PC or a desktop VM.
 #         Called linux-LP inside, because it is not a Raspberry Pi.
@@ -21,10 +27,15 @@
 # start.elf, since UEFI looks only at EFI/BOOT/BOOTAA64.EFI.
 #
 # Usage:
-#   ./tools/mkdist.sh          all three
+#   ./tools/mkdist.sh          everything
 #   ./tools/mkdist.sh utm      arm64 VM only
-#   ./tools/mkdist.sh sd       arm64 Pi image only
+#   ./tools/mkdist.sh sd       arm64 Pi image only  (Zero 2 W)
+#   ./tools/mkdist.sh armv6    armv6 Pi image only  (Zero W)
 #   ./tools/mkdist.sh amd64    amd64 only
+#
+# Every image is built here, by this script, and nowhere else. The two
+# Pi images used to be assembled by hand from the notes in a session
+# log, which is another way of saying they could not be rebuilt.
 #
 set -euo pipefail
 
@@ -37,7 +48,7 @@ step() { printf '\n==> %s\n' "$*"; }
 log()  { printf '  %s\n' "$*"; }
 
 WHAT="${1:-all}"
-case "$WHAT" in all|utm|sd|amd64) ;; *) die "알 수 없는 인자: $WHAT" ;; esac
+case "$WHAT" in all|utm|sd|armv6|amd64) ;; *) die "알 수 없는 인자: $WHAT" ;; esac
 
 command -v xz  >/dev/null || die "xz 가 없습니다 (apt install xz-utils)"
 command -v zip >/dev/null || die "zip 이 없습니다 (apt install zip)"
@@ -62,14 +73,49 @@ fi
 
 # ── SD 카드용 ────────────────────────────────────────────────────
 if [[ "$WHAT" == "all" || "$WHAT" == "sd" ]]; then
-    step "범용 이미지 (실기 Pi + 가상머신)"
+    step "Pi Zero 2 W 이미지 (arm64, 실기 + 가상머신)"
+
+    # Its inputs are built here too. Assuming they are current is how a
+    # kernel with last week's initramfs in it gets shipped: the rootfs
+    # is compiled into the kernel image, so a stale kernel is a stale
+    # userland with no way to tell from the outside.
+    make -C "${REPO_ROOT}/userland" >/dev/null
+    ( cd "${REPO_ROOT}/userland" && ./mkrootfs.sh >/dev/null )
+    "${REPO_ROOT}/kernel/build.sh" >/dev/null
     "${REPO_ROOT}/tools/mksdcard.sh" --linux > /dev/null
     [[ -f "$IMG" ]] || die "이미지가 만들어지지 않았습니다"
 
-    rm -f "${DIST}/test_a_123_LPzero2W_linux.img.xz"
+    rm -f "${DIST}/linux-LP_arm64_Zero2W.img.xz"
     # -T0: 코어 수만큼 스레드. 256MB 를 한 스레드로 짜면 오래 걸린다.
-    xz -9 -T0 -c "$IMG" > "${DIST}/test_a_123_LPzero2W_linux.img.xz"
-    log "test_a_123_LPzero2W_linux.img.xz  $(stat -c%s "${DIST}/test_a_123_LPzero2W_linux.img.xz") bytes"
+    xz -9 -T0 -c "$IMG" > "${DIST}/linux-LP_arm64_Zero2W.img.xz"
+    log "linux-LP_arm64_Zero2W.img.xz  $(stat -c%s "${DIST}/linux-LP_arm64_Zero2W.img.xz") bytes"
+fi
+
+# ── armv6 (Pi Zero W) ────────────────────────────────────────────
+if [[ "$WHAT" == "all" || "$WHAT" == "armv6" ]]; then
+    step "Pi Zero W 이미지 (armv6)"
+
+    # Everything on this line differs from arm64: the compiler target,
+    # the binaries, the root filesystem, the kernel and the boot files.
+    # Nothing is shared but the source.
+    make -C "${REPO_ROOT}/userland" ARCH=armv6 >/dev/null
+    ( cd "${REPO_ROOT}/userland" \
+      && LP_ARCH=armv6 LP_BINDIR=bin-armv6 LP_ROOTFS_DIR=rootfs-armv6 \
+         LP_CPIO_NAME=initramfs-armv6.cpio.gz ./mkrootfs.sh >/dev/null )
+    LP_ARCH=armv6 LP_ROOTFS_DIR=rootfs-armv6 "${REPO_ROOT}/kernel/build.sh" >/dev/null
+    LP_ARCH=armv6 LP_ROOTFS_DIR=rootfs-armv6 \
+        "${REPO_ROOT}/tools/mksdcard.sh" --linux >/dev/null
+    [[ -f "$IMG" ]] || die "armv6 이미지가 만들어지지 않았습니다"
+
+    rm -f "${DIST}/linux-LP_armv6_ZeroW.img.xz"
+    xz -9 -T0 -c "$IMG" > "${DIST}/linux-LP_armv6_ZeroW.img.xz"
+    log "linux-LP_armv6_ZeroW.img.xz  $(stat -c%s "${DIST}/linux-LP_armv6_ZeroW.img.xz") bytes"
+
+    # Put the arm64 userland and rootfs back, for the same reason the
+    # amd64 section below does: the three share kernel/out and
+    # userland/build only through this script's ordering.
+    make -C "${REPO_ROOT}/userland" >/dev/null
+    ( cd "${REPO_ROOT}/userland" && ./mkrootfs.sh >/dev/null )
 fi
 
 # ── amd64 ────────────────────────────────────────────────────────
@@ -108,8 +154,8 @@ fi
 step "체크섬"
 ( cd "$DIST" && rm -f SHA256SUMS.txt \
   && sha256sum *.img.xz *.zip > SHA256SUMS.txt 2>/dev/null || true )
-if [[ -f "${DIST}/test_a_123_LPzero2W_linux.img.xz" ]]; then
-    ( cd "$DIST" && sha256sum test_a_123_LPzero2W_linux.img.xz \
+if [[ -f "${DIST}/linux-LP_arm64_Zero2W.img.xz" ]]; then
+    ( cd "$DIST" && sha256sum linux-LP_arm64_Zero2W.img.xz \
         > PI_IMAGE_SHA256.txt )
 fi
 while read -r _ name; do log "$name"; done < "${DIST}/SHA256SUMS.txt"
@@ -130,6 +176,7 @@ for f in "${DIST}"/*; do
 done
 echo ""
 echo "  SD 카드에 굽기:"
-echo "    xz -d < dist/test_a_123_LPzero2W_linux.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress"
+echo "    xz -d < dist/linux-LP_arm64_Zero2W.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress"
+echo "    xz -d < dist/linux-LP_armv6_ZeroW.img.xz  | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress   # Zero W"
 echo "  UTM/QEMU:"
 echo "    unzip dist/test_a_123_LPzero2W_linux-utm.zip   그리고 test_a_123_LPzero2W_linux.img 를 디스크로 붙인다"

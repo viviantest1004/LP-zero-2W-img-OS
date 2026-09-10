@@ -131,6 +131,19 @@ static bool path_is_safe(const char *p)
     return true;
 }
 
+/* Is this a real directory, not a symlink pointing at one?
+ *
+ * lp_is_dir() answers the second question as yes, because it stats
+ * through the link. That is the right answer almost everywhere and the
+ * wrong one here - see make_parents below. */
+static bool is_real_dir(const char *path)
+{
+    lp_stat_t st;
+    if (lp_stat(path, &st, false) < 0)
+        return false;
+    return (st.mode & LP_S_IFMT) == LP_S_IFDIR;
+}
+
 /* Create every directory above `path`, but not `path` itself.
  *
  * The "but not itself" is load-bearing. Every directory entry in a tar
@@ -140,7 +153,28 @@ static bool path_is_safe(const char *p)
  * already there and left it alone. Every directory in every archive
  * came out 0755: /root world-readable, /tmp not sticky. The names are
  * stripped of their trailing slash before they get here now, and this
- * says so out loud in case they stop being. */
+ * says so out loud in case they stop being.
+ *
+ * ── Why a symlink in the path is removed ──
+ *
+ * path_is_safe() stops "../.." and "/etc/passwd". It does not stop this,
+ * which is the same attack by a different road:
+ *
+ *     lrwxrwxrwx  evil -> /etc
+ *     -rw-r--r--  evil/passwd
+ *
+ * Both entries are relative and neither contains "..". Extract them in
+ * order and the symlink is created, and then the second entry is opened
+ * through it - writing /etc/passwd on the machine doing the unpacking,
+ * as root, from an archive off the network. The check that used to be
+ * here asked lp_is_dir(), which stats through the link and answers yes,
+ * so nothing was created and nothing was in the way.
+ *
+ * So: a component that exists and is not a real directory is removed
+ * and replaced with one. That loses nothing - a tar that puts a file
+ * and then a directory at the same name is self-contradictory - and it
+ * is what GNU tar does.
+ */
 static void make_parents(const char *path)
 {
     char work[1024];
@@ -151,8 +185,10 @@ static void make_parents(const char *path)
     for (char *p = work + 1; *p; p++) {
         if (*p != '/') continue;
         *p = '\0';
-        if (!lp_is_dir(work))
+        if (!is_real_dir(work)) {
+            lp_unlink(work);
             lp_mkdir(work, 0755);
+        }
         *p = '/';
     }
 }
@@ -490,8 +526,13 @@ static int walk(const char *archive, const char *into, bool extract)
         switch (type) {
         case '5':
             make_parents(full);
-            if (!lp_is_dir(full))
+            if (!is_real_dir(full)) {
+                /* A symlink here would make everything unpacked inside
+                 * it land wherever it points. Same reason as
+                 * make_parents: lp_is_dir() would have said yes. */
+                lp_unlink(full);
                 lp_mkdir(full, mode & 07777);
+            }
             /* Unconditionally, not only when we just made it: a
              * directory that already exists still has to end up with
              * the mode the archive says. */
@@ -589,6 +630,11 @@ static int walk(const char *archive, const char *into, bool extract)
         }
 
         make_parents(full);
+        /* Remove whatever is there first. O_CREAT on an existing
+         * symlink follows it, so without this an archive that puts a
+         * link before a file of the same name writes through the link -
+         * the same escape make_parents describes, one level down. */
+        lp_unlink(full);
         long out = lp_open(full, O_WRONLY | O_CREAT | O_TRUNC, mode & 0777);
         if (out < 0) {
             dprintf(STDERR_FILENO, "tar: cannot write %s\n", full);
