@@ -1000,6 +1000,76 @@ char *lp_human(guint64 bytes)
     return g_strdup_printf(v < 10.0 ? "%.1f %s" : "%.0f %s", v, unit[u]);
 }
 
+/* ── the rest of the desktop ─────────────────────────────────────────── */
+
+static void quiet_done(int st, const char *out, const char *err, gpointer p)
+{
+    char *what = p;
+    if (st != 0) {
+        char *why = lp_first_line(err, out);
+        g_printerr("lp-settings: %s: %s\n", what, why);
+        g_free(why);
+    }
+    g_free(what);
+}
+
+void lp_gsettings_set(const char *schema, const char *key, const char *value)
+{
+    const char *v[] = { "gsettings", "set", schema, key, value, NULL };
+    lp_run_async(v, NULL, NULL, quiet_done, g_strdup_printf("gsettings %s %s", schema, key));
+}
+
+static char *gtk_ini(const char *ver)
+{
+    return g_build_filename(g_get_user_config_dir(), ver, "settings.ini", NULL);
+}
+
+gboolean lp_gtk_settings_set(const char *key, const char *value)
+{
+    gboolean ok = TRUE;
+    const char *vers[] = { "gtk-3.0", "gtk-4.0" };
+    for (int i = 0; i < 2; i++) {
+        char *p = gtk_ini(vers[i]);
+        ok &= value ? ini_set(p, "Settings", key, value) : ini_unset(p, "Settings", key);
+        g_free(p);
+    }
+    return ok;
+}
+
+char *lp_gtk_settings_get(const char *key)
+{
+    char *p = gtk_ini("gtk-4.0");
+    char *v = ini_get(p, "Settings", key);
+    g_free(p);
+    return v;
+}
+
+gboolean lp_sway(void)
+{
+    const char *s = g_getenv("SWAYSOCK");
+    return s && *s;
+}
+
+void lp_swaymsg(const char *const *args)
+{
+    if (!lp_sway()) return;
+    GPtrArray *v = g_ptr_array_new();
+    g_ptr_array_add(v, (gpointer)"swaymsg");
+    for (int i = 0; args[i]; i++)
+        g_ptr_array_add(v, (gpointer)args[i]);
+    g_ptr_array_add(v, NULL);
+    lp_run_async((const char *const *)v->pdata, NULL, NULL, quiet_done, g_strdup("swaymsg"));
+    g_ptr_array_free(v, TRUE);
+}
+
+gboolean lp_have(const char *prog)
+{
+    char *p = g_find_program_in_path(prog);
+    gboolean ok = p != NULL;
+    g_free(p);
+    return ok;
+}
+
 /* ── JSON ──────────────────────────────────────────────────────────── */
 
 typedef struct { const char *p; int depth; } jp_t;

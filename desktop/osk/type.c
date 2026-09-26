@@ -1002,6 +1002,16 @@ gboolean type_init(void)
     if (!vkm)
         g_warning("the compositor has no zwp_virtual_keyboard_manager_v1: "
                   "the keys cannot type anything");
+    /* The virtual keyboard exists from the start, not from the first key,
+     * and the compositor has seen it before any text field can activate
+     * us. sway 1.7 answers a keyboard grab by reading the modifiers of the
+     * seat's current keyboard without checking there is one, and a seat
+     * with no keyboard at all (a tablet, the headless test session) dies
+     * there - taking the whole desktop with it. With ours on the seat
+     * there always is one. It also takes the keymap upload off the first
+     * keystroke. */
+    if (vk_ready())
+        wl_display_roundtrip(dpy);
     if (imm && seat) {
         im = zwp_input_method_manager_v2_get_input_method(imm, seat);
         zwp_input_method_v2_add_listener(im, &im_listener, NULL);

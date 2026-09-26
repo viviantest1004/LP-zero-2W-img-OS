@@ -341,13 +341,106 @@ def _prim_c(p, accent):
     return f"{{ LP_ARC, 0x{mask:x}, {int(accent)}, {q(p.cx)}, {q(p.cy)}, {q(p.r)}, 0, {q(p.w)} }}"
 
 
+# Where the splash puts things. They are here, in the generated header,
+# and not as numbers in splash.c, because a second program has to put
+# the logo on exactly the same pixels: desktop/branding/lp-splash-fade,
+# the session's first frame, which takes over from the splash and fades
+# into the desktop. Two copies of "15% of the height, centred at 44%"
+# would drift the first time one was tuned, and the hand-off would jump.
+SPLASH_LAYOUT = [
+    ("MARK_H", 15, "the mark's height, % of the screen's height"),
+    ("MARK_MAXW", 22, "...but at most this % of its width (portrait panels)"),
+    ("MARK_MIN", 24, "...and at least this many pixels"),
+    ("CENTRE_Y", 44, "the mark's centre, % down the screen: dead centre reads low"),
+    ("WORD_CAP", 27, "the name's cap height, % of the mark's height"),
+    ("WORD_GAP", 62, "the name's baseline, % of the mark's height below its bottom"),
+    ("SPIN_Y", 78, "the spinner's centre, % down the screen"),
+    ("SPIN_R", 80, "the spinner's radius (to the stroke's centre), per mille of the mark"),
+    ("SPIN_W", 18, "the spinner's stroke, per mille of the mark's height"),
+]
+
+# The splash's motion, from the design system's table (design/feel.md §2,
+# desktop/common/lp-motion.h). The logo arriving is the one long move -
+# the brief asks for about 400ms, the ceiling feel.md allows. The spinner
+# comes and goes as a sheet does. One revolution in 1.3 s is calm: a
+# faster spinner reads as urgency, and nothing is urgent at boot.
+SPLASH_MOTION = [
+    ("LOGO_IN_MS", 400, "the logo fading in"),
+    ("SPIN_DELAY_MS", 1000, "held back after the logo: a fast boot never shows it"),
+    ("SPIN_IN_MS", 260, "the spinner arriving (the sheet spring)"),
+    ("SPIN_OUT_MS", 182, "and leaving: 0.7x"),
+    ("SPIN_TURN_MS", 1300, "one revolution"),
+    ("REDUCED_MS", 100, "any change, when motion is reduced: a crossfade this long"),
+    ("PULSE_MS", 2400, "reduced motion's stand-in for turning: a slow brightness pulse"),
+    ("HOLD_MS", 90000, "give up waiting for the desktop and hand the screen back"),
+]
+
+
+def _splash_layout(A):
+    A("/* Layout - shared with desktop/branding/lp-splash-fade, which draws the")
+    A(" * session's first frame on the same pixels (see mark.py SPLASH_LAYOUT). */")
+    for k, v, what in SPLASH_LAYOUT:
+        A(f"#define LP_LAYOUT_{k:10s} {v:5d}   /* {what} */")
+    A("")
+
+
+def _splash_motion(A):
+    import math
+    A("/* Motion (mark.py SPLASH_MOTION; design/feel.md §2). */")
+    for k, v, what in SPLASH_MOTION:
+        A(f"#define LP_MOTION_{k:14s} {v:6d}   /* {what} */")
+    A("")
+    # A critically damped spring released from 0 towards 1:
+    #   x(t) = 1 - (1 + w t) e^(-w t)
+    # with w chosen so it is within 0.5% of 1 at the end of its time - the
+    # settle rule lp-motion.h uses. Sampled over that time, one curve
+    # serves every duration: the splash scales its clock, not the curve.
+    lo, hi = 1.0, 20.0
+    for _ in range(80):
+        mid = (lo + hi) / 2
+        if (1 + mid) * math.exp(-mid) > 0.005:
+            lo = mid
+        else:
+            hi = mid
+    a = hi
+    ease = [1 - (1 + a * i / 64) * math.exp(-a * i / 64) for i in range(65)]
+    ease = [int(round(min(1.0, e / ease[-1]) * 65535)) for e in ease]
+    A("/* LP_EASE[i]: that spring's position (0..65535) at i/64 of its settle")
+    A(f" * time; w*T = {a:.3f}. Interpolate between entries. */")
+    A("static const u16 LP_EASE[65] = {")
+    for i in range(0, 65, 13):
+        A("    " + " ".join(f"{v:5d}," for v in ease[i:i + 13]))
+    A("};")
+    A("")
+    # the pulse: one smooth rise, (1 - cos(pi u)) / 2, used up then down
+    wave = [int(round((1 - math.cos(math.pi * i / 64)) / 2 * 65535)) for i in range(65)]
+    A("/* LP_WAVE[i]: (1 - cos(pi i/64)) / 2 in 0..65535 - a smooth rise from 0 to")
+    A(" * 1, run forwards then backwards for reduced motion's pulse. */")
+    A("static const u16 LP_WAVE[65] = {")
+    for i in range(0, 65, 13):
+        A("    " + " ".join(f"{v:5d}," for v in wave[i:i + 13]))
+    A("};")
+    A("")
+    at = [int(round(math.atan(i / 64) / (2 * math.pi) * 65536)) for i in range(65)]
+    A("/* LP_ATAN[i]: atan(i/64) in 1/65536ths of a turn (0..8192, i.e. 0..45")
+    A(" * degrees) - enough, with the octant, to give every pixel of the spinner")
+    A(" * its angle without floating point. */")
+    A("static const u16 LP_ATAN[65] = {")
+    for i in range(0, 65, 13):
+        A("    " + " ".join(f"{v:5d}," for v in at[i:i + 13]))
+    A("};")
+    A("")
+
+
 def write_splash_header(path):
     import wallpaper
     ring, ell = mark16()
     lines = []
     A = lines.append
-    A("/* logo.h - the LP mark, the wordmark's letters and the desktop's gradient,")
-    A(" * as tables for splash.c.")
+    A("/* logo.h - the LP mark, the wordmark's letters, the desktop's gradient,")
+    A(" * and where and how fast the boot splash draws them, as tables for")
+    A(" * splash.c - and for desktop/branding/lp-splash-fade, which draws the")
+    A(" * session's first frame to match it (it defines u8, s16 and u16 first).")
     A(" *")
     A(" * GENERATED by desktop/branding/src/mark.py from the same shapes that")
     A(" * produce the SVGs in desktop/branding/logo - change them there and rerun")
@@ -428,6 +521,8 @@ def write_splash_header(path):
         A("    " + " ".join(f"{{ {r:5d}, {g:5d}, {b:5d} }}," for r, g, b in tab[i:i + 4]))
     A("};")
     A("")
+    _splash_layout(A)
+    _splash_motion(A)
     A("#endif")
     with open(path, "w") as f:
         f.write("\n".join(lines) + "\n")

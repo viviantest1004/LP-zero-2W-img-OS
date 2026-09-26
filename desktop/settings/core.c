@@ -164,7 +164,7 @@ static const char *CSS =
     ".lp-settings .lp-segmented > button:checked { background: @lp_accent; color: @lp_on_accent;"
     "  border-color: @lp_accent; }\n"
     ".lp-settings switch { min-width: 60px; min-height: 34px; border-radius: 17px;"
-    "  background: @lp_track; border: 1px solid @lp_border; color: transparent; font-size: 0; }\n"
+    "  background: @lp_track; border: 1px solid @lp_border; color: transparent; }\n"
     ".lp-settings switch:checked { background: @lp_accent; border-color: @lp_accent; }\n"
     ".lp-settings switch slider { min-width: 28px; min-height: 28px; margin: 2px;"
     "  border-radius: 14px; background: #ffffff; border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.3); }\n"

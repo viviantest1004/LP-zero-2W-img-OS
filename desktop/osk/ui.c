@@ -624,9 +624,7 @@ static void draw_key(cairo_t *cr, const Key *k)
     uint32_t bg = special ? C_SPECIAL : C_KEY;
     const Mod *m = d->kind == K_SHIFT || d->kind == K_CAPS ? &m_shift :
                    d->kind == K_CTRL ? &m_ctrl : d->kind == K_ALT ? &m_alt : NULL;
-    gboolean lock = m && (d->kind == K_CAPS ? m->mode == M_LOCK :
-                          m->mode == M_LOCK);
-    if (lock)
+    if (m && m->mode == M_LOCK)
         bg = C_ACCENT;
     rrect(cr, k->x, k->y, k->w, k->h, 8);
     rgb(cr, bg, 1);
@@ -1034,6 +1032,10 @@ static void on_frame(GtkWidget *w, gpointer data)
     }
     if (!slide.moving)
         update_opaque_region();
+    if (old_cache && !xfade.moving) {
+        cairo_surface_destroy(old_cache);
+        old_cache = NULL;
+    }
     if (!want_shown && !slide.moving && slide.x <= 0.0 && !drag_on)
         finish_hide();
 }
@@ -1761,8 +1763,9 @@ static void touch_begin(gintptr id, double x, double y)
     t->t0 = now;
     t->pv = -1;
     t->key = k;
-    t->shift = m_shift.held > 0 || m_shift.mode == M_ONCE ||
-               (m_shift.mode == M_LOCK && !is_letter(k->d) && FALSE);
+    /* Caps Lock capitalises letters only, as on a laptop; Shift, held or
+     * tapped once, shifts everything. */
+    t->shift = m_shift.held > 0 || m_shift.mode == M_ONCE;
     t->caps = m_shift.mode == M_LOCK;
     t->ctrl = m_ctrl.held > 0 || m_ctrl.mode != M_OFF;
     t->alt = m_alt.held > 0 || m_alt.mode != M_OFF;
@@ -1864,6 +1867,9 @@ static void touch_end(gintptr id, double x, double y, gboolean cancel)
     gint64 now = g_get_monotonic_time();
     timer_stop(t);
     Key *k = t->key;
+    /* Off the list before acting: what this touch does may hide the
+     * keyboard, and hiding cancels every touch still on the list. */
+    t->used = FALSE;
 
     if (t->drag) {
         if (cancel) {
@@ -1896,7 +1902,6 @@ static void touch_end(gintptr id, double x, double y, gboolean cancel)
             k->last_up = now;
         unlight(k, t);
     }
-    t->used = FALSE;
 }
 
 static void cancel_all_touches(void)

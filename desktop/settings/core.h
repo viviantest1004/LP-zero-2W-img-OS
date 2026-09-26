@@ -253,6 +253,29 @@ char    *wayfire_ini(void);
 
 char    *lp_human(guint64 bytes);
 
+/* ── the rest of the desktop ────────────────────────────────────────────
+ *
+ * Our files are the record of every setting; these mirror a value into
+ * the places other programs read it from. */
+
+/* gsettings set SCHEMA KEY VALUE, in the background. libadwaita apps and
+ * GTK 4 through the portal read org.gnome.desktop.interface; without a
+ * session bus it fails, quietly (stderr), and our file still holds the
+ * value for `lp-settings --restore` to try again at the next login. */
+void     lp_gsettings_set(const char *schema, const char *key, const char *value);
+/* [Settings] KEY=VALUE in both ~/.config/gtk-3.0/settings.ini and
+ * gtk-4.0/settings.ini (NULL removes it); GTK apps started later read
+ * them. The value of the gtk-4.0 file, or NULL. */
+gboolean lp_gtk_settings_set(const char *key, const char *value);
+char    *lp_gtk_settings_get(const char *key);
+/* Under sway (SWAYSOCK set) some changes can be applied live with
+ * swaymsg as well as written to wayfire.ini for the session the image
+ * ships. Runs in the background; errors go to stderr. */
+gboolean lp_sway(void);
+void     lp_swaymsg(const char *const *args);
+/* Is a program on PATH? */
+gboolean lp_have(const char *prog);
+
 /* ── JSON ───────────────────────────────────────────────────────────────
  *
  * lp-net and lp-tune answer in JSON and the base has no json-glib. This is

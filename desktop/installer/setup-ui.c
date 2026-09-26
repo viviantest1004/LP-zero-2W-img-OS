@@ -54,6 +54,8 @@ static const char CSS[] =
     ".su-body { font-size: 17px; }\n"
     ".su-note { font-size: 15px; color: @su_dim; }\n"
     ".su-warn { font-size: 17px; color: #ffb4a6; }\n"
+    "button.su-choice, button.su-primary, button.su-secondary,\n"
+    "button.su-danger { background-image: none; }\n"
     "button.su-choice { min-height: 64px; padding: 10px 18px;\n"
     "  border-radius: 12px; background-color: alpha(white, 0.05);\n"
     "  box-shadow: inset 0 0 0 1px alpha(white, 0.08); }\n"
@@ -223,6 +225,9 @@ GtkWidget *su_choice(const char *en, const char *ko,
     }
     GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     gtk_widget_set_valign(col, GTK_ALIGN_CENTER);
+    /* Without this a wrapping label is given its minimum width inside a
+     * button and "English (United States)" breaks after two words. */
+    gtk_widget_set_hexpand(col, TRUE);
     gtk_box_append(GTK_BOX(col), su_label(en, ko, "su-choice-title"));
     if (en_detail)
         gtk_box_append(GTK_BOX(col), su_label(en_detail, ko_detail, "su-choice-detail"));

@@ -1573,6 +1573,10 @@ typedef struct {
     char name[112];            /* GPT name, UTF-8 */
     u64  attrs;                /* GPT attribute bits; MBR: bit 7 = active */
     bool logical;              /* MBR logical partition (read, not edited) */
+    /* Only used while a plan is played through on a model: */
+    int  mfs;                  /* fstype_t of what is (or will be) on it */
+    bool mfs_other;            /* something we cannot name (iso9660 ...) */
+    u64  mfs_size;             /* bytes the filesystem spans, 0 = unknown */
 } pent_t;
 
 typedef struct {
@@ -2253,4 +2257,2065 @@ static bool need_tool(const char *name, const char *pkg, char *out, size_t n)
     char msg[200];
     snprintf(msg, sizeof msg, "%s is not installed (Debian package %s)", name, pkg);
     return failed("missing", msg);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * The partition table, through sfdisk
+ *
+ * sfdisk writes both GPT copies and the protective MBR, or the MBR,
+ * with the same syntax for both, from a script on stdin or one option
+ * per change. --no-reread and --no-tell-kernel because kernel_sync()
+ * does that part, partition by partition, after every change.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static bool sfdisk_run(const char *disk, const char *const pre[],
+                       const char *const post[], const char *script)
+{
+    char bin[64], dev[64];
+    if (!need_tool("sfdisk", "fdisk", bin, sizeof bin))
+        return false;
+    if (!dev_path(disk, dev, sizeof dev))
+        return failed("failed", "the disk disappeared");
+    char *argv[24];
+    int k = 0;
+    argv[k++] = bin;
+    argv[k++] = "--no-reread";
+    argv[k++] = "--no-tell-kernel";
+    for (int i = 0; pre && pre[i] && k < 14; i++)
+        argv[k++] = (char *)pre[i];
+    argv[k++] = dev;
+    for (int i = 0; post && post[i] && k < 22; i++)
+        argv[k++] = (char *)post[i];
+    argv[k] = NULL;
+    int rc = run_in(argv, STAT_NONE, script, script ? strlen(script) : 0,
+                    false, false);
+    if (rc != 0) {
+        char msg[96];
+        snprintf(msg, sizeof msg, "sfdisk exited with %d", rc);
+        return failed("failed", msg);
+    }
+    lp_sync();
+    return true;
+}
+
+static void numstr(int n, char *out) { snprintf(out, 8, "%d", n); }
+
+/* The type as sfdisk wants it: a GUID for GPT, two hex digits for MBR. */
+static bool type_code(const table_t *t, const ptype_t *ty, char *out, size_t n)
+{
+    if (!strcmp(t->kind, "gpt")) {
+        strlcpy(out, ty->gpt, n);
+        return true;
+    }
+    if (!ty->mbr)
+        return false;
+    snprintf(out, n, "%02x", ty->mbr);
+    return true;
+}
+
+static void attrs_str(u64 a, char *out, size_t n)
+{
+    out[0] = '\0';
+    if (a & 1) strlcat(out, "RequiredPartition,", n);
+    if (a & 2) strlcat(out, "NoBlockIOProtocol,", n);
+    if (a & 4) strlcat(out, "LegacyBIOSBootable,", n);
+    for (int b = 48; b < 64; b++) {
+        if (a & (1ull << b)) {
+            char g[16];
+            snprintf(g, sizeof g, "GUID:%d,", b);
+            strlcat(out, g, n);
+        }
+    }
+    size_t l = strlen(out);
+    if (l) out[l - 1] = '\0';
+}
+
+static bool tbl_new(const char *disk, bool gpt)
+{
+    static const char *const pre[] = { "--wipe", "always", NULL };
+    return sfdisk_run(disk, pre, NULL, gpt ? "label: gpt\n" : "label: dos\n");
+}
+
+static bool tbl_add(const char *disk, const table_t *t, int num, u64 start,
+                    u64 size, const char *code, const char *uuid,
+                    const char *name)
+{
+    char nb[8], script[400];
+    numstr(num, nb);
+    const char *pre[] = { "--append", "--wipe-partitions", "always", "-N", nb, NULL };
+    if (!strcmp(t->kind, "gpt"))
+        snprintf(script, sizeof script,
+                 "start=%llu, size=%llu, type=%s, uuid=%s%s%s%s\n",
+                 (unsigned long long)start, (unsigned long long)size, code, uuid,
+                 name[0] ? ", name=\"" : "", name, name[0] ? "\"" : "");
+    else
+        snprintf(script, sizeof script, "start=%llu, size=%llu, type=%s\n",
+                 (unsigned long long)start, (unsigned long long)size, code);
+    return sfdisk_run(disk, pre, NULL, script);
+}
+
+static bool tbl_del(const char *disk, int num)
+{
+    char nb[8];
+    numstr(num, nb);
+    const char *pre[] = { "--delete", NULL };
+    const char *post[] = { nb, NULL };
+    return sfdisk_run(disk, pre, post, NULL);
+}
+
+static bool tbl_geom(const char *disk, int num, u64 start, u64 size)
+{
+    char nb[8], script[128];
+    numstr(num, nb);
+    const char *pre[] = { "--wipe-partitions", "never", "-N", nb, NULL };
+    snprintf(script, sizeof script, "start=%llu, size=%llu\n",
+             (unsigned long long)start, (unsigned long long)size);
+    return sfdisk_run(disk, pre, NULL, script);
+}
+
+static bool tbl_set(const char *disk, const char *opt, int num, const char *value)
+{
+    char nb[8];
+    numstr(num, nb);
+    const char *pre[] = { opt, NULL };
+    const char *post[] = { nb, value, NULL };
+    return sfdisk_run(disk, pre, post, NULL);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Filesystems
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static u32 caller_uid, caller_gid;
+
+/* Push what the page cache holds for a device to the disk, and drop
+ * it. The whole-disk device and each partition device have caches of
+ * their own; a move reads through the disk device what may have been
+ * written through the partition one. */
+static void flush_dev(const char *name)
+{
+    char dev[64];
+    if (!dev_path(name, dev, sizeof dev))
+        return;
+    long fd = lp_open(dev, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0)
+        return;
+    lp_fsync((int)fd);
+    lp_ioctl((int)fd, BLKFLSBUF_, NULL);
+    lp_close((int)fd);
+}
+
+static bool wipe_sigs(const char *dev)
+{
+    char bin[64];
+    if (!tool("wipefs", bin, sizeof bin))
+        return true;                 /* mkfs overwrites the main ones */
+    char *argv[] = { bin, "-a", (char *)dev, NULL };
+    return run(argv) == 0;
+}
+
+/* Make a filesystem on `name`. The passphrase, for LUKS, only ever goes
+ * to cryptsetup's stdin. */
+static bool mkfs_on(const char *name, fstype_t f, const char *label,
+                    const char *pass, size_t passlen)
+{
+    char dev[64];
+    if (!dev_path(name, dev, sizeof dev))
+        return failed("failed", "the device node did not appear");
+    progress_last = -1;
+    if (!wipe_sigs(dev))
+        return failed("failed", "could not clear the old signatures");
+
+    char bin[64], owner[48], up[16];
+    char *argv[20];
+    int k = 0;
+    bool whole = !blk_is_part(name);
+    /* The top directory of a new ext4 belongs to whoever asked, so a
+     * data partition they just made is one they can write to. */
+    snprintf(owner, sizeof owner, "root_owner=%u:%u", caller_uid, caller_gid);
+    switch (f) {
+    case FS_EXT4:
+        if (!need_tool("mkfs.ext4", "e2fsprogs", bin, sizeof bin)) return false;
+        argv[k++] = bin; argv[k++] = "-F"; argv[k++] = "-q";
+        if (caller_uid) { argv[k++] = "-E"; argv[k++] = owner; }
+        if (label[0]) { argv[k++] = "-L"; argv[k++] = (char *)label; }
+        break;
+    case FS_BTRFS:
+        if (!need_tool("mkfs.btrfs", "btrfs-progs", bin, sizeof bin)) return false;
+        argv[k++] = bin; argv[k++] = "-f";
+        if (label[0]) { argv[k++] = "-L"; argv[k++] = (char *)label; }
+        break;
+    case FS_FAT32: {
+        if (!need_tool("mkfs.fat", "dosfstools", bin, sizeof bin)) return false;
+        argv[k++] = bin; argv[k++] = "-F"; argv[k++] = "32";
+        if (whole) argv[k++] = "-I";
+        size_t i;
+        for (i = 0; label[i] && i < sizeof up - 1; i++)
+            up[i] = (label[i] >= 'a' && label[i] <= 'z') ? (char)(label[i] - 32) : label[i];
+        up[i] = '\0';
+        if (up[0]) { argv[k++] = "-n"; argv[k++] = up; }
+        break;
+    }
+    case FS_EXFAT:
+        if (!need_tool("mkfs.exfat", "exfatprogs", bin, sizeof bin)) return false;
+        argv[k++] = bin;
+        if (label[0]) { argv[k++] = "-L"; argv[k++] = (char *)label; }
+        break;
+    case FS_NTFS:
+        if (!need_tool("mkfs.ntfs", "ntfs-3g", bin, sizeof bin)) return false;
+        /* -Q: quick. A full format zeroes the device first, which on a
+         * 1 TB disk is hours of a window saying "formatting". */
+        argv[k++] = bin; argv[k++] = "-Q"; argv[k++] = "-F";
+        if (label[0]) { argv[k++] = "-L"; argv[k++] = (char *)label; }
+        break;
+    case FS_SWAP:
+        if (!need_tool("mkswap", "util-linux", bin, sizeof bin)) return false;
+        argv[k++] = bin;
+        if (label[0]) { argv[k++] = "-L"; argv[k++] = (char *)label; }
+        break;
+    case FS_LUKS: {
+        char cs[64], mk[64];
+        if (!need_tool("cryptsetup", "cryptsetup", cs, sizeof cs)) return false;
+        if (!need_tool("mkfs.ext4", "e2fsprogs", mk, sizeof mk)) return false;
+        if (!pass || passlen == 0)
+            return failed("invalid", "an encrypted partition needs a passphrase");
+        progress(20, "encrypting (LUKS2)");
+        char *fa[12];
+        int j = 0;
+        fa[j++] = cs; fa[j++] = "luksFormat"; fa[j++] = "--type"; fa[j++] = "luks2";
+        fa[j++] = "--batch-mode"; fa[j++] = "--key-file=-";
+        if (label[0]) { fa[j++] = "--label"; fa[j++] = (char *)label; }
+        fa[j++] = dev; fa[j] = NULL;
+        if (run_in(fa, STAT_NONE, pass, passlen, false, true) != 0)
+            return failed("failed", "cryptsetup could not format the partition");
+        char map[48], mdev[80];
+        snprintf(map, sizeof map, "lpdiskd-%s", name);
+        snprintf(mdev, sizeof mdev, "/dev/mapper/%s", map);
+        progress(55, "opening the encrypted volume");
+        char *oa[] = { cs, "open", "--key-file=-", dev, map, NULL };
+        if (run_in(oa, STAT_NONE, pass, passlen, false, true) != 0)
+            return failed("failed", "the new encrypted volume would not open");
+        progress(70, "making ext4 inside it");
+        char *ma[10];
+        j = 0;
+        ma[j++] = mk; ma[j++] = "-F"; ma[j++] = "-q";
+        if (caller_uid) { ma[j++] = "-E"; ma[j++] = owner; }
+        if (label[0]) { ma[j++] = "-L"; ma[j++] = (char *)label; }
+        ma[j++] = mdev; ma[j] = NULL;
+        int rc = run(ma);
+        char *ca[] = { cs, "close", map, NULL };
+        run(ca);
+        if (rc != 0)
+            return failed("failed", "mkfs.ext4 inside the encrypted volume failed;"
+                          " the partition is LUKS2 with no filesystem inside");
+        lp_sync();
+        return true;
+    }
+    default:
+        return true;                  /* "none": wiped, left empty */
+    }
+    argv[k++] = dev;
+    argv[k] = NULL;
+    progress(30, argv[0]);
+    int rc = run(argv);
+    if (rc != 0) {
+        char msg[96];
+        snprintf(msg, sizeof msg, "%s exited with %d", argv[0], rc);
+        return failed("failed", msg);
+    }
+    lp_sync();
+    return true;
+}
+
+static bool set_fslabel(const char *name, const char *label)
+{
+    char dev[64], bin[64];
+    if (!dev_path(name, dev, sizeof dev))
+        return failed("failed", "the device is gone");
+    probe_t p;
+    probe_dev(name, &p);
+    fstype_t f = fs_of_probe(&p);
+    char *argv[8];
+    int k = 0;
+    char up[16];
+    switch (f) {
+    case FS_EXT4:
+        if (!need_tool("e2label", "e2fsprogs", bin, sizeof bin)) return false;
+        argv[k++] = bin; argv[k++] = dev; argv[k++] = (char *)label;
+        break;
+    case FS_FAT32: {
+        if (!need_tool("fatlabel", "dosfstools", bin, sizeof bin)) return false;
+        size_t i;
+        for (i = 0; label[i] && i < sizeof up - 1; i++)
+            up[i] = (label[i] >= 'a' && label[i] <= 'z') ? (char)(label[i] - 32) : label[i];
+        up[i] = '\0';
+        argv[k++] = bin; argv[k++] = dev;
+        if (up[0]) argv[k++] = up; else argv[k++] = "-r";
+        break;
+    }
+    case FS_EXFAT:
+        if (!need_tool("exfatlabel", "exfatprogs", bin, sizeof bin)) return false;
+        argv[k++] = bin; argv[k++] = dev; argv[k++] = (char *)label;
+        break;
+    case FS_NTFS:
+        if (!need_tool("ntfslabel", "ntfs-3g", bin, sizeof bin)) return false;
+        argv[k++] = bin; argv[k++] = "--force"; argv[k++] = dev; argv[k++] = (char *)label;
+        break;
+    case FS_BTRFS:
+        if (!need_tool("btrfs", "btrfs-progs", bin, sizeof bin)) return false;
+        argv[k++] = bin; argv[k++] = "filesystem"; argv[k++] = "label";
+        argv[k++] = dev; argv[k++] = (char *)label;
+        break;
+    case FS_SWAP:
+        if (!need_tool("swaplabel", "util-linux", bin, sizeof bin)) return false;
+        argv[k++] = bin; argv[k++] = "-L"; argv[k++] = (char *)label; argv[k++] = dev;
+        break;
+    case FS_LUKS:
+        if (!need_tool("cryptsetup", "cryptsetup", bin, sizeof bin)) return false;
+        argv[k++] = bin; argv[k++] = "config"; argv[k++] = "--label";
+        argv[k++] = (char *)label; argv[k++] = dev;
+        break;
+    default:
+        return failed("refused", "there is no filesystem here to label");
+    }
+    argv[k] = NULL;
+    if (run(argv) != 0)
+        return failed("failed", "the label could not be set");
+    lp_sync();
+    return true;
+}
+
+/* Check (never writes) or repair. Returns 0 clean or repaired, 1 errors
+ * found by a check, -1 failed (reason set). */
+static int fsck_on(const char *name, bool repair)
+{
+    char dev[64], bin[64], fd3[4] = "3";
+    if (!dev_path(name, dev, sizeof dev))
+        return failed("failed", "the device is gone"), -1;
+    probe_t p;
+    probe_dev(name, &p);
+    char *argv[10];
+    int k = 0;
+    statkind_t sk = STAT_NONE;
+    if (starts(p.fs, "ext")) {
+        if (!need_tool("e2fsck", "e2fsprogs", bin, sizeof bin)) return -1;
+        argv[k++] = bin; argv[k++] = "-f"; argv[k++] = repair ? "-y" : "-n";
+        argv[k++] = "-C"; argv[k++] = fd3;
+        sk = STAT_E2FSCK;
+    } else if (!strcmp(p.fs, "vfat")) {
+        if (!need_tool("fsck.fat", "dosfstools", bin, sizeof bin)) return -1;
+        argv[k++] = bin; argv[k++] = repair ? "-a" : "-n";
+        if (repair) argv[k++] = "-w";
+    } else if (!strcmp(p.fs, "exfat")) {
+        if (!need_tool("fsck.exfat", "exfatprogs", bin, sizeof bin)) return -1;
+        argv[k++] = bin; argv[k++] = repair ? "-y" : "-n";
+    } else if (!strcmp(p.fs, "ntfs")) {
+        if (!need_tool("ntfsfix", "ntfs-3g", bin, sizeof bin)) return -1;
+        argv[k++] = bin;
+        argv[k++] = repair ? "-d" : "-n";
+    } else if (!strcmp(p.fs, "btrfs")) {
+        if (!need_tool("btrfs", "btrfs-progs", bin, sizeof bin)) return -1;
+        if (repair)
+            return failed("refused", "btrfs check --repair can make things worse;"
+                          " back up first and repair from a terminal"), -1;
+        argv[k++] = bin; argv[k++] = "check"; argv[k++] = "--readonly";
+    } else {
+        return failed("refused", p.fs[0] ? "there is no checker for this filesystem"
+                                         : "no filesystem found to check"), -1;
+    }
+    argv[k++] = dev;
+    argv[k] = NULL;
+    pct_text = repair ? "repairing" : "checking";
+    int rc = run_in(argv, sk, NULL, 0, !repair, false);
+    if (cancel_req && !repair)
+        return failed("cancelled", "the check was stopped; nothing was changed"), -1;
+    /* e2fsck: 0 clean, 1 fixed, 2 fixed+reboot, 4 left uncorrected;
+     * fsck.fat/exfat: 1 = errors found (with -n) or corrected. */
+    if (rc == 0)
+        return 0;
+    if (repair && (rc == 1 || rc == 2))
+        return 0;
+    if (!repair && rc > 0 && rc < 8)
+        return 1;
+    char msg[96];
+    snprintf(msg, sizeof msg, "%s exited with %d", argv[0], rc);
+    return failed("failed", msg), -1;
+}
+
+/* The smallest this filesystem can be shrunk to, in bytes, or 0 when
+ * the tool that knows cannot say. resize2fs -P and ntfsresize --info
+ * both read the filesystem without touching it. */
+static u64 min_found;
+static void min_line(char *s)
+{
+    const char *k1 = "Estimated minimum size of the filesystem: ";
+    const char *k2 = "You might resize at ";
+    char *p;
+    if ((p = strstr(s, k1)) != NULL)
+        min_found = (u64)strtoll(p + strlen(k1), NULL, 10);   /* blocks */
+    else if ((p = strstr(s, k2)) != NULL)
+        min_found = (u64)strtoll(p + strlen(k2), NULL, 10);   /* bytes */
+}
+
+static u64 capture_run(char *const argv[], void (*fn)(char *))
+{
+    int out[2];
+    if (lp_pipe(out) < 0)
+        return 0;
+    pid_t pid = lp_fork();
+    if (pid == 0) {
+        long nul = lp_open("/dev/null", O_RDWR, 0);
+        if (nul >= 0) lp_dup2((int)nul, 0);
+        lp_dup2(out[1], 1);
+        lp_dup2(out[1], 2);
+        for (int fd = 3; fd < 1024; fd++) lp_close(fd);
+        lp_execve(argv[0], argv, child_env);
+        lp_exit(127);
+    }
+    lp_close(out[1]);
+    static linebuf_t lb;
+    lb.len = 0;
+    char buf[2048];
+    long r;
+    while ((r = lp_read(out[0], buf, sizeof buf)) != 0) {
+        if (r == -EINTR_) continue;
+        if (r < 0) break;
+        feed(&lb, buf, r, fn);
+    }
+    if (lb.len) { lb.buf[lb.len] = '\0'; fn(lb.buf); }
+    lp_close(out[0]);
+    int st;
+    while (lp_waitpid(pid, &st, 0) == -EINTR_)
+        ;
+    return (st & 0x7f) == 0 ? (u64)((st >> 8) & 0xff) : 255;
+}
+
+static u64 fs_min_size(const char *name, const probe_t *p)
+{
+    char dev[64], bin[64];
+    if (!dev_path(name, dev, sizeof dev))
+        return 0;
+    min_found = 0;
+    fstype_t f = fs_of_probe(p);
+    if (f == FS_EXT4 && tool("resize2fs", bin, sizeof bin)) {
+        char *argv[] = { bin, "-P", dev, NULL };
+        capture_run(argv, min_line);
+        u64 bsize = p->used_known && p->size ? 0 : 0;
+        (void)bsize;
+        /* -P answers in filesystem blocks; the block size is in the
+         * superblock the probe already read. */
+        char d2[64];
+        dev_path(name, d2, sizeof d2);
+        long fd = lp_open(d2, O_RDONLY | O_CLOEXEC, 0);
+        u8 sb[1024];
+        u64 bs = 4096;
+        if (fd >= 0) {
+            if (read_at((int)fd, 1024, sb, sizeof sb))
+                bs = 1024ull << le32(sb + 24);
+            lp_close((int)fd);
+        }
+        return min_found * bs;
+    }
+    if (f == FS_NTFS && tool("ntfsresize", bin, sizeof bin)) {
+        char *argv[] = { bin, "--info", "--force", "--no-progress-bar", dev, NULL };
+        capture_run(argv, min_line);
+        return min_found;
+    }
+    if (p->used_known)
+        return p->used + p->used / 10 + 16 * MIB;   /* a margin: metadata */
+    return 0;
+}
+
+/* Can this filesystem change size in place, and in which direction? */
+static const char *resize_refusal(fstype_t f, bool shrink)
+{
+    switch (f) {
+    case FS_EXT4:
+    case FS_NTFS:
+    case FS_SWAP:
+    case FS_NONE:
+        return NULL;
+    case FS_FAT32:
+        return NULL;                  /* with fatresize, if installed */
+    case FS_EXFAT:
+        return "exFAT cannot be resized in place by any Linux tool: copy the"
+               " files somewhere else, delete it, make a new one of the size"
+               " you want, and copy them back";
+    case FS_BTRFS:
+        return shrink ? "btrfs is resized while mounted (btrfs filesystem resize);"
+                        " this tool only works on unmounted filesystems"
+                      : "btrfs is grown while mounted (btrfs filesystem resize max);"
+                        " grow the partition here, then run that";
+    case FS_LUKS:
+        return "an encrypted partition would have to be unlocked to resize what is"
+               " inside it; that is not done here";
+    }
+    return "unknown filesystem";
+}
+
+/* Shrink (before the table) or grow (after it) the filesystem itself.
+ * `bytes` is the new partition size. */
+static bool fs_resize(const char *name, fstype_t f, u64 bytes, bool shrink)
+{
+    char dev[64], bin[64];
+    if (!dev_path(name, dev, sizeof dev))
+        return failed("failed", "the device is gone");
+    switch (f) {
+    case FS_EXT4: {
+        char e2[64];
+        if (!need_tool("e2fsck", "e2fsprogs", e2, sizeof e2)) return false;
+        if (!need_tool("resize2fs", "e2fsprogs", bin, sizeof bin)) return false;
+        /* resize2fs refuses a filesystem that was not checked since it
+         * was last mounted, and it is right to: shrinking moves blocks,
+         * and moving them on top of an error spreads it. */
+        char fd3[4] = "3";
+        char *ck[] = { e2, "-f", "-y", "-C", fd3, dev, NULL };
+        int save_hi = pct_hi;
+        pct_hi = pct_lo + (pct_hi - pct_lo) / 3;
+        pct_text = "checking before resizing";
+        int rc = run_in(ck, STAT_E2FSCK, NULL, 0, false, false);
+        pct_lo = pct_hi; pct_hi = save_hi;
+        if (rc != 0 && rc != 1 && rc != 2)
+            return failed("failed", "the filesystem has errors e2fsck could not"
+                          " repair; nothing was resized");
+        char sz[32];
+        snprintf(sz, sizeof sz, "%lluK", (unsigned long long)(bytes / 1024));
+        pct_text = shrink ? "shrinking the filesystem" : "growing the filesystem";
+        char *rs_shrink[] = { bin, "-p", dev, sz, NULL };
+        char *rs_grow[]   = { bin, "-p", dev, NULL };
+        rc = run(shrink ? rs_shrink : rs_grow);
+        if (rc != 0)
+            return failed("failed", "resize2fs failed");
+        break;
+    }
+    case FS_NTFS: {
+        if (!need_tool("ntfsresize", "ntfs-3g", bin, sizeof bin)) return false;
+        char sz[32];
+        snprintf(sz, sizeof sz, "%llu", (unsigned long long)bytes);
+        /* A dry run first: ntfsresize finds every reason to refuse
+         * (hibernated Windows, too much data) without touching a byte. */
+        char *dry_s[] = { bin, "--no-action", "--force", "--no-progress-bar", "--size", sz, dev, NULL };
+        char *dry_g[] = { bin, "--no-action", "--force", "--no-progress-bar", dev, NULL };
+        if (run(shrink ? dry_s : dry_g) != 0)
+            return failed("failed", "ntfsresize's trial run refused; nothing was"
+                          " changed (if Windows is hibernated or used Fast Startup,"
+                          " shut it down fully first)");
+        pct_text = shrink ? "shrinking NTFS" : "growing NTFS";
+        char *real_s[] = { bin, "--force", "--size", sz, dev, NULL };
+        char *real_g[] = { bin, "--force", dev, NULL };
+        /* It asks "Are you sure you want to proceed (y/[n])?". */
+        if (run_in(shrink ? real_s : real_g, STAT_NONE, "y\n", 2, false, false) != 0)
+            return failed("failed", "ntfsresize failed");
+        break;
+    }
+    case FS_FAT32:
+        /* fatresize resizes the filesystem AND the partition entry
+         * (it goes through libparted), so it is called in place of
+         * both halves; resize_part() knows. */
+        return true;
+    case FS_SWAP: {
+        if (shrink)
+            return true;              /* remade after the table, below */
+        probe_t p;
+        probe_dev(name, &p);
+        if (!need_tool("mkswap", "util-linux", bin, sizeof bin)) return false;
+        char *argv[8];
+        int k = 0;
+        argv[k++] = bin;
+        if (p.uuid[0]) { argv[k++] = "-U"; argv[k++] = p.uuid; }
+        if (p.label[0]) { argv[k++] = "-L"; argv[k++] = p.label; }
+        argv[k++] = dev; argv[k] = NULL;
+        if (run(argv) != 0)
+            return failed("failed", "mkswap failed");
+        break;
+    }
+    default:
+        break;
+    }
+    lp_sync();
+    return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Moving a partition's data
+ *
+ * See the top of the file for why the chunk size and the journal
+ * interval are what they are. Everything is in bytes here; the table
+ * speaks sectors and the caller converts.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    char disk[32], diskid[40], partuuid[40];
+    int  num;
+    u64  from, to, len;          /* bytes, from the start of the disk */
+    u64  done;                   /* bytes copied, in copy order */
+    int  phase;                  /* 0 copying, 1 copied - table next */
+} journal_t;
+
+static bool journal_write(const journal_t *j)
+{
+    char buf[512];
+    int n = snprintf(buf, sizeof buf,
+                     "disk=%s\ndiskid=%s\npartuuid=%s\nnum=%d\nfrom=%llu\n"
+                     "to=%llu\nlen=%llu\ndone=%llu\nphase=%d\n",
+                     j->disk, j->diskid, j->partuuid, j->num,
+                     (unsigned long long)j->from, (unsigned long long)j->to,
+                     (unsigned long long)j->len, (unsigned long long)j->done,
+                     j->phase);
+    lp_mkdir("/var/lib", 0755);
+    lp_mkdir(STATE_DIR, 0700);
+    return n > 0 && lp_write_file_atomic(JOURNAL_PATH, buf, (size_t)n);
+}
+
+static bool journal_read(journal_t *j)
+{
+    memset(j, 0, sizeof *j);
+    static char buf[1024];
+    long got = proc_read(JOURNAL_PATH, buf, sizeof buf - 1);
+    if (got <= 0)
+        return false;
+    buf[got] = '\0';
+    int seen = 0;
+    for (char *line = buf; line && *line; ) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        char *eq = strchr(line, '=');
+        if (eq) {
+            *eq = '\0';
+            const char *v = eq + 1;
+            u64 x = 0;
+            if (!strcmp(line, "disk") && dev_name_ok(v))      { strlcpy(j->disk, v, sizeof j->disk); seen |= 1; }
+            else if (!strcmp(line, "diskid"))                { strlcpy(j->diskid, v, sizeof j->diskid); seen |= 2; }
+            else if (!strcmp(line, "partuuid"))              { strlcpy(j->partuuid, v, sizeof j->partuuid); seen |= 4; }
+            else if (!strcmp(line, "num"))                   { j->num = atoi(v); seen |= 8; }
+            else if (!strcmp(line, "from") && parse_u64(v, &x)) { j->from = x; seen |= 16; }
+            else if (!strcmp(line, "to") && parse_u64(v, &x))   { j->to = x; seen |= 32; }
+            else if (!strcmp(line, "len") && parse_u64(v, &x))  { j->len = x; seen |= 64; }
+            else if (!strcmp(line, "done") && parse_u64(v, &x)) { j->done = x; seen |= 128; }
+            else if (!strcmp(line, "phase"))                 { j->phase = atoi(v); seen |= 256; }
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+    return seen == 511;
+}
+
+/* Copy j->len bytes from j->from to j->to on the whole-disk device,
+ * starting at j->done. Returns true when every byte is across. */
+static bool move_copy(journal_t *j, bool *stopped_clean)
+{
+    *stopped_clean = false;
+    char dev[64];
+    if (!dev_path(j->disk, dev, sizeof dev))
+        return failed("failed", "the disk disappeared");
+    long fd = lp_open(dev, O_RDWR | O_CLOEXEC, 0);
+    if (fd < 0)
+        return failed("failed", "cannot open the disk for writing");
+
+    bool right = j->to > j->from;
+    u64 shift = right ? j->to - j->from : j->from - j->to;
+    bool overlap = shift < j->len;
+    u64 chunk = 4 * MIB;
+    u64 every;                       /* chunks between journal entries */
+    if (overlap) {
+        if (chunk > shift / 2) chunk = shift / 2;
+        chunk &= ~4095ull;
+        if (chunk < 4096) chunk = 4096;
+        every = shift / chunk - 1;
+        if (every < 1) every = 1;
+        if (every > 64) every = 64;
+    } else {
+        every = 64;
+    }
+    u8 *buf = malloc((size_t)chunk);
+    if (!buf) {
+        lp_close((int)fd);
+        return failed("failed", "out of memory");
+    }
+
+    char msg[160], a[32], b[32];
+    human(j->len, a, sizeof a);
+    human(shift, b, sizeof b);
+    snprintf(msg, sizeof msg, "moving %s of data %s by %s%s", a,
+             right ? "right" : "left", b,
+             overlap ? " (overlapping: this step cannot be stopped)" : "");
+    say(msg);
+
+    u64 since = 0;
+    s64 last = 0;
+    bool ok = true;
+    while (j->done < j->len) {
+        if (cancel_req && !overlap) {
+            *stopped_clean = true;
+            ok = false;
+            break;
+        }
+        u64 c = j->len - j->done < chunk ? j->len - j->done : chunk;
+        u64 off = right ? j->len - j->done - c : j->done;
+        if (!read_at((int)fd, j->from + off, buf, (size_t)c) ||
+            !write_at((int)fd, j->to + off, buf, (size_t)c)) {
+            ok = false;
+            failed("failed", "a read or write error stopped the move");
+            break;
+        }
+        j->done += c;
+        if (++since >= every || j->done == j->len) {
+            /* The data first, then the claim that it is there. */
+            if (lp_fsync((int)fd) < 0 || !journal_write(j)) {
+                ok = false;
+                failed("failed", "could not record the move's progress");
+                break;
+            }
+            since = 0;
+        }
+        s64 now = lp_monotonic_ms();
+        if (now - last > 250) {
+            last = now;
+            scaled((int)(j->done * 100 / j->len), "moving data");
+        }
+    }
+    lp_fsync((int)fd);
+    lp_ioctl((int)fd, BLKFLSBUF_, NULL);
+    lp_close((int)fd);
+    free(buf);
+    return ok;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Plans
+ * ═══════════════════════════════════════════════════════════════════ */
+
+typedef enum { S_MKLABEL, S_CREATE, S_DELETE, S_RESIZE, S_MOVE, S_FORMAT,
+               S_LABEL, S_NAME, S_TYPE, S_FLAGS, S_CHECK, S_REPAIR,
+               S_WIPE } skind_t;
+
+static const struct { const char *verb; skind_t k; int min, max; } SVERBS[] = {
+    { "mklabel", S_MKLABEL, 2, 3 },
+    { "create",  S_CREATE,  6, 8 },
+    { "delete",  S_DELETE,  1, 2 },
+    { "resize",  S_RESIZE,  2, 2 },
+    { "move",    S_MOVE,    2, 2 },
+    { "format",  S_FORMAT,  3, 5 },
+    { "label",   S_LABEL,   2, 2 },
+    { "name",    S_NAME,    2, 2 },
+    { "type",    S_TYPE,    2, 2 },
+    { "flags",   S_FLAGS,   2, 2 },
+    { "check",   S_CHECK,   1, 1 },
+    { "repair",  S_REPAIR,  1, 1 },
+    { "wipe",    S_WIPE,    1, 2 },
+    { NULL, S_CHECK, 0, 0 }
+};
+
+typedef struct {
+    skind_t  kind;
+    char     ref[40];            /* as it arrived */
+    int      at;                 /* @N: the step that created the target */
+    char     disk[32];           /* resolved */
+    int      num;                /* table entry; 0 = the whole disk */
+    char     uuid[40];           /* PARTUUID of the target (or the new one) */
+    u64      a, b;               /* bytes: start and size, new size, new start */
+    fstype_t fs;
+    char     label[112];
+    char     ptype[16];
+    char     flags[200];
+    bool     gpt;                /* mklabel: which kind */
+    char     pass[260];
+    size_t   passlen;
+    char     confirm[40];
+    char     desc[360];
+    /* How far execution got, for the state report. */
+    int      phase;
+} step_t;
+
+static step_t steps[MAX_STEPS];
+static int    nsteps;
+
+/* ── The model ──────────────────────────────────────────────────── */
+
+typedef struct {
+    bool    used;
+    table_t t;
+} model_t;
+
+static model_t models[6];
+
+static table_t *model_of(const char *disk)
+{
+    for (int i = 0; i < 6; i++)
+        if (models[i].used && !strcmp(models[i].t.disk, disk))
+            return &models[i].t;
+    for (int i = 0; i < 6; i++) {
+        if (models[i].used)
+            continue;
+        table_t *t = &models[i].t;
+        if (!table_read(disk, t))
+            return NULL;
+        models[i].used = true;
+        for (int k = 0; k < t->n; k++) {
+            char kn[40];
+            probe_t pr;
+            part_name(disk, t->p[k].num, kn, sizeof kn);
+            if (probe_dev(kn, &pr)) {
+                t->p[k].mfs = (int)fs_of_probe(&pr);
+                t->p[k].mfs_other = pr.fs[0] && fs_of_probe(&pr) == FS_NONE;
+                t->p[k].mfs_size = pr.size;
+            }
+        }
+        return t;
+    }
+    return NULL;
+}
+
+static u64 align_up(u64 v, u64 a) { return (v + a - 1) / a * a; }
+
+/* Is [start, start+size) inside the usable area and clear of every
+ * entry but `skip`? Sectors. */
+static bool region_free(const table_t *t, u64 start, u64 size, int skip,
+                        char *why, size_t whyn)
+{
+    if (start < t->first || start + size - 1 > t->last || size == 0) {
+        snprintf(why, whyn, "that would reach outside the usable part of the disk");
+        return false;
+    }
+    for (int i = 0; i < t->n; i++) {
+        const pent_t *p = &t->p[i];
+        if (p->num == skip)
+            continue;
+        if (start < p->start + p->size && p->start < start + size) {
+            char kn[40];
+            part_name(t->disk, p->num, kn, sizeof kn);
+            snprintf(why, whyn, "that overlaps %s", kn);
+            return false;
+        }
+    }
+    return true;
+}
+
+static void fs_desc(const pent_t *p, char *out, size_t n)
+{
+    if (p->mfs_other)
+        strlcpy(out, "unknown filesystem", n);
+    else if (p->mfs == FS_NONE)
+        strlcpy(out, "no filesystem", n);
+    else
+        strlcpy(out, fs_word((fstype_t)p->mfs), n);
+}
+
+/* Resolve a step's target on the model. */
+static bool resolve(step_t *s, int idx, bool allow_disk, char *why, size_t whyn)
+{
+    const char *r = s->ref;
+    if (r[0] == '@') {
+        u64 k;
+        if (!parse_u64(r + 1, &k) || k < 1 || (int)k > idx ||
+            steps[k - 1].kind != S_CREATE) {
+            snprintf(why, whyn, "%s does not name an earlier create step", r);
+            return false;
+        }
+        s->at = (int)k;
+        strlcpy(s->disk, steps[k - 1].disk, sizeof s->disk);
+        s->num = steps[k - 1].num;
+        strlcpy(s->uuid, steps[k - 1].uuid, sizeof s->uuid);
+        return true;
+    }
+    if (guid_ok(r) || mbr_partuuid_ok(r)) {
+        strlcpy(s->uuid, r, sizeof s->uuid);
+        if (guid_ok(r)) upcase(s->uuid); else downcase(s->uuid);
+        if (!find_partuuid(s->uuid, s->disk, sizeof s->disk, &s->num)) {
+            snprintf(why, whyn, "no partition has PARTUUID %s", r);
+            return false;
+        }
+        return true;
+    }
+    if (dev_name_ok(r) && blk_exists(r)) {
+        if (blk_is_part(r)) {
+            blk_disk(r, s->disk, sizeof s->disk);
+            s->num = blk_partno(r);
+            table_t *t = model_of(s->disk);
+            pent_t *p = t ? table_num(t, s->num) : NULL;
+            if (!p) {
+                snprintf(why, whyn, "%s is not in the partition table on the disk", r);
+                return false;
+            }
+            /* From here on the plan names it by its GUID. */
+            strlcpy(s->uuid, p->uuid, sizeof s->uuid);
+            return true;
+        }
+        if (!allow_disk) {
+            snprintf(why, whyn, "%s is a whole disk; this step wants a partition", r);
+            return false;
+        }
+        strlcpy(s->disk, r, sizeof s->disk);
+        s->num = 0;
+        return true;
+    }
+    snprintf(why, whyn, "\"%s\" is not a partition, a PARTUUID or @step", r);
+    return false;
+}
+
+/* The kernel name of a step's target: loop5p2, or loop5. */
+static void target_name(const step_t *s, char *out, size_t n)
+{
+    if (s->num)
+        part_name(s->disk, s->num, out, n);
+    else
+        strlcpy(out, s->disk, n);
+}
+
+/* Things that stop every step whatever else is true: the target is in
+ * use now, or was just checked in an earlier step of the same plan. */
+static bool target_free(const step_t *s, char *why, size_t whyn)
+{
+    char kn[40];
+    target_name(s, kn, sizeof kn);
+    if (!blk_exists(kn))
+        return true;                   /* created by this plan */
+    bool vital;
+    if (s->num == 0)
+        return !disk_busy(kn, &vital, why, whyn);
+    return !in_use(kn, &vital, why, whyn);
+}
+
+static const char *protected_of(const step_t *s)
+{
+    table_t *t = model_of(s->disk);
+    pent_t *p = t && s->num ? table_num(t, s->num) : NULL;
+    return p ? protected_tag(t, p) : NULL;
+}
+
+/* A new random GPT GUID, version 4. */
+static void new_guid(char *out)
+{
+    u8 r[16];
+    if (lp_getrandom(r, sizeof r, 0) != (long)sizeof r) {
+        u64 t = (u64)lp_monotonic_ms() ^ ((u64)lp_getpid() << 32);
+        for (int i = 0; i < 16; i++) { t = t * 6364136223846793005ull + 1; r[i] = (u8)(t >> 56); }
+    }
+    r[6] = (u8)((r[6] & 0x0f) | 0x40);
+    r[8] = (u8)((r[8] & 0x3f) | 0x80);
+    hex_uuid(r, out);
+    upcase(out);
+}
+
+static int free_num(const table_t *t)
+{
+    int max = !strcmp(t->kind, "gpt") ? 128 : 4;
+    for (int n = 1; n <= max; n++) {
+        bool taken = false;
+        for (int i = 0; i < t->n; i++)
+            if (t->p[i].num == n) taken = true;
+        if (!taken)
+            return n;
+    }
+    return 0;
+}
+
+/* Parse one step from its fields and play it on the model. */
+static bool plan_step(step_t *s, int idx, char **f, int nf, char *why, size_t whyn)
+{
+    memset(s, 0, sizeof *s);
+    int v = -1;
+    for (int i = 0; SVERBS[i].verb; i++)
+        if (!strcmp(f[0], SVERBS[i].verb)) v = i;
+    if (v < 0) {
+        snprintf(why, whyn, "\"%.20s\" is not a step", f[0]);
+        return false;
+    }
+    s->kind = SVERBS[v].k;
+    /* Optional trailing fields, recognised by their prefix. */
+    int nargs = nf - 1;
+    while (nargs > 0) {
+        char *last = f[nargs];
+        if (starts(last, "confirm=") && alphabet_ok(last + 8, "-", 20, true)) {
+            strlcpy(s->confirm, last + 8, sizeof s->confirm);
+        } else if (starts(last, "uuid=") && guid_ok(last + 5)) {
+            strlcpy(s->uuid, last + 5, sizeof s->uuid);
+            upcase(s->uuid);
+        } else if (starts(last, "k:")) {
+            if (!unhex(last + 2, s->pass, sizeof s->pass, &s->passlen) ||
+                s->passlen < 8) {
+                snprintf(why, whyn, "a passphrase is hex after k:, at least 8 bytes");
+                return false;
+            }
+        } else {
+            break;
+        }
+        nargs--;
+    }
+    if (nargs < SVERBS[v].min || nargs > SVERBS[v].max) {
+        snprintf(why, whyn, "%s takes %d to %d arguments", f[0],
+                 SVERBS[v].min, SVERBS[v].max);
+        return false;
+    }
+    char **a = f + 1;
+    char tmp[200], sz1[32], sz2[32], kn[40];
+
+    if (s->kind == S_MKLABEL || s->kind == S_CREATE) {
+        if (!dev_name_ok(a[0]) || !blk_exists(a[0]) || blk_is_part(a[0])) {
+            snprintf(why, whyn, "%.31s is not a whole disk", a[0]);
+            return false;
+        }
+        strlcpy(s->disk, a[0], sizeof s->disk);
+        strlcpy(s->ref, a[0], sizeof s->ref);
+    } else {
+        strlcpy(s->ref, a[0], sizeof s->ref);
+        bool disk_ok = s->kind == S_FORMAT || s->kind == S_LABEL ||
+                       s->kind == S_CHECK || s->kind == S_REPAIR || s->kind == S_WIPE;
+        if (!resolve(s, idx, disk_ok, why, whyn))
+            return false;
+    }
+    table_t *t = model_of(s->disk);
+    if (!t) {
+        snprintf(why, whyn, "cannot read %s", s->disk);
+        return false;
+    }
+    bool gpt = !strcmp(t->kind, "gpt");
+    pent_t *p = s->num ? table_num(t, s->num) : NULL;
+    if (s->num && !p) {
+        snprintf(why, whyn, "the partition %s is gone by this step", s->ref);
+        return false;
+    }
+    target_name(s, kn, sizeof kn);
+    u64 lss = t->lss;
+    u64 al = ALIGN_BYTES / lss;
+    char what[160];
+    if (p) {
+        char fd_[40];
+        fs_desc(p, fd_, sizeof fd_);
+        human(p->size * lss, sz1, sizeof sz1);
+        snprintf(what, sizeof what, "%s (%s, %s%s%s%s)", kn, sz1, fd_,
+                 p->name[0] ? ", \"" : "", p->name, p->name[0] ? "\"" : "");
+    } else {
+        strlcpy(what, kn, sizeof what);
+    }
+
+    /* Everything but a create and a check needs its target unused. */
+    if (s->kind != S_CREATE && s->kind != S_MKLABEL && !target_free(s, why, whyn))
+        return false;
+
+    switch (s->kind) {
+    case S_MKLABEL: {
+        if (strcmp(a[1], "gpt") && strcmp(a[1], "mbr")) {
+            snprintf(why, whyn, "the table type is gpt or mbr");
+            return false;
+        }
+        bool vital;
+        if (disk_busy(s->disk, &vital, why, whyn))
+            return false;
+        bool prot = false;
+        for (int i = 0; i < t->n; i++)
+            if (protected_tag(t, &t->p[i])) prot = true;
+        if (prot && strcmp(s->confirm, "ALL")) {
+            snprintf(why, whyn, "%s holds the ESP or LP-RECOVERY; a new table"
+                     " needs the typed confirmation", s->disk);
+            return false;
+        }
+        s->gpt = !strcmp(a[1], "gpt");
+        u64 total = t->nsect;
+        memset(t->p, 0, sizeof t->p);
+        t->n = 0;
+        strlcpy(t->kind, s->gpt ? "gpt" : "mbr", sizeof t->kind);
+        t->first = s->gpt ? (u64)(align_up(34 * 512, ALIGN_BYTES) / lss) : al;
+        t->last = s->gpt ? total - 34 * 512 / lss : total - 1;
+        t->has_extended = false;
+        snprintf(s->desc, sizeof s->desc, "Create a new, empty %s partition"
+                 " table on %s - everything on it is lost",
+                 s->gpt ? "GPT" : "MBR", s->disk);
+        return true;
+    }
+    case S_CREATE: {
+        u64 start, size;
+        if (!parse_u64(a[1], &start) || !parse_u64(a[2], &size)) {
+            snprintf(why, whyn, "start and size are byte counts");
+            return false;
+        }
+        if (!fs_parse(a[3], &s->fs)) {
+            snprintf(why, whyn, "the filesystem is one of ext4 btrfs fat32 exfat"
+                     " ntfs swap luks-ext4 none");
+            return false;
+        }
+        if (!label_decode(a[4], s->fs, false, s->label, sizeof s->label, why, whyn))
+            return false;
+        if (!strcmp(t->kind, "none")) {
+            snprintf(why, whyn, "%s has no partition table yet - create one first",
+                     s->disk);
+            return false;
+        }
+        if (t->has_extended) {
+            snprintf(why, whyn, "this MBR disk has logical partitions; new"
+                     " partitions on it are made from a terminal (fdisk)");
+            return false;
+        }
+        if (start % ALIGN_BYTES || size % lss || size < MIB) {
+            snprintf(why, whyn, "a new partition starts on a MiB boundary and is"
+                     " at least 1 MiB");
+            return false;
+        }
+        const char *tn = strcmp(a[5], "auto") ? a[5] : auto_type(s->fs, gpt);
+        const ptype_t *ty = ptype_by_name(tn);
+        if (!ty || (!gpt && !ty->mbr)) {
+            snprintf(why, whyn, "\"%.16s\" is not a partition type this %s table"
+                     " can have", a[5], t->kind);
+            return false;
+        }
+        strlcpy(s->ptype, ty->name, sizeof s->ptype);
+        if (s->fs == FS_LUKS && s->passlen == 0) {
+            snprintf(why, whyn, "an encrypted partition needs a passphrase");
+            return false;
+        }
+        s->a = start;
+        s->b = size;
+        u64 ss = start / lss, sn = size / lss;
+        if (!region_free(t, ss, sn, 0, tmp, sizeof tmp)) {
+            snprintf(why, whyn, "the new partition does not fit: %s", tmp);
+            return false;
+        }
+        s->num = free_num(t);
+        if (!s->num || t->n >= MAX_PARTS) {
+            snprintf(why, whyn, "the partition table is full");
+            return false;
+        }
+        if (gpt) {
+            if (!s->uuid[0])
+                new_guid(s->uuid);
+            if (table_uuid(t, s->uuid)) {
+                snprintf(why, whyn, "that PARTUUID is already on the disk");
+                return false;
+            }
+        } else {
+            snprintf(s->uuid, sizeof s->uuid, "%s-%02x", t->id, s->num);
+        }
+        pent_t *np = &t->p[t->n++];
+        memset(np, 0, sizeof *np);
+        np->num = s->num;
+        np->start = ss;
+        np->size = sn;
+        strlcpy(np->uuid, s->uuid, sizeof np->uuid);
+        if (gpt) strlcpy(np->type, ty->gpt, sizeof np->type);
+        else snprintf(np->type, sizeof np->type, "0x%02x", ty->mbr);
+        if (gpt) strlcpy(np->name, s->label, sizeof np->name);
+        np->mfs = (int)s->fs;
+        np->mfs_size = s->fs == FS_NONE ? 0 : size;
+        human(size, sz1, sizeof sz1);
+        human(start, sz2, sizeof sz2);
+        snprintf(s->desc, sizeof s->desc, "Create a %s %s partition%s%s%s on %s at %s",
+                 sz1, s->fs == FS_NONE ? "empty" : fs_word(s->fs),
+                 s->label[0] ? " \"" : "", s->label, s->label[0] ? "\"" : "",
+                 s->disk, sz2);
+        return true;
+    }
+    case S_DELETE: {
+        const char *tag = protected_tag(t, p);
+        if (tag && strcmp(s->confirm, tag)) {
+            snprintf(why, whyn, "%s is the %s; deleting it needs the typed"
+                     " confirmation", kn, tag);
+            return false;
+        }
+        if (p->logical) {
+            snprintf(why, whyn, "logical MBR partitions are removed from a terminal (fdisk)");
+            return false;
+        }
+        snprintf(s->desc, sizeof s->desc, "Delete %s", what);
+        *p = t->p[--t->n];
+        return true;
+    }
+    case S_RESIZE: {
+        u64 size;
+        if (!parse_u64(a[1], &size) || size % lss || size < MIB) {
+            snprintf(why, whyn, "the new size is a byte count, at least 1 MiB");
+            return false;
+        }
+        u64 sn = size / lss;
+        if (sn == p->size) {
+            snprintf(why, whyn, "%s is already that size", kn);
+            return false;
+        }
+        if (p->logical) {
+            snprintf(why, whyn, "logical MBR partitions are resized from a terminal");
+            return false;
+        }
+        bool shrink = sn < p->size;
+        if (p->mfs_other) {
+            snprintf(why, whyn, "%s has a filesystem this tool cannot resize", kn);
+            return false;
+        }
+        const char *no = resize_refusal((fstype_t)p->mfs, shrink);
+        if (no) {
+            snprintf(why, whyn, "%s: %s", kn, no);
+            return false;
+        }
+        if (!region_free(t, p->start, sn, p->num, tmp, sizeof tmp)) {
+            snprintf(why, whyn, "%s cannot grow that far: %s", kn, tmp);
+            return false;
+        }
+        /* The new end must still be on a MiB, or on the last sector. */
+        if ((p->start + sn) % al && p->start + sn - 1 != t->last) {
+            snprintf(why, whyn, "the new size has to end on a MiB boundary");
+            return false;
+        }
+        human(p->size * lss, sz1, sizeof sz1);
+        human(size, sz2, sizeof sz2);
+        snprintf(s->desc, sizeof s->desc, "%s %s from %s to %s",
+                 shrink ? "Shrink" : "Grow", what, sz1, sz2);
+        s->b = size;
+        s->a = p->start * lss;
+        p->size = sn;
+        if (p->mfs != FS_NONE) p->mfs_size = size;
+        return true;
+    }
+    case S_MOVE: {
+        u64 start;
+        if (!parse_u64(a[1], &start) || start % ALIGN_BYTES) {
+            snprintf(why, whyn, "the new start is a byte count on a MiB boundary");
+            return false;
+        }
+        u64 ss = start / lss;
+        if (ss == p->start) {
+            snprintf(why, whyn, "%s already starts there", kn);
+            return false;
+        }
+        if (p->logical) {
+            snprintf(why, whyn, "logical MBR partitions are moved from a terminal");
+            return false;
+        }
+        if (!region_free(t, ss, p->size, p->num, tmp, sizeof tmp)) {
+            snprintf(why, whyn, "%s cannot move there: %s", kn, tmp);
+            return false;
+        }
+        human(p->start * lss, sz1, sizeof sz1);
+        human(start, sz2, sizeof sz2);
+        snprintf(s->desc, sizeof s->desc, "Move %s from %s to %s on the disk"
+                 " (slow: every block is copied)", what, sz1, sz2);
+        s->a = start;
+        s->b = p->size * lss;
+        p->start = ss;
+        return true;
+    }
+    case S_FORMAT: {
+        if (!fs_parse(a[1], &s->fs)) {
+            snprintf(why, whyn, "the filesystem is one of ext4 btrfs fat32 exfat"
+                     " ntfs swap luks-ext4 none");
+            return false;
+        }
+        if (!label_decode(a[2], s->fs, false, s->label, sizeof s->label, why, whyn))
+            return false;
+        if (s->fs == FS_LUKS && s->passlen == 0) {
+            snprintf(why, whyn, "an encrypted partition needs a passphrase");
+            return false;
+        }
+        const char *tag = p ? protected_tag(t, p) : NULL;
+        if (tag && strcmp(s->confirm, tag)) {
+            snprintf(why, whyn, "%s is the %s; formatting it needs the typed"
+                     " confirmation", kn, tag);
+            return false;
+        }
+        if (!p && strcmp(t->kind, "none")) {
+            snprintf(why, whyn, "%s has a partition table; format a partition,"
+                     " or make a new table first", kn);
+            return false;
+        }
+        snprintf(s->desc, sizeof s->desc, "Format %s as %s%s%s%s - what is on it"
+                 " now is lost", what, fs_word(s->fs), s->label[0] ? " \"" : "",
+                 s->label, s->label[0] ? "\"" : "");
+        if (p) { p->mfs = (int)s->fs; p->mfs_other = false; p->mfs_size = p->size * lss; }
+        return true;
+    }
+    case S_LABEL: {
+        fstype_t f = p ? (fstype_t)p->mfs : FS_NONE;
+        if (!p) {
+            probe_t pr;
+            probe_dev(kn, &pr);
+            f = fs_of_probe(&pr);
+        }
+        if (f == FS_NONE) {
+            snprintf(why, whyn, "%s has no filesystem to label", kn);
+            return false;
+        }
+        if (!label_decode(a[1], f, false, s->label, sizeof s->label, why, whyn))
+            return false;
+        snprintf(s->desc, sizeof s->desc, "Label the filesystem on %s \"%s\"",
+                 kn, s->label);
+        return true;
+    }
+    case S_NAME:
+        if (!gpt) {
+            snprintf(why, whyn, "only GPT partitions have names");
+            return false;
+        }
+        if (!label_decode(a[1], FS_NONE, true, s->label, sizeof s->label, why, whyn))
+            return false;
+        if (!strcmp(s->label, "LP-RECOVERY") || !strcmp(s->label, "LP-ROOT") ||
+            !strcmp(p->name, "LP-RECOVERY") || !strcmp(p->name, "LP-ROOT")) {
+            snprintf(why, whyn, "LP-ROOT and LP-RECOVERY are how the boot menu"
+                     " finds the system; those names are not changed here");
+            return false;
+        }
+        snprintf(s->desc, sizeof s->desc, "Name %s \"%s\"", what, s->label);
+        strlcpy(p->name, s->label, sizeof p->name);
+        return true;
+    case S_TYPE: {
+        const ptype_t *ty = ptype_by_name(a[1]);
+        if (!ty || (!gpt && !ty->mbr)) {
+            snprintf(why, whyn, "\"%.16s\" is not a type this table can have", a[1]);
+            return false;
+        }
+        strlcpy(s->ptype, ty->name, sizeof s->ptype);
+        snprintf(s->desc, sizeof s->desc, "Set the type of %s to %s", what, ty->desc);
+        if (gpt) strlcpy(p->type, ty->gpt, sizeof p->type);
+        else snprintf(p->type, sizeof p->type, "0x%02x", ty->mbr);
+        return true;
+    }
+    case S_FLAGS:
+        if (!alphabet_ok(a[1], ",_", 190, false)) {
+            snprintf(why, whyn, "flags are a comma list, or none");
+            return false;
+        }
+        strlcpy(s->flags, a[1], sizeof s->flags);
+        snprintf(s->desc, sizeof s->desc, "Set the flags of %s to %s", what,
+                 !strcmp(a[1], "none") ? "none" : a[1]);
+        return true;
+    case S_CHECK:
+    case S_REPAIR:
+        snprintf(s->desc, sizeof s->desc, "%s the filesystem on %s",
+                 s->kind == S_CHECK ? "Check" : "Check and repair", what);
+        return true;
+    case S_WIPE: {
+        const char *tag = p ? protected_tag(t, p) : NULL;
+        if (tag && strcmp(s->confirm, tag)) {
+            snprintf(why, whyn, "%s is the %s; wiping it needs the typed"
+                     " confirmation", kn, tag);
+            return false;
+        }
+        if (!p) {
+            bool vital;
+            if (disk_busy(kn, &vital, why, whyn))
+                return false;
+        }
+        snprintf(s->desc, sizeof s->desc, "Wipe the signatures on %s so nothing"
+                 " recognises what was on it", what);
+        if (p) { p->mfs = FS_NONE; p->mfs_other = false; }
+        else strlcpy(t->kind, "none", sizeof t->kind);
+        return true;
+    }
+    }
+    return false;
+}
+
+/* ── Flags ──────────────────────────────────────────────────────────
+ *
+ * "flags" is the whole set a partition should have afterwards, the way
+ * GParted's flag dialog shows it. Some of those flags are really the
+ * partition type (esp, msftdata, lvm, raid ...), the rest GPT
+ * attribute bits or MBR's active byte. This turns the set into the
+ * type and the bits, or says which flag makes no sense. */
+static bool flags_compute(const table_t *t, const pent_t *p, const char *list,
+                          char *type, size_t typen, u64 *attrs,
+                          char *why, size_t whyn)
+{
+    bool gpt = !strcmp(t->kind, "gpt");
+    const char *typeflag = NULL;
+    u64 a = gpt ? (p->attrs & ~((1ull << 0) | (1ull << 2) | (1ull << 60) |
+                                (1ull << 62) | (1ull << 63))) : 0;
+    bool hidden = false;
+    char buf[200];
+    strlcpy(buf, list, sizeof buf);
+    if (strcmp(buf, "none") != 0) {
+        for (char *f = buf; f && *f; ) {
+            char *c = strchr(f, ',');
+            if (c) *c++ = '\0';
+            const char *tf = NULL;
+            if (!strcmp(f, "esp") || (!strcmp(f, "boot") && gpt)) tf = "esp";
+            else if (!strcmp(f, "boot"))        a |= 0x80;
+            else if (!strcmp(f, "msftdata"))    tf = "msdata";
+            else if (!strcmp(f, "lvm"))         tf = "lvm";
+            else if (!strcmp(f, "raid"))        tf = "raid";
+            else if (!strcmp(f, "swap"))        tf = "swap";
+            else if (!strcmp(f, "bios_grub"))   tf = "bios";
+            else if (!strcmp(f, "msftres"))     tf = "msres";
+            else if (!strcmp(f, "diag"))        tf = "winre";
+            else if (!strcmp(f, "hidden"))      hidden = true;
+            else if (gpt && !strcmp(f, "legacy_boot"))  a |= 1ull << 2;
+            else if (gpt && !strcmp(f, "required"))     a |= 1ull << 0;
+            else if (gpt && !strcmp(f, "readonly"))     a |= 1ull << 60;
+            else if (gpt && !strcmp(f, "no_automount")) a |= 1ull << 63;
+            else {
+                snprintf(why, whyn, "\"%.20s\" is not a flag a %s partition can have",
+                         f, t->kind);
+                return false;
+            }
+            if (tf) {
+                if (typeflag && strcmp(typeflag, tf)) {
+                    snprintf(why, whyn, "%s and %s are both partition types;"
+                             " a partition has one", typeflag, tf);
+                    return false;
+                }
+                typeflag = tf;
+            }
+            f = c;
+        }
+    }
+    if (gpt && hidden) a |= 1ull << 62;
+
+    /* The type: the one a type-flag names; otherwise keep the current
+     * type unless it IS one of the type-flags, which was just switched
+     * off - then back to the ordinary type for what is on it. */
+    const ptype_t *cur = ptype_find(p->type);
+    const ptype_t *ty = typeflag ? ptype_by_name(typeflag) : cur;
+    static const char *const flagtypes[] = { "esp", "msdata", "lvm", "raid",
+                                             "swap", "bios", "msres", "winre", NULL };
+    if (!typeflag && cur) {
+        for (int i = 0; flagtypes[i]; i++)
+            if (!strcmp(cur->name, flagtypes[i]))
+                ty = ptype_by_name(auto_type((fstype_t)p->mfs, gpt));
+        if (!gpt && !strcmp(cur->name, "fat32"))
+            ty = cur;
+    }
+    if (gpt) {
+        strlcpy(type, ty ? ty->gpt : p->type, typen);
+    } else {
+        u8 code = ty && ty->mbr ? ty->mbr : (u8)(hexval(p->type[2]) * 16 + hexval(p->type[3]));
+        /* MBR hides FAT and NTFS by adding 0x10 to the type. */
+        static const u8 hideable[] = { 0x01, 0x04, 0x06, 0x07, 0x0b, 0x0c, 0x0e, 0 };
+        u8 base = code & (u8)~0x10;
+        bool can = false;
+        for (int i = 0; hideable[i]; i++) if (hideable[i] == base) can = true;
+        if (hidden && !can) {
+            snprintf(why, whyn, "only FAT and NTFS partitions can be hidden on MBR");
+            return false;
+        }
+        if (can) code = hidden ? (u8)(base | 0x10) : base;
+        snprintf(type, typen, "0x%02x", code);
+    }
+    *attrs = a;
+    return true;
+}
+
+/* ── Doing it ───────────────────────────────────────────────────── */
+
+static int  cur_step;                  /* 1-based, while executing */
+
+static bool reread(const char *disk, table_t *t)
+{
+    if (!table_read(disk, t))
+        return failed("failed", "the partition table could not be read back");
+    return true;
+}
+
+static pent_t *entry_of(table_t *t, step_t *s)
+{
+    pent_t *p = s->uuid[0] ? table_uuid(t, s->uuid) : NULL;
+    if (!p && s->num)
+        p = table_num(t, s->num);      /* an MBR entry whose id changed */
+    if (p)
+        s->num = p->num;
+    return p;
+}
+
+/* Is it still free? The plan checked seconds or minutes ago. */
+static bool still_free(const step_t *s)
+{
+    mounts_refresh();
+    char why[300];
+    if (!target_free(s, why, sizeof why))
+        return failed("refused", why);
+    return true;
+}
+
+static bool sync_or_fail(const char *disk)
+{
+    char why[300];
+    if (!kernel_sync(disk, why, sizeof why))
+        return failed("failed", why);
+    return true;
+}
+
+static bool exec_step(step_t *s)
+{
+    static table_t t;
+    char kn[40], why[300], code[48];
+    if (s->kind != S_MKLABEL && s->kind != S_CREATE && s->at) {
+        /* The target was made by an earlier step; take what it became. */
+        step_t *c = &steps[s->at - 1];
+        strlcpy(s->disk, c->disk, sizeof s->disk);
+        s->num = c->num;
+        strlcpy(s->uuid, c->uuid, sizeof s->uuid);
+    }
+    if (!reread(s->disk, &t))
+        return false;
+    bool gpt = !strcmp(t.kind, "gpt");
+    pent_t *p = NULL;
+    if (s->kind != S_MKLABEL && s->kind != S_CREATE && s->num) {
+        p = entry_of(&t, s);
+        if (!p)
+            return failed("failed", "the partition is not in the table any more");
+    }
+    target_name(s, kn, sizeof kn);
+    if (s->kind != S_CREATE && !still_free(s))
+        return false;
+    u64 lss = t.lss;
+
+    switch (s->kind) {
+    case S_MKLABEL:
+        flush_dev(s->disk);
+        if (!tbl_new(s->disk, s->gpt))
+            return false;
+        s->phase = 1;
+        if (!sync_or_fail(s->disk) || !reread(s->disk, &t))
+            return false;
+        if (strcmp(t.kind, s->gpt ? "gpt" : "mbr") || t.n)
+            return failed("failed", "the new table did not read back as written");
+        return true;
+
+    case S_CREATE: {
+        const ptype_t *ty = ptype_by_name(s->ptype);
+        if (!type_code(&t, ty, code, sizeof code))
+            return failed("failed", "that type is not possible on this table");
+        u64 ss = s->a / lss, sn = s->b / lss;
+        if (!region_free(&t, ss, sn, 0, why, sizeof why))
+            return failed("failed", why);
+        if (table_num(&t, s->num))
+            s->num = free_num(&t);
+        const char *name = gpt ? s->label : "";
+        if (!tbl_add(s->disk, &t, s->num, ss, sn, code, s->uuid, name))
+            return false;
+        s->phase = 1;
+        if (!sync_or_fail(s->disk) || !reread(s->disk, &t))
+            return false;
+        pent_t *np = table_num(&t, s->num);
+        if (!np || np->start != ss || np->size != sn)
+            return failed("failed", "the new partition did not read back where it"
+                          " was put");
+        strlcpy(s->uuid, np->uuid, sizeof s->uuid);
+        target_name(s, kn, sizeof kn);
+        if (s->fs != FS_NONE) {
+            pct_lo = 30; pct_hi = 95;
+            if (!mkfs_on(kn, s->fs, s->label, s->pass, s->passlen))
+                return false;
+            s->phase = 2;
+        }
+        return true;
+    }
+
+    case S_DELETE:
+        flush_dev(kn);
+        if (!tbl_del(s->disk, p->num))
+            return false;
+        s->phase = 1;
+        if (!sync_or_fail(s->disk) || !reread(s->disk, &t))
+            return false;
+        if (table_uuid(&t, s->uuid))
+            return failed("failed", "the partition is still in the table");
+        return true;
+
+    case S_RESIZE: {
+        probe_t pr;
+        probe_dev(kn, &pr);
+        fstype_t f = fs_of_probe(&pr);
+        if (pr.fs[0] && f == FS_NONE)
+            return failed("refused", "that filesystem cannot be resized here");
+        u64 sn = s->b / lss;
+        bool shrink = sn < p->size;
+        const char *no = resize_refusal(f, shrink);
+        if (no)
+            return failed("refused", no);
+        if (!region_free(&t, p->start, sn, p->num, why, sizeof why))
+            return failed("failed", why);
+        flush_dev(kn);
+        if (f == FS_FAT32 && pr.fs[0]) {
+            /* fatresize does both halves itself, through libparted. */
+            char bin[64], dev[64], sz[32], nb[8];
+            if (!need_tool("fatresize", "fatresize", bin, sizeof bin))
+                return false;
+            dev_path(s->disk, dev, sizeof dev);
+            snprintf(sz, sizeof sz, "%llu", (unsigned long long)s->b);
+            numstr(p->num, nb);
+            char *argv[] = { bin, "-f", "-s", sz, "-n", nb, dev, NULL };
+            pct_text = "resizing FAT";
+            if (run(argv) != 0)
+                return failed("failed", "fatresize failed");
+            s->phase = 2;
+        } else if (shrink) {
+            pct_lo = 5; pct_hi = 80;
+            if (!fs_resize(kn, f, s->b, true))
+                return false;
+            s->phase = 1;
+            probe_dev(kn, &pr);
+            if (pr.size > s->b)
+                return failed("failed", "the filesystem is still bigger than the"
+                              " new partition size; the partition was not touched");
+            if (!tbl_geom(s->disk, p->num, p->start, sn))
+                return false;
+            s->phase = 2;
+            if (f == FS_SWAP) {
+                if (!sync_or_fail(s->disk))
+                    return false;
+                if (!fs_resize(kn, f, s->b, false))
+                    return false;
+            }
+        } else {
+            if (!tbl_geom(s->disk, p->num, p->start, sn))
+                return false;
+            s->phase = 3;
+            if (!sync_or_fail(s->disk))
+                return false;
+            pct_lo = 10; pct_hi = 95;
+            if (f != FS_NONE && !fs_resize(kn, f, s->b, false))
+                return false;
+            s->phase = 4;
+        }
+        if (!sync_or_fail(s->disk) || !reread(s->disk, &t))
+            return false;
+        p = entry_of(&t, s);
+        if (!p || p->size != sn)
+            return failed("failed", "the partition did not read back at the new size");
+        probe_dev(kn, &pr);
+        if (pr.size > s->b)
+            return failed("failed", "the filesystem is bigger than its partition");
+        return true;
+    }
+
+    case S_MOVE: {
+        journal_t j;
+        memset(&j, 0, sizeof j);
+        strlcpy(j.disk, s->disk, sizeof j.disk);
+        strlcpy(j.diskid, t.id, sizeof j.diskid);
+        strlcpy(j.partuuid, p->uuid, sizeof j.partuuid);
+        j.num = p->num;
+        j.from = p->start * lss;
+        j.to = s->a;
+        j.len = p->size * lss;
+        if (!region_free(&t, s->a / lss, p->size, p->num, why, sizeof why))
+            return failed("failed", why);
+        flush_dev(kn);
+        flush_dev(s->disk);
+        if (!journal_write(&j))
+            return failed("failed", "could not write the move journal");
+        s->phase = 1;
+        bool clean;
+        pct_lo = 2; pct_hi = 90;
+        if (!move_copy(&j, &clean)) {
+            if (clean) {
+                lp_unlink(JOURNAL_PATH);
+                s->phase = 0;
+                return failed("cancelled", "the move was stopped before the table"
+                              " changed; the partition is where it was, intact");
+            }
+            return false;
+        }
+        j.phase = 1;
+        journal_write(&j);
+        s->phase = 2;
+        if (!tbl_geom(s->disk, p->num, s->a / lss, p->size))
+            return false;
+        s->phase = 3;
+        lp_unlink(JOURNAL_PATH);
+        if (!sync_or_fail(s->disk) || !reread(s->disk, &t))
+            return false;
+        p = entry_of(&t, s);
+        if (!p || p->start != s->a / lss)
+            return failed("failed", "the partition did not read back at its new place");
+        probe_t pr;
+        if (probe_dev(kn, &pr) && pr.fs[0] && strcmp(pr.fs, "swap") &&
+            strcmp(pr.fs, "crypto_LUKS") && strcmp(pr.fs, "btrfs")) {
+            say("checking the moved filesystem (read-only)");
+            pct_lo = 90; pct_hi = 100;
+            if (fsck_on(kn, false) != 0)
+                return failed("failed", "the moved filesystem does not check clean");
+        }
+        return true;
+    }
+
+    case S_FORMAT: {
+        pct_lo = 5; pct_hi = 90;
+        flush_dev(kn);
+        if (!mkfs_on(kn, s->fs, s->label, s->pass, s->passlen))
+            return false;
+        s->phase = 1;
+        /* A FAT or NTFS partition typed "Linux" is invisible to Windows
+         * and a Linux one typed "basic data" is offered to it; follow the
+         * filesystem, but only between the ordinary types. */
+        if (p && s->fs != FS_NONE) {
+            const ptype_t *cur = ptype_find(p->type);
+            if (cur && (!strcmp(cur->name, "linux") || !strcmp(cur->name, "msdata") ||
+                        !strcmp(cur->name, "fat32") || !strcmp(cur->name, "swap"))) {
+                const ptype_t *want = ptype_by_name(auto_type(s->fs, gpt));
+                if (want && want != cur && type_code(&t, want, code, sizeof code) &&
+                    strcmp(want->gpt, cur->gpt) != 0)
+                    tbl_set(s->disk, "--part-type", p->num, code);
+            }
+        }
+        probe_t pr;
+        probe_dev(kn, &pr);
+        if (s->fs != FS_NONE && fs_of_probe(&pr) != s->fs &&
+            !(s->fs == FS_LUKS && !strcmp(pr.fs, "crypto_LUKS")))
+            return failed("failed", "the new filesystem did not read back");
+        return true;
+    }
+
+    case S_LABEL: {
+        if (!set_fslabel(kn, s->label))
+            return false;
+        probe_t pr;
+        probe_dev(kn, &pr);
+        char want[112];
+        strlcpy(want, s->label, sizeof want);
+        if (!strcmp(pr.fs, "vfat")) upcase(want);
+        if (strcmp(pr.label, want) != 0)
+            return failed("failed", "the label did not read back");
+        return true;
+    }
+
+    case S_NAME:
+        if (!tbl_set(s->disk, "--part-label", p->num, s->label))
+            return false;
+        if (!reread(s->disk, &t))
+            return false;
+        p = entry_of(&t, s);
+        if (!p || strcmp(p->name, s->label) != 0)
+            return failed("failed", "the name did not read back");
+        return true;
+
+    case S_TYPE: {
+        const ptype_t *ty = ptype_by_name(s->ptype);
+        if (!type_code(&t, ty, code, sizeof code))
+            return failed("failed", "that type is not possible on this table");
+        if (!tbl_set(s->disk, "--part-type", p->num, code))
+            return false;
+        if (!reread(s->disk, &t))
+            return false;
+        p = entry_of(&t, s);
+        const ptype_t *got = p ? ptype_find(p->type) : NULL;
+        if (!got || (gpt ? strcmp(got->gpt, ty->gpt) : got->mbr != ty->mbr))
+            return failed("failed", "the type did not read back");
+        return true;
+    }
+
+    case S_FLAGS: {
+        char type[48];
+        u64 attrs;
+        p->mfs = (int)fs_of_probe(&(probe_t){0});
+        probe_t pr;
+        if (probe_dev(kn, &pr)) p->mfs = (int)fs_of_probe(&pr);
+        if (!flags_compute(&t, p, s->flags, type, sizeof type, &attrs, why, sizeof why))
+            return failed("invalid", why);
+        if (strcmp(type, p->type) != 0) {
+            if (gpt) strlcpy(code, type, sizeof code);
+            else strlcpy(code, type + 2, sizeof code);
+            if (!tbl_set(s->disk, "--part-type", p->num, code))
+                return false;
+        }
+        if (gpt) {
+            char as[200];
+            attrs_str(attrs, as, sizeof as);
+            if (attrs != p->attrs && !tbl_set(s->disk, "--part-attrs", p->num, as))
+                return false;
+        } else if ((attrs & 0x80) != (p->attrs & 0x80)) {
+            /* --activate switches on the ones named and off the rest. */
+            char nb[8][8];
+            const char *post[10];
+            int k = 0;
+            for (int i = 0; i < t.n && k < 8; i++) {
+                bool on = t.p[i].num == p->num ? (attrs & 0x80) : (t.p[i].attrs & 0x80);
+                if (on && !t.p[i].logical) {
+                    numstr(t.p[i].num, nb[k]);
+                    post[k] = nb[k];
+                    k++;
+                }
+            }
+            if (!k) post[k++] = "-";
+            post[k] = NULL;
+            char bin[64], dev[64];
+            if (!need_tool("sfdisk", "fdisk", bin, sizeof bin) ||
+                !dev_path(s->disk, dev, sizeof dev))
+                return false;
+            char *argv[16];
+            int n = 0;
+            argv[n++] = bin; argv[n++] = "--no-reread"; argv[n++] = "--no-tell-kernel";
+            argv[n++] = "--activate"; argv[n++] = dev;
+            for (int i = 0; post[i]; i++) argv[n++] = (char *)post[i];
+            argv[n] = NULL;
+            if (run(argv) != 0)
+                return failed("failed", "sfdisk could not set the boot flag");
+        }
+        if (!reread(s->disk, &t))
+            return false;
+        p = entry_of(&t, s);
+        if (!p || strcmp(p->type, type) != 0 || p->attrs != attrs)
+            return failed("failed", "the flags did not read back");
+        return true;
+    }
+
+    case S_CHECK:
+    case S_REPAIR: {
+        pct_lo = 0; pct_hi = 100;
+        int r = fsck_on(kn, s->kind == S_REPAIR);
+        if (r < 0)
+            return false;
+        if (r == 1)
+            return failed("failed", "the check found errors; repair them with"
+                          " \"Check and repair\" (nothing was changed)");
+        return true;
+    }
+
+    case S_WIPE: {
+        char dev[64];
+        if (!dev_path(kn, dev, sizeof dev))
+            return failed("failed", "the device is gone");
+        if (!wipe_sigs(dev))
+            return failed("failed", "wipefs failed");
+        s->phase = 1;
+        if (!s->num && !sync_or_fail(s->disk))
+            return false;
+        return true;
+    }
+    }
+    return failed("failed", "unknown step");
+}
+
+/* What the disk looks like now, as "state" lines: the part of the
+ * failure message that says where things stand. */
+static void state_table(const char *disk)
+{
+    static table_t t;
+    char line[400], sz[32], st[32];
+    if (!table_read(disk, &t)) {
+        reply("state", "the partition table could not be read");
+        return;
+    }
+    snprintf(line, sizeof line, "%s now has a %s partition table:", disk,
+             !strcmp(t.kind, "mbr") ? "MBR" : !strcmp(t.kind, "gpt") ? "GPT" : "no");
+    reply("state", line);
+    for (int i = 0; i < t.n; i++) {
+        char kn[40];
+        probe_t pr;
+        part_name(disk, t.p[i].num, kn, sizeof kn);
+        probe_dev(kn, &pr);
+        human(t.p[i].start * t.lss, st, sizeof st);
+        human(t.p[i].size * t.lss, sz, sizeof sz);
+        snprintf(line, sizeof line, "  %s  at %s  %s  %s%s%s", kn, st, sz,
+                 pr.fs[0] ? pr.fs : "no filesystem", pr.label[0] ? " " : "",
+                 pr.label);
+        reply("state", line);
+    }
+}
+
+static void state_report(int failed_at)
+{
+    char line[600];
+    for (int i = 0; i < failed_at - 1; i++) {
+        snprintf(line, sizeof line, "done: %d. %s", i + 1, steps[i].desc);
+        reply("state", line);
+    }
+    step_t *s = &steps[failed_at - 1];
+    snprintf(line, sizeof line, "stopped: %d. %s", failed_at, s->desc);
+    reply("state", line);
+    const char *what = "nothing of this step was done";
+    switch (s->kind) {
+    case S_RESIZE:
+        if (s->phase == 1)
+            what = "the filesystem was already made smaller, but the partition still"
+                   " has its old size. That is safe: the space after the filesystem"
+                   " is simply unused. Try again, or grow the filesystem back";
+        else if (s->phase == 2)
+            what = "the filesystem and the partition entry have their new size; only"
+                   " telling the kernel failed. Restart before using the partition";
+        else if (s->phase == 3)
+            what = "the partition is bigger, the filesystem inside still has its old"
+                   " size. That is safe; grow it again to use the space";
+        break;
+    case S_MOVE:
+        if (s->phase == 1)
+            what = "the data was being copied. The partition table still points at"
+                   " the old place. A move journal is kept: run \"lp-diskctl resume\""
+                   " (or open Disks) to finish the move before using the partition";
+        else if (s->phase == 2)
+            what = "every block was copied but the table was not updated. Run"
+                   " \"lp-diskctl resume\" to finish";
+        else if (s->phase == 3)
+            what = "the move is complete and the table updated; the final check or"
+                   " telling the kernel failed. Restart and run a check";
+        break;
+    case S_CREATE:
+        if (s->phase == 1)
+            what = "the partition exists but has no filesystem yet; format it";
+        break;
+    case S_FORMAT:
+        if (s->phase == 0)
+            what = "formatting did not finish: what was on the partition may be"
+                   " partly overwritten. Format it again";
+        break;
+    case S_MKLABEL:
+        if (s->phase == 1)
+            what = "the new table was written; only telling the kernel failed."
+                   " Restart before using the disk";
+        break;
+    default:
+        break;
+    }
+    snprintf(line, sizeof line, "  %s.", what);
+    reply("state", line);
+    for (int i = failed_at; i < nsteps; i++) {
+        snprintf(line, sizeof line, "not started: %d. %s", i + 1, steps[i].desc);
+        reply("state", line);
+    }
+    char seen[6][32];
+    int ns = 0;
+    for (int i = 0; i < failed_at && i < nsteps; i++) {
+        bool dup = false;
+        for (int k = 0; k < ns; k++) if (!strcmp(seen[k], steps[i].disk)) dup = true;
+        if (!dup && ns < 6) {
+            strlcpy(seen[ns++], steps[i].disk, 32);
+            state_table(steps[i].disk);
+        }
+    }
+}
+
+/* Split the plan's fields into steps and play them all on the model.
+ * Returns false (reason set) if any step would fail. */
+static bool plan_parse(char **f, int nf, char *why, size_t whyn)
+{
+    memset(models, 0, sizeof models);
+    nsteps = 0;
+    int i = 0;
+    while (i < nf) {
+        int j = i;
+        while (j < nf && strcmp(f[j], "|") != 0) j++;
+        if (j == i) {
+            snprintf(why, whyn, "an empty step");
+            return false;
+        }
+        if (nsteps >= MAX_STEPS) {
+            snprintf(why, whyn, "at most %d steps in one plan", MAX_STEPS);
+            return false;
+        }
+        char w[300];
+        if (!plan_step(&steps[nsteps], nsteps + 1, f + i, j - i, w, sizeof w)) {
+            snprintf(why, whyn, "step %d: %s", nsteps + 1, w);
+            return false;
+        }
+        /* Flags are checked against the model here too. */
+        step_t *s = &steps[nsteps];
+        if (s->kind == S_FLAGS) {
+            table_t *t = model_of(s->disk);
+            pent_t *p = t ? table_num(t, s->num) : NULL;
+            char type[48];
+            u64 attrs;
+            if (!p || !flags_compute(t, p, s->flags, type, sizeof type, &attrs, w, sizeof w)) {
+                snprintf(why, whyn, "step %d: %s", nsteps + 1, p ? w : "no such partition");
+                return false;
+            }
+            strlcpy(p->type, type, sizeof p->type);
+            p->attrs = attrs;
+        }
+        nsteps++;
+        i = j + 1;
+    }
+    if (nsteps == 0) {
+        snprintf(why, whyn, "the plan is empty");
+        return false;
+    }
+    return true;
+}
+
+static void plan_run(void)
+{
+    char line[500];
+    snprintf(line, sizeof line, "%d", nsteps);
+    reply("plan", line);
+    for (int i = 0; i < nsteps; i++) {
+        snprintf(line, sizeof line, "%d %d %s", i + 1, nsteps, steps[i].desc);
+        reply("describe", line);
+    }
+    for (int i = 0; i < nsteps; i++) {
+        if (cancel_req) {
+            snprintf(fail_text, sizeof fail_text, "cancelled before step %d; the"
+                     " disk is consistent after step %d", i + 1, i);
+            strlcpy(fail_why, "cancelled", sizeof fail_why);
+            job_rc = 1;
+            state_report(i + 1);
+            finish_fail();
+            return;
+        }
+        cur_step = i + 1;
+        snprintf(line, sizeof line, "%d %d %s", i + 1, nsteps, steps[i].desc);
+        reply("step", line);
+        snprintf(line, sizeof line, "step %d/%d: %s", i + 1, nsteps, steps[i].desc);
+        audit(line);
+        strlcpy(job_desc, line, sizeof job_desc);
+        progress_last = -1;
+        pct_lo = 0; pct_hi = 100; pct_text = "";
+        progress(0, steps[i].desc);
+        if (!exec_step(&steps[i])) {
+            state_report(i + 1);
+            finish_fail();
+            return;
+        }
+        progress(100, "done");
+        snprintf(line, sizeof line, "%d", i + 1);
+        reply("stepdone", line);
+    }
+    snprintf(line, sizeof line, "%d step%s finished", nsteps, nsteps == 1 ? "" : "s");
+    done(line);
+}
+
+/* Finish a move a power cut interrupted, from its journal. */
+static void resume_move(void)
+{
+    journal_t j;
+    if (!journal_read(&j)) {
+        done("no interrupted move");
+        return;
+    }
+    static table_t t;
+    if (!blk_exists(j.disk) || !table_read(j.disk, &t) || strcmp(t.id, j.diskid)) {
+        failed("failed", "the disk the move was on is not here (or has a"
+               " different partition table now)");
+        finish_fail();
+        return;
+    }
+    pent_t *p = table_uuid(&t, j.partuuid);
+    u64 lss = t.lss;
+    if (!p || (p->start * lss != j.from && p->start * lss != j.to) ||
+        p->size * lss != j.len) {
+        failed("failed", "the partition in the journal does not match the table;"
+               " not touching anything");
+        finish_fail();
+        return;
+    }
+    char kn[40];
+    part_name(j.disk, p->num, kn, sizeof kn);
+    mounts_refresh();
+    bool vital;
+    char why[300];
+    if (in_use(kn, &vital, why, sizeof why)) {
+        failed("refused", why);
+        finish_fail();
+        return;
+    }
+    char msg[200], a[32];
+    human(j.done, a, sizeof a);
+    snprintf(msg, sizeof msg, "resuming the move of %s: %s were already copied", kn, a);
+    say(msg);
+    audit(msg);
+    if (j.phase == 0 && p->start * lss == j.from) {
+        bool clean;
+        pct_lo = 0; pct_hi = 90;
+        cancel_req = 0;
+        if (!move_copy(&j, &clean)) {
+            finish_fail();
+            return;
+        }
+        j.phase = 1;
+        journal_write(&j);
+    }
+    if (p->start * lss != j.to && !tbl_geom(j.disk, p->num, j.to / lss, p->size)) {
+        finish_fail();
+        return;
+    }
+    lp_unlink(JOURNAL_PATH);
+    if (!sync_or_fail(j.disk)) {
+        finish_fail();
+        return;
+    }
+    progress(100, "moved");
+    done("the move is finished");
 }

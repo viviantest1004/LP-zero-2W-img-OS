@@ -2303,7 +2303,9 @@ static int hexdigit(char c)
 }
 
 /* The shape of an auth argument: an even number of hex digits, one to
- * LP_CRYPT6_PW_MAX bytes once decoded. */
+ * LP_CRYPT6_PW_MAX - 1 bytes once decoded, none of them NUL - a NUL
+ * would cut the password short where the person did not. A request of
+ * the wrong shape is "invalid" and does not count as a wrong password. */
 static bool hex_ok(const char *s)
 {
     size_t n = strlen(s);
@@ -2312,11 +2314,14 @@ static bool hex_ok(const char *s)
     for (size_t i = 0; i < n; i++)
         if (hexdigit(s[i]) < 0)
             return false;
+    for (size_t i = 0; i < n; i += 2)
+        if (s[i] == '0' && s[i + 1] == '0')
+            return false;
     return true;
 }
 
-/* Decode; a NUL byte inside would cut the password short where the
- * person did not, so it is refused rather than passed on. */
+/* Decode. hex_ok has been through it already; the NUL test stays here
+ * too so that this function is safe on its own. */
 static bool hex_decode(const char *s, char *out, size_t outn)
 {
     size_t n = strlen(s) / 2;
@@ -3018,8 +3023,35 @@ static bool read_password(char *out, size_t n)
 }
 
 /* "auth <hex>\n" for a password, then everything wiped. 0 when it was
- * accepted. */
+ * accepted. A "wait N s" answer - a wrong password was typed a moment
+ * ago - is waited out here and the same password sent again, once:
+ * making the person type it a second time for the daemon's pause would
+ * only look like the first one had been wrong. */
+static int send_auth_once(const char *pw, char *last, size_t lastn);
+
 static int send_auth(const char *pw, bool print)
+{
+    for (int round = 0; ; round++) {
+        char last[256] = "";
+        int rc = send_auth_once(pw, last, sizeof last);
+        long secs = 0;
+        if (rc == 1 && round == 0 && starts(last, "fail auth wait ")) {
+            secs = strtol(last + 15, NULL, 10);
+            if (secs > 0 && secs <= WAIT_MAX_MS / 1000) {
+                if (print)
+                    dprintf(STDERR_FILENO, "lp-privd: waiting %ld s after a"
+                            " wrong password\n", secs);
+                lp_sleep_ms((unsigned)secs * 1000 + 100);
+                continue;
+            }
+        }
+        if (rc != 0 && print && last[0])
+            dprintf(STDERR_FILENO, "lp-privd: %s\n", last);
+        return rc;
+    }
+}
+
+static int send_auth_once(const char *pw, char *last, size_t lastn)
 {
     static const char hx[] = "0123456789abcdef";
     char req[MAX_REQ];
@@ -3029,12 +3061,9 @@ static int send_auth(const char *pw, bool print)
         req[k++] = hx[(u8)*p & 15];
     }
     req[k++] = '\n';
-    char last[256] = "";
     bool dummy = false;
-    int rc = talk(req, k, false, false, &dummy, last, sizeof last);
+    int rc = talk(req, k, false, false, &dummy, last, lastn);
     wipe_mem(req, sizeof req);
-    if (rc != 0 && print && last[0])
-        dprintf(STDERR_FILENO, "lp-privd: %s\n", last);
     return rc;
 }
 

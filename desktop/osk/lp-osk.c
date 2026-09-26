@@ -60,9 +60,12 @@
 #include <glib-unix.h>
 #include <gtk-layer-shell.h>
 #include <locale.h>
+#include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "lp-i18n.h"
@@ -348,7 +351,7 @@ static gboolean do_test(char **a, int n, GString *out)
 static gboolean handle(char **a, int n, GString *out, gboolean *keep)
 {
     *keep = FALSE;
-    const char *cmd = n ? a[0] : "show";
+    const char *cmd = n ? a[0] : "daemon";   /* bare `lp-osk`: already running */
     if (!strcmp(cmd, "show") || !strcmp(cmd, "daemon")) {
         if (!strcmp(cmd, "show"))
             show_by_person();

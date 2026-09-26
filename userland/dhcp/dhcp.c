@@ -465,6 +465,10 @@ static int get_lease(const char *ifname, u32 known, lease_t *out,
 #define AF_NETLINK              16
 #define NETLINK_KOBJECT_UEVENT  15
 #define SO_RCVBUF               8
+/* rtnetlink's link group: RTM_NEWLINK for every carrier and operstate
+ * change. See run_daemon_all for why this is listened to as well. */
+#define NETLINK_ROUTE           0
+#define RTMGRP_LINK             1
 
 typedef struct {
     u16 nl_family;
@@ -498,11 +502,26 @@ static bool net_sysfs(const char *ifname, const char *file,
     return out[0] != '\0';
 }
 
-/* Is there a cable in it, or - on wlan0 - is it associated? */
+/* Is there a cable in it, or - on a wireless interface - is it
+ * associated AND keyed?
+ *
+ * The second half is operstate. A wireless link has carrier from the
+ * moment it is associated, which is before the WPA handshake; a DISCOVER
+ * sent then goes out unencrypted and the access point drops it, so the
+ * first round was always lost and the address came a round late. The
+ * wpa daemon (and wpa_supplicant, the fallback) set the interface's link
+ * mode to dormant, which makes the kernel report an associated-but-not-
+ * yet-keyed link as operstate "dormant" and switch it to "up" when the
+ * supplicant says the keys are in (RFC 2863). So "dormant" here means
+ * "not yet" - for a wired port nobody sets that mode and operstate is
+ * "up" whenever there is carrier, so nothing changes for a cable. */
 static bool has_carrier(const char *ifname)
 {
     char v[16];
-    return net_sysfs(ifname, "carrier", v, sizeof v) && strcmp(v, "1") == 0;
+    if (!net_sysfs(ifname, "carrier", v, sizeof v) || strcmp(v, "1") != 0)
+        return false;
+    return !(net_sysfs(ifname, "operstate", v, sizeof v) &&
+             strcmp(v, "dormant") == 0);
 }
 
 /* ── Which interfaces this manages ────────────────────────────────────
@@ -1007,6 +1026,12 @@ static bool parse_uevent(const char *msg, size_t len,
  *   that was dropped because the socket buffer overflowed in a burst or
  *   because this process was inside a twelve-second DISCOVER when it
  *   arrived. A missed event costs TICK_MS and nothing more.
+ *
+ *   Carrier and operstate changes also arrive on rtnetlink's link
+ *   group, and that is listened to as a way to end the wait early -
+ *   the cable, and a wireless link the wpa daemon has just keyed, are
+ *   then seen at once instead of at the next tick. It only wakes the
+ *   loop; the tick stays the thing that is guaranteed.
  */
 static int run_daemon_all(void)
 {
@@ -1034,6 +1059,26 @@ static int run_daemon_all(void)
                 "dhcp: no kernel event socket - an adapter plugged in will"
                 " be noticed at the next check instead\n");
 
+    /* Link changes: carrier coming and going, and a wireless link going
+     * from dormant to up when the wpa daemon has installed the keys.
+     * None of those is a uevent. Without this they wait for the tick,
+     * which put up to two seconds of nothing between "keys installed"
+     * and the first DISCOVER - the longest step of joining a network,
+     * spent idle. Any message on it just ends the wait early; what
+     * changed is read from sysfs as always, so a lost message costs a
+     * tick and nothing else. */
+    long rfd = lp_socket(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE);
+    if (rfd >= 0) {
+        sockaddr_nl_t sa;
+        memset(&sa, 0, sizeof sa);
+        sa.nl_family = AF_NETLINK;
+        sa.nl_groups = RTMGRP_LINK;
+        if (lp_bind((int)rfd, &sa, sizeof sa) < 0) {
+            lp_close((int)rfd);
+            rfd = -1;
+        }
+    }
+
     printf("dhcp: watching every interface for a cable\n");
     pass();
 
@@ -1049,18 +1094,34 @@ static int run_daemon_all(void)
             if (left <= 0)
                 break;
 
-            if (fd < 0) {
+            if (fd < 0 && rfd < 0) {
                 lp_sleep_ms(left);
                 break;
             }
 
-            lp_pollfd_t pfd;
-            pfd.fd      = (int)fd;
-            pfd.events  = LP_POLLIN;
-            pfd.revents = 0;
+            lp_pollfd_t pfd[2];
+            pfd[0].fd      = (int)fd;       /* -1 is ignored by poll */
+            pfd[0].events  = LP_POLLIN;
+            pfd[0].revents = 0;
+            pfd[1].fd      = (int)rfd;
+            pfd[1].events  = LP_POLLIN;
+            pfd[1].revents = 0;
 
-            if (lp_poll(&pfd, 1, (int)left) <= 0)
+            if (lp_poll(pfd, 2, (int)left) <= 0)
                 continue;           /* timed out, or a signal */
+
+            if (pfd[1].revents & LP_POLLIN) {
+                /* Read it all; a burst is one reason to look. The short
+                 * pause lets the rest of a burst (carrier, then
+                 * operstate) land before sysfs is read. */
+                while (lp_recvfrom((int)rfd, buf, sizeof buf, 0x40 /* DONTWAIT */,
+                                   NULL, NULL) > 0)
+                    ;
+                lp_sleep_ms(50);
+                now_please = true;
+            }
+            if (!(pfd[0].revents & LP_POLLIN))
+                continue;
 
             long got = lp_recvfrom((int)fd, buf, sizeof buf - 1, 0, NULL, NULL);
             if (got <= 0)

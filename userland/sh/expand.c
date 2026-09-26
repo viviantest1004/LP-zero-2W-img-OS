@@ -455,13 +455,6 @@ static bool arith_eval(const char *expr, long long *out)
 
 static bool cclass(const char *name, size_t n, int c)
 {
-    struct { const char *n; bool (*f)(int); } t[] = {
-        { "alpha", NULL }, { "digit", NULL }, { "alnum", NULL },
-        { "space", NULL }, { "upper", NULL }, { "lower", NULL },
-        { "blank", NULL }, { "punct", NULL }, { "print", NULL },
-        { "graph", NULL }, { "cntrl", NULL }, { "xdigit", NULL },
-    };
-    (void)t;
     if (n == 5 && memcmp(name, "alpha", 5) == 0)
         return (c|32) >= 'a' && (c|32) <= 'z';
     if (n == 5 && memcmp(name, "digit", 5) == 0)
@@ -615,7 +608,7 @@ static char *tilde_home(const char *user)
         return h ? xstrdup(h) : NULL;
     }
     lp_user_t u;
-    if (lp_user_by_name(user, &u) == 0 && u.home[0])
+    if (lp_user_by_name(user, &u) && u.home[0])
         return xstrdup(u.home);
     return NULL;
 }
@@ -846,6 +839,14 @@ static void fb_endfield(fb_t *f)
     f->started = false;
 }
 
+/* An explicitly empty field, for the gap between two non-whitespace IFS
+ * delimiters (a::b with IFS=: is three fields). */
+static void fb_empty_field(fb_t *f)
+{
+    sv_push(&f->fields, xstrdup(""));
+    sv_push(&f->masks, xstrdup(""));
+}
+
 /* Append literal text that is not subject to splitting. */
 static void fb_add_protected(fb_t *f, const char *s, size_t n)
 {
@@ -873,28 +874,33 @@ static void fb_add_split(fb_t *f, const char *s)
         return;
     }
     const char *p = s;
+    bool nonws_pending = false;         /* a non-ws sep just closed a field;
+                                         * a second one makes an empty field */
     while (*p) {
-        if (ifs_ws(f, (u8)*p)) {
-            /* a run of whitespace IFS: end the field, skip the run, and
-             * if a non-ws IFS follows, consume it too (it is the real
-             * separator). */
+        u8 c = (u8)*p;
+        if (ifs_ws(f, c)) {
+            /* whitespace IFS: end the field, skip the whole run, and if a
+             * single non-ws IFS follows, it is part of this one delimiter */
             if (f->started)
                 fb_endfield(f);
-            while (ifs_ws(f, (u8)*p))
+            while (*p && ifs_ws(f, (u8)*p))
                 p++;
+            if (*p && !ifs_ws(f, (u8)*p) && ifs_has(f, (u8)*p))
+                p++;
+            nonws_pending = false;
             continue;
         }
-        if (ifs_has(f, (u8)*p)) {       /* non-whitespace IFS: a boundary */
-            fb_endfield(f);
-            f->started = true;          /* an empty field before the sep is real */
-            f->started = false;
-            /* Actually: a lone non-ws sep between two seps yields an empty
-             * field. Open one so the boundary is recorded. */
+        if (ifs_has(f, c)) {            /* non-whitespace IFS: a boundary */
+            if (f->started)
+                fb_endfield(f);
+            else if (nonws_pending)
+                fb_empty_field(f);
+            nonws_pending = true;
             p++;
-            /* leave field closed; the next char opens a new one */
             continue;
         }
-        fb_pushchar(f, *p, 0);
+        fb_pushchar(f, (char)c, 0);
+        nonws_pending = false;
         p++;
     }
 }
@@ -1166,7 +1172,7 @@ static void expand_param(fb_t *f, wpart_t *p, bool word_dq)
         if (op == PO_ALT) {
             /* ${x:+word}: word if set(/non-null), else nothing */
             if (colon ? !null_or_unset : set) {
-                char *w = expand_word_str(p->arg, word_dq ? X_PATTERN : 0);
+                char *w = expand_word_str(p->arg, 0);
                 /* the alternate is itself subject to splitting when the
                  * whole thing is unquoted */
                 if (word_dq || p->quoted) fb_add_protected(f, w ? w : "", w ? strlen(w) : 0);
@@ -1794,16 +1800,30 @@ static char *expand_word_str(word_t *w, int flags)
     char *result;
     if (f.fields.n == 0) {
         result = xstrdup("");
-    } else if (f.fields.n == 1 && !(flags & X_PATTERN)) {
-        result = xstrdup(f.fields.v[0]);
-    } else {
-        /* with an empty IFS there is at most one field; PATTERN wants the
-         * escaped form so quoted metacharacters stay literal downstream */
+    } else if (f.fields.n == 1) {
+        /* the common case; PATTERN wants the escaped form so quoted
+         * metacharacters stay literal downstream (${x#pat}, case) */
         const char *text = f.fields.v[0];
         const char *mask = f.masks.v[0];
         size_t n = strlen(text);
         result = (flags & X_PATTERN) ? field_pattern(text, mask, n)
                                      : xstrdup(text);
+    } else {
+        /* an unquoted $@ with several parameters reached a scalar context
+         * (an assignment, a case subject): join with a space, as $* does */
+        strbuf_t b = {0};
+        for (int i = 0; i < f.fields.n; i++) {
+            if (i) sb_putc(&b, ' ');
+            if (flags & X_PATTERN) {
+                char *pp = field_pattern(f.fields.v[i], f.masks.v[i],
+                                         strlen(f.fields.v[i]));
+                sb_puts(&b, pp);
+                xfree(pp);
+            } else {
+                sb_puts(&b, f.fields.v[i]);
+            }
+        }
+        result = sb_take(&b);
     }
     sv_free(&f.fields);
     sv_free(&f.masks);
@@ -1841,6 +1861,7 @@ static char *prompt_expand(const char *ps, int *visible_width)
     int width = 0;
     bool nonprint = false;
     lp_tm_t tm;
+    memset(&tm, 0, sizeof tm);
     bool have_tm = false;
     for (const char *p = ps; *p; p++) {
         if (*p != '\\') {
@@ -1862,9 +1883,11 @@ static char *prompt_expand(const char *ps, int *visible_width)
         }
         case 'h': case 'H': {
             char host[65] = "linux-lp";
-            lp_uname_t un;
-            if (lp_uname(&un) == 0 && un.nodename[0])
-                strlcpy(host, un.nodename, sizeof host);
+            /* struct utsname is six fixed 65-byte fields; nodename is the
+             * second, so it starts 65 bytes in. */
+            char uts[6 * 65];
+            if (lp_uname(uts) >= 0 && uts[65])
+                strlcpy(host, uts + 65, sizeof host);
             if (*p == 'h') {
                 char *dot = strchr(host, '.');
                 if (dot) *dot = '\0';
@@ -1903,7 +1926,7 @@ static char *prompt_expand(const char *ps, int *visible_width)
             break;
         }
         case 't': case 'T': case '@': case 'A': {
-            if (!have_tm) { lp_time_local(&tm); have_tm = true; }
+            if (!have_tm) { lp_localtime(lp_time(), &tm); have_tm = true; }
             char ts[16];
             if (*p == 'A')
                 snprintf(ts, sizeof ts, "%02d:%02d", tm.hour, tm.min);
@@ -1914,14 +1937,14 @@ static char *prompt_expand(const char *ps, int *visible_width)
             break;
         }
         case 'd': {
-            if (!have_tm) { lp_time_local(&tm); have_tm = true; }
+            if (!have_tm) { lp_localtime(lp_time(), &tm); have_tm = true; }
             static const char *const wd[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
             static const char *const mo[] = {"Jan","Feb","Mar","Apr","May","Jun",
                                              "Jul","Aug","Sep","Oct","Nov","Dec"};
             char ds[32];
             int wi = tm.wday % 7, mi = (tm.mon - 1) % 12;
             snprintf(ds, sizeof ds, "%s %s %d", wd[wi < 0 ? 0 : wi],
-                     mo[mi < 0 ? 0 : mi], tm.mday);
+                     mo[mi < 0 ? 0 : mi], tm.day);
             sb_puts(&b, ds);
             if (!nonprint) width += (int)strlen(ds);
             break;

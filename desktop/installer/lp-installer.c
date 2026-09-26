@@ -1,0 +1,651 @@
+/*
+ * lp-installer - the window that installs LP from the USB stick.
+ *
+ * Every decision and every write belongs to lp-install (the Python
+ * program beside this file); this is its face. The split is deliberate:
+ * an installer whose logic lives in a GUI can only be tested by clicking
+ * through it, and the one that matters most - the disk it refuses - has
+ * to be right from a serial console too. So this window asks lp-install
+ * for the disks (`list --json`) and the firmware facts (`check --json`),
+ * shows them, and runs `install --progress`, reading one line per event.
+ *
+ * The pages, in order:
+ *
+ *   welcome    English or 한국어 (English preselected); Install, or Try
+ *              LP without installing (exit status 10 - the setup gate
+ *              then starts the ordinary desktop).
+ *   problem    Secure Boot on, or the SATA controller in RAID mode with
+ *              no disk visible: what to change in the BIOS, and Check
+ *              again. Neither can be fixed from here.
+ *   disks      one large row per disk; the stick we run from and disks
+ *              with mounted partitions are shown, greyed, with the reason.
+ *   confirm    what will be erased, and a tick box before the red button.
+ *              No typed confirmation: the person may have no keyboard
+ *              yet, and a tick box is as deliberate as typing a name.
+ *   progress   the step, and a bar that eases on a spring.
+ *   done       remove the stick, restart.  failed  what lp-install said.
+ *
+ * Touch first: 56-64 px targets at scale 2, nothing that needs a hover,
+ * nothing that needs a keyboard. Motion per COMMON.md: pages slide 260 ms
+ * the right way (a crossfade under 100 ms with reduced motion), disk rows
+ * come in through revealers at the insert spring's 220 ms, the progress
+ * bar follows a critically damped spring so 1% steps read as one motion.
+ *
+ *   lp-installer [--korean] [--windowed]
+ *   LP_INSTALL=/path/to/lp-install   another backend (tests, screenshots)
+ */
+#include "setup-ui.h"
+#include "lp-json.h"
+#include "lp-motion.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+#define EXIT_TRY 10
+
+typedef struct {
+    GtkApplication *app;
+    GtkWidget  *win;
+    GtkWidget  *stack;
+    int         exit_code;
+    gboolean    windowed;
+
+    /* welcome */
+    GtkWidget  *en, *ko;
+    /* problem */
+    GtkWidget  *problem_text;
+    /* disks */
+    GtkWidget  *disk_box;
+    GtkWidget  *disk_next;
+    GtkWidget  *disk_group;         /* first toggle, the group leader */
+    char        disk[64];           /* /dev/nvme0n1 */
+    char        disk_model[128];
+    char        disk_size[32];
+    int         disk_parts;
+    /* confirm */
+    GtkWidget  *confirm_what, *confirm_warn, *confirm_check, *confirm_go;
+    /* progress */
+    GtkWidget  *step;
+    GtkWidget  *percent;
+    SuProgress *bar;
+    GSubprocess *proc;
+    GDataInputStream *lines;
+    char        last_error[1024];
+    /* failed */
+    GtkWidget  *fail_text;
+} App;
+
+static App A;
+
+static const char *backend(void)
+{
+    const char *b = g_getenv("LP_INSTALL");
+    return b && *b ? b : "/usr/local/bin/lp-install";
+}
+
+/* ── welcome ───────────────────────────────────────────────────────── */
+
+static void on_language(GtkToggleButton *b, gpointer data)
+{
+    (void)data;
+    if (!gtk_toggle_button_get_active(b))
+        return;
+    su_set_korean(GTK_WIDGET(b) == A.ko);
+}
+
+static void show_disks(void);
+
+static void on_continue(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    /* The firmware first: with Secure Boot on or the disk hidden behind
+     * RAID there is no point choosing a disk. */
+    const char *argv[] = { backend(), "check", "--json", NULL };
+    char *out = su_run(argv, NULL);
+    LpJson *j = out ? lp_json_parse(out) : NULL;
+    LpJson *probs = j ? lp_json_get(j, "problems") : NULL;
+    if (probs && lp_json_len(probs) > 0) {
+        GString *en = g_string_new(NULL), *ko = g_string_new(NULL);
+        for (int i = 0; i < lp_json_len(probs); i++) {
+            LpJson *p = lp_json_at(probs, i);
+            g_string_append_printf(en, "%s%s", i ? "\n\n" : "", lp_json_str(p, "en", ""));
+            g_string_append_printf(ko, "%s%s", i ? "\n\n" : "", lp_json_str(p, "ko", ""));
+        }
+        su_retext(A.problem_text, en->str, ko->str);
+        g_string_free(en, TRUE);
+        g_string_free(ko, TRUE);
+        su_go(A.stack, "problem", TRUE);
+    } else {
+        show_disks();
+        su_go(A.stack, "disks", TRUE);
+    }
+    if (j)
+        lp_json_free(j);
+    g_free(out);
+}
+
+static void on_try(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    A.exit_code = EXIT_TRY;
+    gtk_window_destroy(GTK_WINDOW(A.win));
+}
+
+static void page_welcome(void)
+{
+    SuPage p;
+    su_page(&p, "Welcome to LP", "LP 에 오신 것을 환영합니다",
+            "Choose a language. You can change it again later in Settings.",
+            "언어를 고르세요. 나중에 설정에서 다시 바꿀 수 있습니다.");
+    A.en = su_choice("English", "English", "English (United States)",
+                     "영어 (미국)", NULL);
+    A.ko = su_choice("한국어", "한국어", "Korean", "한국어 (대한민국)", NULL);
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(A.ko), GTK_TOGGLE_BUTTON(A.en));
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(su_korean ? A.ko : A.en), TRUE);
+    g_signal_connect(A.en, "toggled", G_CALLBACK(on_language), NULL);
+    g_signal_connect(A.ko, "toggled", G_CALLBACK(on_language), NULL);
+    gtk_box_append(GTK_BOX(p.body), A.en);
+    gtk_box_append(GTK_BOX(p.body), A.ko);
+    gtk_box_append(GTK_BOX(p.body), su_label(
+        "LP will be installed on this computer's disk. Nothing is written "
+        "until you confirm which disk, on the last page before the copy starts.",
+        "LP 를 이 컴퓨터의 디스크에 설치합니다. 복사를 시작하기 전 마지막 "
+        "화면에서 디스크를 확인하기 전까지는 아무것도 쓰지 않습니다.", "su-note"));
+
+    GtkWidget *try = su_button("Try LP without installing", "설치하지 않고 써 보기",
+                               "su-secondary");
+    g_signal_connect(try, "clicked", G_CALLBACK(on_try), NULL);
+    gtk_box_append(GTK_BOX(p.left), try);
+    GtkWidget *go = su_button("Install LP", "LP 설치", "su-primary");
+    g_signal_connect(go, "clicked", G_CALLBACK(on_continue), NULL);
+    gtk_box_append(GTK_BOX(p.right), go);
+    gtk_stack_add_named(GTK_STACK(A.stack), p.root, "welcome");
+}
+
+/* ── problem ───────────────────────────────────────────────────────── */
+
+static void power(const char *word)
+{
+    const char *argv[] = { "/bin/lp-power", word, NULL };
+    g_free(su_run(argv, NULL));
+}
+
+static void on_restart(GtkButton *b, gpointer d) { (void)b; (void)d; power("restart"); }
+static void on_poweroff(GtkButton *b, gpointer d) { (void)b; (void)d; power("off"); }
+static void on_back_welcome(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    su_go(A.stack, "welcome", FALSE);
+}
+
+static void page_problem(void)
+{
+    SuPage p;
+    su_page(&p, "Change a BIOS setting first", "먼저 BIOS 설정을 바꿔야 합니다",
+            "LP cannot be installed the way this computer is set up now.",
+            "지금 설정으로는 LP 를 설치할 수 없습니다.");
+    A.problem_text = su_label("", "", "su-warn");
+    gtk_box_append(GTK_BOX(p.body), A.problem_text);
+    gtk_box_append(GTK_BOX(p.body), su_label(
+        "Restart, press F2 when the Dell logo appears, change the setting, "
+        "save, and start from this USB stick again (F12).",
+        "다시 시작한 뒤 Dell 로고가 보일 때 F2 를 누르고, 설정을 바꿔 저장한 "
+        "다음 이 USB 로 다시 시작하세요 (F12).", "su-note"));
+    GtkWidget *back = su_button("Back", "뒤로", "su-secondary");
+    g_signal_connect(back, "clicked", G_CALLBACK(on_back_welcome), NULL);
+    gtk_box_append(GTK_BOX(p.left), back);
+    GtkWidget *again = su_button("Check again", "다시 확인", "su-secondary");
+    g_signal_connect(again, "clicked", G_CALLBACK(on_continue), NULL);
+    gtk_box_append(GTK_BOX(p.right), again);
+    GtkWidget *rs = su_button("Restart", "다시 시작", "su-primary");
+    g_signal_connect(rs, "clicked", G_CALLBACK(on_restart), NULL);
+    gtk_box_append(GTK_BOX(p.right), rs);
+    gtk_stack_add_named(GTK_STACK(A.stack), p.root, "problem");
+}
+
+/* ── disks ─────────────────────────────────────────────────────────── */
+
+static void on_disk_toggled(GtkToggleButton *b, gpointer d)
+{
+    (void)d;
+    if (!gtk_toggle_button_get_active(b))
+        return;
+    g_strlcpy(A.disk, g_object_get_data(G_OBJECT(b), "path"), sizeof A.disk);
+    g_strlcpy(A.disk_model, g_object_get_data(G_OBJECT(b), "model"), sizeof A.disk_model);
+    g_strlcpy(A.disk_size, g_object_get_data(G_OBJECT(b), "size"), sizeof A.disk_size);
+    A.disk_parts = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "parts"));
+    gtk_widget_set_sensitive(A.disk_next, TRUE);
+}
+
+static const char *transport_name(const char *t, gboolean ko)
+{
+    if (!strcmp(t, "nvme")) return "NVMe SSD";
+    if (!strcmp(t, "usb")) return ko ? "USB 저장장치" : "USB drive";
+    if (!strcmp(t, "sata")) return "SATA";
+    if (!strcmp(t, "mmc")) return ko ? "SD 카드" : "SD card";
+    if (!strcmp(t, "virtio")) return ko ? "가상 디스크" : "Virtual disk";
+    return ko ? "디스크" : "Disk";
+}
+
+/* Reveal the rows one after another, 40 ms apart: the list assembles
+ * rather than appearing in one flash. */
+static gboolean reveal_one(gpointer data)
+{
+    gtk_revealer_set_reveal_child(GTK_REVEALER(data), TRUE);
+    return G_SOURCE_REMOVE;
+}
+
+static void show_disks(void)
+{
+    GtkWidget *c;
+    while ((c = gtk_widget_get_first_child(A.disk_box)))
+        gtk_box_remove(GTK_BOX(A.disk_box), c);
+    A.disk[0] = '\0';
+    A.disk_group = NULL;
+    gtk_widget_set_sensitive(A.disk_next, FALSE);
+
+    const char *argv[] = { backend(), "list", "--json", NULL };
+    char *out = su_run(argv, NULL);
+    LpJson *j = out ? lp_json_parse(out) : NULL;
+    int n = j ? lp_json_len(j) : 0;
+    int usable = 0;
+    GtkWidget *only = NULL;
+    for (int i = 0; i < n; i++) {
+        LpJson *d = lp_json_at(j, i);
+        const char *model = lp_json_str(d, "model", "?");
+        const char *size = lp_json_str(d, "size_text", "");
+        const char *tran = lp_json_str(d, "transport", "");
+        const char *reason = lp_json_str(d, "reason", "");
+        int parts = (int)lp_json_num(d, "partitions", 0);
+        gboolean ok = lp_json_bool(d, "usable", 0);
+
+        char *den = g_strdup_printf("%s  ·  %s  ·  %s", size, transport_name(tran, FALSE),
+                                    lp_json_str(d, "path", ""));
+        char *dko = g_strdup_printf("%s  ·  %s  ·  %s", size, transport_name(tran, TRUE),
+                                    lp_json_str(d, "path", ""));
+        if (!ok) {
+            const char *wen = !strcmp(reason, "running") ? "LP is running from this disk"
+                            : !strcmp(reason, "mounted") ? "In use: it has mounted partitions"
+                            : !strcmp(reason, "in-use")  ? "In use (encrypted or LVM)"
+                            : !strcmp(reason, "read-only") ? "Read-only" : reason;
+            const char *wko = !strcmp(reason, "running") ? "지금 LP 가 돌고 있는 디스크입니다"
+                            : !strcmp(reason, "mounted") ? "사용 중: 마운트된 파티션이 있습니다"
+                            : !strcmp(reason, "in-use")  ? "사용 중 (암호화 또는 LVM)"
+                            : !strcmp(reason, "read-only") ? "읽기 전용" : reason;
+            char *e2 = g_strdup_printf("%s  —  %s", den, wen);
+            char *k2 = g_strdup_printf("%s  —  %s", dko, wko);
+            g_free(den); g_free(dko);
+            den = e2; dko = k2;
+        }
+        GtkWidget *b = su_choice(model, model, den, dko,
+                                 !strcmp(tran, "usb") ? "drive-removable-media"
+                                                      : "drive-harddisk");
+        g_free(den); g_free(dko);
+        gtk_widget_set_sensitive(b, ok);
+        g_object_set_data_full(G_OBJECT(b), "path", g_strdup(lp_json_str(d, "path", "")), g_free);
+        g_object_set_data_full(G_OBJECT(b), "model", g_strdup(model), g_free);
+        g_object_set_data_full(G_OBJECT(b), "size", g_strdup(size), g_free);
+        g_object_set_data(G_OBJECT(b), "parts", GINT_TO_POINTER(parts));
+        if (A.disk_group)
+            gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(b), GTK_TOGGLE_BUTTON(A.disk_group));
+        else
+            A.disk_group = b;
+        g_signal_connect(b, "toggled", G_CALLBACK(on_disk_toggled), NULL);
+
+        GtkWidget *rv = gtk_revealer_new();
+        gtk_revealer_set_transition_type(GTK_REVEALER(rv),
+            lp_motion_reduced() ? GTK_REVEALER_TRANSITION_TYPE_CROSSFADE
+                                : GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+        gtk_revealer_set_transition_duration(GTK_REVEALER(rv),
+            lp_motion_reduced() ? 90 : lp_spring_ms(LP_SPRING_INSERT, FALSE));
+        gtk_revealer_set_child(GTK_REVEALER(rv), b);
+        gtk_box_append(GTK_BOX(A.disk_box), rv);
+        g_timeout_add(200 + 40 * i, reveal_one, rv);
+        if (ok && ++usable == 1)
+            only = b;
+    }
+    /* One usable disk - the laptop's own - is the usual case, and then it
+     * is chosen already. With several, the person picks: preselecting
+     * one of two disks is choosing which one to erase for them. */
+    if (usable == 1)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(only), TRUE);
+    if (n == 0)
+        gtk_box_append(GTK_BOX(A.disk_box), su_label("No disks were found.",
+                                                     "디스크를 찾지 못했습니다.", "su-warn"));
+    if (j)
+        lp_json_free(j);
+    g_free(out);
+}
+
+static void on_disk_next(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    char *en = g_strdup_printf("%s  (%s)", A.disk_model, A.disk_size);
+    su_retext(A.confirm_what, en, en);
+    g_free(en);
+    char *wen = g_strdup_printf(
+        "Everything on %s will be deleted%s. This cannot be undone.", A.disk,
+        A.disk_parts ? ", including the partitions on it now" : "");
+    char *wko = g_strdup_printf(
+        "%s 의 모든 것이 지워집니다%s. 되돌릴 수 없습니다.", A.disk,
+        A.disk_parts ? " (지금 있는 파티션 포함)" : "");
+    su_retext(A.confirm_warn, wen, wko);
+    g_free(wen); g_free(wko);
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(A.confirm_check), FALSE);
+    gtk_widget_set_sensitive(A.confirm_go, FALSE);
+    su_go(A.stack, "confirm", TRUE);
+}
+
+static void page_disks(void)
+{
+    SuPage p;
+    su_page(&p, "Where should LP go?", "LP 를 어디에 설치할까요?",
+            "Choose the disk. It will be erased and used for LP alone.",
+            "디스크를 고르세요. 그 디스크는 지워지고 LP 만 쓰게 됩니다.");
+    GtkWidget *sw = gtk_scrolled_window_new();
+    gtk_widget_add_css_class(sw, "su-list");
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_NEVER,
+                                   GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(sw), TRUE);
+    gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(sw), 420);
+    gtk_scrolled_window_set_kinetic_scrolling(GTK_SCROLLED_WINDOW(sw), TRUE);
+    A.disk_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), A.disk_box);
+    gtk_box_append(GTK_BOX(p.body), sw);
+
+    GtkWidget *back = su_button("Back", "뒤로", "su-secondary");
+    g_signal_connect(back, "clicked", G_CALLBACK(on_back_welcome), NULL);
+    gtk_box_append(GTK_BOX(p.left), back);
+    A.disk_next = su_button("Next", "다음", "su-primary");
+    g_signal_connect(A.disk_next, "clicked", G_CALLBACK(on_disk_next), NULL);
+    gtk_box_append(GTK_BOX(p.right), A.disk_next);
+    gtk_stack_add_named(GTK_STACK(A.stack), p.root, "disks");
+}
+
+/* ── confirm ───────────────────────────────────────────────────────── */
+
+static void on_check(GtkCheckButton *c, gpointer d)
+{
+    (void)d;
+    gtk_widget_set_sensitive(A.confirm_go, gtk_check_button_get_active(c));
+}
+
+static void on_back_disks(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    su_go(A.stack, "disks", FALSE);
+}
+
+static void start_install(void);
+
+static void on_go(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    start_install();
+}
+
+static void page_confirm(void)
+{
+    SuPage p;
+    su_page(&p, "Erase this disk and install LP?", "이 디스크를 지우고 LP 를 설치할까요?",
+            NULL, NULL);
+    A.confirm_what = su_label("", "", "su-choice-title");
+    gtk_box_append(GTK_BOX(p.body), A.confirm_what);
+    A.confirm_warn = su_label("", "", "su-warn");
+    gtk_box_append(GTK_BOX(p.body), A.confirm_warn);
+    gtk_box_append(GTK_BOX(p.body), su_label(
+        "LP uses the whole disk: 512 MB to start up, 6 GB for the recovery "
+        "system, and the rest for LP and your files.",
+        "LP 가 디스크 전체를 씁니다: 시작용 512MB, 복구 시스템 6GB, 나머지는 "
+        "LP 와 내 파일에 씁니다.", "su-note"));
+    A.confirm_check = gtk_check_button_new();
+    gtk_widget_add_css_class(A.confirm_check, "su-check");
+    su_retext(A.confirm_check, "I understand that everything on this disk will be erased",
+              "이 디스크의 모든 것이 지워진다는 것을 이해했습니다");
+    g_signal_connect(A.confirm_check, "toggled", G_CALLBACK(on_check), NULL);
+    gtk_box_append(GTK_BOX(p.body), A.confirm_check);
+
+    GtkWidget *back = su_button("Back", "뒤로", "su-secondary");
+    g_signal_connect(back, "clicked", G_CALLBACK(on_back_disks), NULL);
+    gtk_box_append(GTK_BOX(p.left), back);
+    A.confirm_go = su_button("Erase and install", "지우고 설치", "su-danger");
+    gtk_widget_set_sensitive(A.confirm_go, FALSE);
+    g_signal_connect(A.confirm_go, "clicked", G_CALLBACK(on_go), NULL);
+    gtk_box_append(GTK_BOX(p.right), A.confirm_go);
+    gtk_stack_add_named(GTK_STACK(A.stack), p.root, "confirm");
+}
+
+/* ── progress ──────────────────────────────────────────────────────── */
+
+static void step_text(const char *key)
+{
+    static const struct { const char *key, *en, *ko; } STEPS[] = {
+        { "partition", "Partitioning the disk",       "디스크를 나누는 중" },
+        { "format",    "Formatting",                  "포맷하는 중" },
+        { "copy",      "Copying LP",                  "LP 를 복사하는 중" },
+        { "recovery",  "Setting up the recovery system", "복구 시스템을 준비하는 중" },
+        { "boot",      "Making the disk start up",    "시작 준비를 하는 중" },
+        { "finish",    "Finishing",                   "마무리하는 중" },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(STEPS); i++)
+        if (!strcmp(key, STEPS[i].key))
+            su_retext(A.step, STEPS[i].en, STEPS[i].ko);
+}
+
+static void finished(gboolean ok)
+{
+    if (A.lines)
+        g_clear_object(&A.lines);
+    if (ok) {
+        su_go(A.stack, "done", TRUE);
+    } else {
+        char *en = g_strdup_printf("lp-install said: %s", A.last_error[0] ? A.last_error
+                                                                           : "(nothing)");
+        char *ko = g_strdup_printf("lp-install 의 메시지: %s", A.last_error[0] ? A.last_error
+                                                                            : "(없음)");
+        su_retext(A.fail_text, en, ko);
+        g_free(en); g_free(ko);
+        su_go(A.stack, "failed", TRUE);
+    }
+}
+
+static void on_line(GObject *src, GAsyncResult *res, gpointer d)
+{
+    (void)d;
+    gsize len = 0;
+    GError *err = NULL;
+    char *line = g_data_input_stream_read_line_finish(G_DATA_INPUT_STREAM(src), res,
+                                                      &len, &err);
+    if (!line) {
+        g_clear_error(&err);
+        gboolean ok = A.proc && g_subprocess_wait_check(A.proc, NULL, NULL);
+        g_clear_object(&A.proc);
+        finished(ok);
+        return;
+    }
+    /* PROGRESS <pct> <step> | STEP <step> <text> | ERROR <key> <text> | DONE ... */
+    char **f = g_strsplit(line, " ", 3);
+    if (f[0] && f[1]) {
+        if (!strcmp(f[0], "PROGRESS")) {
+            int pct = atoi(f[1]);
+            su_progress_set(A.bar, pct / 100.0);
+            char t[16];
+            g_snprintf(t, sizeof t, "%d%%", pct);
+            gtk_label_set_text(GTK_LABEL(A.percent), t);
+        } else if (!strcmp(f[0], "STEP")) {
+            step_text(f[1]);
+        } else if (!strcmp(f[0], "ERROR")) {
+            g_strlcpy(A.last_error, f[2] ? f[2] : f[1], sizeof A.last_error);
+        }
+    }
+    g_strfreev(f);
+    g_free(line);
+    g_data_input_stream_read_line_async(A.lines, G_PRIORITY_DEFAULT, NULL, on_line, NULL);
+}
+
+static void start_install(void)
+{
+    su_progress_set(A.bar, 0.0);
+    gtk_label_set_text(GTK_LABEL(A.percent), "0%");
+    step_text("partition");
+    A.last_error[0] = '\0';
+    su_go(A.stack, "progress", TRUE);
+
+    GError *err = NULL;
+    A.proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                              G_SUBPROCESS_FLAGS_STDERR_MERGE, &err,
+                              backend(), "install", "--disk", A.disk, "--yes",
+                              "--progress", "--lang",
+                              su_korean ? "ko_KR.UTF-8" : "en_US.UTF-8", NULL);
+    if (!A.proc) {
+        g_strlcpy(A.last_error, err ? err->message : "could not start", sizeof A.last_error);
+        g_clear_error(&err);
+        finished(FALSE);
+        return;
+    }
+    A.lines = g_data_input_stream_new(g_subprocess_get_stdout_pipe(A.proc));
+    g_data_input_stream_read_line_async(A.lines, G_PRIORITY_DEFAULT, NULL, on_line, NULL);
+}
+
+static void page_progress(void)
+{
+    SuPage p;
+    su_page(&p, "Installing LP", "LP 를 설치하는 중",
+            "This takes a few minutes. Keep the computer plugged in.",
+            "몇 분 걸립니다. 전원을 연결해 두세요.");
+    A.step = su_label("", "", "su-choice-title");
+    gtk_box_append(GTK_BOX(p.body), A.step);
+    A.bar = su_progress_new();
+    gtk_box_append(GTK_BOX(p.body), su_progress_widget(A.bar));
+    A.percent = gtk_label_new("0%");
+    gtk_widget_add_css_class(A.percent, "su-note");
+    gtk_label_set_xalign(GTK_LABEL(A.percent), 1.0);
+    gtk_box_append(GTK_BOX(p.body), A.percent);
+    gtk_stack_add_named(GTK_STACK(A.stack), p.root, "progress");
+}
+
+/* ── done / failed ─────────────────────────────────────────────────── */
+
+static void page_done(void)
+{
+    SuPage p;
+    su_page(&p, "LP is installed", "LP 설치를 마쳤습니다",
+            "Remove the USB stick, then restart.",
+            "USB 를 뽑은 뒤 다시 시작하세요.");
+    gtk_box_append(GTK_BOX(p.body), su_label(
+        "After the restart LP asks for your name, a password and a few "
+        "settings, and then it is yours.",
+        "다시 시작하면 LP 가 이름과 암호, 그리고 몇 가지 설정을 묻고, 그 다음부터는 "
+        "바로 쓸 수 있습니다.", "su-body"));
+    GtkWidget *off = su_button("Power off", "전원 끄기", "su-secondary");
+    g_signal_connect(off, "clicked", G_CALLBACK(on_poweroff), NULL);
+    gtk_box_append(GTK_BOX(p.left), off);
+    GtkWidget *rs = su_button("Restart", "다시 시작", "su-primary");
+    g_signal_connect(rs, "clicked", G_CALLBACK(on_restart), NULL);
+    gtk_box_append(GTK_BOX(p.right), rs);
+    gtk_stack_add_named(GTK_STACK(A.stack), p.root, "done");
+}
+
+static void on_again(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    show_disks();
+    su_go(A.stack, "disks", FALSE);
+}
+
+static void page_failed(void)
+{
+    SuPage p;
+    su_page(&p, "The installation did not finish", "설치를 마치지 못했습니다",
+            "The disk may be partly written. Nothing on the USB stick was changed.",
+            "디스크에 일부만 쓰였을 수 있습니다. USB 에 있는 것은 바뀌지 않았습니다.");
+    A.fail_text = su_label("", "", "su-warn");
+    gtk_label_set_selectable(GTK_LABEL(A.fail_text), TRUE);
+    gtk_box_append(GTK_BOX(p.body), A.fail_text);
+    GtkWidget *off = su_button("Power off", "전원 끄기", "su-secondary");
+    g_signal_connect(off, "clicked", G_CALLBACK(on_poweroff), NULL);
+    gtk_box_append(GTK_BOX(p.left), off);
+    GtkWidget *again = su_button("Try again", "다시 시도", "su-primary");
+    g_signal_connect(again, "clicked", G_CALLBACK(on_again), NULL);
+    gtk_box_append(GTK_BOX(p.right), again);
+    gtk_stack_add_named(GTK_STACK(A.stack), p.root, "failed");
+}
+
+/* ── the window ────────────────────────────────────────────────────── */
+
+static gboolean on_close(GtkWindow *w, gpointer d)
+{
+    (void)w; (void)d;
+    /* Closing mid-copy would leave a half-written disk and a running
+     * rsync with nobody reading its output. */
+    return A.proc != NULL;
+}
+
+static void activate(GtkApplication *app, gpointer d)
+{
+    (void)d;
+    su_load_css();
+    A.win = gtk_application_window_new(app);
+    gtk_widget_add_css_class(A.win, "su-window");
+    gtk_window_set_title(GTK_WINDOW(A.win), "Install LP");
+    gtk_window_set_default_size(GTK_WINDOW(A.win), 1100, 760);
+    g_signal_connect(A.win, "close-request", G_CALLBACK(on_close), NULL);
+
+    GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(card, "su-card");
+    gtk_widget_set_size_request(card, 760, 560);
+    gtk_widget_set_halign(card, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(card, GTK_ALIGN_CENTER);
+    A.stack = su_stack();
+    gtk_widget_set_vexpand(A.stack, TRUE);
+    gtk_box_append(GTK_BOX(card), A.stack);
+    gtk_window_set_child(GTK_WINDOW(A.win), card);
+
+    page_welcome();
+    page_problem();
+    page_disks();
+    page_confirm();
+    page_progress();
+    page_done();
+    page_failed();
+    su_set_korean(su_korean);
+    gtk_stack_set_visible_child_name(GTK_STACK(A.stack), "welcome");
+
+    if (!A.windowed)
+        gtk_window_fullscreen(GTK_WINDOW(A.win));
+    gtk_window_present(GTK_WINDOW(A.win));
+
+    /* For screenshots and tests: start on a page. */
+    const char *page = g_getenv("LP_SETUP_PAGE");
+    if (page && *page) {
+        if (!strcmp(page, "disks") || !strcmp(page, "confirm"))
+            show_disks();
+        if (!strcmp(page, "confirm") && A.disk[0])
+            on_disk_next(NULL, NULL);
+        else
+            gtk_stack_set_visible_child_name(GTK_STACK(A.stack), page);
+        if (!strcmp(page, "progress"))
+            start_install();
+        if (!strcmp(page, "problem"))
+            on_continue(NULL, NULL);
+    }
+}
+
+int main(int argc, char **argv)
+{
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--korean"))
+            su_korean = TRUE;
+        else if (!strcmp(argv[i], "--windowed"))
+            A.windowed = TRUE;
+    }
+    const char *lang = g_getenv("LANG");
+    if (lang && g_str_has_prefix(lang, "ko"))
+        su_korean = TRUE;
+    A.app = gtk_application_new("org.lp.Installer", G_APPLICATION_NON_UNIQUE);
+    g_signal_connect(A.app, "activate", G_CALLBACK(activate), NULL);
+    char *args[] = { argv[0], NULL };
+    int st = g_application_run(G_APPLICATION(A.app), 1, args);
+    g_object_unref(A.app);
+    return st ? st : A.exit_code;
+}
