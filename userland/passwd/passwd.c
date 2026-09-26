@@ -57,6 +57,7 @@
  * prefix rather than a real chroot(), which needs no privilege and has
  * the same effect on the only files this program touches.
  */
+#include "crypt6.h"
 #include "types.h"
 #include "string.h"
 #include "stdio.h"
@@ -64,8 +65,6 @@
 #include "unistd.h"
 
 #define PW_MAX       256
-#define SALT_LEN     16
-#define ROUNDS_DEF   5000
 #define FILE_MAX     65536
 #define DAY          86400
 
@@ -78,160 +77,8 @@ static long flen;
 static char obuf[FILE_MAX + 1024];   /* the one being written */
 static long olen;
 
-/* ── SHA-512 crypt ────────────────────────────────────────────────────
- *
- * Ulrich Drepper's $6$, on top of lp_digest. It is here rather than in
- * libc because passwd is the only thing that wants it.
- *
- * lp_digest_final hands back hex, so each 64-byte digest is decoded once
- * on the way out. That costs 128 characters of parsing per round and
- * 5000 rounds is still a few milliseconds; the alternative was a second
- * SHA-512 in this file, which is a worse thing to have two of. */
-
-static const char B64[] =
-    "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-
-static int hexnib(char c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    return 0;
-}
-
-static void sha_final(lp_digest_t *d, u8 out[64])
-{
-    char hex[2 * 64 + 1];
-    lp_digest_final(d, hex);
-    for (int i = 0; i < 64; i++)
-        out[i] = (u8)((hexnib(hex[2 * i]) << 4) | hexnib(hex[2 * i + 1]));
-}
-
-/* The byte order the $6$ encoding interleaves the digest in. Twenty-one
- * groups of three bytes, then one lone byte. It is not a rotation you
- * can compute, so it is written out. */
-static const u8 PERM[63] = {
-     0,21,42, 22,43, 1, 44, 2,23,  3,24,45, 25,46, 4, 47, 5,26,
-     6,27,48, 28,49, 7, 50, 8,29,  9,30,51, 31,52,10, 53,11,32,
-    12,33,54, 34,55,13, 56,14,35, 15,36,57, 37,58,16, 59,17,38,
-    18,39,60, 40,61,19, 62,20,41
-};
-
-static void b64_group(u32 w, int n, char **out)
-{
-    for (int i = 0; i < n; i++) {
-        *(*out)++ = B64[w & 0x3F];
-        w >>= 6;
-    }
-}
-
-/* rounds is what the salt asked for, or ROUNDS_DEF. `salt` is the salt
- * text only, without the $6$ and without any rounds= part. */
-static void sha512_crypt(const char *pw, const char *salt, unsigned rounds,
-                         char *out, size_t outn)
-{
-    size_t pwlen = strlen(pw), slen = strlen(salt);
-    u8 A[64], B[64], DP[64], DS[64];
-    u8 P[PW_MAX], S[64];
-    lp_digest_t c;
-
-    lp_digest_init(&c, LP_SHA512);
-    lp_digest_update(&c, pw, pwlen);
-    lp_digest_update(&c, salt, slen);
-    lp_digest_update(&c, pw, pwlen);
-    sha_final(&c, B);
-
-    lp_digest_init(&c, LP_SHA512);
-    lp_digest_update(&c, pw, pwlen);
-    lp_digest_update(&c, salt, slen);
-    size_t cnt = pwlen;
-    for (; cnt > 64; cnt -= 64)
-        lp_digest_update(&c, B, 64);
-    lp_digest_update(&c, B, cnt);
-    for (size_t n = pwlen; n > 0; n >>= 1) {
-        if (n & 1) lp_digest_update(&c, B, 64);
-        else       lp_digest_update(&c, pw, pwlen);
-    }
-    sha_final(&c, A);
-
-    lp_digest_init(&c, LP_SHA512);
-    for (size_t i = 0; i < pwlen; i++)
-        lp_digest_update(&c, pw, pwlen);
-    sha_final(&c, DP);
-    for (size_t i = 0; i < pwlen; i++)
-        P[i] = DP[i % 64];
-
-    lp_digest_init(&c, LP_SHA512);
-    for (unsigned i = 0; i < 16u + A[0]; i++)
-        lp_digest_update(&c, salt, slen);
-    sha_final(&c, DS);
-    for (size_t i = 0; i < slen; i++)
-        S[i] = DS[i % 64];
-
-    for (unsigned r = 0; r < rounds; r++) {
-        lp_digest_init(&c, LP_SHA512);
-        if (r & 1) lp_digest_update(&c, P, pwlen);
-        else       lp_digest_update(&c, A, 64);
-        if (r % 3) lp_digest_update(&c, S, slen);
-        if (r % 7) lp_digest_update(&c, P, pwlen);
-        if (r & 1) lp_digest_update(&c, A, 64);
-        else       lp_digest_update(&c, P, pwlen);
-        sha_final(&c, A);
-    }
-
-    char body[90], *p = body;
-    for (int i = 0; i < 63; i += 3)
-        b64_group(((u32)A[PERM[i]] << 16) | ((u32)A[PERM[i + 1]] << 8) |
-                  (u32)A[PERM[i + 2]], 4, &p);
-    b64_group((u32)A[63], 2, &p);
-    *p = '\0';
-
-    if (rounds == ROUNDS_DEF)
-        snprintf(out, outn, "$6$%s$%s", salt, body);
-    else
-        snprintf(out, outn, "$6$rounds=%u$%s$%s", rounds, salt, body);
-}
-
-/* Does this password produce this stored hash? Only $6$ is understood;
- * anything else is answered "no" rather than guessed at. */
-static bool hash_matches(const char *pw, const char *stored)
-{
-    if (strncmp(stored, "$6$", 3) != 0)
-        return false;
-    const char *s = stored + 3;
-    unsigned rounds = ROUNDS_DEF;
-    if (strncmp(s, "rounds=", 7) == 0) {
-        s += 7;
-        rounds = 0;
-        while (*s >= '0' && *s <= '9')
-            rounds = rounds * 10 + (unsigned)(*s++ - '0');
-        if (*s != '$' || rounds == 0)
-            return false;
-        s++;
-    }
-    const char *dollar = strchr(s, '$');
-    if (!dollar || dollar - s > SALT_LEN)
-        return false;
-
-    char salt[SALT_LEN + 1];
-    size_t n = (size_t)(dollar - s);
-    memcpy(salt, s, n);
-    salt[n] = '\0';
-
-    char again[256];
-    sha512_crypt(pw, salt, rounds, again, sizeof again);
-    return strcmp(again, stored) == 0;
-}
-
-static bool make_salt(char *out)
-{
-    u8 raw[SALT_LEN];
-    if (lp_getrandom(raw, sizeof raw, 0) != (long)sizeof raw)
-        return false;
-    for (int i = 0; i < SALT_LEN; i++)
-        out[i] = B64[raw[i] & 0x3F];
-    out[SALT_LEN] = '\0';
-    return true;
-}
+/* SHA-512 crypt is libc/src/crypt6.c, shared with sudo, login and the
+ * administrator daemons. */
 
 /* ── The files ────────────────────────────────────────────────────── */
 
@@ -866,7 +713,7 @@ int main(int argc, char **argv)
         char old[PW_MAX];
         if (!ask("Current password: ", old, sizeof old))
             return fail_unchanged("Authentication token manipulation error");
-        if (!hash_matches(old, oldhash))
+        if (!lp_crypt6_verify(old, oldhash))
             return fail_unchanged("Authentication token manipulation error");
     }
 
@@ -901,12 +748,9 @@ int main(int argc, char **argv)
         return fail_unchanged("Have exhausted maximum number of retries for"
                               " service");
 
-    char salt[SALT_LEN + 1];
-    if (!make_salt(salt))
-        return fail_unchanged("Authentication token manipulation error");
-
     char hash[256];
-    sha512_crypt(chosen, salt, ROUNDS_DEF, hash, sizeof hash);
+    if (!lp_crypt6_new(chosen, hash, sizeof hash))
+        return fail_unchanged("Authentication token manipulation error");
     rebuild(target.name, hash, days_now(), line, sizeof line);
     if (!store_line(target.name, line))
         return store_failed();
