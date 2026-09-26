@@ -13,6 +13,10 @@
  *     search "night"             type into the search field
  *     wait 1500                  let an asynchronous answer land
  *     run grim /media/x.png      run a command and wait for it
+ *     shots /media/p 60,120,200  grim at those offsets from now, without
+ *                                waiting - for frames in the middle of an
+ *                                animation, which a blocking `run` would
+ *                                freeze (the main loop draws the frames)
  *     echo text                  a marker in the output
  *     dump                       print the widget tree's labels
  *     quit
@@ -54,6 +58,8 @@ static GList *windows_dialogs_first(void)
         GtkWidget *w = g_list_model_get_item(m, i);
         g_object_unref(w);
         if (!gtk_widget_get_visible(w)) continue;
+        /* A dialog on its way out (the sheet's exit) is not a target. */
+        if (g_object_get_data(G_OBJECT(w), "lp-closing")) continue;
         if (g_object_get_data(G_OBJECT(w), "lp-dialog"))
             dialogs = g_list_prepend(dialogs, w);
         else
@@ -174,6 +180,22 @@ static void dump(GtkWidget *w, int depth)
 
 static gboolean step(gpointer p);
 
+static gboolean shot_at(gpointer p)
+{
+    char *file = p;
+    const char *v[] = { "grim", file, NULL };
+    GError *e = NULL;
+    if (!g_spawn_async(NULL, (char **)v, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &e)) {
+        g_print("driver: grim: %s\n", e->message);
+        g_error_free(e);
+    } else {
+        g_print("driver: shot %s at %" G_GINT64_FORMAT " ms\n", file,
+                g_get_monotonic_time() / 1000);
+    }
+    g_free(file);
+    return G_SOURCE_REMOVE;
+}
+
 static void fail(const char *why, const char *line)
 {
     D.failures++;
@@ -235,6 +257,16 @@ static gboolean step(gpointer p)
             g_print("driver: run exit %d%s%s%s%s\n", st, out && *out ? " out: " : "",
                     out ? out : "", err && *err ? " err: " : "", err ? err : "");
             g_free(out); g_free(err);
+        } else if (!strcmp(cmd, "shots") && argc >= 3) {
+            char **ms = g_strsplit(argv[2], ",", -1);
+            for (int k = 0; ms[k]; k++) {
+                guint at = (guint)atoi(ms[k]);
+                char *f = g_strdup_printf("%s-%03ums.png", argv[1], at);
+                if (at) g_timeout_add(at, shot_at, f);
+                else shot_at(f);
+            }
+            g_strfreev(ms);
+            delay = 0;
         } else if (!strcmp(cmd, "echo")) {
             char *t = g_strjoinv(" ", argv + 1);
             g_print("MARK %s\n", t);
