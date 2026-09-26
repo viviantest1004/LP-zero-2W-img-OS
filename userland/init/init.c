@@ -17,9 +17,35 @@
 #include "stdlib.h"
 #include "unistd.h"
 
-#define SHELL_PATH   "/bin/sh"
+/* Our shell, by the name that is always ours.
+ *
+ * On the RAM-root images /bin/sh IS our shell, and /bin/lpsh is the same
+ * file under a second name. On the desktop, /bin/sh belongs to Debian's
+ * dash package - dash's own postinst manages that link, apt-key and every
+ * maintainer script expect a POSIX shell there, and a package upgrade
+ * would put it back if anything else took it. So the desktop's /bin/sh
+ * is dash, and our shell lives at /bin/lpsh. /etc/rc is written for our
+ * shell, and the console shell is ours, so init asks for it by the name
+ * that cannot be taken away, and falls back to /bin/sh only on an image
+ * built before /bin/lpsh existed. */
+#define SHELL_OURS   "/bin/lpsh"
+#define SHELL_POSIX  "/bin/sh"
+static const char *shell_path(void)
+{
+    return lp_exists(SHELL_OURS) ? SHELL_OURS : SHELL_POSIX;
+}
+#define SHELL_PATH   shell_path()
 #define RC_SCRIPT    "/etc/rc"
-#define SERVICES     "/etc/services"
+/* On the Debian-based desktop /etc/services belongs to netbase: it is
+ * the port-name table glibc reads for getservbyname(). Our list lives
+ * in /etc/lp/services there, and the boards keep the old path. */
+#define SERVICES_OURS   "/etc/lp/services"
+#define SERVICES_LEGACY "/etc/services"
+static const char *services_path(void)
+{
+    return lp_exists(SERVICES_OURS) ? SERVICES_OURS : SERVICES_LEGACY;
+}
+#define SERVICES     services_path()
 
 /* Services somebody added on this machine.
  *

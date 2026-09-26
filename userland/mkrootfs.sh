@@ -109,37 +109,56 @@ fi
 
 # ── 우리 프로그램 ────────────────────────────────────────────────
 for p in "${PROGRAMS[@]}"; do
+    # rm first: if an earlier build left bin/<p> as an alias symlink (sudo
+    # used to be a link to su, less to more), cp would follow it and write
+    # the new program over the link's TARGET - replacing su with sudo.
+    rm -f "${ROOT_DIR}/bin/${p}"
     cp "${BIN_DIR}/${p}" "${ROOT_DIR}/bin/${p}"
 done
+
+# An alias only where there is no real program by that name. sudo and
+# less were aliases (of su and more) until they became programs of their
+# own; the unconditional ln -sf that made them would now replace the real
+# ones with links every time this script ran.
+alias_bin() {
+    [[ -e "${ROOT_DIR}/bin/$2" && ! -L "${ROOT_DIR}/bin/$2" ]] && return 0
+    ln -sf "$1" "${ROOT_DIR}/bin/$2"
+}
+
+# Our shell under the name that is always ours. On these RAM-root images
+# /bin/sh is our shell too; on the desktop /bin/sh belongs to Debian's
+# dash, and init, /etc/rc and the login shell use /bin/lpsh. A hard link,
+# so it is one file under two names and cannot drift.
+ln -f "${ROOT_DIR}/bin/sh" "${ROOT_DIR}/bin/lpsh"
 # mount 는 argv[0] 로 동작을 가른다. 같은 파일을 umount 이름으로도 둔다.
-ln -sf mount "${ROOT_DIR}/bin/umount"
+alias_bin mount "umount"
 # chattr 도 argv[0] 로 갈린다. lsattr 은 같은 파일이다.
-ln -sf chattr "${ROOT_DIR}/bin/lsattr"
+alias_bin chattr "lsattr"
 # 나머지 argv[0] 쌍들. 하는 일이 같고 기본값만 다른 것들이라
 # 파일을 두 개 만들 이유가 없다.
-ln -sf chown   "${ROOT_DIR}/bin/chgrp"
-ln -sf id      "${ROOT_DIR}/bin/groups"
-ln -sf useradd "${ROOT_DIR}/bin/userdel"
-ln -sf su      "${ROOT_DIR}/bin/sudo"
+alias_bin chown "chgrp"
+alias_bin id "groups"
+alias_bin useradd "userdel"
+alias_bin su "sudo"
 # `less` is what people type. `more` here already scrolls both ways and
 # quits on q, so the name is the only thing that was missing.
-ln -sf more    "${ROOT_DIR}/bin/less"
+alias_bin more "less"
 # md5sum and its siblings are the same program: one digest front end that
 # picks the algorithm from the name it was called by.
-ln -sf sha256sum "${ROOT_DIR}/bin/md5sum"
-ln -sf sha256sum "${ROOT_DIR}/bin/sha1sum"
-ln -sf sha256sum "${ROOT_DIR}/bin/sha512sum"
+alias_bin sha256sum "md5sum"
+alias_bin sha256sum "sha1sum"
+alias_bin sha256sum "sha512sum"
 # base32 is base64 with a different alphabet, and nothing else.
-ln -sf base64    "${ROOT_DIR}/bin/base32"
+alias_bin base64 "base32"
 # `[` is test. The shell has both built in; the files have to exist too,
 # because `find -exec [ ... ]` and a crontab line look for a file.
-ln -sf test      "${ROOT_DIR}/bin/["
+alias_bin test "["
 # pkill is pgrep that sends a signal instead of printing a pid.
-ln -sf pgrep     "${ROOT_DIR}/bin/pkill"
+alias_bin pgrep "pkill"
 # gunzip is `gzip -d` and zcat is `gzip -dc`. One decompressor, three
 # names, because those are the three names people type.
-ln -sf gzip      "${ROOT_DIR}/bin/gunzip"
-ln -sf gzip      "${ROOT_DIR}/bin/zcat"
+alias_bin gzip "gunzip"
+alias_bin gzip "zcat"
 log "bin/: ${PROGRAMS[*]} umount lsattr chgrp groups userdel sudo less md5sum sha1sum sha512sum base32 [ pkill gunzip zcat"
 
 # 커널은 initramfs 의 /init 을 PID 1 로 실행한다

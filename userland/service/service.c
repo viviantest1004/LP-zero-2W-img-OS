@@ -30,7 +30,14 @@
 #include "unistd.h"
 #include "syscall.h"
 
-#define SERVICES  "/etc/services"
+/* /etc/lp/services on the desktop, where /etc/services is glibc's
+ * port-name table; /etc/services on the boards. Same choice init makes. */
+static const char *services_path(void)
+{
+    return lp_exists("/etc/lp/services") ? "/etc/lp/services"
+                                          : "/etc/services";
+}
+#define SERVICES  services_path()
 #define DISABLED  "/data/services.disabled"
 
 /* Services added on this machine.
