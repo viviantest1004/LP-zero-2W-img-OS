@@ -4,7 +4,9 @@
  *   lp-tune status [--json]          the same, as JSON for the top bar
  *   lp-tune set auto|balanced|saver|performance
  *   lp-tune brightness get           0-100
- *   lp-tune brightness set N|+N|-N   N percent, or a step up or down
+ *   lp-tune brightness set N|+N|-N   N percent, or a step up or down;
+ *                                    glides there in ~240ms, and the
+ *                                    daemon restores the last value at boot
  *   lp-tune suspend                  lock the session, then sleep
  *   lp-tune config [get]             the lid / power-button settings
  *   lp-tune config set KEY VALUE     change one (validated)
@@ -105,6 +107,11 @@
 
 #define SOCK_PATH     "/run/lp-tune.sock"
 #define PROFILE_FILE  "/etc/lp-tune.profile"
+/* The last brightness someone chose, restored when the daemon starts.
+ * Written when a glide ends, so a slider drag is one write, not thirty
+ * a second. */
+#define BRIGHT_DIR    "/var/lib/lp-tune"
+#define BRIGHT_FILE   "/var/lib/lp-tune/brightness"
 #define AF_UNIX_      1
 #define AF_NETLINK_   16
 #define NETLINK_KOBJECT_UEVENT_ 15
@@ -367,6 +374,92 @@ static int brightness_get(void)
     return (int)((cur * 100 + max / 2) / max);
 }
 
+/* Brightness does not jump; it glides.
+ *
+ * A slider dragged across the screen sends thirty values a second, a
+ * brightness key sends one, the idle dimmer sends one. Written straight
+ * to the backlight each is a visible step - at the dark end of the range
+ * a step of a few percent reads as a flash. So every request becomes a
+ * target and the daemon walks the panel to it: an exponential approach
+ * with a 45ms time constant, stepped every 8ms, done within 0.5% of the
+ * range (about 240ms - the "expand" spring of design/feel.md, which is
+ * what a change of level is). A new request mid-way retargets from where
+ * the panel is, so dragging never queues up behind the glide.
+ *
+ * In the daemon the steps ride on its poll loop, which only wakes that
+ * often while a glide is running. Called directly (root, --sysfs, or no
+ * daemon yet), brightness_set() glides in place before it returns. */
+#define RAMP_TICK_MS 8
+#define RAMP_ALPHA_1000 163        /* 1 - exp(-8/45), in thousandths */
+
+static struct {
+    bool on;
+    char dev[64];
+    long max;
+    long x1000;                    /* current raw level x 1000 */
+    long target;                   /* raw */
+    s64  last_ms;
+} ramp;
+
+static bool in_daemon;
+static int  bright_saved = -1;
+
+static void bright_save(void)
+{
+    if (dry_run || ramp.max <= 0)
+        return;
+    int pct = (int)((ramp.target * 100 + ramp.max / 2) / ramp.max);
+    if (pct == bright_saved)
+        return;
+    char d[512], f[512], line[16];
+    rooted(BRIGHT_DIR, d, sizeof d);
+    rooted(BRIGHT_FILE, f, sizeof f);
+    lp_mkdir(d, 0755);
+    snprintf(line, sizeof line, "%d\n", pct);
+    if (lp_write_file_atomic(f, line, strlen(line)))
+        bright_saved = pct;
+}
+
+static bool ramp_write(long raw)
+{
+    char f[256], v[32];
+    snprintf(v, sizeof v, "%ld", raw);
+    snprintf(f, sizeof f, "/sys/class/backlight/%s/brightness", ramp.dev);
+    int before = n_refused;
+    wr(f, v);
+    return n_refused == before;
+}
+
+/* One or more 8ms steps, however many fit in the time since the last.
+ * False when the glide is over (or the backlight refused a write). */
+static bool ramp_step(void)
+{
+    if (!ramp.on)
+        return false;
+    s64 now = lp_monotonic_ms();
+    long steps = (long)((now - ramp.last_ms) / RAMP_TICK_MS);
+    if (steps < 1)
+        return true;
+    if (steps > 64)
+        steps = 64;
+    ramp.last_ms = now;
+    long tgt = ramp.target * 1000;
+    for (long i = 0; i < steps; i++)
+        ramp.x1000 += (tgt - ramp.x1000) * RAMP_ALPHA_1000 / 1000;
+    long left = tgt - ramp.x1000;
+    if (left < 0) left = -left;
+    bool done = left <= ramp.max * 5;          /* 0.5% of the range, x1000 */
+    long raw = done ? ramp.target : (ramp.x1000 + 500) / 1000;
+    if (raw < 1) raw = 1;
+    if (!ramp_write(raw) || done) {
+        ramp.on = false;
+        if (done)
+            bright_save();
+        return false;
+    }
+    return true;
+}
+
 static bool brightness_set(int pct)
 {
     char dev[64], f[256];
@@ -380,12 +473,31 @@ static bool brightness_set(int pct)
         return false;
     long raw = max * pct / 100;
     if (raw < 1) raw = 1;
-    char v[32];
-    snprintf(v, sizeof v, "%ld", raw);
-    snprintf(f, sizeof f, "/sys/class/backlight/%s/brightness", dev);
+
+    /* Start from what the panel shows now, or from where a glide in
+     * progress has got to - never from where it was going. */
+    if (!ramp.on || strcmp(ramp.dev, dev) != 0 || ramp.max != max) {
+        snprintf(f, sizeof f, "/sys/class/backlight/%s/brightness", dev);
+        long cur = rd_num(f, raw);
+        strlcpy(ramp.dev, dev, sizeof ramp.dev);
+        ramp.max = max;
+        ramp.x1000 = cur * 1000;
+        ramp.last_ms = lp_monotonic_ms();
+    }
+    ramp.target = raw;
+    ramp.on = true;
+
+    /* The first step now, so the change starts in this frame and a
+     * refusal is reported to the one who asked. */
     int before = n_refused;
-    wr(f, v);
-    return n_refused == before;
+    ramp.last_ms -= RAMP_TICK_MS;
+    ramp_step();
+    if (n_refused != before)
+        return false;
+    if (!in_daemon)
+        while (ramp_step())
+            lp_sleep_ms(RAMP_TICK_MS);
+    return true;
 }
 
 /* ── Profiles ──────────────────────────────────────────────────────── */
@@ -413,15 +525,10 @@ static void save_profile(profile_t p)
 {
     if (dry_run)
         return;
-    char path[512], tmp[520];
+    char path[512], line[32];
     rooted(PROFILE_FILE, path, sizeof path);
-    snprintf(tmp, sizeof tmp, "%s.new", path);
-    long fd = lp_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0)
-        return;
-    dprintf((int)fd, "%s\n", PNAME[p]);
-    lp_close((int)fd);
-    lp_rename(tmp, path);
+    snprintf(line, sizeof line, "%s\n", PNAME[p]);
+    lp_write_file_atomic(path, line, strlen(line));
 }
 
 static profile_t effective(profile_t p, const power_t *pw)
@@ -633,13 +740,9 @@ static bool conf_save(const conf_t *c)
 {
     if (dry_run)
         return true;
-    char p[512], tmp[520];
+    char p[512], text[1024];
     rooted(CONF_FILE, p, sizeof p);
-    snprintf(tmp, sizeof tmp, "%s.new", p);
-    long fd = lp_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0)
-        return false;
-    dprintf((int)fd,
+    int n = snprintf(text, sizeof text,
             "# Written by lp-tune (the Settings app's Power panel). One key=value\n"
             "# per line; see `lp-tune --help`.\n"
             "lid_on_battery=%s\nlid_on_ac=%s\npower_button=%s\n"
@@ -647,8 +750,10 @@ static bool conf_save(const conf_t *c)
             "idle_suspend_minutes_ac=%d\n",
             c->lid_bat, c->lid_ac, c->power, c->lock ? "yes" : "no",
             c->idle_bat, c->idle_ac);
-    lp_close((int)fd);
-    return lp_rename(tmp, p) == 0;
+    /* Durable, not just atomic: a setting changed a second before the
+     * battery died must still be there on the next boot. */
+    return n > 0 && (size_t)n < sizeof text &&
+           lp_write_file_atomic(p, text, (size_t)n);
 }
 
 static void conf_print(int fd, const conf_t *c)
@@ -1002,7 +1107,9 @@ static void handle(const char *req, u32 uid, profile_t *prof, char *reply,
             snprintf(reply, n, "err the backlight refused it\n");
             return;
         }
-        snprintf(reply, n, "ok %d\n", brightness_get());
+        /* The target, not a reading taken a few milliseconds into the
+         * glide towards it. */
+        snprintf(reply, n, "ok %d\n", want < 1 ? 1 : want > 100 ? 100 : want);
         return;
     }
     if (strcmp(word, "suspend") == 0) {
@@ -1054,6 +1161,18 @@ static int daemon_main(void)
     read_power(&pw);
     bool last_ac = pw.ac;
     apply(effective(prof, &pw));
+
+    /* The brightness someone left it at, faded in from wherever the
+     * firmware put it. Never below 5% at boot: a panel that comes up
+     * nearly black reads as a machine that did not start. */
+    char bf[32];
+    if (rd(BRIGHT_FILE, bf, sizeof bf)) {
+        int pct = (int)strtol(bf, NULL, 10);
+        if (pct >= 1 && pct <= 100) {
+            bright_saved = pct;
+            brightness_set(pct < 5 ? 5 : pct);
+        }
+    }
     printf("lp-tune: %s (%s) - %d settings applied, %d not on this machine%s\n",
            PNAME[prof], PNAME[effective(prof, &pw)], n_written, n_absent,
            n_refused ? ", some refused - see above" : "");
@@ -1095,15 +1214,20 @@ static int daemon_main(void)
     printf("lp-tune: watching %d lid switch%s and %d power button%s\n",
            nlid, nlid == 1 ? "" : "es", npwr, npwr == 1 ? "" : "s");
 
+    in_daemon = true;
     for (;;) {
         lp_pollfd_t fds[8];
         unsigned nf = 0;
+        bool gliding = ramp.on;
         if (ls >= 0) { fds[nf].fd = (int)ls; fds[nf].events = LP_POLLIN; fds[nf].revents = 0; nf++; }
         if (ue >= 0) { fds[nf].fd = (int)ue; fds[nf].events = LP_POLLIN; fds[nf].revents = 0; nf++; }
         for (int i = 0; i < nin; i++) { fds[nf].fd = infd[i]; fds[nf].events = LP_POLLIN; fds[nf].revents = 0; nf++; }
-        long r = lp_poll(fds, nf, 60000);
+        /* Wake every 8ms only while the backlight is gliding. */
+        long r = lp_poll(fds, nf, gliding ? RAMP_TICK_MS : 60000);
+        if (ramp.on)
+            ramp_step();
 
-        bool recheck = (r == 0);
+        bool recheck = (r == 0 && !gliding);
         for (unsigned i = 0; r > 0 && i < nf; i++) {
             if (!(fds[i].revents & LP_POLLIN))
                 continue;
