@@ -5,6 +5,9 @@
  *   lp-tune set auto|balanced|saver|performance
  *   lp-tune brightness get           0-100
  *   lp-tune brightness set N|+N|-N   N percent, or a step up or down
+ *   lp-tune suspend                  lock the session, then sleep
+ *   lp-tune config [get]             the lid / power-button settings
+ *   lp-tune config set KEY VALUE     change one (validated)
  *   lp-tune -d                       the daemon, run from /etc/services
  *
  *   --sysfs DIR   read and write under DIR instead of /  (tests)
@@ -59,6 +62,30 @@
  * machine may ask it for a new value. It never goes below 1% - a panel at
  * zero looks switched off, and on a touch laptop with no keyboard handy
  * there is then no way to find the slider again.
+ *
+ * ── The lid and the power button ──
+ * On a normal distribution logind watches both. There is no logind here,
+ * so the daemon opens the ACPI "Lid Switch" and "Power Button" input
+ * devices itself and does what /etc/lp-tune.conf says:
+ *
+ *   lid_on_battery=suspend|nothing|poweroff      (suspend)
+ *   lid_on_ac=suspend|nothing|poweroff           (suspend)
+ *   power_button=suspend|poweroff|nothing        (suspend)
+ *   lock_before_suspend=yes|no                   (yes)
+ *   idle_suspend_minutes_battery=N               (15; 0 = never)
+ *   idle_suspend_minutes_ac=N                    (0)
+ *
+ * The idle values are for the session's idle watcher, which can see
+ * whether anyone is touching the machine and this daemon cannot; it
+ * reads the same file and asks for `lp-tune suspend`.
+ *
+ * Closing the lid with an external monitor plugged in does nothing -
+ * that is a laptop on a desk being used as a desktop, and sleeping would
+ * blank the screen somebody is looking at.
+ *
+ * Suspending locks the session FIRST, and waits for the lock to be on
+ * the screen: a laptop opened in a cafe must come back to a lock screen,
+ * never to the desktop for a moment before the lock catches up.
  *
  * ── Who may ask ──
  * The socket is /run/lp-tune.sock and the daemon asks the kernel who is
@@ -508,6 +535,345 @@ static void apply(profile_t eff)
     wr("/proc/sys/vm/laptop_mode", saver ? "5" : "0");
 }
 
+/* ── /etc/lp-tune.conf ─────────────────────────────────────────────── */
+
+#define CONF_FILE "/etc/lp-tune.conf"
+
+typedef struct {
+    char lid_bat[12], lid_ac[12], power[12];
+    bool lock;
+    int  idle_bat, idle_ac;
+} conf_t;
+
+static void conf_defaults(conf_t *c)
+{
+    strlcpy(c->lid_bat, "suspend", sizeof c->lid_bat);
+    strlcpy(c->lid_ac,  "suspend", sizeof c->lid_ac);
+    strlcpy(c->power,   "suspend", sizeof c->power);
+    c->lock = true;
+    c->idle_bat = 15;
+    c->idle_ac = 0;
+}
+
+/* Validate one key=value. Returns false - and says why in `why` - for
+ * an unknown key or a value outside the key's set. Used for the file and
+ * for requests from the socket alike, so the file can never hold a
+ * value the daemon would not accept from a person. */
+static bool conf_apply(conf_t *c, const char *k, const char *v, char *why,
+                       size_t wn)
+{
+    bool action3 = strcmp(v, "suspend") == 0 || strcmp(v, "nothing") == 0 ||
+                   strcmp(v, "poweroff") == 0;
+    if (strcmp(k, "lid_on_battery") == 0 || strcmp(k, "lid_on_ac") == 0 ||
+        strcmp(k, "power_button") == 0) {
+        if (!action3) {
+            snprintf(why, wn, "%s is suspend, nothing or poweroff", k);
+            return false;
+        }
+        char *dst = strcmp(k, "lid_on_battery") == 0 ? c->lid_bat
+                  : strcmp(k, "lid_on_ac") == 0      ? c->lid_ac : c->power;
+        strlcpy(dst, v, 12);
+        return true;
+    }
+    if (strcmp(k, "lock_before_suspend") == 0) {
+        if (strcmp(v, "yes") && strcmp(v, "no")) {
+            snprintf(why, wn, "lock_before_suspend is yes or no");
+            return false;
+        }
+        c->lock = strcmp(v, "yes") == 0;
+        return true;
+    }
+    if (strcmp(k, "idle_suspend_minutes_battery") == 0 ||
+        strcmp(k, "idle_suspend_minutes_ac") == 0) {
+        char *end = NULL;
+        long n = strtol(v, &end, 10);
+        if (!v[0] || (end && *end) || n < 0 || n > 600) {
+            snprintf(why, wn, "%s is a number of minutes, 0 to 600", k);
+            return false;
+        }
+        if (k[21] == 'b') c->idle_bat = (int)n; else c->idle_ac = (int)n;
+        return true;
+    }
+    snprintf(why, wn, "no setting called %s", k);
+    return false;
+}
+
+static void conf_load(conf_t *c)
+{
+    conf_defaults(c);
+    char p[512];
+    rooted(CONF_FILE, p, sizeof p);
+    long fd = lp_open(p, O_RDONLY, 0);
+    if (fd < 0)
+        return;
+    char line[160], why[96];
+    while (readline((int)fd, line, sizeof line) >= 0) {
+        char *h = strchr(line, '#');
+        if (h) *h = '\0';
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        char *k = line, *v = eq + 1;
+        while (*k == ' ') k++;
+        char *e = k + strlen(k);
+        while (e > k && e[-1] == ' ') *--e = '\0';
+        while (*v == ' ') v++;
+        e = v + strlen(v);
+        while (e > v && (e[-1] == ' ' || e[-1] == '\r')) *--e = '\0';
+        /* A bad line keeps the default and is said once; it must not
+         * stop the lid from working. */
+        if (!conf_apply(c, k, v, why, sizeof why))
+            dprintf(STDERR_FILENO, "lp-tune: %s: %s - using the default\n",
+                    CONF_FILE, why);
+    }
+    lp_close((int)fd);
+}
+
+static bool conf_save(const conf_t *c)
+{
+    if (dry_run)
+        return true;
+    char p[512], tmp[520];
+    rooted(CONF_FILE, p, sizeof p);
+    snprintf(tmp, sizeof tmp, "%s.new", p);
+    long fd = lp_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return false;
+    dprintf((int)fd,
+            "# Written by lp-tune (the Settings app's Power panel). One key=value\n"
+            "# per line; see `lp-tune --help`.\n"
+            "lid_on_battery=%s\nlid_on_ac=%s\npower_button=%s\n"
+            "lock_before_suspend=%s\nidle_suspend_minutes_battery=%d\n"
+            "idle_suspend_minutes_ac=%d\n",
+            c->lid_bat, c->lid_ac, c->power, c->lock ? "yes" : "no",
+            c->idle_bat, c->idle_ac);
+    lp_close((int)fd);
+    return lp_rename(tmp, p) == 0;
+}
+
+static void conf_print(int fd, const conf_t *c)
+{
+    dprintf(fd, "lid_on_battery=%s\nlid_on_ac=%s\npower_button=%s\n"
+                "lock_before_suspend=%s\nidle_suspend_minutes_battery=%d\n"
+                "idle_suspend_minutes_ac=%d\n",
+            c->lid_bat, c->lid_ac, c->power, c->lock ? "yes" : "no",
+            c->idle_bat, c->idle_ac);
+}
+
+/* ── Suspend ───────────────────────────────────────────────────────── */
+
+/* An external monitor is connected: any DRM connector reporting
+ * "connected" that is not the laptop's own panel. */
+static bool ext_found;
+static void drm_one(const char *path, void *arg)
+{
+    (void)arg;
+    const char *name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+    const char *dash = strchr(name, '-');          /* card0-HDMI-A-1 */
+    if (!dash)
+        return;
+    const char *conn = dash + 1;
+    if (strncmp(conn, "eDP", 3) == 0 || strncmp(conn, "LVDS", 4) == 0 ||
+        strncmp(conn, "DSI", 3) == 0 || strncmp(conn, "Virtual", 7) == 0)
+        return;
+    char f[512], st[32];
+    snprintf(f, sizeof f, "%s/status", path);
+    if (rd(f, st, sizeof st) && strcmp(st, "connected") == 0)
+        ext_found = true;
+}
+
+static bool external_display(void)
+{
+    ext_found = false;
+    each_entry("/sys/class/drm", drm_one, NULL);
+    return ext_found;
+}
+
+/* The person whose session is on the screen: the first uid >= 1000 with
+ * a Wayland socket in its runtime directory. */
+typedef struct { u32 uid; char sock[32]; } sess_t;
+static void wl_one(const char *path, void *arg)
+{
+    sess_t *s = arg;
+    const char *name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+    if (strncmp(name, "wayland-", 8) == 0 && !strchr(name, '.') && !s->sock[0])
+        strlcpy(s->sock, name, sizeof s->sock);
+}
+static void run_one(const char *path, void *arg)
+{
+    sess_t *s = arg;
+    if (s->sock[0])
+        return;
+    const char *name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+    long uid = strtol(name, NULL, 10);
+    if (uid < 1000)
+        return;
+    each_entry(path, wl_one, s);
+    if (s->sock[0])
+        s->uid = (u32)uid;
+}
+
+/* Run the session's lock command as that user and wait until it says
+ * the lock is up (it exits 0 once the lock surface is shown) - two
+ * seconds at most, because a machine that will not sleep with its lid
+ * shut cooks in a bag. */
+static bool lock_session(void)
+{
+    sess_t s;
+    memset(&s, 0, sizeof s);
+    each_entry("/run/user", run_one, &s);
+    if (!s.sock[0]) {
+        printf("lp-tune: nobody is logged in - nothing to lock\n");
+        return true;
+    }
+    char cmd[256];
+    const char *cands[] = { "/usr/bin/lp-lock", "/bin/lp-lock", NULL };
+    cmd[0] = '\0';
+    for (int i = 0; cands[i]; i++) {
+        rooted(cands[i], cmd, sizeof cmd);
+        if (lp_exists(cmd)) break;
+        cmd[0] = '\0';
+    }
+    if (!cmd[0]) {
+        dprintf(STDERR_FILENO, "lp-tune: ** no lp-lock - suspending WITHOUT"
+                " locking the session\n");
+        return false;
+    }
+    lp_user_t u;
+    gid_t gid = s.uid;
+    if (lp_user_by_uid(s.uid, &u))
+        gid = u.gid;
+
+    char rt[128], wd[64], home[96];
+    snprintf(rt, sizeof rt, "XDG_RUNTIME_DIR=%s/run/user/%u", root, s.uid);
+    snprintf(wd, sizeof wd, "WAYLAND_DISPLAY=%s", s.sock);
+    snprintf(home, sizeof home, "HOME=%s", lp_user_by_uid(s.uid, &u) ? u.home : "/");
+    char *envp[] = { rt, wd, home, (char *)"PATH=/usr/bin:/bin", NULL };
+    char *argv[] = { cmd, NULL };
+
+    pid_t pid = lp_fork();
+    if (pid == 0) {
+        /* Drop to the person entirely before exec: groups, then gid,
+         * then uid - in that order, because after setuid there is no
+         * permission left to change the other two. */
+        if (lp_setgroups(0, NULL) < 0 || lp_setgid(gid) < 0 ||
+            lp_setuid(s.uid) < 0)
+            lp_exit(126);
+        lp_execve(cmd, argv, envp);
+        lp_exit(127);
+    }
+    if (pid < 0)
+        return false;
+    for (int t = 0; t < 40; t++) {              /* 40 x 50 ms = 2 s */
+        int st = 0;
+        if (lp_waitpid(pid, &st, 1 /* WNOHANG */) == pid) {
+            if ((st & 0x7f) || ((st >> 8) & 0xff) != 0) {
+                dprintf(STDERR_FILENO, "lp-tune: lp-lock failed (%d)\n",
+                        (st >> 8) & 0xff);
+                return false;
+            }
+            return true;
+        }
+        lp_sleep_ms(50);
+    }
+    dprintf(STDERR_FILENO, "lp-tune: lp-lock did not confirm within 2s -"
+            " suspending anyway\n");
+    return false;
+}
+
+static void do_suspend(const conf_t *c)
+{
+    /* If the lock could not be confirmed, this still suspends: a laptop
+     * that refuses to sleep with its lid shut overheats in a bag, and
+     * that is the worse failure. But it tries again the instant the
+     * machine wakes, so the window in which an unlocked desktop can be
+     * seen is the resume itself, not the rest of the day. */
+    bool locked = !c->lock || lock_session();
+    lp_sync();
+    printf("lp-tune: suspending\n");
+    /* "mem" is whatever /sys/power/mem_sleep selects - deep (S3) on the
+     * XPS 15 9550, s2idle on machines without S3. */
+    wr("/sys/power/state", "mem");
+    /* Some of what apply() set does not survive a resume on every
+     * machine (USB devices re-enumerate). Cheap to set again. */
+    if (!locked) {
+        printf("lp-tune: resumed - locking now, since it did not happen before\n");
+        lock_session();
+    }
+    power_t pw;
+    read_power(&pw);
+    apply(effective(load_profile(), &pw));
+    printf("lp-tune: resumed\n");
+}
+
+static void do_action(const char *act, const conf_t *c)
+{
+    if (strcmp(act, "suspend") == 0)
+        do_suspend(c);
+    else if (strcmp(act, "poweroff") == 0) {
+        printf("lp-tune: powering off\n");
+        if (!dry_run && !root[0])
+            lp_kill(1, 10 /* SIGUSR1: init's "off", the same signal lp-power sends */);
+    }
+}
+
+/* ── The lid and power-button devices ──────────────────────────────── */
+
+/* Find input devices by the names the ACPI button driver gives them.
+ * /proc/bus/input/devices lists each device as a block of lines; the
+ * N: line has the name and the H: line the event handler. */
+static int find_inputs(int *fds, int max, int *kinds)
+{
+    char p[512];
+    rooted("/proc/bus/input/devices", p, sizeof p);
+    long fd = lp_open(p, O_RDONLY, 0);
+    if (fd < 0)
+        return 0;
+    int n = 0, kind = 0;
+    char line[512];
+    while (readline((int)fd, line, sizeof line) >= 0 && n < max) {
+        if (strncmp(line, "N: Name=", 8) == 0)
+            kind = strstr(line, "\"Lid Switch\"")   ? 1
+                 : strstr(line, "\"Power Button\"") ? 2 : 0;
+        else if (kind && strncmp(line, "H: Handlers=", 12) == 0) {
+            char *ev = strstr(line, "event");
+            if (ev) {
+                char dev[64], path[512];
+                int k = 0;
+                while (ev[k] && ev[k] != ' ' && k < 30) { dev[k] = ev[k]; k++; }
+                dev[k] = '\0';
+                snprintf(path, sizeof path, "%s/dev/input/%s", root, dev);
+                /* Non-blocking: poll() says when there is an event, and an
+                 * open or a read must never be able to hang the daemon -
+                 * a daemon stuck at startup is a lid that never sleeps. */
+                long efd = lp_open(path, O_RDONLY | O_NONBLOCK, 0);
+                if (efd >= 0) {
+                    fds[n] = (int)efd;
+                    kinds[n] = kind;
+                    n++;
+                }
+            }
+            kind = 0;
+        }
+    }
+    lp_close((int)fd);
+    return n;
+}
+
+/* struct input_event is { struct timeval; u16 type; u16 code; s32 value; }
+ * and timeval is two longs - 8 bytes on the Pi Zero W, 16 on amd64 and
+ * arm64. Computed, never hard-coded: this project has already shipped
+ * one 32-bit struct layout bug (BLKPG) and does not need another. */
+#define EV_OFF   (2 * sizeof(long))
+#define EV_SIZE  (EV_OFF + 8)
+#define EV_KEY_  1
+#define EV_SW_   5
+#define KEY_POWER_ 116
+#define SW_LID_  0
+
 /* ── Reporting ─────────────────────────────────────────────────────── */
 
 static void json_status(int fd, profile_t prof)
@@ -588,6 +954,7 @@ static bool peer_uid(int fd, u32 *uid)
 static void handle(const char *req, u32 uid, profile_t *prof, char *reply,
                    size_t n)
 {
+    const char *req_all = req;
     if (uid != 0 && uid < 1000) {
         snprintf(reply, n, "err only a person at this machine may change this\n");
         return;
@@ -638,7 +1005,46 @@ static void handle(const char *req, u32 uid, profile_t *prof, char *reply,
         snprintf(reply, n, "ok %d\n", brightness_get());
         return;
     }
-    snprintf(reply, n, "err say set <profile> or brightness <n>\n");
+    if (strcmp(word, "suspend") == 0) {
+        conf_t c;
+        conf_load(&c);
+        snprintf(reply, n, "ok suspending\n");
+        do_suspend(&c);
+        return;
+    }
+    if (strcmp(word, "config") == 0) {
+        /* "config set KEY VALUE" - the key and value are re-read from the
+         * request here because the generic parser above keeps one arg. */
+        const char *rest = strstr(req_all, "set");
+        char k[40] = "", v[16] = "";
+        if (!rest) {
+            snprintf(reply, n, "err config set KEY VALUE\n");
+            return;
+        }
+        rest += 3;
+        while (*rest == ' ') rest++;
+        int i = 0;
+        while (*rest && *rest != ' ' && i < 39) k[i++] = *rest++;
+        k[i] = '\0';
+        while (*rest == ' ') rest++;
+        i = 0;
+        while (*rest && *rest != ' ' && *rest != '\n' && i < 15) v[i++] = *rest++;
+        v[i] = '\0';
+        conf_t c;
+        char why[96];
+        conf_load(&c);
+        if (!conf_apply(&c, k, v, why, sizeof why)) {
+            snprintf(reply, n, "err %s\n", why);
+            return;
+        }
+        if (!conf_save(&c)) {
+            snprintf(reply, n, "err cannot write %s\n", CONF_FILE);
+            return;
+        }
+        snprintf(reply, n, "ok %s=%s\n", k, v);
+        return;
+    }
+    snprintf(reply, n, "err say set <profile>, brightness <n>, suspend or config set <k> <v>\n");
 }
 
 static int daemon_main(void)
@@ -682,17 +1088,59 @@ static int daemon_main(void)
         }
     }
 
+    int infd[6], inkind[6];
+    int nin = find_inputs(infd, 6, inkind);
+    int nlid = 0, npwr = 0;
+    for (int i = 0; i < nin; i++) { if (inkind[i] == 1) nlid++; else npwr++; }
+    printf("lp-tune: watching %d lid switch%s and %d power button%s\n",
+           nlid, nlid == 1 ? "" : "es", npwr, npwr == 1 ? "" : "s");
+
     for (;;) {
-        lp_pollfd_t fds[2];
+        lp_pollfd_t fds[8];
         unsigned nf = 0;
         if (ls >= 0) { fds[nf].fd = (int)ls; fds[nf].events = LP_POLLIN; fds[nf].revents = 0; nf++; }
         if (ue >= 0) { fds[nf].fd = (int)ue; fds[nf].events = LP_POLLIN; fds[nf].revents = 0; nf++; }
+        for (int i = 0; i < nin; i++) { fds[nf].fd = infd[i]; fds[nf].events = LP_POLLIN; fds[nf].revents = 0; nf++; }
         long r = lp_poll(fds, nf, 60000);
 
         bool recheck = (r == 0);
         for (unsigned i = 0; r > 0 && i < nf; i++) {
             if (!(fds[i].revents & LP_POLLIN))
                 continue;
+            int kind = 0;
+            for (int j = 0; j < nin; j++)
+                if (fds[i].fd == infd[j]) kind = inkind[j];
+            if (kind) {
+                u8 evbuf[EV_SIZE * 16];
+                long n = lp_read(fds[i].fd, evbuf, sizeof evbuf);
+                for (long off = 0; n > 0 && off + (long)EV_SIZE <= n; off += EV_SIZE) {
+                    u16 type, code;
+                    s32 value;
+                    memcpy(&type,  evbuf + off + EV_OFF,     2);
+                    memcpy(&code,  evbuf + off + EV_OFF + 2, 2);
+                    memcpy(&value, evbuf + off + EV_OFF + 4, 4);
+                    conf_t conf;
+                    if (kind == 1 && type == EV_SW_ && code == SW_LID_ && value == 1) {
+                        conf_load(&conf);
+                        read_power(&pw);
+                        if (external_display()) {
+                            printf("lp-tune: lid closed with an external monitor"
+                                   " connected - staying awake\n");
+                            continue;
+                        }
+                        const char *act = pw.ac ? conf.lid_ac : conf.lid_bat;
+                        printf("lp-tune: lid closed on %s - %s\n",
+                               pw.ac ? "the charger" : "battery", act);
+                        do_action(act, &conf);
+                    } else if (kind == 2 && type == EV_KEY_ &&
+                               code == KEY_POWER_ && value == 1) {
+                        conf_load(&conf);
+                        printf("lp-tune: power button - %s\n", conf.power);
+                        do_action(conf.power, &conf);
+                    }
+                }
+                continue;
+            }
             if (fds[i].fd == (int)ue) {
                 char ev[2048];
                 long n = lp_recvfrom((int)ue, ev, sizeof ev - 1, 0, NULL, NULL);
@@ -710,7 +1158,7 @@ static int daemon_main(void)
                  * within a second is dropped rather than waited for. */
                 s64 tv[2] = { 1, 0 };
                 lp_setsockopt((int)c, SOL_SOCKET, SO_RCVTIMEO_NEW, tv, sizeof tv);
-                char req[64], reply[160];
+                char req[96], reply[160];
                 long n = lp_read((int)c, req, sizeof req - 1);
                 u32 uid = 65534;
                 if (n > 0 && peer_uid((int)c, &uid)) {
@@ -770,6 +1218,8 @@ static void usage(void)
     printf("usage: lp-tune [status [--json]]\n"
            "       lp-tune set auto|balanced|saver|performance\n"
            "       lp-tune brightness get | set N|+N|-N\n"
+           "       lp-tune suspend\n"
+           "       lp-tune config [get] | config set KEY VALUE\n"
            "       lp-tune -d\n"
            "\n"
            "  auto          balanced on the charger, saver on battery (default)\n"
@@ -816,8 +1266,17 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (strcmp(cmd, "set") == 0 || strcmp(cmd, "brightness") == 0) {
-        char line[64], reply[160];
+    if (strcmp(cmd, "config") == 0 &&
+        (a + 1 >= argc || strcmp(argv[a + 1], "get") == 0)) {
+        conf_t c;
+        conf_load(&c);
+        conf_print(STDOUT_FILENO, &c);
+        return 0;
+    }
+
+    if (strcmp(cmd, "set") == 0 || strcmp(cmd, "brightness") == 0 ||
+        strcmp(cmd, "suspend") == 0 || strcmp(cmd, "config") == 0) {
+        char line[96], reply[160];
         if (strcmp(cmd, "brightness") == 0) {
             const char *sub = a + 1 < argc ? argv[a + 1] : "get";
             if (strcmp(sub, "get") == 0) {
@@ -834,6 +1293,11 @@ int main(int argc, char **argv)
                 return 2;
             }
             snprintf(line, sizeof line, "brightness %s\n", argv[a + 2]);
+        } else if (strcmp(cmd, "suspend") == 0) {
+            snprintf(line, sizeof line, "suspend\n");
+        } else if (strcmp(cmd, "config") == 0) {
+            if (a + 3 >= argc || strcmp(argv[a + 1], "set") != 0) { usage(); return 2; }
+            snprintf(line, sizeof line, "config set %s %s\n", argv[a + 2], argv[a + 3]);
         } else {
             if (a + 1 >= argc) { usage(); return 2; }
             snprintf(line, sizeof line, "set %s\n", argv[a + 1]);
