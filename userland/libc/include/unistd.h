@@ -352,22 +352,10 @@ bool  lp_rtc_write(s64 unix_seconds);
  * measure an interval with. */
 s64   lp_monotonic_ms(void);
 
-/* Broken-down time. Unlike struct tm this holds what a person reads:
- * year is not offset from 1900 and mon starts at 1, so nothing to confuse. */
-typedef struct {
-    int year;    /* e.g. 2026 */
-    int mon;     /* 1-12 */
-    int day;     /* 1-31 */
-    int hour;    /* 0-23 */
-    int min;     /* 0-59 */
-    int sec;     /* 0-60 */
-    int wday;    /* 0 = Sunday */
-} lp_tm_t;
-
-/* Unix seconds -> broken-down time, in UTC. */
-void  lp_gmtime(s64 t, lp_tm_t *out);
-/* Broken-down UTC time -> unix seconds. wday is ignored. */
-s64   lp_timegm(const lp_tm_t *tm);
+/* Broken-down time (lp_tm_t), UTC and local time, time zones and
+ * strftime - all in tz.h, which includes nothing but types.h so that it
+ * can be pulled in here without a cycle. */
+#include "tz.h"
 
 /* ── System ── */
 /* lp_access 의 mode. 존재만 보려면 F_OK. */
@@ -524,46 +512,6 @@ void  lp_log(const char *tag, const char *msg);           /* struct utsname is 3
 #define LP_WIFSIGNALED(s)  ((((s) & 0x7F) + 1) >> 1 > 0)
 #define LP_WTERMSIG(s)     ((s) & 0x7F)
 
-#endif /* _LP_UNISTD_H */
-
-/* ── Local time ───────────────────────────────────────────────────────
- *
- * The machine keeps its clock in UTC. Everything a person reads should
- * be in the zone they chose, and until now only `date` knew what that
- * zone was - so `ls -l`, the log, `top` and cron all disagreed with it.
- * These put the answer in one place.
- *
- * The zone is /etc/timezone, or /data/timezone when that exists (the
- * writable half wins, so a choice survives a reboot on a RAM root). The
- * file holds "<minutes> <label>", e.g. "540 KST".
- *
- * Daylight saving is computed, not looked up. Full tzdata is tens of
- * megabytes; the four rules below cover every zone this system offers
- * and they have not changed in twenty years. A zone whose rule is not
- * one of these is a fixed offset and says so.
- */
-typedef enum {
-    LP_DST_NONE = 0,
-    LP_DST_EU,      /* last Sun Mar 01:00 UTC -> last Sun Oct 01:00 UTC */
-    LP_DST_US,      /* 2nd Sun Mar 02:00 local -> 1st Sun Nov 02:00 local */
-    LP_DST_AU,      /* 1st Sun Oct -> 1st Sun Apr (southern) */
-    LP_DST_NZ       /* last Sun Sep -> 1st Sun Apr (southern) */
-} lp_dst_t;
-
-/* Minutes east of UTC at that instant, daylight saving included. Ask
- * about the time you are formatting, not about now - in March a summer
- * offset applied to a winter date is an hour wrong. */
-int   lp_tz_offset(s64 utc);
-/* Drop the cached zone. For a program that has just written a new one
- * and wants to print the result through the same door everything else
- * reads it by. */
-void  lp_tz_forget(void);
-/* The label to print next to a time ("KST", "CEST", "UTC"). */
-const char *lp_tz_label(s64 utc);
-/* Unix seconds -> broken-down time in the configured zone. */
-void  lp_localtime(s64 t, lp_tm_t *out);
-/* Broken-down local time -> unix seconds. */
-s64   lp_timelocal(const lp_tm_t *tm);
 
 /* ── Which voice the commands speak in ────────────────────────────────
  *
@@ -667,3 +615,5 @@ void lp_getopt_init_ex(lp_getopt_t *st, int argc, char **argv,
 int  lp_getopt(lp_getopt_t *st);
 /* GNU's two lines: "prog: invalid option -- 'x'" and the --help hint. */
 void lp_getopt_err(const char *prog, const lp_getopt_t *st);
+
+#endif /* _LP_UNISTD_H */

@@ -125,11 +125,63 @@ echo "    기준: =y ${BEFORE_Y}개, =m ${BEFORE_M}개"
 # ── 2. 우리 조각 병합 ────────────────────────────────────────────
 step "${KCONFIG_NAME} 병합"
 
+# ── Firmware for the disk-rooted PC kernel ──
+#
+# The amd64 kernel that boots from disk has every driver built in, so
+# every driver probes while the only filesystem is this kernel's own
+# tiny initramfs - seconds before preinit mounts the root. A driver that
+# asks for firmware then gets "not found", and the ones on the Dell XPS
+# do not ask twice: i915 without its DMC firmware turns runtime power
+# management off until the next boot, ath10k and brcmfmac never register
+# a WiFi interface, cfg80211 without regulatory.db stays in the world
+# domain, and btusb's setup fails before the Bluetooth controller is
+# ever announced to userspace.
+#
+# So the same files go into the initramfs, under /lib/firmware, where
+# the firmware loader finds them before the root exists. The image
+# carries them in /lib/firmware on disk as well; after preinit chroots,
+# the loader reads that one (PID 1 shares its fs_struct with the kernel,
+# so the chroot moves the loader's root too), and that is what a reset
+# or a resume re-reads. A disk-rooted kernel is the one built with
+# root= in LP_CMDLINE (tools/mkdisk.sh); the RAM-live amd64 kernel's
+# initramfs is the whole root, and it gets its firmware from there.
+#
+# tools/fetch-pc-fw.sh is all-or-nothing and checks every file against
+# a pinned sha256; run with the set already present, it touches no
+# network. A missing set stops the build rather than producing a kernel
+# whose WiFi silently does not exist.
+EARLY_FW_LIST=""
+if [[ "$LP_ARCH" == "amd64" && " ${LP_CMDLINE:-} " == *" root="* ]]; then
+    step "PC 펌웨어 (initramfs 의 /lib/firmware)"
+    "${REPO_ROOT}/tools/fetch-pc-fw.sh" \
+        || die "PC firmware set is incomplete (tools/fetch-pc-fw.sh)"
+    FW_DIR="${PC_FW_DIR:-${REPO_ROOT}/blobs/pc-fw}"
+    EARLY_FW_LIST="${BUILD_DIR}/lp-early-firmware.list"
+    # gen_init_cpio's list format: every directory before what is in it.
+    {
+        echo "# build.sh 가 생성. tools/fetch-pc-fw.sh --list 의 파일들."
+        "${REPO_ROOT}/tools/fetch-pc-fw.sh" --list | while read -r f; do
+            d="lib/firmware"
+            echo "dir /lib 0755 0 0"
+            echo "dir /${d} 0755 0 0"
+            for part in $(dirname "$f" | tr '/' ' '); do
+                [[ "$part" == "." ]] && continue
+                d="${d}/${part}"
+                echo "dir /${d} 0755 0 0"
+            done
+            echo "file /lib/firmware/${f} ${FW_DIR}/${f} 0644 0 0"
+        done | awk '!seen[$0]++'
+    } > "$EARLY_FW_LIST"
+    echo "    $(grep -c '^file ' "$EARLY_FW_LIST")개 파일, $(du -ch $(awk '/^file /{print $3}' "$EARLY_FW_LIST") | tail -1 | cut -f1)"
+fi
+
 # initramfs 경로는 환경마다 다르므로 여기서 만들어 붙인다.
 GEN="${BUILD_DIR}/lp-zero-generated.config"
 {
     echo "# build.sh 가 생성. 직접 수정하지 말 것."
-    echo "CONFIG_INITRAMFS_SOURCE=\"${ROOTFS}\""
+    # INITRAMFS_SOURCE takes a space-separated list: the root directory,
+    # then (disk kernel only) the firmware list above.
+    echo "CONFIG_INITRAMFS_SOURCE=\"${ROOTFS}${EARLY_FW_LIST:+ ${EARLY_FW_LIST}}\""
     echo "CONFIG_INITRAMFS_ROOT_UID=0"
     echo "CONFIG_INITRAMFS_ROOT_GID=0"
 
@@ -164,6 +216,19 @@ echo "    결과: =y ${AFTER_Y}개, =m ${AFTER_M}개"
 # 남는다. 이 경우 X 가 아니라 "X 를 select 하는 쪽"을 꺼야 한다.
 #
 # 조용히 무시되면 왜 이미지가 안 줄어드는지 알 수 없으므로 전부 보고한다.
+#
+# Each symbol is checked against the LAST value the file gives it, which
+# is the one merge_config applies. The amd64 and armv6 configs are the
+# arm64 answers followed by their own (tools/mk*config.sh), so a
+# symbol can be there twice, and checking every line reported each Pi
+# answer the PC overrides on purpose - forty-odd lines of noise on every
+# amd64 build, in which the two real misses (virtio-scsi and Hyper-V
+# storage, off because the Pi turned their menu off) sat unread. What
+# still shows up is a Pi answer the PC cannot take - a symbol this
+# kernel version no longer has, or one with no prompt on x86 (AIO and
+# IO_URING are forced on without EXPERT) - and a choice member the Pi
+# picked differently, unless the PC fragment says =n to it (the amd64
+# one does).
 step "조각 반영 상태 대조"
 
 MISSED=0
@@ -187,9 +252,12 @@ while read -r line; do
         }
         ;;
     esac
-done < <(grep -E '^CONFIG_[A-Z0-9_]+=(y|n)$' "$FRAGMENT")
+done < <(grep -E '^CONFIG_[A-Z0-9_]+=(y|n)$' "$FRAGMENT" | awk -F= '
+            !($1 in last) { order[++n] = $1 }
+            { last[$1] = $2 }
+            END { for (i = 1; i <= n; i++) print order[i] "=" last[order[i]] }')
 
-TOTAL=$(grep -cE '^CONFIG_[A-Z0-9_]+=(y|n)$' "$FRAGMENT")
+TOTAL=$(grep -E '^CONFIG_[A-Z0-9_]+=(y|n)$' "$FRAGMENT" | cut -d= -f1 | sort -u | wc -l)
 if [[ "$MISSED" == "0" ]]; then
     echo "    전부 반영됨 (${TOTAL}개)"
 else

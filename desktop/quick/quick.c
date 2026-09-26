@@ -604,6 +604,26 @@ static void do_poweroff(GtkButton *b, gpointer d)
 { (void)b; (void)d;
   const char *a[] = { "lp-power", "off", NULL }; run_bg(a); }
 
+/* "Restart into Recovery…" - reboot into the recovery partition, whose
+ * shell is root with no password (the owner's rule; see COMMON.md's
+ * Administrator rights). That is a partition the boot-recovery track
+ * builds, not anything set here: this menu only asks for the reboot.
+ *
+ * Rebooting into recovery IS an administrator action on the normal
+ * system, so it must ask the user for their own password first - the
+ * same rule as every other admin action from the GUI. This program does
+ * NOT check the password itself; it hands the request to
+ * lp-reboot-recovery, which goes through lp-privd, and lp-privd is what
+ * shows the password dialog (auth-admin-keep) and refuses without it.
+ * lp-reboot-recovery is shipped by the boot-recovery track; the row that
+ * calls this is only shown when that command is on PATH, so an image
+ * without it never presents a dead - or worse, an unauthenticated -
+ * button. */
+static void do_recovery(GtkButton *b, gpointer d)
+{ (void)b; Quick *q = d;
+  const char *a[] = { "lp-reboot-recovery", NULL }; run_bg(a);
+  gtk_window_close(GTK_WINDOW(q->window)); }
+
 /* 3-7 의 전원 메뉴. 하위 화면이 아니라 여기서 펼쳐진다. */
 static GtkWidget *expand_power_menu(Quick *q)
 {
@@ -623,6 +643,14 @@ static GtkWidget *expand_power_menu(Quick *q)
 
     gtk_box_append(GTK_BOX(box),
         link_row(T("Restart", "다시 시작"), G_CALLBACK(do_reboot), q));
+    /* Only when the recovery reboot command is present - see do_recovery. */
+    char *recov = g_find_program_in_path("lp-reboot-recovery");
+    if (recov) {
+        g_free(recov);
+        gtk_box_append(GTK_BOX(box),
+            link_row(T("Restart into Recovery…", "복구 모드로 다시 시작…"),
+                     G_CALLBACK(do_recovery), q));
+    }
     gtk_box_append(GTK_BOX(box),
         link_row(T("Shut down", "시스템 종료"), G_CALLBACK(do_poweroff), q));
     return box;

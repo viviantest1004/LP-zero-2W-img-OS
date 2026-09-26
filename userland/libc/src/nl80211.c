@@ -56,8 +56,10 @@
  *                       event on the scan group
  *      nl_scan_results  GET_SCAN as a dump; each message is one BSS
  *      nl_connect       CONNECT with SSID, BSSID, auth OPEN, WPA2, the
- *                       cipher lists and AKM PSK. Returns when the
- *                       kernel has ACCEPTED it.
+ *                       cipher lists, AKM PSK and our RSN element
+ *                       (which a softmac card's association request is
+ *                       built from). Returns when the kernel has
+ *                       ACCEPTED it.
  *      nl_wait          the CONNECT event, carrying the 802.11 status
  *                       code. 0 means the firmware authenticated and
  *                       associated for us.
@@ -558,6 +560,10 @@ static nl_ev_kind_t ev_kind_of(u8 cmd)
     }
 }
 
+static void ie_copy(const u8 *ies, u16 ielen, u8 want_id,
+                    const u8 *want_oui, u8 want_oui_type,
+                    u8 *out, size_t outcap, u8 *out_len, u16 *out_total);
+
 /* Turn one broadcast nl80211 message into an event. */
 static void ev_parse(const nlmsg_t *m, nl_event_t *ev)
 {
@@ -588,6 +594,20 @@ static void ev_parse(const nlmsg_t *m, nl_event_t *ev)
     ev->by_ap     = nla_has(m->attrs, m->attrlen,
                             NL80211_ATTR_DISCONNECTED_BY_AP);
     ev->timed_out = nla_has(m->attrs, m->attrlen, NL80211_ATTR_TIMED_OUT);
+
+    /* The RSN element our association request really carried. The
+     * handshake repeats it in message 2, and an AP that sees a different
+     * one there drops the message without a word - so it is taken from
+     * what the driver says it sent, not from what we asked it to send.
+     * A clipped element is worse than none: it would be repeated wrong. */
+    if ((ev->kind == NL_EV_CONNECT || ev->kind == NL_EV_ROAM) &&
+        nla_find(m->attrs, m->attrlen, NL80211_ATTR_REQ_IE, &p, &n)) {
+        u16 total = 0;
+        ie_copy(p, n, WLAN_EID_RSN, NULL, 0, ev->req_rsn_ie,
+                sizeof ev->req_rsn_ie, &ev->req_rsn_ie_len, &total);
+        if (total > sizeof ev->req_rsn_ie)
+            ev->req_rsn_ie_len = 0;
+    }
 }
 
 /* ══ The socket ══════════════════════════════════════════════════════ */

@@ -24,10 +24,18 @@
  * and from then on EAPOL is just ordinary traffic arriving on wlan0
  * like any other ethernet frame.
  *
- * That is why this header is so short. On a softmac card you would need
- * AUTHENTICATE, ASSOCIATE, the management-frame plumbing and a state
- * machine to drive them. Here the whole list is: resolve the family,
- * scan, connect, install two keys, listen for events. Five things.
+ * That is why this header is so short: resolve the family, scan,
+ * connect, install two keys, listen for events. Five things.
+ *
+ * ── And a softmac card needs nothing more ──
+ * The same five work on a softmac card - ath10k in a Dell XPS 15, any
+ * mac80211 driver, mac80211_hwsim in a test VM - because a driver that
+ * has no .connect of its own gets cfg80211's in-kernel SME, which turns
+ * one NL80211_CMD_CONNECT into the authentication and association
+ * frames itself and reports back with the same CONNECT event. What
+ * differs is who writes the association request: on softmac it is the
+ * kernel, from the elements in nl_conn_t.ie and nothing else, which is
+ * why that element is not optional (see nl_conn_t).
  *
  * ── The shape of the conversation ──
  * Generic netlink is a multiplexer that lives on one socket. Every
@@ -317,6 +325,16 @@ typedef struct {
     bool by_ap;             /* DISCONNECT: the AP sent it, we did not    */
     bool timed_out;         /* CONNECT: no answer at all, not a refusal  */
     u32  timeout_reason;
+
+    /* CONNECT: the RSN element the association request actually carried,
+     * from NL80211_ATTR_REQ_IE. Message 2 of the handshake has to repeat
+     * that element byte for byte or the AP drops it, and on a fullmac
+     * chip it is the firmware that wrote the request - so what we asked
+     * for and what went out are not guaranteed to be the same bytes.
+     * wpa_supplicant takes its own element from here for that reason.
+     * Length 0 when the driver did not report the request. */
+    u8   req_rsn_ie[NL_RSN_IE_MAX];
+    u8   req_rsn_ie_len;
 } nl_event_t;
 
 /* ── A scan result ─────────────────────────────────────────────────── */
@@ -379,9 +397,14 @@ typedef struct {
     bool privacy;           /* the network is encrypted at all           */
 
     /* Extra elements for the association request - in practice the RSN
-     * IE. A fullmac firmware builds its own from the cipher lists above,
-     * so this is usually left NULL and is here because some drivers
-     * take the IE and ignore the lists. */
+     * IE, and it is not optional. On a softmac card (ath10k, anything
+     * under mac80211) the kernel's own SME builds the association
+     * request, and it puts in exactly these elements: the cipher lists
+     * above configure the kernel, they do not become an RSN element. An
+     * association request without one is refused by any WPA2 access
+     * point (status 40, "invalid element"). brcmfmac reads the element
+     * from here too, into the firmware's "wpaie". So always pass it -
+     * wpa_rsn_ie_build() makes the one to send. */
     const u8 *ie;
     u16       ie_len;
 } nl_conn_t;

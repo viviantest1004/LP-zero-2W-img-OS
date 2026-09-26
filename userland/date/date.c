@@ -1,24 +1,46 @@
 /* date - show and set the clock.
  *
- *   date                            Mon Sep  7 09:51:39 UTC 2026
- *   date +%Y-%m-%d                  any format string strftime knows
- *   date -d "2 days ago" +%F        a time other than now
- *   date -u                         show UTC
- *   date -R                         the shape an email header wants
+ *   date                            Sat Sep 26 23:47:01 KST 2026
+ *   date +%Y-%m-%d                  any format GNU date knows, via lp_strftime
+ *   date -d "next monday 9am" +%F   a time other than now
+ *   date -f FILE                    each line of FILE, as -d would read it
+ *   date -r FILE                    when FILE was last changed
+ *   date -u / -R / -I[FMT] / --rfc-3339=FMT
+ *   date -s "2026-09-01 12:34:56"   set the clock; MMDDhhmm[[CC]YY][.ss] too
  *   date -e                         unix seconds only (ours, not GNU's)
- *   date -s "2026-09-01 12:34:56"   set the clock (in the configured zone)
- *   date -z                         show the current zone
- *   date -z list                    list the zones you can pick
- *   date -z Asia/Seoul              pick a zone by name
- *   date -z +9                      or by raw offset
+ *   date -z [ZONE|list]             the zone (ours; timedatectl does the work)
  *
- * The zone is stored in /data/timezone - or /etc/timezone on a machine
- * whose root is a real disk - so it survives a reboot. It is written by
- * rename, not in place: a power cut in the middle of an in-place write
- * leaves an empty file, and an empty timezone reads back as UTC.
+ * ── The -d language ──
  *
- * On the clock itself see ntp(1). This board has no battery-backed
- * clock, so time stops when the power goes.
+ * GNU's -d is a small language - "last friday", "2 hours ago", "tomorrow
+ * 5pm", "22-Nov-2025", "12:00 UTC+9", "@1790000000", TZ="Asia/Seoul"
+ * prefixes - and scripts written on Ubuntu use all of it. The parser
+ * below follows gnulib's parse-datetime.y rule for rule rather than
+ * approximating it, because an approximation is worse than a refusal:
+ * a date that is silently a day out is found when the backup did not
+ * run, not when the script was written.
+ *
+ * That includes GNU's surprises, kept on purpose. A signed number after
+ * a time is a zone offset, so "12:00 +1 month" is noon at UTC+1 plus a
+ * month; "EST" in September is refused in New York, because it asks for
+ * winter time on a summer date; and a relative month keeps the summer or
+ * winter flag of the day it started from, so "8 months ago" in September
+ * lands an hour earlier on the clock. Each of those is what Ubuntu says,
+ * and a script tested there has to mean the same thing here. The
+ * differential test (scratchpad cli/test/datediff.py) runs several
+ * hundred strings through both.
+ *
+ * ── The zone ──
+ *
+ * All of it comes from the libc (tz.h): TZ, /etc/localtime, the older
+ * /data/timezone line. -u is TZ=UTC0, exactly as GNU does it, so a -d
+ * string is read in UTC too. `date -z NAME` used to write the zone itself
+ * from a table of forty; setting a zone is timedatectl's job now, and -z
+ * hands over to it so there is one writer of those files.
+ *
+ * The clock itself: `date -s` sets it, then writes it to the hardware
+ * clock when there is one and to /data/.clock when there is not, because
+ * a Pi Zero has no battery and would otherwise wake up in 1970.
  */
 #include "types.h"
 #include "string.h"
@@ -26,884 +48,1160 @@
 #include "stdlib.h"
 #include "unistd.h"
 
-/* The zone and the last-known time both have to outlive a reboot, and
- * where that is depends on the machine: on a RAM root only /data does,
- * on a disk root there is no /data and /etc is ordinary. lp_setting_path
- * picks whichever one this machine actually keeps. */
-#define TZ_NAME     "timezone"
 #define CLOCK_NAME  ".clock"
-
 /* Anything before 2020 means the clock was never set. */
 #define SANE_MIN    1577836800LL
 
-/* Time zone table.
- *
- * Doing this properly needs tzdata, which is tens of megabytes and this
- * root lives in RAM. So the offsets are here and the daylight-saving
- * rules are in the libc, computed rather than looked up.
- *
- * This used to say "zones that use DST are marked, shift by hand in
- * summer". That is not a time zone, it is a chore with a deadline:
- * twice a year every timestamp on the machine is an hour wrong until
- * somebody remembers, and a log written across the change cannot be
- * read at all. The four rules below cover every zone in this table and
- * none of them has changed in twenty years. */
-typedef struct {
-    const char *name;      /* what you type to pick it */
-    const char *abbr;      /* short name in winter */
-    const char *summer;    /* short name in summer, or the same */
-    int         minutes;   /* standard offset from UTC */
-    lp_dst_t    rule;      /* which daylight-saving rule, if any */
-} zone_t;
+static const char *prog = "date";
 
-static const zone_t ZONES[] = {
-    { "UTC",                 "UTC",  "UTC",    0,           LP_DST_NONE },
-    { "Asia/Seoul",          "KST",  "KST",    9 * 60,      LP_DST_NONE },
-    { "Asia/Tokyo",          "JST",  "JST",    9 * 60,      LP_DST_NONE },
-    { "Asia/Shanghai",       "CST",  "CST",    8 * 60,      LP_DST_NONE },
-    { "Asia/Hong_Kong",      "HKT",  "HKT",    8 * 60,      LP_DST_NONE },
-    { "Asia/Taipei",         "TWT",  "TWT",    8 * 60,      LP_DST_NONE },
-    { "Asia/Singapore",      "SGT",  "SGT",    8 * 60,      LP_DST_NONE },
-    { "Asia/Bangkok",        "ICT",  "ICT",    7 * 60,      LP_DST_NONE },
-    { "Asia/Jakarta",        "WIB",  "WIB",    7 * 60,      LP_DST_NONE },
-    { "Asia/Kolkata",        "IST",  "IST",    5 * 60 + 30, LP_DST_NONE },
-    { "Asia/Kathmandu",      "NPT",  "NPT",    5 * 60 + 45, LP_DST_NONE },
-    { "Asia/Dubai",          "GST",  "GST",    4 * 60,      LP_DST_NONE },
-    { "Europe/Moscow",       "MSK",  "MSK",    3 * 60,      LP_DST_NONE },
-    { "Europe/Istanbul",     "TRT",  "TRT",    3 * 60,      LP_DST_NONE },
-    { "Europe/Berlin",       "CET",  "CEST",   1 * 60,      LP_DST_EU   },
-    { "Europe/Paris",        "CET",  "CEST",   1 * 60,      LP_DST_EU   },
-    { "Europe/Madrid",       "CET",  "CEST",   1 * 60,      LP_DST_EU   },
-    { "Europe/Rome",         "CET",  "CEST",   1 * 60,      LP_DST_EU   },
-    { "Europe/Amsterdam",    "CET",  "CEST",   1 * 60,      LP_DST_EU   },
-    { "Europe/Warsaw",       "CET",  "CEST",   1 * 60,      LP_DST_EU   },
-    { "Europe/Stockholm",    "CET",  "CEST",   1 * 60,      LP_DST_EU   },
-    { "Europe/Athens",       "EET",  "EEST",   2 * 60,      LP_DST_EU   },
-    { "Europe/Helsinki",     "EET",  "EEST",   2 * 60,      LP_DST_EU   },
-    { "Europe/Lisbon",       "WET",  "WEST",   0,           LP_DST_EU   },
-    { "Europe/Dublin",       "GMT",  "IST",    0,           LP_DST_EU   },
-    { "Europe/London",       "GMT",  "BST",    0,           LP_DST_EU   },
-    { "America/Sao_Paulo",   "BRT",  "BRT",   -3 * 60,      LP_DST_NONE },
-    { "America/Bogota",      "COT",  "COT",   -5 * 60,      LP_DST_NONE },
-    { "America/Toronto",     "EST",  "EDT",   -5 * 60,      LP_DST_US   },
-    { "America/New_York",    "EST",  "EDT",   -5 * 60,      LP_DST_US   },
-    { "America/Chicago",     "CST",  "CDT",   -6 * 60,      LP_DST_US   },
-    { "America/Mexico_City", "CST",  "CST",   -6 * 60,      LP_DST_NONE },
-    { "America/Denver",      "MST",  "MDT",   -7 * 60,      LP_DST_US   },
-    { "America/Phoenix",     "MST",  "MST",   -7 * 60,      LP_DST_NONE },
-    { "America/Vancouver",   "PST",  "PDT",   -8 * 60,      LP_DST_US   },
-    { "America/Los_Angeles", "PST",  "PDT",   -8 * 60,      LP_DST_US   },
-    { "America/Anchorage",   "AKST", "AKDT",  -9 * 60,      LP_DST_US   },
-    { "Pacific/Honolulu",    "HST",  "HST",  -10 * 60,      LP_DST_NONE },
-    { "Australia/Perth",     "AWST", "AWST",   8 * 60,      LP_DST_NONE },
-    { "Australia/Brisbane",  "AEST", "AEST",  10 * 60,      LP_DST_NONE },
-    { "Australia/Sydney",    "AEST", "AEDT",  10 * 60,      LP_DST_AU   },
-    { "Australia/Melbourne", "AEST", "AEDT",  10 * 60,      LP_DST_AU   },
-    { "Pacific/Auckland",    "NZST", "NZDT",  12 * 60,      LP_DST_NZ   },
+/* ══ The -d parser ═══════════════════════════════════════════════════ */
+
+enum {
+    T_END = 256, T_UNUM, T_SNUM, T_UDEC, T_SDEC, T_MONTH, T_WDAY, T_MERID,
+    T_DST, T_ZONE, T_DAYZONE, T_LOCALZONE, T_YEAR_U, T_MONTH_U, T_DAY_U,
+    T_HOUR_U, T_MIN_U, T_SEC_U, T_DAYSHIFT, T_ORDINAL, T_AGO, T_BAD
 };
-#define NZONES ((int)(sizeof(ZONES) / sizeof(ZONES[0])))
 
-static const char *WDAY[7] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+typedef struct {
+    int  type;
+    s64  val;          /* numbers; for words, the table value */
+    int  digits;       /* numbers: how many digits were written */
+    long ns;           /* decimals: the fraction, in nanoseconds */
+} tok_t;
 
-/* Current zone, filled in by load_zone(). */
-static int  tz_minutes = 0;
-static char tz_label[32] = "UTC";
+#define MAXTOK 64
 
-/* Case-insensitive compare, so "asia/seoul" works too. */
-static bool eq_ci(const char *a, const char *b)
+typedef struct { s64 year, month, day, hour, min, sec, ns; } rel_t;
+
+typedef struct {
+    tok_t  t[MAXTOK];
+    int    n, i;
+    /* what was said */
+    s64    year; int year_digits;
+    s64    month, day;
+    s64    hour, min, sec; long ns;
+    int    merid;                    /* 0 24h, 1 am, 2 pm */
+    int    day_ordinal, day_number;
+    s64    time_zone;                /* minutes east */
+    int    local_isdst;
+    rel_t  rel;
+    int    times, dates, days, zones, local_zones, dsts;
+    bool   rels, timespec;
+    s64    epoch; long epoch_ns;
+    /* the local zone's own abbreviations, which mean "this zone, summer
+     * or winter" rather than a fixed offset */
+    char   lz_name[2][16];
+    int    lz_isdst[2];
+    int    nlz;
+} pc_t;
+
+#define HOUR(x) ((x) * 60)
+
+typedef struct { const char *name; int type; int val; } word_t;
+
+static const word_t MONTH_DAY[] = {
+    { "JANUARY", T_MONTH, 1 }, { "FEBRUARY", T_MONTH, 2 }, { "MARCH", T_MONTH, 3 },
+    { "APRIL", T_MONTH, 4 }, { "MAY", T_MONTH, 5 }, { "JUNE", T_MONTH, 6 },
+    { "JULY", T_MONTH, 7 }, { "AUGUST", T_MONTH, 8 }, { "SEPTEMBER", T_MONTH, 9 },
+    { "SEPT", T_MONTH, 9 }, { "OCTOBER", T_MONTH, 10 }, { "NOVEMBER", T_MONTH, 11 },
+    { "DECEMBER", T_MONTH, 12 },
+    { "SUNDAY", T_WDAY, 0 }, { "MONDAY", T_WDAY, 1 }, { "TUESDAY", T_WDAY, 2 },
+    { "TUES", T_WDAY, 2 }, { "WEDNESDAY", T_WDAY, 3 }, { "WEDNES", T_WDAY, 3 },
+    { "THURSDAY", T_WDAY, 4 }, { "THUR", T_WDAY, 4 }, { "THURS", T_WDAY, 4 },
+    { "FRIDAY", T_WDAY, 5 }, { "SATURDAY", T_WDAY, 6 }, { NULL, 0, 0 }
+};
+
+static const word_t UNITS[] = {
+    { "YEAR", T_YEAR_U, 1 }, { "MONTH", T_MONTH_U, 1 }, { "FORTNIGHT", T_DAY_U, 14 },
+    { "WEEK", T_DAY_U, 7 }, { "DAY", T_DAY_U, 1 }, { "HOUR", T_HOUR_U, 1 },
+    { "MINUTE", T_MIN_U, 1 }, { "MIN", T_MIN_U, 1 }, { "SECOND", T_SEC_U, 1 },
+    { "SEC", T_SEC_U, 1 }, { NULL, 0, 0 }
+};
+
+static const word_t RELATIVE[] = {
+    { "TOMORROW", T_DAYSHIFT, 1 }, { "YESTERDAY", T_DAYSHIFT, -1 },
+    { "TODAY", T_DAYSHIFT, 0 }, { "NOW", T_DAYSHIFT, 0 },
+    { "LAST", T_ORDINAL, -1 }, { "THIS", T_ORDINAL, 0 }, { "NEXT", T_ORDINAL, 1 },
+    { "FIRST", T_ORDINAL, 1 }, { "THIRD", T_ORDINAL, 3 }, { "FOURTH", T_ORDINAL, 4 },
+    { "FIFTH", T_ORDINAL, 5 }, { "SIXTH", T_ORDINAL, 6 }, { "SEVENTH", T_ORDINAL, 7 },
+    { "EIGHTH", T_ORDINAL, 8 }, { "NINTH", T_ORDINAL, 9 }, { "TENTH", T_ORDINAL, 10 },
+    { "ELEVENTH", T_ORDINAL, 11 }, { "TWELFTH", T_ORDINAL, 12 },
+    { "AGO", T_AGO, -1 }, { "HENCE", T_AGO, 1 }, { NULL, 0, 0 }
+};
+
+static const word_t UNIVERSAL[] = {
+    { "GMT", T_ZONE, 0 }, { "UT", T_ZONE, 0 }, { "UTC", T_ZONE, 0 }, { NULL, 0, 0 }
+};
+
+/* gnulib's list, which is deliberately short: an abbreviation that
+ * means two places (IST is India, Ireland and Israel) is read as the one
+ * GNU reads it as, and one it does not list is refused. */
+static const word_t ZONES[] = {
+    { "WET", T_ZONE, HOUR(0) }, { "WEST", T_DAYZONE, HOUR(0) },
+    { "BST", T_DAYZONE, HOUR(0) }, { "ART", T_ZONE, -HOUR(3) },
+    { "BRT", T_ZONE, -HOUR(3) }, { "BRST", T_DAYZONE, -HOUR(3) },
+    { "NST", T_ZONE, -(HOUR(3) + 30) }, { "NDT", T_DAYZONE, -(HOUR(3) + 30) },
+    { "AST", T_ZONE, -HOUR(4) }, { "ADT", T_DAYZONE, -HOUR(4) },
+    { "CLT", T_ZONE, -HOUR(4) }, { "CLST", T_DAYZONE, -HOUR(4) },
+    { "EST", T_ZONE, -HOUR(5) }, { "EDT", T_DAYZONE, -HOUR(5) },
+    { "CST", T_ZONE, -HOUR(6) }, { "CDT", T_DAYZONE, -HOUR(6) },
+    { "MST", T_ZONE, -HOUR(7) }, { "MDT", T_DAYZONE, -HOUR(7) },
+    { "PST", T_ZONE, -HOUR(8) }, { "PDT", T_DAYZONE, -HOUR(8) },
+    { "AKST", T_ZONE, -HOUR(9) }, { "AKDT", T_DAYZONE, -HOUR(9) },
+    { "HST", T_ZONE, -HOUR(10) }, { "HAST", T_ZONE, -HOUR(10) },
+    { "HADT", T_DAYZONE, -HOUR(10) }, { "SST", T_ZONE, -HOUR(12) },
+    { "WAT", T_ZONE, HOUR(1) }, { "CET", T_ZONE, HOUR(1) },
+    { "CEST", T_DAYZONE, HOUR(1) }, { "MET", T_ZONE, HOUR(1) },
+    { "MEZ", T_ZONE, HOUR(1) }, { "MEST", T_DAYZONE, HOUR(1) },
+    { "MESZ", T_DAYZONE, HOUR(1) }, { "EET", T_ZONE, HOUR(2) },
+    { "EEST", T_DAYZONE, HOUR(2) }, { "CAT", T_ZONE, HOUR(2) },
+    { "SAST", T_ZONE, HOUR(2) }, { "EAT", T_ZONE, HOUR(3) },
+    { "MSK", T_ZONE, HOUR(3) }, { "MSD", T_DAYZONE, HOUR(3) },
+    { "IST", T_ZONE, HOUR(5) + 30 }, { "SGT", T_ZONE, HOUR(8) },
+    { "KST", T_ZONE, HOUR(9) }, { "JST", T_ZONE, HOUR(9) },
+    { "GST", T_ZONE, HOUR(10) }, { "NZST", T_ZONE, HOUR(12) },
+    { "NZDT", T_DAYZONE, HOUR(12) }, { NULL, 0, 0 }
+};
+
+static bool is_digit(char c) { return c >= '0' && c <= '9'; }
+static bool is_alpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+static bool is_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+                                      c == '\f' || c == '\v'; }
+
+static const word_t *find_zone(const pc_t *pc, const char *w, word_t *tmp)
 {
-    for (;; a++, b++) {
-        char x = *a, y = *b;
-        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
-        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
-        if (x != y)    return false;
-        if (x == '\0') return true;
-    }
-}
-
-static const zone_t *find_zone(const char *name)
-{
-    for (int i = 0; i < NZONES; i++)
-        if (eq_ci(ZONES[i].name, name) || eq_ci(ZONES[i].abbr, name))
-            return &ZONES[i];
+    for (const word_t *z = UNIVERSAL; z->name; z++)
+        if (strcmp(w, z->name) == 0) return z;
+    /* The local zone's own names come before the fixed table: in Seoul,
+     * KST is "local time", not "+09:00 regardless". */
+    for (int i = 0; i < pc->nlz; i++)
+        if (strcmp(w, pc->lz_name[i]) == 0) {
+            tmp->name = pc->lz_name[i];
+            tmp->type = T_LOCALZONE;
+            tmp->val  = pc->lz_isdst[i];
+            return tmp;
+        }
+    for (const word_t *z = ZONES; z->name; z++)
+        if (strcmp(w, z->name) == 0) return z;
     return NULL;
 }
 
-static void offset_text(int minutes, char *buf, size_t cap)
+/* gnulib's lookup_word, in its order. */
+static bool lookup_word(const pc_t *pc, char *w, tok_t *t)
 {
-    int a = minutes < 0 ? -minutes : minutes;
-    snprintf(buf, cap, "UTC%c%d:%02d", minutes < 0 ? '-' : '+', a / 60, a % 60);
-}
+    word_t tmp;
+    size_t len = strlen(w);
+    for (char *p = w; *p; p++)
+        if (*p >= 'a' && *p <= 'z') *p = (char)(*p - 32);
 
-static void list_zones(void)
-{
-    printf("Zones you can pick. Daylight saving is followed"
-           " automatically.\n\n");
-    for (int i = 0; i < NZONES; i++) {
-        char off[16];
-        offset_text(ZONES[i].minutes, off, sizeof(off));
-        printf("  %-20s %-5s %-10s%s\n",
-               ZONES[i].name, ZONES[i].abbr, off,
-               ZONES[i].rule != LP_DST_NONE ? ZONES[i].summer : "");
-    }
-    printf("\n  date -z Asia/Seoul     pick by name\n");
-    printf("  date -z KST            or by short name\n");
-    printf("  date -z +9             or by raw offset\n");
-}
+    if (strcmp(w, "AM") == 0 || strcmp(w, "A.M.") == 0) { t->type = T_MERID; t->val = 1; return true; }
+    if (strcmp(w, "PM") == 0 || strcmp(w, "P.M.") == 0) { t->type = T_MERID; t->val = 2; return true; }
 
-/* The file holds "<minutes> <label>". The label is only for display, so
- * a file with just a number still works. */
-/* The libc reads the same file and applies the daylight-saving rule, so
- * this is the whole of it now. Parsing it a second time here is how the
- * two used to drift. */
-static void load_zone(void)
-{
-    lp_tz_forget();
-    s64 now = lp_time();
-    tz_minutes = lp_tz_offset(now);
-    strlcpy(tz_label, lp_tz_label(now), sizeof(tz_label));
-}
-
-/* "<minutes> <winter label> <rule> <summer label>".
- *
- * The rule and the summer name are on the same line because every
- * program on the machine reads this file through lp_localtime, and a
- * second file to keep in step is a second file to get out of step. */
-static bool save_zone(int minutes, const char *label,
-                      const char *rule, const char *summer)
-{
-    char buf[96];
-    int  len = snprintf(buf, sizeof(buf), "%d %s %s %s\n",
-                        minutes, label, rule ? rule : "-",
-                        summer ? summer : label);
-
-    char path[256];
-    lp_setting_path(TZ_NAME, path, sizeof path);
-
-    if (!lp_write_file_atomic(path, buf, (size_t)len)) {
-        dprintf(STDERR_FILENO,
-                "date: cannot write %s\n"
-                "      nothing writable survives a reboot on this machine -\n"
-                "      is /data mounted?\n", path);
-        return false;
-    }
-    return true;
-}
-
-/* Accepts "+9", "-3", "+05:30", "9". */
-static bool parse_offset(const char *s, int *out)
-{
-    int sign = 1;
-    if      (*s == '+') s++;
-    else if (*s == '-') { sign = -1; s++; }
-
-    if (*s < '0' || *s > '9')
-        return false;
-
-    int hh = 0;
-    while (*s >= '0' && *s <= '9')
-        hh = hh * 10 + (*s++ - '0');
-
-    int mm = 0;
-    if (*s == ':') {
-        s++;
-        if (*s < '0' || *s > '9')
-            return false;
-        while (*s >= '0' && *s <= '9')
-            mm = mm * 10 + (*s++ - '0');
-    }
-    if (*s != '\0' || hh > 14 || mm > 59)
-        return false;
-
-    *out = sign * (hh * 60 + mm);
-    return true;
-}
-
-/* Accepts "2026-09-01 12:34:56", "2026-09-01T12:34:56" or "2026-09-01". */
-static bool parse_datetime(const char *s, lp_tm_t *tm)
-{
-    int vals[6] = { 0, 0, 0, 0, 0, 0 };
-    int n = 0;
-    const char *p = s;
-
-    while (n < 6) {
-        if (*p < '0' || *p > '9')
-            break;
-        int v = 0;
-        while (*p >= '0' && *p <= '9')
-            v = v * 10 + (*p++ - '0');
-        vals[n++] = v;
-        if (*p == '-' || *p == ' ' || *p == ':' || *p == 'T')
-            p++;
-        else
-            break;
-    }
-    if (*p != '\0' || n < 3)
-        return false;
-
-    tm->year = vals[0]; tm->mon = vals[1]; tm->day  = vals[2];
-    tm->hour = vals[3]; tm->min = vals[4]; tm->sec  = vals[5];
-    tm->wday = 0;
-
-    if (tm->year < 1970 || tm->mon < 1 || tm->mon > 12 ||
-        tm->day  < 1    || tm->day > 31 || tm->hour > 23 ||
-        tm->min  > 59   || tm->sec > 60)
-        return false;
-    return true;
-}
-
-/* Remember the time so the next boot can pick up where this one left
- * off. Two places, because the two machines this runs on are different:
- *
- *   the hardware clock  A PC and an EC2 instance have one with a
- *                       battery, and it keeps counting while the power
- *                       is off. That is the only way a machine switched
- *                       on a week later knows a week has passed.
- *   /data/.clock        A Pi Zero 2 W has no such clock. The saved
- *                       timestamp does not advance while the power is
- *                       off, but it beats starting at 1970 - which
- *                       fails every HTTPS handshake outright.
- *
- * Whichever exists gets written. ntp reads the same file. */
-static void save_clock(s64 t)
-{
-    bool rtc = lp_rtc_write(t);
-
-    char buf[32];
-    int  len = snprintf(buf, sizeof(buf), "%lld\n", (long long)t);
-
-    char path[256];
-    lp_setting_path(CLOCK_NAME, path, sizeof path);
-
-    if (!lp_write_file_atomic(path, buf, (size_t)len) && !rtc)
-        printf("(no hardware clock and nothing writable that survives a "
-               "reboot - this time will be gone at the next boot)\n");
-}
-
-static const char *WDAY_FULL[7] = { "Sunday", "Monday", "Tuesday", "Wednesday",
-                                    "Thursday", "Friday", "Saturday" };
-static const char *MON_ABBR[13] = { "", "Jan","Feb","Mar","Apr","May","Jun",
-                                    "Jul","Aug","Sep","Oct","Nov","Dec" };
-static const char *MON_FULL[13] = { "", "January","February","March","April",
-                                    "May","June","July","August","September",
-                                    "October","November","December" };
-
-static bool leap(int y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
-
-static int yday_of(const lp_tm_t *tm)
-{
-    static const int cum[13] = { 0,0,31,59,90,120,151,181,212,243,273,304,334 };
-    int d = cum[tm->mon] + tm->day;
-    if (tm->mon > 2 && leap(tm->year)) d++;
-    return d;                                   /* 1..366 */
-}
-
-/* ── strftime ─────────────────────────────────────────────────────────
- *
- * `date +%F` is the most-typed form of this command by a wide margin,
- * and the old version answered "unknown option: +%Y-%m-%d". A date that
- * cannot be formatted is a date every script has to work around, so
- * this is the whole set - including the flags (-_0^) and the field
- * width, which is what makes `%-d` print 7 rather than 07.
- *
- * There is no locale here, so %c %x %X and the day and month names are
- * the C locale's, which is what a machine with no locale data should
- * say rather than pretending to know Korean month names.
- */
-static void put(char *out, size_t cap, size_t *k, const char *s)
-{
-    while (*s && *k < cap - 1) out[(*k)++] = *s++;
-}
-
-static void put_num(char *out, size_t cap, size_t *k, long long v,
-                    int width, char pad, char flag)
-{
-    if (flag == '-') { width = 0; }
-    else if (flag == '_') pad = ' ';
-    else if (flag == '0') pad = '0';
-
-    char digits[32];
-    int  n = 0;
-    bool neg = v < 0;
-    unsigned long long a = neg ? (unsigned long long)(-v) : (unsigned long long)v;
-    if (a == 0) digits[n++] = '0';
-    while (a) { digits[n++] = (char)('0' + a % 10); a /= 10; }
-
-    int len = n + (neg ? 1 : 0);
-    if (neg && pad == '0' && *k < cap - 1) out[(*k)++] = '-';
-    for (int i = len; i < width && *k < cap - 1; i++) out[(*k)++] = pad;
-    if (neg && pad != '0' && *k < cap - 1) out[(*k)++] = '-';
-    while (n-- > 0 && *k < cap - 1) out[(*k)++] = digits[n];
-}
-
-static void upper_from(char *out, size_t from, size_t to)
-{
-    for (size_t i = from; i < to; i++)
-        if (out[i] >= 'a' && out[i] <= 'z') out[i] = (char)(out[i] - 32);
-}
-
-/* The ISO week number, and the year it belongs to - which is not always
- * the calendar year: 1 January can be week 52 or 53 of the year before,
- * and 31 December can be week 1 of the year after. Weekdays are counted
- * Monday=1 here because that is what the ISO rule is written in, and
- * getting that off by one turns week 53 into week 1 of the wrong year. */
-static void iso_week(const lp_tm_t *tm, int *week, int *year)
-{
-    int wd = (tm->wday == 0) ? 7 : tm->wday;    /* Mon=1 .. Sun=7 */
-    int yd = yday_of(tm);                       /* 1..366 */
-    int y  = tm->year;
-    int w  = (yd - wd + 10) / 7;
-
-    if (w < 1) {                    /* the last week of the year before */
-        y--;
-        yd += leap(y) ? 366 : 365;
-        w = (yd - wd + 10) / 7;
-    } else if (w > 52) {            /* week 53 only if the year has one */
-        int days = leap(y) ? 366 : 365;
-        if (days - yd < 4 - wd) { w = 1; y++; }
-    }
-    *week = w;
-    *year = y;
-}
-
-static size_t fmt_time(char *out, size_t cap, const char *fmt,
-                       s64 t, int off, const char *zone)
-{
-    lp_tm_t tm;
-    lp_gmtime(t + (s64)off * 60, &tm);
-    size_t k = 0;
-
-    for (const char *p = fmt; *p && k < cap - 1; p++) {
-        if (*p != '%') { out[k++] = *p; continue; }
-        p++;
-
-        char flag = 0;
-        while (*p == '-' || *p == '_' || *p == '0' || *p == '^' || *p == '#') {
-            if (*p == '^' || *p == '#') flag = flag ? flag : '^';
-            else flag = *p;
-            p++;
+    bool abbrev = len == 3 || (len == 4 && w[3] == '.');
+    for (const word_t *e = MONTH_DAY; e->name; e++)
+        if (abbrev ? strncmp(w, e->name, 3) == 0 : strcmp(w, e->name) == 0) {
+            t->type = e->type; t->val = e->val; return true;
         }
-        bool upper = false;
-        for (const char *q = p - 1; q > fmt && (*q == '^' || *q == '#'); q--) upper = true;
-        int width = 0;
-        while (*p >= '0' && *p <= '9') width = width * 10 + (*p++ - '0');
-        if (!*p) break;
-
-        size_t before = k;
-        switch (*p) {
-        case 'a': put(out, cap, &k, WDAY[tm.wday % 7]); break;
-        case 'A': put(out, cap, &k, WDAY_FULL[tm.wday % 7]); break;
-        case 'b': case 'h': put(out, cap, &k, MON_ABBR[tm.mon]); break;
-        case 'B': put(out, cap, &k, MON_FULL[tm.mon]); break;
-        case 'c': {
-            char b[128];
-            fmt_time(b, sizeof b, "%a %b %e %H:%M:%S %Y", t, off, zone);
-            put(out, cap, &k, b);
-            break;
-        }
-        case 'C': put_num(out, cap, &k, tm.year / 100, width ? width : 2, '0', flag); break;
-        case 'd': put_num(out, cap, &k, tm.day, width ? width : 2, '0', flag); break;
-        case 'D': {
-            char b[32];
-            fmt_time(b, sizeof b, "%m/%d/%y", t, off, zone);
-            put(out, cap, &k, b);
-            break;
-        }
-        case 'e': put_num(out, cap, &k, tm.day, width ? width : 2, ' ', flag); break;
-        case 'F': {
-            char b[32];
-            fmt_time(b, sizeof b, "%Y-%m-%d", t, off, zone);
-            put(out, cap, &k, b);
-            break;
-        }
-        case 'g': { int w, y; iso_week(&tm, &w, &y);
-                    put_num(out, cap, &k, y % 100, width ? width : 2, '0', flag); break; }
-        case 'G': { int w, y; iso_week(&tm, &w, &y);
-                    put_num(out, cap, &k, y, width ? width : 4, '0', flag); break; }
-        case 'H': put_num(out, cap, &k, tm.hour, width ? width : 2, '0', flag); break;
-        case 'I': { int h = tm.hour % 12; if (!h) h = 12;
-                    put_num(out, cap, &k, h, width ? width : 2, '0', flag); break; }
-        case 'j': put_num(out, cap, &k, yday_of(&tm), width ? width : 3, '0', flag); break;
-        case 'k': put_num(out, cap, &k, tm.hour, width ? width : 2, ' ', flag); break;
-        case 'l': { int h = tm.hour % 12; if (!h) h = 12;
-                    put_num(out, cap, &k, h, width ? width : 2, ' ', flag); break; }
-        case 'm': put_num(out, cap, &k, tm.mon, width ? width : 2, '0', flag); break;
-        case 'M': put_num(out, cap, &k, tm.min, width ? width : 2, '0', flag); break;
-        case 'n': put(out, cap, &k, "\n"); break;
-        case 'N': put_num(out, cap, &k, 0, 9, '0', 0); break;   /* no sub-second clock here */
-        case 'p': put(out, cap, &k, tm.hour < 12 ? "AM" : "PM"); break;
-        case 'P': put(out, cap, &k, tm.hour < 12 ? "am" : "pm"); break;
-        case 'q': put_num(out, cap, &k, (tm.mon + 2) / 3, 0, '0', flag); break;
-        case 'r': {
-            char b[64];
-            fmt_time(b, sizeof b, "%I:%M:%S %p", t, off, zone);
-            put(out, cap, &k, b);
-            break;
-        }
-        case 'R': {
-            char b[32];
-            fmt_time(b, sizeof b, "%H:%M", t, off, zone);
-            put(out, cap, &k, b);
-            break;
-        }
-        case 's': put_num(out, cap, &k, (long long)t, width, '0', flag); break;
-        case 'S': put_num(out, cap, &k, tm.sec, width ? width : 2, '0', flag); break;
-        case 't': put(out, cap, &k, "\t"); break;
-        case 'T': {
-            char b[32];
-            fmt_time(b, sizeof b, "%H:%M:%S", t, off, zone);
-            put(out, cap, &k, b);
-            break;
-        }
-        case 'u': put_num(out, cap, &k, tm.wday == 0 ? 7 : tm.wday, 0, '0', flag); break;
-        case 'U': put_num(out, cap, &k, (yday_of(&tm) + 6 - tm.wday) / 7,
-                          width ? width : 2, '0', flag); break;
-        case 'V': { int w, y; iso_week(&tm, &w, &y);
-                    put_num(out, cap, &k, w, width ? width : 2, '0', flag); break; }
-        case 'w': put_num(out, cap, &k, tm.wday, 0, '0', flag); break;
-        case 'W': put_num(out, cap, &k, (yday_of(&tm) + 6 - ((tm.wday + 6) % 7)) / 7,
-                          width ? width : 2, '0', flag); break;
-        case 'x': {
-            char b[32];
-            fmt_time(b, sizeof b, "%m/%d/%y", t, off, zone);
-            put(out, cap, &k, b);
-            break;
-        }
-        case 'X': {
-            char b[32];
-            fmt_time(b, sizeof b, "%H:%M:%S", t, off, zone);
-            put(out, cap, &k, b);
-            break;
-        }
-        case 'y': put_num(out, cap, &k, tm.year % 100, width ? width : 2, '0', flag); break;
-        case 'Y': put_num(out, cap, &k, tm.year, width, '0', flag); break;
-        case 'z': {
-            char b[16];
-            int a = off < 0 ? -off : off;
-            snprintf(b, sizeof b, "%c%02d%02d", off < 0 ? '-' : '+', a / 60, a % 60);
-            put(out, cap, &k, b);
-            break;
-        }
-        case ':': {
-            if (p[1] == 'z') {
-                p++;
-                char b[16];
-                int a = off < 0 ? -off : off;
-                snprintf(b, sizeof b, "%c%02d:%02d", off < 0 ? '-' : '+', a / 60, a % 60);
-                put(out, cap, &k, b);
-            } else {
-                out[k++] = '%';
-                if (k < cap - 1) out[k++] = ':';
+    const word_t *z = find_zone(pc, w, &tmp);
+    if (z) { t->type = z->type; t->val = z->val; return true; }
+    if (strcmp(w, "DST") == 0) { t->type = T_DST; t->val = 0; return true; }
+    for (const word_t *e = UNITS; e->name; e++)
+        if (strcmp(w, e->name) == 0) { t->type = e->type; t->val = e->val; return true; }
+    if (len > 1 && w[len - 1] == 'S') {
+        w[len - 1] = '\0';
+        for (const word_t *e = UNITS; e->name; e++)
+            if (strcmp(w, e->name) == 0) {
+                t->type = e->type; t->val = e->val; w[len - 1] = 'S'; return true;
             }
-            break;
-        }
-        case 'Z': put(out, cap, &k, zone); break;
-        case '%': if (k < cap - 1) out[k++] = '%'; break;
-        default:
-            if (k < cap - 1) out[k++] = '%';
-            if (k < cap - 1) out[k++] = *p;
-            break;
-        }
-        if (upper || flag == '^') upper_from(out, before, k);
+        w[len - 1] = 'S';
     }
-    out[k] = '\0';
-    return k;
-}
+    for (const word_t *e = RELATIVE; e->name; e++)
+        if (strcmp(w, e->name) == 0) { t->type = e->type; t->val = e->val; return true; }
 
-static void print_time(s64 t, int minutes, const char *label)
-{
-    char buf[512];
-    /* GNU's default format, in the C locale. */
-    fmt_time(buf, sizeof buf, "%a %b %e %H:%M:%S %Z %Y", t, minutes, label);
-    printf("%s\n", buf);
-}
-
-/* Said only about the clock itself. `date -d @0` is a question about
- * 1970, not a machine whose clock stopped there. */
-static void warn_if_unset(void)
-{
-    if (lp_time() < SANE_MIN)
-        printf("clock is not set - run 'ntp', or 'date -s \"2026-09-01 12:00:00\"'\n");
-}
-
-/* ── -d: a time that is not now ───────────────────────────────────────
- *
- * GNU's -d accepts an entire small language. This accepts the part of
- * it that scripts actually use, and refuses the rest out loud rather
- * than guessing - a date command that silently returns the wrong day is
- * worse than one that says it cannot read the string.
- */
-static bool relative_unit(const char *word, s64 *secs)
-{
-    size_t n = strlen(word);
-    char w[32];
-    strlcpy(w, word, sizeof w);
-    if (n > 1 && w[n - 1] == 's') w[n - 1] = '\0';
-
-    if (strcmp(w, "second") == 0 || strcmp(w, "sec") == 0) { *secs = 1; return true; }
-    if (strcmp(w, "minute") == 0 || strcmp(w, "min") == 0) { *secs = 60; return true; }
-    if (strcmp(w, "hour") == 0)  { *secs = 3600; return true; }
-    if (strcmp(w, "day") == 0)   { *secs = 86400; return true; }
-    if (strcmp(w, "week") == 0)  { *secs = 7 * 86400; return true; }
-    if (strcmp(w, "fortnight") == 0) { *secs = 14 * 86400; return true; }
+    /* Military zones: A-I +1..+9, K-M +10..+12, N-Y -1..-12, Z UTC. T is
+     * both a zone and the separator in 2026-09-26T12:00, and the parser
+     * tells which; J is "local time" and changes nothing. */
+    if (len == 1) {
+        char c = w[0];
+        if (c == 'T') { t->type = 'T'; t->val = 0; return true; }
+        if (c == 'J') { t->type = T_LOCALZONE; t->val = -1; return true; }
+        if (c == 'Z') { t->type = T_ZONE; t->val = 0; return true; }
+        if (c >= 'A' && c <= 'I') { t->type = T_ZONE; t->val = HOUR(c - 'A' + 1); return true; }
+        if (c >= 'K' && c <= 'M') { t->type = T_ZONE; t->val = HOUR(c - 'K' + 10); return true; }
+        if (c >= 'N' && c <= 'Y') { t->type = T_ZONE; t->val = -HOUR(c - 'N' + 1); return true; }
+    }
+    /* "E.S.T." */
+    char q[32];
+    size_t k = 0;
+    bool period = false;
+    for (const char *p = w; *p && k < sizeof q - 1; p++) {
+        if (*p == '.') period = true;
+        else q[k++] = *p;
+    }
+    q[k] = '\0';
+    if (period && (z = find_zone(pc, q, &tmp))) { t->type = z->type; t->val = z->val; return true; }
     return false;
 }
 
-static bool parse_when(const char *s, s64 now, int off, s64 *out)
+/* gnulib's yylex. A sign followed by anything but a digit is dropped,
+ * which is why "tomorrow + 2 hours" works; parentheses are comments. */
+static bool lex(pc_t *pc, const char *s)
 {
-    while (*s == ' ') s++;
+    pc->n = 0;
+    for (;;) {
+        while (is_space(*s)) s++;
+        if (pc->n >= MAXTOK - 1) return false;
+        tok_t *t = &pc->t[pc->n];
+        memset(t, 0, sizeof *t);
+        char c = *s;
+        if (!c) { t->type = T_END; pc->n++; return true; }
 
-    if (*s == '@') {                       /* @1788771305 */
-        const char *p = s + 1;
-        bool neg = (*p == '-');
-        if (neg) p++;
-        if (*p < '0' || *p > '9') return false;
-        s64 v = 0;
-        while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
-        while (*p == ' ') p++;
-        if (*p) return false;
-        *out = neg ? -v : v;
+        if (is_digit(c) || c == '-' || c == '+') {
+            int sign = 0;
+            if (c == '-' || c == '+') {
+                sign = c == '-' ? -1 : 1;
+                s++;
+                while (is_space(*s)) s++;
+                if (!is_digit(*s)) continue;
+            }
+            u64 v = 0;
+            int digits = 0;
+            while (is_digit(*s)) {
+                if (v > 922337203685477580ULL) return false;
+                v = v * 10 + (u64)(*s++ - '0');
+                digits++;
+            }
+            if ((*s == '.' || *s == ',') && is_digit(s[1])) {
+                s++;
+                long ns = 0;
+                int nd = 0;
+                bool rest = false;
+                while (is_digit(*s)) {
+                    if (nd < 9) { ns = ns * 10 + (*s - '0'); nd++; }
+                    else if (*s != '0') rest = true;
+                    s++;
+                }
+                while (nd < 9) { ns *= 10; nd++; }
+                s64 sec = (s64)v;
+                /* A negative fraction rounds toward minus infinity, so
+                 * -1.5 is -2 seconds plus half a second. */
+                if (sign < 0) {
+                    sec = -sec;
+                    if (ns || rest) { sec--; ns = 1000000000L - ns - (rest ? 1 : 0); }
+                }
+                t->type = sign ? T_SDEC : T_UDEC;
+                t->val = sec;
+                t->ns = ns;
+            } else {
+                t->type = sign ? T_SNUM : T_UNUM;
+                t->val = sign < 0 ? -(s64)v : (s64)v;
+                t->digits = digits;
+            }
+            pc->n++;
+            continue;
+        }
+        if (is_alpha(c)) {
+            char w[24];
+            size_t k = 0;
+            while (is_alpha(*s) || *s == '.') {
+                if (k < sizeof w - 1) w[k++] = *s;
+                s++;
+            }
+            w[k] = '\0';
+            if (!lookup_word(pc, w, t)) return false;
+            pc->n++;
+            continue;
+        }
+        if (c == '(') {
+            int depth = 0;
+            do {
+                c = *s++;
+                if (!c) { t->type = T_END; pc->n++; return true; }
+                if (c == '(') depth++;
+                else if (c == ')') depth--;
+            } while (depth > 0);
+            continue;
+        }
+        t->type = (unsigned char)c;
+        s++;
+        pc->n++;
+    }
+}
+
+static tok_t *cur(pc_t *pc)           { return &pc->t[pc->i]; }
+static tok_t *peek(pc_t *pc, int k)
+{
+    int j = pc->i + k;
+    return &pc->t[j < pc->n ? j : pc->n - 1];
+}
+static bool is_unit(int ty)
+{
+    return ty == T_YEAR_U || ty == T_MONTH_U || ty == T_DAY_U ||
+           ty == T_HOUR_U || ty == T_MIN_U || ty == T_SEC_U;
+}
+
+static void add_rel(pc_t *pc, int unit, s64 n, s64 unitval)
+{
+    s64 v = n * unitval;
+    switch (unit) {
+    case T_YEAR_U:  pc->rel.year  += v; break;
+    case T_MONTH_U: pc->rel.month += v; break;
+    case T_DAY_U:   pc->rel.day   += v; break;
+    case T_HOUR_U:  pc->rel.hour  += v; break;
+    case T_MIN_U:   pc->rel.min   += v; break;
+    case T_SEC_U:   pc->rel.sec   += v; break;
+    }
+    pc->rels = true;
+}
+
+/* A relative item ends here: "ago" and "hence" scale everything it
+ * added. */
+static void maybe_ago(pc_t *pc, rel_t before)
+{
+    if (cur(pc)->type != T_AGO) return;
+    s64 f = cur(pc)->val;
+    pc->i++;
+    rel_t *r = &pc->rel;
+    r->year  = before.year  + (r->year  - before.year)  * f;
+    r->month = before.month + (r->month - before.month) * f;
+    r->day   = before.day   + (r->day   - before.day)   * f;
+    r->hour  = before.hour  + (r->hour  - before.hour)  * f;
+    r->min   = before.min   + (r->min   - before.min)   * f;
+    r->sec   = before.sec   + (r->sec   - before.sec)   * f;
+    r->ns    = before.ns    + (r->ns    - before.ns)    * f;
+}
+
+/* "+0900", "-5", "+05:30": an offset in minutes, or false. */
+static bool zone_hhmm(pc_t *pc, tok_t *s, s64 *out)
+{
+    s64 m = -1;
+    if (cur(pc)->type == ':' && peek(pc, 1)->type == T_UNUM) {
+        m = peek(pc, 1)->val;
+        pc->i += 2;
+    }
+    s64 v = s->val < 0 ? -s->val : s->val;
+    s64 n;
+    if (m < 0) n = s->digits <= 2 ? v * 60 : (v / 100) * 60 + v % 100;
+    else       n = v * 60 + m;
+    if (s->val < 0) n = -n;
+    if (n < -24 * 60 || n > 24 * 60) return false;
+    *out = n;
+    return true;
+}
+
+static void set_time(pc_t *pc, s64 h, s64 m, s64 sec, long ns, int merid)
+{
+    pc->hour = h; pc->min = m; pc->sec = sec; pc->ns = ns;
+    pc->merid = merid;
+    pc->times++;
+}
+
+/* hh:mm[:ss[.frac]] after the first number, then a meridian or a zone
+ * offset. */
+static bool p_clock(pc_t *pc, s64 h)
+{
+    s64 m = 0, sec = 0;
+    long ns = 0;
+    if (cur(pc)->type == ':' ) {
+        if (peek(pc, 1)->type != T_UNUM) return false;
+        m = peek(pc, 1)->val;
+        pc->i += 2;
+        if (cur(pc)->type == ':') {
+            tok_t *s = peek(pc, 1);
+            if (s->type == T_UNUM)      { sec = s->val; }
+            else if (s->type == T_UDEC) { sec = s->val; ns = s->ns; }
+            else return false;
+            pc->i += 2;
+        }
+    }
+    if (cur(pc)->type == T_MERID) {
+        set_time(pc, h, m, sec, ns, (int)cur(pc)->val);
+        pc->i++;
+        return true;
+    }
+    set_time(pc, h, m, sec, ns, 0);
+    if (cur(pc)->type == T_SNUM) {
+        tok_t *s = cur(pc);
+        pc->i++;
+        s64 z;
+        if (!zone_hhmm(pc, s, &z)) return false;
+        pc->time_zone = z;
+        pc->zones++;
+    }
+    return true;
+}
+
+/* The bare number: a year, a yyyymmdd date, or an hhmm time, depending
+ * on what came before it and how many digits it has. */
+static void p_number(pc_t *pc, tok_t *t)
+{
+    if (pc->dates && !pc->year_digits && !pc->rels && (pc->times || t->digits > 2)) {
+        pc->year = t->val;
+        pc->year_digits = t->digits;
+    } else if (t->digits > 4) {
+        pc->dates++;
+        pc->day = t->val % 100;
+        pc->month = (t->val / 100) % 100;
+        pc->year = t->val / 10000;
+        pc->year_digits = t->digits - 4;
+    } else {
+        pc->times++;
+        if (t->digits <= 2) { pc->hour = t->val; pc->min = 0; }
+        else { pc->hour = t->val / 100; pc->min = t->val % 100; }
+        pc->sec = 0; pc->ns = 0;
+        pc->merid = 0;
+    }
+}
+
+static bool p_item(pc_t *pc)
+{
+    tok_t *t = cur(pc);
+    tok_t *n1 = peek(pc, 1);
+    rel_t before = pc->rel;
+
+    switch (t->type) {
+    case T_UNUM:
+        /* iso date: 2026 -09 -26, perhaps followed by T and a time */
+        if (n1->type == T_SNUM && peek(pc, 2)->type == T_SNUM) {
+            pc->year = t->val; pc->year_digits = t->digits;
+            pc->month = -n1->val; pc->day = -peek(pc, 2)->val;
+            pc->dates++;
+            pc->i += 3;
+            /* A T straight after an ISO date commits to a date-time, as
+             * in GNU's grammar: "2026-09-26T12" is refused rather than
+             * read as noon in military zone T. */
+            if (cur(pc)->type == 'T') {
+                if (peek(pc, 1)->type != T_UNUM ||
+                    (peek(pc, 2)->type != ':' && peek(pc, 2)->type != T_SNUM))
+                    return false;
+                s64 h = peek(pc, 1)->val;
+                pc->i += 2;
+                if (cur(pc)->type == T_SNUM) {           /* 12+09 */
+                    tok_t *s = cur(pc);
+                    pc->i++;
+                    set_time(pc, h, 0, 0, 0, 0);
+                    s64 z;
+                    if (!zone_hhmm(pc, s, &z)) return false;
+                    pc->time_zone = z;
+                    pc->zones++;
+                    return true;
+                }
+                return p_clock(pc, h);
+            }
+            return true;
+        }
+        if (n1->type == ':') { pc->i++; return p_clock(pc, t->val); }
+        if (n1->type == T_MERID) {
+            set_time(pc, t->val, 0, 0, 0, (int)n1->val);
+            pc->i += 2;
+            return true;
+        }
+        if (n1->type == T_SNUM) {
+            if (is_unit(peek(pc, 2)->type)) {
+                /* hybrid: "10 -2 hours" is 10:00, then two hours back */
+                pc->i++;
+                p_number(pc, t);
+                return true;
+            }
+            /* iso time with an offset: "12 +0900" */
+            pc->i += 2;
+            set_time(pc, t->val, 0, 0, 0, 0);
+            s64 z;
+            if (!zone_hhmm(pc, n1, &z)) return false;
+            pc->time_zone = z;
+            pc->zones++;
+            return true;
+        }
+        if (n1->type == T_MONTH) {                    /* 22 Nov [2025] */
+            pc->day = t->val; pc->month = n1->val;
+            pc->dates++;
+            pc->i += 2;
+            tok_t *y = cur(pc);
+            if (y->type == T_SNUM) { pc->year = -y->val; pc->year_digits = y->digits; pc->i++; }
+            else if (y->type == T_UNUM) { pc->year = y->val; pc->year_digits = y->digits; pc->i++; }
+            return true;
+        }
+        if (n1->type == '/' && peek(pc, 2)->type == T_UNUM) {
+            tok_t *b = peek(pc, 2);
+            pc->i += 3;
+            pc->dates++;
+            if (cur(pc)->type == '/' && peek(pc, 1)->type == T_UNUM) {
+                tok_t *c = peek(pc, 1);
+                pc->i += 2;
+                if (t->digits >= 4) {
+                    pc->year = t->val; pc->year_digits = t->digits;
+                    pc->month = b->val; pc->day = c->val;
+                } else {
+                    pc->month = t->val; pc->day = b->val;
+                    pc->year = c->val; pc->year_digits = c->digits;
+                }
+            } else {
+                pc->month = t->val; pc->day = b->val;
+            }
+            return true;
+        }
+        if (n1->type == T_WDAY) {                     /* "3 friday" */
+            pc->day_ordinal = (int)t->val; pc->day_number = (int)n1->val;
+            pc->days++;
+            pc->i += 2;
+            return true;
+        }
+        if (is_unit(n1->type)) {
+            add_rel(pc, n1->type, t->val, n1->val);
+            pc->i += 2;
+            maybe_ago(pc, before);
+            return true;
+        }
+        pc->i++;
+        p_number(pc, t);
+        return true;
+
+    case T_SNUM:
+        if (!is_unit(n1->type)) return false;
+        add_rel(pc, n1->type, t->val, n1->val);
+        pc->i += 2;
+        maybe_ago(pc, before);
+        return true;
+
+    case T_UDEC: case T_SDEC:
+        if (n1->type != T_SEC_U) return false;
+        pc->rel.sec += t->val;
+        pc->rel.ns  += t->ns;
+        pc->rels = true;
+        pc->i += 2;
+        maybe_ago(pc, before);
+        return true;
+
+    case T_MONTH: {
+        pc->month = t->val;
+        pc->dates++;
+        pc->i++;
+        tok_t *a = cur(pc), *b = peek(pc, 1);
+        if (a->type == T_SNUM && b->type == T_SNUM) {  /* Nov-22-2025 */
+            pc->day = -a->val;
+            pc->year = -b->val; pc->year_digits = b->digits;
+            pc->i += 2;
+        } else if (a->type == T_UNUM) {
+            pc->day = a->val;
+            pc->i++;
+            if (cur(pc)->type == ',' && peek(pc, 1)->type == T_UNUM) {
+                pc->year = peek(pc, 1)->val; pc->year_digits = peek(pc, 1)->digits;
+                pc->i += 2;
+            }
+        } else {
+            return false;
+        }
         return true;
     }
 
-    if (strcmp(s, "now") == 0)       { *out = now; return true; }
-    if (strcmp(s, "today") == 0)     { *out = now; return true; }
-    if (strcmp(s, "tomorrow") == 0)  { *out = now + 86400; return true; }
-    if (strcmp(s, "yesterday") == 0) { *out = now - 86400; return true; }
+    case T_WDAY:
+        pc->day_ordinal = 0; pc->day_number = (int)t->val;
+        pc->days++;
+        pc->i++;
+        if (cur(pc)->type == ',') pc->i++;
+        return true;
 
-    /* An absolute date first: "2026-01-15" starts with digits too, and
-     * reading it as "2026 somethings" would quietly give the wrong day. */
-    {
-        lp_tm_t tm;
-        if (parse_datetime(s, &tm)) {
-            *out = lp_timelocal(&tm);
+    case T_ORDINAL:
+        if (n1->type == T_WDAY) {
+            pc->day_ordinal = (int)t->val; pc->day_number = (int)n1->val;
+            pc->days++;
+            pc->i += 2;
             return true;
         }
-    }
+        if (is_unit(n1->type)) {
+            add_rel(pc, n1->type, t->val, n1->val);
+            pc->i += 2;
+            maybe_ago(pc, before);
+            return true;
+        }
+        return false;
 
-    /* "2 days ago", "+3 hours", "-1 week", "3 days" */
-    {
-        const char *p = s;
-        int sign = 1;
-        if (*p == '+') p++;
-        else if (*p == '-') { sign = -1; p++; }
-        if (*p >= '0' && *p <= '9') {
-            s64 n = 0;
-            while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
-            while (*p == ' ') p++;
-            char unit[32];
-            size_t k = 0;
-            while (*p && *p != ' ' && k < sizeof unit - 1) unit[k++] = *p++;
-            unit[k] = '\0';
-            s64 secs;
-            if (relative_unit(unit, &secs)) {
-                while (*p == ' ') p++;
-                if (strcmp(p, "ago") == 0) sign = -sign;
-                else if (*p) return false;
-                *out = now + sign * n * secs;
+    case T_YEAR_U: case T_MONTH_U: case T_DAY_U:
+    case T_HOUR_U: case T_MIN_U: case T_SEC_U:
+        add_rel(pc, t->type, 1, t->val);
+        pc->i++;
+        maybe_ago(pc, before);
+        return true;
+
+    case T_DAYSHIFT:
+        pc->rel.day += t->val;
+        pc->rels = true;
+        pc->i++;
+        return true;
+
+    case T_ZONE:
+        pc->i++;
+        pc->zones++;
+        pc->time_zone = t->val;
+        if (cur(pc)->type == T_DST) { pc->time_zone += 60; pc->i++; return true; }
+        if (cur(pc)->type == T_SNUM) {
+            tok_t *s = cur(pc);
+            if (is_unit(peek(pc, 1)->type)) {          /* "UTC -5 hours" */
+                add_rel(pc, peek(pc, 1)->type, s->val, peek(pc, 1)->val);
+                pc->i += 2;
+                maybe_ago(pc, before);
                 return true;
             }
-            /* Months and years are not a fixed number of seconds, so
-             * they are done on the calendar rather than by arithmetic. */
-            if (strcmp(unit, "month") == 0 || strcmp(unit, "months") == 0 ||
-                strcmp(unit, "year") == 0  || strcmp(unit, "years") == 0) {
-                while (*p == ' ') p++;
-                if (strcmp(p, "ago") == 0) sign = -sign;
-                else if (*p) return false;
-                lp_tm_t tm;
-                lp_gmtime(now + (s64)off * 60, &tm);
-                if (unit[0] == 'm') {
-                    int total = (tm.year * 12 + tm.mon - 1) + (int)(sign * n);
-                    tm.year = total / 12;
-                    tm.mon  = total % 12 + 1;
-                } else {
-                    tm.year += (int)(sign * n);
-                }
-                static const int mdays[13] = { 0,31,28,31,30,31,30,31,31,30,31,30,31 };
-                int last = mdays[tm.mon];
-                if (tm.mon == 2 && leap(tm.year)) last = 29;
-                if (tm.day > last) tm.day = last;
-                *out = lp_timegm(&tm) - (s64)off * 60;
-                return true;
-            }
-            return false;
+            pc->i++;                                   /* "UTC+9", "GMT-05:00" */
+            s64 z;
+            if (!zone_hhmm(pc, s, &z)) return false;
+            pc->time_zone += z;
+            if (pc->time_zone < -24 * 60 || pc->time_zone > 24 * 60) return false;
+        }
+        return true;
+
+    case 'T':
+        pc->i++;
+        pc->zones++;
+        pc->time_zone = -HOUR(7);
+        return true;
+
+    case T_DAYZONE:
+        pc->i++;
+        pc->zones++;
+        pc->time_zone = t->val + 60;
+        return true;
+
+    case T_LOCALZONE:
+        pc->i++;
+        pc->local_zones++;
+        pc->local_isdst = (int)t->val;
+        if (cur(pc)->type == T_DST) { pc->local_isdst = 1; pc->dsts++; pc->i++; }
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+static int to_hour(s64 h, int merid)
+{
+    if (merid == 0) return (h >= 0 && h <= 23) ? (int)h : -1;
+    if (h < 1 || h > 12) return -1;
+    if (merid == 1) return h == 12 ? 0 : (int)h;
+    return h == 12 ? 12 : (int)h + 12;
+}
+
+/* The fields must survive normalisation unchanged, or the date did not
+ * exist: February 30, 12:00:60, and 02:30 on the morning summer time
+ * starts are all refused this way, as GNU refuses them. */
+static bool same_fields(const lp_tm_t *a, const lp_tm_t *b)
+{
+    return a->year == b->year && a->mon == b->mon && a->day == b->day &&
+           a->hour == b->hour && a->min == b->min && a->sec == b->sec;
+}
+
+static void norm_ns(s64 *sec, long *ns)
+{
+    while (*ns < 0) { *ns += 1000000000L; (*sec)--; }
+    while (*ns >= 1000000000L) { *ns -= 1000000000L; (*sec)++; }
+}
+
+/* Read the TZ="..." prefix GNU accepts; returns the rest of the string,
+ * or NULL when the quoting is broken. */
+static const char *tz_prefix(const char *s, char *zone, size_t cap)
+{
+    zone[0] = '\0';
+    while (is_space(*s)) s++;
+    if (strncmp(s, "TZ=\"", 4) != 0) return s;
+    s += 4;
+    size_t k = 0;
+    for (; *s && *s != '"'; s++) {
+        if (*s == '\\') {
+            s++;
+            if (*s != '\\' && *s != '"') return NULL;
+        }
+        if (k < cap - 1) zone[k++] = *s;
+    }
+    if (*s != '"') return NULL;
+    zone[k] = '\0';
+    return s + 1;
+}
+
+/* The local zone's two abbreviations: the one in force now, and the
+ * first one within the next nine months that has the other summer flag. */
+static void local_names(pc_t *pc, s64 now)
+{
+    lp_tm_t tm;
+    lp_localtime(now, &tm);
+    pc->nlz = 0;
+    strlcpy(pc->lz_name[0], tm.zone, sizeof pc->lz_name[0]);
+    pc->lz_isdst[0] = tm.isdst;
+    pc->nlz = 1;
+    for (int q = 1; q <= 3; q++) {
+        lp_tm_t p;
+        lp_localtime(now + (s64)q * 90 * 86400, &p);
+        if (p.isdst != tm.isdst && strcmp(p.zone, tm.zone) != 0) {
+            strlcpy(pc->lz_name[1], p.zone, sizeof pc->lz_name[1]);
+            pc->lz_isdst[1] = p.isdst;
+            pc->nlz = 2;
+            break;
         }
     }
-
-    return false;
+    for (int i = 0; i < pc->nlz; i++)
+        for (char *c = pc->lz_name[i]; *c; c++)
+            if (*c >= 'a' && *c <= 'z') *c = (char)(*c - 32);
 }
+
+static bool parse_body(const char *s, s64 now, long now_ns, s64 *out, long *out_ns)
+{
+    static pc_t pc;
+    memset(&pc, 0, sizeof pc);
+    local_names(&pc, now);
+
+    while (is_space(*s)) s++;
+    if (*s == '@') {
+        if (!lex(&pc, s + 1)) return false;
+        tok_t *t = &pc.t[0];
+        if (pc.n != 2 || pc.t[1].type != T_END) return false;
+        if (t->type == T_UNUM || t->type == T_SNUM) { *out = t->val; *out_ns = 0; return true; }
+        if (t->type == T_UDEC || t->type == T_SDEC) { *out = t->val; *out_ns = t->ns; return true; }
+        return false;
+    }
+    if (!lex(&pc, s)) return false;
+
+    lp_tm_t now_tm;
+    lp_localtime(now, &now_tm);
+    pc.year = now_tm.year; pc.month = now_tm.mon; pc.day = now_tm.day;
+    pc.hour = now_tm.hour; pc.min = now_tm.min; pc.sec = now_tm.sec;
+    pc.ns = now_ns;
+
+    pc.i = 0;
+    while (cur(&pc)->type != T_END)
+        if (!p_item(&pc)) return false;
+
+    if (pc.times > 1 || pc.dates > 1 || pc.days > 1 || pc.dsts > 1 ||
+        pc.local_zones + pc.zones > 1)
+        return false;
+
+    lp_tm_t tm;
+    memset(&tm, 0, sizeof tm);
+    s64 year = pc.year;
+    if (pc.year_digits == 2) year += year < 69 ? 2000 : 1900;
+    if (year < -100000000 || year > 100000000 || pc.month < -1000 || pc.month > 1000 ||
+        pc.day < -100000 || pc.day > 100000)
+        return false;
+    tm.year = (int)year; tm.mon = (int)pc.month; tm.day = (int)pc.day;
+
+    long ns;
+    if (pc.times || (pc.rels && !pc.dates && !pc.days)) {
+        int h = to_hour(pc.hour, pc.merid);
+        if (h < 0 || pc.min < 0 || pc.min > 59 || pc.sec < 0 || pc.sec > 60) return false;
+        tm.hour = h; tm.min = (int)pc.min; tm.sec = (int)pc.sec;
+        ns = pc.ns;
+    } else {
+        tm.hour = tm.min = tm.sec = 0;
+        ns = 0;
+    }
+    tm.isdst = (pc.dates || pc.days || pc.times) ? -1 : now_tm.isdst;
+    if (pc.local_zones && pc.local_isdst >= 0) tm.isdst = pc.local_isdst;
+    lp_tm_t tm0 = tm;
+    s64 start;
+
+    if (pc.zones) {
+        /* A zone was named: the fields are that zone's wall clock, so the
+         * arithmetic is done there and the offset taken off at the end.
+         * This is what gnulib's mktime-then-correct amounts to, without
+         * refusing a time that happens not to exist in the local zone. */
+        lp_tm_t chk;
+        s64 w = lp_timegm(&tm);
+        lp_gmtime(w, &chk);
+        if (!same_fields(&tm0, &chk)) return false;
+        if (pc.days && !pc.dates) {
+            int wd = chk.wday;
+            w += 86400 * (s64)((pc.day_number - wd + 7) % 7 +
+                 7 * (pc.day_ordinal - (0 < pc.day_ordinal && wd != pc.day_number)));
+        }
+        if (pc.rel.year || pc.rel.month || pc.rel.day) {
+            lp_gmtime(w, &chk);
+            chk.year += (int)pc.rel.year; chk.mon += (int)pc.rel.month;
+            chk.day += (int)pc.rel.day;
+            chk.hour = tm0.hour; chk.min = tm0.min; chk.sec = tm0.sec;
+            w = lp_timegm(&chk);
+        }
+        start = w - pc.time_zone * 60;
+    } else {
+        start = lp_mktime(&tm);
+        if (!same_fields(&tm0, &tm)) return false;
+        if (pc.days && !pc.dates) {
+            tm.day += (pc.day_number - tm.wday + 7) % 7 +
+                      7 * (pc.day_ordinal - (0 < pc.day_ordinal && tm.wday != pc.day_number));
+            tm.isdst = -1;
+            start = lp_mktime(&tm);
+        }
+        if (pc.rel.year || pc.rel.month || pc.rel.day) {
+            tm.year += (int)pc.rel.year; tm.mon += (int)pc.rel.month;
+            tm.day += (int)pc.rel.day;
+            tm.hour = tm0.hour; tm.min = tm0.min; tm.sec = tm0.sec;
+            tm.isdst = tm0.isdst;
+            start = lp_mktime(&tm);
+        }
+    }
+    start += pc.rel.hour * 3600 + pc.rel.min * 60 + pc.rel.sec;
+    ns += (long)pc.rel.ns;
+    norm_ns(&start, &ns);
+    *out = start;
+    *out_ns = ns;
+    return true;
+}
+
+/* The whole of -d: an optional TZ="..." that the rest is read in, then
+ * the body. The zone is put back afterwards, because the result is
+ * printed in the zone the command was run in, as GNU does. */
+static bool parse_date(const char *s, s64 now, long now_ns, s64 *out, long *out_ns)
+{
+    char zone[128];
+    const char *rest = tz_prefix(s, zone, sizeof zone);
+    if (!rest) return false;
+    if (!zone[0]) return parse_body(rest, now, now_ns, out, out_ns);
+
+    const char *old = getenv("TZ");
+    char saved[256];
+    bool had = old != NULL;
+    if (had) strlcpy(saved, old, sizeof saved);
+    setenv("TZ", zone, 1);
+    bool ok = parse_body(rest, now, now_ns, out, out_ns);
+    if (had) setenv("TZ", saved, 1);
+    else unsetenv("TZ");
+    return ok;
+}
+
+/* ══ Output ══════════════════════════════════════════════════════════ */
+
+static lp_lang_t lang;
+
+static bool show(const char *fmt, s64 t, long ns)
+{
+    lp_tm_t tm;
+    lp_localtime(t, &tm);
+    char small[512];
+    size_t need = lp_strftime_lang(small, sizeof small, fmt, &tm, ns, lang);
+    if (need < sizeof small) {
+        small[need] = '\n';
+        lp_write(STDOUT_FILENO, small, need + 1);
+        return true;
+    }
+    char *big = malloc(need + 2);
+    if (!big) { dprintf(STDERR_FILENO, "%s: memory exhausted\n", prog); return false; }
+    lp_strftime_lang(big, need + 1, fmt, &tm, ns, lang);
+    big[need] = '\n';
+    lp_write(STDOUT_FILENO, big, need + 1);
+    free(big);
+    return true;
+}
+
+static const char *default_format(void)
+{
+    /* glibc's ko_KR date_fmt, which is what Ubuntu prints in Korean. */
+    return lang == LP_LANG_KO ? "%Y. %m. %d. (%a) %H:%M:%S %Z"
+                              : "%a %b %e %H:%M:%S %Z %Y";
+}
+
+/* ══ Setting the clock ═══════════════════════════════════════════════ */
+
+/* Remember the time so the next boot can pick up where this one left
+ * off: the hardware clock when there is one, and /data/.clock, which
+ * ntp -r reads on a board without one. */
+static void save_clock(s64 t)
+{
+    bool rtc = lp_rtc_write(t);
+    char buf[32];
+    int  len = snprintf(buf, sizeof(buf), "%lld\n", (long long)t);
+    char path[256];
+    lp_setting_path(CLOCK_NAME, path, sizeof path);
+    if (!lp_write_file_atomic(path, buf, (size_t)len) && !rtc)
+        dprintf(STDERR_FILENO, "%s: no hardware clock and nothing writable that"
+                " survives a reboot - this time will be gone at the next boot\n", prog);
+}
+
+/* POSIX's operand: MMDDhhmm[[CC]YY][.ss], in local time. */
+static bool parse_posix_set(const char *s, s64 now, s64 *out)
+{
+    char d[16];
+    size_t k = 0;
+    const char *dot = strchr(s, '.');
+    for (const char *p = s; *p && p != dot; p++) {
+        if (!is_digit(*p) || k >= sizeof d - 1) return false;
+        d[k++] = *p;
+    }
+    d[k] = '\0';
+    if (k != 8 && k != 10 && k != 12) return false;
+    int sec = 0;
+    if (dot) {
+        if (!is_digit(dot[1]) || !is_digit(dot[2]) || dot[3]) return false;
+        sec = (dot[1] - '0') * 10 + (dot[2] - '0');
+    }
+#define TWO(i) ((d[i] - '0') * 10 + (d[i + 1] - '0'))
+    lp_tm_t tm, now_tm;
+    lp_localtime(now, &now_tm);
+    memset(&tm, 0, sizeof tm);
+    tm.mon = TWO(0); tm.day = TWO(2); tm.hour = TWO(4); tm.min = TWO(6);
+    tm.sec = sec;
+    if (k == 8) tm.year = now_tm.year;
+    else if (k == 10) { int y = TWO(8); tm.year = y + (y < 69 ? 2000 : 1900); }
+    else tm.year = TWO(8) * 100 + TWO(10);
+#undef TWO
+    tm.isdst = -1;
+    lp_tm_t tm0 = tm;
+    *out = lp_mktime(&tm);
+    return same_fields(&tm0, &tm);
+}
+
+static int set_clock(s64 t, long ns, const char *fmt)
+{
+    int rc = 0;
+    if (lp_settime(t) < 0) {
+        dprintf(STDERR_FILENO, "%s: cannot set date: Operation not permitted\n", prog);
+        rc = 1;
+    } else {
+        save_clock(t);
+    }
+    /* GNU prints the time even when setting it failed. */
+    show(fmt, t, ns);
+    return rc;
+}
+
+/* ══ -z: the zone, handed to timedatectl ═════════════════════════════ */
+
+static int do_zone(int argc, char **argv, int at)
+{
+    if (at >= argc) {
+        s64 now = lp_time();
+        lp_tm_t tm;
+        lp_localtime(now, &tm);
+        char off[16];
+        lp_strftime(off, sizeof off, "%:z", &tm);
+        const char *name = lp_tz_name();
+        printf("%s (%s, %s)\n", name[0] ? name : tm.zone, tm.zone, off);
+        printf("run 'timedatectl list-timezones' to see the choices,\n"
+               "'timedatectl set-timezone Area/City' to change it\n");
+        return 0;
+    }
+    char *args[4] = { (char *)"timedatectl", NULL, NULL, NULL };
+    if (strcmp(argv[at], "list") == 0) args[1] = (char *)"list-timezones";
+    else { args[1] = (char *)"set-timezone"; args[2] = argv[at]; }
+    lp_execve("/bin/timedatectl", args, environ);
+    dprintf(STDERR_FILENO, "%s: cannot run timedatectl\n", prog);
+    return 1;
+}
+
+/* ══ main ════════════════════════════════════════════════════════════ */
 
 static void usage(void)
 {
     printf("Usage: date [OPTION]... [+FORMAT]\n"
-           "Display the current time in the given FORMAT, or set the system date.\n\n"
+           "  or:  date [-u|--utc|--universal] [MMDDhhmm[[CC]YY][.ss]]\n"
+           "Display date and time in the given FORMAT.\n"
+           "With -s, or with [MMDDhhmm[[CC]YY][.ss]], set the date and time.\n\n"
            "  -d, --date=STRING          display time described by STRING, not 'now'\n"
-           "  -I[FMT], --iso-8601[=FMT]  ISO 8601 format; FMT is 'hours', 'minutes',\n"
-           "                               'date' (the default), 'seconds' or 'ns'\n"
-           "  -R, --rfc-email            output in RFC 5322 format\n"
-           "      --rfc-3339=FMT         RFC 3339 format; FMT is 'date', 'seconds' or 'ns'\n"
+           "      --debug                annotate the parsed date to stderr\n"
+           "  -f, --file=DATEFILE        like --date; once for each line of DATEFILE\n"
+           "  -I[FMT], --iso-8601[=FMT]  output date/time in ISO 8601 format.\n"
+           "                               FMT='date' for date only (the default),\n"
+           "                               'hours', 'minutes', 'seconds', or 'ns'\n"
+           "  -R, --rfc-email            output date and time in RFC 5322 format.\n"
+           "                               Example: Mon, 14 Aug 2006 02:34:56 -0600\n"
+           "      --rfc-3339=FMT         output date/time in RFC 3339 format.\n"
+           "                               FMT='date', 'seconds', or 'ns'\n"
            "  -r, --reference=FILE       display the last modification time of FILE\n"
-           "  -s, --set=STRING           set the time described by STRING\n"
-           "  -u, --utc, --universal     work in UTC rather than the configured zone\n"
-           "      --help     display this help and exit\n\n"
-           "FORMAT is a string beginning with +. Interpreted sequences are:\n\n"
-           "  %%%%   a literal %%\n"
-           "  %%a   abbreviated weekday name (e.g., Sun)\n"
-           "  %%A   full weekday name (e.g., Sunday)\n"
-           "  %%b   abbreviated month name (e.g., Jan)      %%h  same as %%b\n"
-           "  %%B   full month name (e.g., January)\n"
-           "  %%c   date and time (e.g., Thu Mar  3 23:05:25 2005)\n"
-           "  %%C   century; like %%Y, without the last two digits (e.g., 20)\n"
-           "  %%d   day of month (01..31)                   %%e  day of month, space padded\n"
-           "  %%D   date; same as %%m/%%d/%%y                   %%F  full date; %%Y-%%m-%%d\n"
-           "  %%g   last two digits of the ISO week year    %%G  the ISO week year\n"
-           "  %%H   hour (00..23)                           %%I  hour (01..12)\n"
-           "  %%j   day of year (001..366)\n"
-           "  %%k   hour, space padded ( 0..23)             %%l  hour, space padded ( 1..12)\n"
-           "  %%m   month (01..12)                          %%M  minute (00..59)\n"
-           "  %%n   a newline                               %%t  a tab\n"
-           "  %%N   nanoseconds - always 000000000 here; this clock has no sub-second part\n"
-           "  %%p   AM or PM                                %%P  am or pm\n"
-           "  %%q   quarter of year (1..4)                  %%r  12-hour clock time\n"
-           "  %%R   hour and minute; same as %%H:%%M           %%T  time; same as %%H:%%M:%%S\n"
-           "  %%s   seconds since 1970-01-01 00:00 UTC      %%S  second (00..60)\n"
-           "  %%u   day of week (1..7); 1 is Monday         %%w  day of week (0..6); 0 is Sunday\n"
-           "  %%U   week of year, Sunday first (00..53)     %%W  week of year, Monday first\n"
-           "  %%V   ISO week number (01..53)\n"
-           "  %%x   date representation (e.g., 12/31/99)    %%X  time representation\n"
-           "  %%y   last two digits of year (00..99)        %%Y  year\n"
-           "  %%z   +hhmm numeric time zone                 %%:z +hh:mm numeric time zone\n"
-           "  %%Z   time zone abbreviation (e.g., KST)\n\n"
-           "By default numeric fields are padded with zeroes. These flags may follow '%%':\n"
-           "  -  do not pad the field    _  pad with spaces    0  pad with zeros\n"
-           "  ^  use upper case if possible\n\n"
-           "-d understands: @SECONDS, 'now', 'today', 'tomorrow', 'yesterday',\n"
-           "an absolute \"2026-09-01 12:34:56\", and \"N units\" or \"N units ago\" where\n"
-           "the unit is second, minute, hour, day, week, month or year. It is not\n"
-           "GNU's whole date language - anything else is refused rather than guessed at.\n\n"
-           "Two options here are not GNU's, because this machine carries no tzdata:\n"
+           "  -s, --set=STRING           set time described by STRING\n"
+           "  -u, --utc, --universal     print or set Coordinated Universal Time (UTC)\n"
+           "      --help        display this help and exit\n"
+           "      --version     output version information and exit\n\n"
+           "FORMAT controls the output, as in GNU date: %%a %%A %%b %%B %%c %%C %%d %%D\n"
+           "%%e %%F %%g %%G %%h %%H %%I %%j %%k %%l %%m %%M %%n %%N %%p %%P %%q %%r %%R %%s %%S\n"
+           "%%t %%T %%u %%U %%V %%w %%W %%x %%X %%y %%Y %%z %%:z %%::z %%:::z %%Z, with the\n"
+           "flags - _ 0 ^ # + and a field width (%%-d, %%_H, %%^a, %%3N).\n\n"
+           "STRING is GNU's date language: 'now', 'yesterday', 'next monday',\n"
+           "'2 hours ago', 'last friday 5pm', '2026-09-26 12:00 UTC+9', '@1790000000',\n"
+           "'22-Nov-2025', 'TZ=\"Asia/Seoul\" 2026-09-26 09:00'.\n\n"
+           "Two options here are this system's own:\n"
            "  -e             the time as plain unix seconds\n"
-           "  -z [ZONE]      show, list or set the time zone\n"
-           "                   date -z list, date -z Asia/Seoul, date -z +9\n"
-           "The zone is saved and survives a reboot. Daylight saving is computed from\n"
-           "the rule rather than looked up, so the clock shifts by itself.\n\n"
-           "To set the clock from the network: ntp\n"
-           "To keep it across a power cut on a machine that has a battery: hwclock -w\n");
-}
-
-/* -z, kept from before: this system has no tzdata and no /etc/localtime,
- * so there has to be some way to say where the machine is. */
-static int do_zone(int argc, char **argv, int at)
-{
-    if (at >= argc) {
-        char off[16];
-        offset_text(tz_minutes, off, sizeof(off));
-        printf("%s (%s)\n", tz_label, off);
-        printf("run 'date -z list' to see the choices\n");
-        return 0;
-    }
-    if (strcmp(argv[at], "list") == 0) { list_zones(); return 0; }
-
-    const zone_t *z = find_zone(argv[at]);
-    int   minutes;
-    char  label[32];
-
-    if (z) {
-        minutes = z->minutes;
-        strlcpy(label, z->abbr, sizeof(label));
-    } else if (parse_offset(argv[at], &minutes)) {
-        offset_text(minutes, label, sizeof(label));
-    } else {
-        dprintf(STDERR_FILENO,
-                "date: unknown time zone: %s\n"
-                "      try 'date -z list', or an offset like +9\n", argv[at]);
-        return 2;
-    }
-
-    const char *rulename = "-";
-    if (z) {
-        switch (z->rule) {
-        case LP_DST_EU: rulename = "EU"; break;
-        case LP_DST_US: rulename = "US"; break;
-        case LP_DST_AU: rulename = "AU"; break;
-        case LP_DST_NZ: rulename = "NZ"; break;
-        default:        rulename = "-";  break;
-        }
-    }
-    if (!save_zone(minutes, label, rulename, z ? z->summer : label))
-        return 1;
-
-    /* Re-read through the libc so what is printed next is what every
-     * other program will now see, rather than what this one just
-     * decided. If those two ever differ it is this line that finds out,
-     * and finding out immediately is the point. */
-    lp_tz_forget();
-    s64 now = lp_time();
-    tz_minutes = lp_tz_offset(now);
-    strlcpy(tz_label, lp_tz_label(now), sizeof(tz_label));
-
-    if (z && z->rule != LP_DST_NONE)
-        printf("%s follows daylight saving; the clock shifts by itself.\n", z->name);
-
-    print_time(now, tz_minutes, tz_label);
-    return 0;
+           "  -z [ZONE|list] show the zone, list them, or set one (timedatectl)\n");
 }
 
 int main(int argc, char **argv)
 {
     static const lp_lopt_t lo[] = {
-        { "date", 1, 'd' }, { "iso-8601", 2, 'I' }, { "rfc-email", 0, 'R' },
+        { "date", 1, 'd' }, { "file", 1, 'f' }, { "iso-8601", 2, 'I' },
+        { "rfc-email", 0, 'R' }, { "rfc-2822", 0, 'R' }, { "rfc-822", 0, 'R' },
         { "rfc-3339", 1, '3' }, { "reference", 1, 'r' }, { "set", 1, 's' },
-        { "utc", 0, 'u' }, { "universal", 0, 'u' }, { "debug", 0, 'D' },
-        { "help", 0, 'H' }, { 0, 0, 0 }
+        { "utc", 0, 'u' }, { "universal", 0, 'u' }, { "uct", 0, 'u' },
+        { "debug", 0, 'D' }, { "help", 0, 'H' }, { "version", 0, 'V' },
+        { 0, 0, 0 }
     };
-    load_zone();
+    lang = lp_time_lang();
 
-    const char *when = NULL, *setstr = NULL, *reffile = NULL;
+    const char *when = NULL, *setstr = NULL, *reffile = NULL, *datefile = NULL;
     const char *iso = NULL, *rfc3339 = NULL;
-    bool utc = false, rfc_email = false, zone_cmd = false;
-    int  zone_at = 0, real_argc = argc;
+    bool rfc_email = false;
+    int nopt = 0;              /* -I, -R and --rfc-3339, each time given */
+    int real_argc = argc;
 
-    /* -z takes an optional value that may be a whole zone name, and it
-     * is ours rather than GNU's, so it is picked off before getopt sees
-     * it. Everything after -z belongs to it. */
+    /* -z is ours and takes the rest of the line, so it is taken off
+     * before the GNU options are parsed. */
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-z") == 0) {
-            zone_cmd = true;
-            zone_at = i + 1;
-            argc = i;                  /* hide the rest from getopt */
-            break;
-        }
+        if (strcmp(argv[i], "--") == 0) break;
+        if (strcmp(argv[i], "-z") == 0) return do_zone(real_argc, argv, i + 1);
     }
 
     lp_getopt_t g;
-    lp_getopt_init(&g, argc, argv, "d:I::Rr:s:ue", lo);
+    lp_getopt_init(&g, argc, argv, "d:f:I::Rr:s:ue", lo);
     for (int c; (c = lp_getopt(&g)) != -1; ) {
         switch (c) {
         case 'd': when = g.arg; break;
-        case 'I': iso = g.arg ? g.arg : "date"; break;
-        case '3': rfc3339 = g.arg; break;
-        case 'R': rfc_email = true; break;
+        case 'f': datefile = g.arg; break;
+        case 'I': iso = g.arg ? g.arg : "date"; nopt++; break;
+        case '3': rfc3339 = g.arg; nopt++; break;
+        case 'R': rfc_email = true; nopt++; break;
         case 'r': reffile = g.arg; break;
         case 's': setstr = g.arg; break;
-        case 'u': utc = true; break;
+        case 'u': setenv("TZ", "UTC0", 1); break;
         case 'D': break;
-        case 'e': {                    /* ours: plain unix seconds */
-            printf("%lld\n", (long long)lp_time());
-            return 0;
-        }
+        case 'e': printf("%lld\n", (long long)lp_time()); return 0;
         case 'H': usage(); return 0;
-        default: lp_getopt_err("date", &g); return 1;
+        case 'V': printf("date (LP) 2.0\n"); return 0;
+        default: lp_getopt_err(prog, &g); return 1;
         }
     }
 
-    if (zone_cmd)
-        return do_zone(real_argc, argv, zone_at);
+    if ((when != NULL) + (datefile != NULL) + (reffile != NULL) > 1) {
+        dprintf(STDERR_FILENO, "%s: the options to specify dates for printing are"
+                " mutually exclusive\nTry 'date --help' for more information.\n", prog);
+        return 1;
+    }
+    if (setstr && (when || datefile || reffile)) {
+        dprintf(STDERR_FILENO, "%s: the options to print and set the time may not be"
+                " used together\nTry 'date --help' for more information.\n", prog);
+        return 1;
+    }
 
-    /* The offset of the moment being printed, not of this one. A date in
-     * March formatted with September's offset is an hour wrong, and that
-     * is exactly the case somebody reaches for `date -d` to check. */
-    int off = utc ? 0 : tz_minutes;
-    const char *label = utc ? "UTC" : tz_label;
+    /* The format: from an operand, or from the option that implies one. */
+    const char *fmt = NULL, *posix_set = NULL;
+    int nfmt = 0;
+    if (rfc_email) { fmt = "%a, %d %b %Y %H:%M:%S %z"; nfmt++; }
+    if (rfc3339) {
+        size_t l = strlen(rfc3339);
+        if (l && strncmp("date", rfc3339, l) == 0)         fmt = "%Y-%m-%d";
+        else if (l && strncmp("seconds", rfc3339, l) == 0) fmt = "%Y-%m-%d %H:%M:%S%:z";
+        else if (l && strncmp("ns", rfc3339, l) == 0)      fmt = "%Y-%m-%d %H:%M:%S.%N%:z";
+        else {
+            dprintf(STDERR_FILENO, "%s: invalid argument '%s' for '--rfc-3339'\n"
+                    "Valid arguments are:\n  - 'date'\n  - 'seconds'\n  - 'ns'\n"
+                    "Try 'date --help' for more information.\n", prog, rfc3339);
+            return 1;
+        }
+        nfmt++;
+    }
+    if (iso) {
+        static const struct { const char *name, *fmt; } ISO[] = {
+            { "date", "%Y-%m-%d" }, { "hours", "%Y-%m-%dT%H%:z" },
+            { "minutes", "%Y-%m-%dT%H:%M%:z" }, { "seconds", "%Y-%m-%dT%H:%M:%S%:z" },
+            { "ns", "%Y-%m-%dT%H:%M:%S,%N%:z" }, { NULL, NULL }
+        };
+        size_t l = strlen(iso);
+        const char *f = NULL;
+        for (int i = 0; ISO[i].name; i++)
+            if (l && strncmp(ISO[i].name, iso, l) == 0) { f = ISO[i].fmt; break; }
+        if (!f) {
+            dprintf(STDERR_FILENO, "%s: invalid argument '%s' for '--iso-8601'\n"
+                    "Valid arguments are:\n  - 'hours'\n  - 'minutes'\n  - 'date'\n"
+                    "  - 'seconds'\n  - 'ns'\nTry 'date --help' for more information.\n",
+                    prog, iso);
+            return 1;
+        }
+        fmt = f;
+        nfmt++;
+    }
+    if (nfmt > 1 || nopt > 1) {
+        dprintf(STDERR_FILENO, "%s: multiple output formats specified\n", prog);
+        return 1;
+    }
+    /* coreutils' order, so the complaint is the same one: a second
+     * operand is always "extra", then a format that clashes with -I, -R
+     * or --rfc-3339, then a set-operand after an option that already
+     * named a date. */
+    if (g.ind < argc) {
+        if (g.ind + 1 < argc) {
+            dprintf(STDERR_FILENO, "%s: extra operand '%s'\n"
+                    "Try 'date --help' for more information.\n", prog, argv[g.ind + 1]);
+            return 1;
+        }
+        if (argv[g.ind][0] == '+') {
+            if (fmt) {
+                dprintf(STDERR_FILENO, "%s: multiple output formats specified\n", prog);
+                return 1;
+            }
+            fmt = argv[g.ind] + 1;
+        } else if (setstr || when || datefile || reffile) {
+            dprintf(STDERR_FILENO, "%s: the argument '%s' lacks a leading '+';\n"
+                    "when using an option to specify date(s), any non-option\n"
+                    "argument must be a format string beginning with '+'\n"
+                    "Try 'date --help' for more information.\n", prog, argv[g.ind]);
+            return 1;
+        } else {
+            posix_set = argv[g.ind];
+        }
+    }
+    if (!fmt) fmt = default_format();
 
-    if (setstr) {
+    long now_ns;
+    s64 now = lp_time_ns(&now_ns);
+
+    if (posix_set) {
         s64 t;
-        if (!parse_when(setstr, lp_time(), off, &t)) {
-            dprintf(STDERR_FILENO, "date: invalid date '%s'\n", setstr);
+        if (!parse_posix_set(posix_set, now, &t)) {
+            dprintf(STDERR_FILENO, "%s: invalid date '%s'\n", prog, posix_set);
             return 1;
         }
-        if (lp_settime(t) < 0) {
-            dprintf(STDERR_FILENO,
-                    "date: cannot set date: Operation not permitted\n");
+        return set_clock(t, 0, fmt);
+    }
+    if (setstr) {
+        s64 t; long ns;
+        if (!parse_date(setstr, now, now_ns, &t, &ns)) {
+            dprintf(STDERR_FILENO, "%s: invalid date '%s'\n", prog, setstr);
             return 1;
         }
-        save_clock(t);
-        print_time(t, off, label);
-        return 0;
+        return set_clock(t, ns, fmt);
     }
 
-    s64 t = lp_time();
+    if (datefile) {
+        long fd = strcmp(datefile, "-") == 0 ? STDIN_FILENO : lp_open(datefile, O_RDONLY, 0);
+        if (fd < 0) {
+            lp_diag(prog, NULL, NULL, "cannot open", datefile, (int)fd);
+            return 1;
+        }
+        int rc = 0;
+        char line[1024];
+        while (readline((int)fd, line, sizeof line) >= 0) {
+            s64 t; long ns;
+            if (!parse_date(line, now, now_ns, &t, &ns)) {
+                dprintf(STDERR_FILENO, "%s: invalid date '%s'\n", prog, line);
+                rc = 1;
+                continue;
+            }
+            show(fmt, t, ns);
+        }
+        if (fd != STDIN_FILENO) lp_close((int)fd);
+        return rc;
+    }
+
+    s64 t = now;
+    long ns = now_ns;
     if (reffile) {
         lp_stat_t st;
-        if (lp_stat(reffile, &st, true) < 0) {
-            lp_diag("date", NULL, NULL, "cannot stat", reffile, 2);
+        long r = lp_stat(reffile, &st, true);
+        if (r < 0) {
+            lp_diag(prog, NULL, NULL, "cannot stat", reffile, (int)r);
             return 1;
         }
         t = st.mtime;
+        ns = st.mtime_ns;
     }
-    if (when && !parse_when(when, t, off, &t)) {
-        dprintf(STDERR_FILENO, "date: invalid date '%s'\n", when);
+    if (when && !parse_date(when, t, ns, &t, &ns)) {
+        dprintf(STDERR_FILENO, "%s: invalid date '%s'\n", prog, when);
         return 1;
     }
-
-    if (!utc) {
-        off   = lp_tz_offset(t);
-        label = lp_tz_label(t);
-    }
-
-    /* The operand, if there is one, is the format. */
-    const char *fmt = NULL;
-    for (int i = g.ind; i < argc; i++) {
-        if (argv[i][0] == '+') { fmt = argv[i] + 1; continue; }
-        dprintf(STDERR_FILENO, "date: invalid date '%s'\n", argv[i]);
-        return 1;
-    }
-
-    char buf[4096];
-    if (fmt) {
-        fmt_time(buf, sizeof buf, fmt, t, off, label);
-        printf("%s\n", buf);
-        return 0;
-    }
-    if (rfc_email) {
-        fmt_time(buf, sizeof buf, "%a, %d %b %Y %H:%M:%S %z", t, off, label);
-        printf("%s\n", buf);
-        return 0;
-    }
-    if (rfc3339) {
-        const char *f = strcmp(rfc3339, "date") == 0 ? "%Y-%m-%d"
-                      : strcmp(rfc3339, "seconds") == 0 ? "%Y-%m-%d %H:%M:%S%:z"
-                      : strcmp(rfc3339, "ns") == 0 ? "%Y-%m-%d %H:%M:%S.%N%:z"
-                      : NULL;
-        if (!f) {
-            dprintf(STDERR_FILENO,
-                    "date: invalid argument '%s' for '--rfc-3339'\n", rfc3339);
-            return 1;
-        }
-        fmt_time(buf, sizeof buf, f, t, off, label);
-        printf("%s\n", buf);
-        return 0;
-    }
-    if (iso) {
-        /* -Is and -Ised both mean seconds: GNU takes any unambiguous
-         * prefix, and -Is is the form people actually type. */
-        static const struct { const char *name, *fmt; } ISO[] = {
-            { "hours",   "%Y-%m-%dT%H%:z" },
-            { "minutes", "%Y-%m-%dT%H:%M%:z" },
-            { "date",    "%Y-%m-%d" },
-            { "seconds", "%Y-%m-%dT%H:%M:%S%:z" },
-            { "ns",      "%Y-%m-%dT%H:%M:%S,%N%:z" },
-            { NULL, NULL }
-        };
-        const char *f = NULL;
-        size_t ilen = strlen(iso);
-        for (int i = 0; ISO[i].name; i++)
-            if (ilen && strncmp(ISO[i].name, iso, ilen) == 0) { f = ISO[i].fmt; break; }
-        if (!f) {
-            dprintf(STDERR_FILENO,
-                    "date: invalid argument '%s' for '--iso-8601'\n"
-                    "Valid arguments are:\n"
-                    "  - 'hours'\n  - 'minutes'\n  - 'date'\n"
-                    "  - 'seconds'\n  - 'ns'\n"
-                    "Try 'date --help' for more information.\n", iso);
-            return 1;
-        }
-        fmt_time(buf, sizeof buf, f, t, off, label);
-        printf("%s\n", buf);
-        return 0;
-    }
-
-    print_time(t, off, label);
-    if (!when && !reffile) warn_if_unset();
+    if (!show(fmt, t, ns)) return 1;
     return 0;
 }
