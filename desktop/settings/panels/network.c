@@ -26,6 +26,15 @@
  * closed at once and left the failure to a banner would make somebody who
  * mistyped the password open the network and type it all again; left
  * open, the on-screen keyboard is still up and the field is still there.
+ *
+ * ── The list changes under the finger, gently ──
+ *
+ * A rescan does not clear the list and draw it again: that makes every row
+ * blink and moves the one somebody was about to tap. Rows are matched by
+ * network name - one that is still there is updated in place, one that has
+ * gone closes (154ms), a new one opens (220ms) at its place in the order
+ * (ui.c, row_add_animated). The order is kept by the list's sort function,
+ * so a network whose signal changed moves without being rebuilt.
  */
 #include "core.h"
 
@@ -254,12 +263,6 @@ static void on_status(int st, const char *out, const char *err, gpointer p)
     fill_details(n);
 }
 
-static void refresh_status(net_t *n)
-{
-    static const char *const v[] = { "lp-net", "status", "--json", NULL };
-    lp_run_async(v, NULL, n->page, on_status, n);
-}
-
 static void finish_connect(net_t *n, gboolean ok, const char *why)
 {
     if (n->poll) { g_source_remove(n->poll); n->poll = 0; }
@@ -472,107 +475,214 @@ static int rank(const jnode_t *n)
            (json_bool(n, "saved", FALSE) ? 1000 : 0) + (int)json_num(n, "quality", 0);
 }
 
-static gint by_rank(gconstpointer a, gconstpointer b)
+/* Status rows ("Looking for networks…") above everything, networks by
+ * rank, "Other network…" last. */
+static int row_rank(GtkListBoxRow *r)
 {
-    return rank(*(const jnode_t *const *)b) - rank(*(const jnode_t *const *)a);
+    return GPOINTER_TO_INT(g_object_get_data(G_OBJECT(r), "lp-rank"));
+}
+
+static int sort_rows(GtkListBoxRow *a, GtkListBoxRow *b, gpointer d)
+{
+    (void)d;
+    int ra = row_rank(a), rb = row_rank(b);
+    if (ra != rb) return rb - ra;
+    const char *ta = g_object_get_data(G_OBJECT(a), "lp-title");
+    const char *tb = g_object_get_data(G_OBJECT(b), "lp-title");
+    return g_strcmp0(ta, tb);
+}
+
+#define RANK_STATUS 100000
+#define RANK_OTHER  (-100000)
+
+/* The one status row, replaced (both animated) when the text changes. */
+static void set_status_row(net_t *n, const char *title, const char *detail, gboolean spin)
+{
+    GtkWidget *old = g_object_get_data(G_OBJECT(n->list), "lp-status-row");
+    if (old && title) {
+        const char *t = g_object_get_data(G_OBJECT(old), "lp-title");
+        if (!g_strcmp0(t, title)) {
+            row_set_detail(old, detail);
+            return;
+        }
+    }
+    if (old) {
+        g_object_set_data(G_OBJECT(n->list), "lp-status-row", NULL);
+        row_remove_animated(old);
+    }
+    if (!title) return;
+    GtkWidget *row = row_shell(title, detail);
+    if (spin) {
+        GtkWidget *sp = gtk_spinner_new();
+        gtk_spinner_start(GTK_SPINNER(sp));
+        gtk_box_prepend(GTK_BOX(row_box(row)), sp);
+    }
+    g_object_set_data(G_OBJECT(row), "lp-rank", GINT_TO_POINTER(RANK_STATUS));
+    g_object_set_data(G_OBJECT(n->list), "lp-status-row", row);
+    row_add_animated(n->list, row);
+}
+
+static void ensure_other_row(net_t *n)
+{
+    if (g_object_get_data(G_OBJECT(n->list), "lp-other-row"))
+        return;
+    GtkWidget *row = row_chevron(NULL, T("Other network…", "다른 네트워크…"),
+                                 T("A network that hides its name", "이름을 숨긴 네트워크"), NULL,
+                                 G_CALLBACK(on_hidden), NULL);
+    g_object_set_data(G_OBJECT(row), "lp-rank", GINT_TO_POINTER(RANK_OTHER));
+    g_object_set_data(G_OBJECT(n->list), "lp-other-row", row);
+    row_add(n->list, row);
+}
+
+/* Everything on a network's row but its name: the signal icon, the lock,
+ * the details button, the second line. Rebuilt on every scan, inside a row
+ * that stays where it is. */
+static void fill_net_row(GtkWidget *row, jnode_t *net)
+{
+    const char *ssid = json_str(net, "ssid", "");
+    gboolean conn = json_bool(net, "connected", FALSE);
+    gboolean saved = json_bool(net, "saved", FALSE);
+    const char *sec = json_str(net, "security", "open");
+    gboolean open = !g_strcmp0(sec, "open");
+
+    const char *what = conn ? T("Connected", "연결됨")
+                     : saved ? T("Saved", "저장됨")
+                     : open ? T("Open - anyone nearby can see the traffic",
+                                "열린 네트워크 - 주변에서 내용을 볼 수 있습니다")
+                     : NULL;
+    char *detail = what ? g_strdup(what) : g_ascii_strup(sec, -1);
+    row_set_detail(row, detail);
+    g_free(detail);
+
+    GtkWidget *h = row_box(row);
+    GtkWidget *keep = gtk_widget_get_parent(g_object_get_data(G_OBJECT(row), "lp-detail"));
+    GtkWidget *c = gtk_widget_get_first_child(h);
+    while (c) {
+        GtkWidget *next = gtk_widget_get_next_sibling(c);
+        if (c != keep) gtk_box_remove(GTK_BOX(h), c);
+        c = next;
+    }
+    GtkWidget *icon = gtk_image_new_from_icon_name(signal_icon((int)json_num(net, "quality", 0)));
+    gtk_widget_add_css_class(icon, "lp-signal");
+    gtk_box_prepend(GTK_BOX(h), icon);
+    if (!open) {
+        GtkWidget *lock = gtk_image_new_from_icon_name("changes-prevent-symbolic");
+        gtk_widget_add_css_class(lock, "lp-value");
+        gtk_box_append(GTK_BOX(h), lock);
+    }
+    if (saved || conn) {
+        GtkWidget *more = gtk_button_new_from_icon_name("view-more-symbolic");
+        gtk_widget_set_tooltip_text(more, T("Details", "자세히"));
+        gtk_widget_set_valign(more, GTK_ALIGN_CENTER);
+        g_object_set_data(G_OBJECT(more), "lp-row", row);
+        g_object_set_data_full(G_OBJECT(more), "lp-title", g_strdup_printf("more:%s", ssid), g_free);
+        g_signal_connect(more, "clicked", G_CALLBACK(on_more), NULL);
+        gtk_box_append(GTK_BOX(h), more);
+    }
+    g_object_set_data(G_OBJECT(row), "lp-net", net);
+    g_object_set_data(G_OBJECT(row), "lp-rank", GINT_TO_POINTER(rank(net)));
+}
+
+static void drop_net_rows(net_t *n, GHashTable *keep)
+{
+    GtkWidget *c = gtk_widget_get_first_child(n->list);
+    while (c) {
+        GtkWidget *next = gtk_widget_get_next_sibling(c);
+        const char *ssid = g_object_get_data(G_OBJECT(c), "lp-ssid");
+        if (ssid && !g_object_get_data(G_OBJECT(c), "lp-leaving") &&
+            (!keep || !g_hash_table_contains(keep, ssid))) {
+            /* Its JSON is about to be freed with the old scan. */
+            g_object_set_data(G_OBJECT(c), "lp-net", NULL);
+            g_object_set_data(G_OBJECT(c), "lp-leaving", GINT_TO_POINTER(1));
+            row_remove_animated(c);
+        }
+        c = next;
+    }
 }
 
 static void on_scan(int st, const char *out, const char *err, gpointer p)
 {
     net_t *n = p;
     gtk_widget_set_sensitive(n->scan_btn, TRUE);
-    clear_list(n->list);
 
     jnode_t *arr = st == 0 ? json_parse(out) : NULL;
     if (!arr || arr->type != J_ARR) {
         char *why = st == 0 ? g_strdup(T("lp-net answered something that is not a list",
                                          "lp-net 의 답이 목록이 아닙니다"))
                             : lp_first_line(err, out);
-        row_value(n->list, T("Could not scan", "주변 네트워크를 찾지 못했습니다"), why, NULL);
+        drop_net_rows(n, NULL);
+        set_status_row(n, T("Could not scan", "주변 네트워크를 찾지 못했습니다"), why, FALSE);
         g_free(why);
         json_free(arr);
+        ensure_other_row(n);
         return;
     }
-    /* Kept on the list so the rows can point into it. */
-    g_object_set_data_full(G_OBJECT(n->list), "lp-scan", arr, (GDestroyNotify)json_free);
 
-    /* Connected first, then saved, then by signal: the network somebody
-     * is looking for is almost always one of the first two. */
-    GPtrArray *order = g_ptr_array_new();
-    for (jnode_t *net = arr->child; net; net = net->next)
-        g_ptr_array_add(order, net);
-    g_ptr_array_sort(order, by_rank);
+    /* Which rows are there now, by name. */
+    GHashTable *have = g_hash_table_new(g_str_hash, g_str_equal);
+    for (GtkWidget *c = gtk_widget_get_first_child(n->list); c; c = gtk_widget_get_next_sibling(c)) {
+        const char *ssid = g_object_get_data(G_OBJECT(c), "lp-ssid");
+        if (ssid && !g_object_get_data(G_OBJECT(c), "lp-leaving"))
+            g_hash_table_insert(have, (gpointer)ssid, c);
+    }
+    GHashTable *seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 
     int count = 0;
-    for (guint i = 0; i < order->len; i++) {
-        jnode_t *net = g_ptr_array_index(order, i);
+    for (jnode_t *net = arr->child; net; net = net->next) {
         const char *ssid = json_str(net, "ssid", "");
-        if (!*ssid) continue;                    /* hidden: the row below handles those */
-        gboolean conn = json_bool(net, "connected", FALSE);
-        gboolean saved = json_bool(net, "saved", FALSE);
-        const char *sec = json_str(net, "security", "open");
-        gboolean open = !g_strcmp0(sec, "open");
-
-        const char *what = conn ? T("Connected", "연결됨")
-                         : saved ? T("Saved", "저장됨")
-                         : open ? T("Open - anyone nearby can see the traffic",
-                                    "열린 네트워크 - 주변에서 내용을 볼 수 있습니다")
-                         : NULL;
-        char *detail = what ? g_strdup(what) : g_ascii_strup(sec, -1);
-        GtkWidget *row = row_shell(ssid, detail);
-        g_free(detail);
-        GtkWidget *h = row_box(row);
-
-        GtkWidget *icon = gtk_image_new_from_icon_name(signal_icon((int)json_num(net, "quality", 0)));
-        gtk_widget_add_css_class(icon, "lp-signal");
-        gtk_box_prepend(GTK_BOX(h), icon);
-        if (!open) {
-            GtkWidget *lock = gtk_image_new_from_icon_name("changes-prevent-symbolic");
-            gtk_widget_add_css_class(icon, "lp-signal");
-            gtk_widget_add_css_class(lock, "lp-value");
-            gtk_box_append(GTK_BOX(h), lock);
+        if (!*ssid) continue;                    /* hidden: "Other network…" handles those */
+        if (g_hash_table_contains(seen, ssid)) continue;   /* a second access point */
+        g_hash_table_add(seen, g_strdup(ssid));
+        count++;
+        GtkWidget *row = g_hash_table_lookup(have, ssid);
+        if (row) {
+            fill_net_row(row, net);
+            continue;
         }
-        if (saved || conn) {
-            GtkWidget *more = gtk_button_new_from_icon_name("view-more-symbolic");
-            gtk_widget_set_tooltip_text(more, T("Details", "자세히"));
-            gtk_widget_set_valign(more, GTK_ALIGN_CENTER);
-            g_object_set_data(G_OBJECT(more), "lp-row", row);
-            g_object_set_data_full(G_OBJECT(more), "lp-title", g_strdup_printf("more:%s", ssid), g_free);
-            g_signal_connect(more, "clicked", G_CALLBACK(on_more), NULL);
-            gtk_box_append(GTK_BOX(h), more);
-        }
+        row = row_shell(ssid, NULL);
+        g_object_set_data_full(G_OBJECT(row), "lp-ssid", g_strdup(ssid), g_free);
         gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
         g_object_set_data(G_OBJECT(row), "lp-activate", (gpointer)on_net_tapped);
-        g_object_set_data(G_OBJECT(row), "lp-net", net);
-        row_add(n->list, row);
-        count++;
+        fill_net_row(row, net);
+        row_add_animated(n->list, row);
     }
-    g_ptr_array_free(order, TRUE);
+    drop_net_rows(n, seen);
+    g_hash_table_destroy(have);
+    g_hash_table_destroy(seen);
+
+    /* Kept on the list so the rows can point into it; the previous scan's
+     * array goes now, and every row that pointed into it was refilled or
+     * told to forget it above. */
+    g_object_set_data_full(G_OBJECT(n->list), "lp-scan", arr, (GDestroyNotify)json_free);
+
     if (!count)
-        row_value(n->list, T("No networks found", "찾은 네트워크가 없습니다"),
-                  T("Move closer to the access point, or scan again.",
-                    "공유기 가까이 가거나 다시 찾아 보십시오."), NULL);
-    row_chevron(n->list, T("Other network…", "다른 네트워크…"),
-                T("A network that hides its name", "이름을 숨긴 네트워크"), NULL,
-                G_CALLBACK(on_hidden), NULL);
+        set_status_row(n, T("No networks found", "찾은 네트워크가 없습니다"),
+                       T("Move closer to the access point, or scan again.",
+                         "공유기 가까이 가거나 다시 찾아 보십시오."), FALSE);
+    else
+        set_status_row(n, NULL, NULL, FALSE);
+    ensure_other_row(n);
+    gtk_list_box_invalidate_sort(GTK_LIST_BOX(n->list));
 }
 
 static void scan(net_t *n)
 {
     if (!gtk_switch_get_active(GTK_SWITCH(n->radio_sw))) {
-        clear_list(n->list);
-        row_value(n->list, T("Wi-Fi is off", "Wi-Fi 가 꺼져 있습니다"),
-                  T("Turn it on above to see networks.", "위에서 켜면 네트워크가 보입니다."), NULL);
-        refresh_status(n);
+        drop_net_rows(n, NULL);
+        set_status_row(n, T("Wi-Fi is off", "Wi-Fi 가 꺼져 있습니다"),
+                       T("Turn it on above to see networks.", "위에서 켜면 네트워크가 보입니다."), FALSE);
         return;
     }
     gtk_widget_set_sensitive(n->scan_btn, FALSE);
-    clear_list(n->list);
-    GtkWidget *row = row_shell(T("Looking for networks…", "네트워크를 찾는 중…"), NULL);
-    GtkWidget *sp = gtk_spinner_new();
-    gtk_spinner_start(GTK_SPINNER(sp));
-    gtk_box_prepend(GTK_BOX(row_box(row)), sp);
-    row_add(n->list, row);
+    /* Only when there is nothing to look at yet: with networks listed, the
+     * scan button's own state says a scan is running, and the list stays
+     * put rather than growing a row at the top. */
+    gboolean empty = TRUE;
+    for (GtkWidget *c = gtk_widget_get_first_child(n->list); c; c = gtk_widget_get_next_sibling(c))
+        if (g_object_get_data(G_OBJECT(c), "lp-ssid") && !g_object_get_data(G_OBJECT(c), "lp-leaving"))
+            empty = FALSE;
+    if (empty)
+        set_status_row(n, T("Looking for networks…", "네트워크를 찾는 중…"), NULL, TRUE);
     static const char *const v[] = { "lp-net", "scan", "--json", NULL };
     lp_run_async(v, NULL, n->page, on_scan, n);
 }
@@ -680,6 +790,7 @@ static GtkWidget *build(void)
     n->air_sw = row_control(r);
 
     n->list = group_new(n->page, T("Wi-Fi networks", "Wi-Fi 네트워크"));
+    gtk_list_box_set_sort_func(GTK_LIST_BOX(n->list), sort_rows, NULL, NULL);
     n->scan_btn = gtk_button_new_with_label(T("Scan again", "다시 찾기"));
     gtk_widget_set_halign(n->scan_btn, GTK_ALIGN_END);
     gtk_widget_set_margin_top(n->scan_btn, 8);
@@ -707,5 +818,5 @@ static const char *const KEYS[] = {
 };
 
 const lp_panel_t lp_panel_network = {
-    "network", "Network", "네트워크", "network-wireless-symbolic", build, KEYS
+    "network", "Network", "네트워크", "network-wireless-symbolic", build, KEYS, NULL
 };

@@ -549,5 +549,5 @@ static const char *const KEYS[] = {
 };
 
 const lp_panel_t lp_panel_bluetooth = {
-    "bluetooth", "Bluetooth", "블루투스", "bluetooth-symbolic", build, KEYS
+    "bluetooth", "Bluetooth", "블루투스", "bluetooth-symbolic", build, KEYS, NULL
 };
