@@ -6,7 +6,7 @@
  *   lp-osk.c   the command line, the single-instance socket, the settings
  *              file, and the policy of when the keyboard shows itself
  *   ui.c       the layer-shell window, the keys, and every touch
- *   type.c     where text goes: the input method (preedit and commit),
+ *   type.c     where text goes: the input method (live text or preedit),
  *              the virtual keyboards, and the laptop keyboard's grab
  *   evdev.c    whether the last thing a person touched was the screen
  *   hangul.c   the 2-beolsik automaton (no GTK; hangul-test.c drives it)
@@ -95,6 +95,11 @@ void     type_refresh_keymap(void);
 gboolean type_composing(void);
 const char *type_im_status(void);      /* "active", "inactive", ... */
 uint32_t type_purpose(void);
+/* Presses, by CLOCK_MONOTONIC ms: any mouse/touchpad button or touch
+ * (evdev.c), and those on our own keys (ui.c). A live syllable ends at a
+ * press that was not ours (type.c, head comment 1.). */
+void     type_pointer_press(uint32_t ms);
+void     type_osk_press(uint32_t ms);
 
 /* evdev.c */
 void        lastinput_init(void);

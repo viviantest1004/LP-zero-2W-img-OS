@@ -1969,7 +1969,10 @@ static gboolean on_touch(GtkWidget *w, GdkEvent *ev, gpointer data)
     gintptr id = (gintptr)ev->touch.sequence;
     double x = ev->touch.x, y = ev->touch.y;
     switch (ev->type) {
-    case GDK_TOUCH_BEGIN:  touch_begin(id, x, y); break;
+    case GDK_TOUCH_BEGIN:
+        type_osk_press(ev->touch.time);   /* ours: type.c, head comment 1. */
+        touch_begin(id, x, y);
+        break;
     case GDK_TOUCH_UPDATE: touch_update(id, x, y); break;
     case GDK_TOUCH_END:    touch_end(id, x, y, FALSE); break;
     case GDK_TOUCH_CANCEL: touch_end(id, x, y, TRUE); break;
@@ -1997,6 +2000,10 @@ static gboolean on_button(GtkWidget *w, GdkEventButton *ev, gpointer data)
     g_debug("button %s %u at %.0f,%.0f%s", ev->type == GDK_BUTTON_PRESS ? "press" :
             ev->type == GDK_BUTTON_RELEASE ? "release" : "other", ev->button,
             ev->x, ev->y, from_touch((GdkEvent *)ev) ? " (from touch)" : "");
+    /* Any press here is ours, not one that may have moved a text
+     * cursor (type.c, head comment 1.). */
+    if (ev->type == GDK_BUTTON_PRESS)
+        type_osk_press(ev->time);
     if (from_touch((GdkEvent *)ev) || ev->button != GDK_BUTTON_PRIMARY)
         return TRUE;
     if (ev->type == GDK_BUTTON_PRESS)

@@ -7,12 +7,67 @@
  *
  * 1. The input method (zwp_input_method_v2). When a text field that speaks
  *    text-input-v3 has focus - GTK 3 and 4, foot, Firefox - the compositor
- *    hands us that field. Hangul composition goes through it as a real
- *    preedit: set_preedit_string shows the syllable being built, underlined,
- *    in the application, and commit_string makes it text. Nothing is typed
- *    and deleted again, so an application that reacts to every keystroke
- *    (a shell's history search, a web page's autocomplete) never sees the
- *    intermediate syllables, and undo takes back words, not jamo.
+ *    hands us that field. Hangul composition goes into it one of two ways.
+ *
+ *    Where the field tells us its text (surrounding_text: GTK's entries
+ *    and text views, Firefox, which types through GTK 3), the syllable
+ *    being built does not stay a preedit: once typing pauses it becomes
+ *    real text ("live"), and while it is still being built after that,
+ *    each change replaces it - delete_surrounding_text for the one
+ *    character we put there, commit_string with what it became. A preedit
+ *    is the field's only while the field has focus: GTK drops it on
+ *    focus-out, and after our deactivate nothing can commit it any more.
+ *    "한글" typed and 완료 clicked named the folder "한"; going to another
+ *    window ate the last syllable in gedit. Text that is already there
+ *    cannot be lost that way.
+ *
+ *    Why only after a pause (IDLE_MS since the syllable last changed, and
+ *    SETTLE_MS since we last passed a key on), and why the next syllable
+ *    is a preedit again: keys we pass on (Space, Enter, BackSpace, arrows:
+ *    2. and 3.) reach GTK as keyboard events, which GDK queues and handles
+ *    one per main-loop turn, while text-input events take effect the
+ *    moment they are read, so text sent after a key can overtake it in a
+ *    client that has fallen behind. Every syllable live from its first
+ *    jamo was tried first: typed at 30 ms a key in the test VM,
+ *    "한<Enter>글" came out "한글" and "한 글" "한ㄱ글아" - each replacement
+ *    followed a key within a keystroke, and a replacement deletes whatever
+ *    is before the cursor at the time. A preedit only has to be committed
+ *    at the next syllable or key, so typing as a preedit mixes them up only
+ *    when the client is a whole syllable behind. (The same VM got that far
+ *    behind under load too, with this file as it was before live text and
+ *    as it is now: a limit of sending keys and text on two channels, which
+ *    the pause does not add to and does not fix.) A click or a touch turns
+ *    the preedit into text at once, as that is what takes the focus away -
+ *    unless a key went out within SETTLE_MS, which the text could still
+ *    overtake. So a syllable is still lost when its field loses focus
+ *    within that time some other way, or by a click just after a Space.
+ *
+ *    The deletion asks for 1, not the syllable's three bytes. The protocol
+ *    counts bytes, but GTK 4.8 passes the number on to its widgets as
+ *    characters (3 deleted the syllable and the two characters before it),
+ *    and GTK 3.24 converts bytes to characters by stepping back from the
+ *    cursor, where one byte back always comes to one character. 1 is the
+ *    only number both read as "the character before the cursor", and a
+ *    syllable in the making is always exactly one character.
+ *
+ *    The replacement is relative to the cursor, so the syllable must still
+ *    be right before it, and GTK does not say when a click moves the
+ *    cursor: its click handler, which would tell us, is cancelled by the
+ *    very cursor move ("far" clicks, gtkimcontextwayland set_cursor_
+ *    location). Clicked elsewhere halfway through 나 and typing on, the
+ *    next jamo deleted the character before the new cursor. So a press of
+ *    a mouse or touchpad button, or a touch, that was not on our own keys
+ *    (evdev.c sees them all, ui.c says which were ours; both carry the
+ *    kernel's time) ends the syllable where it is, as text, before the
+ *    next jamo; so does the field reporting its cursor anywhere else.
+ *
+ *    Everywhere else it is a preedit, as before: a field with no
+ *    surrounding text (foot, a terminal), and numbers, dates, phone
+ *    numbers and the like, which may refuse a jamo - a live replacement
+ *    would then delete a character of the person's instead of ours.
+ *    set_preedit_string shows the syllable underlined in the application,
+ *    commit_string makes it text, and the application never sees the
+ *    intermediate syllables.
  *
  * 2. A virtual keyboard of our own (vk_osk, zwp_virtual_keyboard_v1) for
  *    everything that is a key rather than text: Enter, Tab, Esc, arrows,
@@ -65,6 +120,11 @@
 #include "virtual-keyboard-unstable-v1-client-protocol.h"
 
 /* text-input-v3 values the input method protocol passes through */
+#define PURPOSE_NORMAL   0
+#define PURPOSE_ALPHA    1
+#define PURPOSE_URL      5
+#define PURPOSE_EMAIL    6
+#define PURPOSE_NAME     7
 #define PURPOSE_PASSWORD 8
 #define PURPOSE_PIN      9
 #define CAUSE_OTHER      1
@@ -91,12 +151,18 @@ static struct {
     char    *surr, *pending_surr;   /* surrounding text (without preedit) */
     uint32_t cursor, pending_cursor;
     gboolean surr_changed;     /* this done batch moved the text or cursor */
+    gboolean surr_seen;        /* this activation's field sends its text */
 } ims = { .pending = -1 };
+
+/* The syllable in the making that is already text in the field, right
+ * before its cursor ("live", head comment 1.); "" when there is none. */
+static char live[8];
 
 /* A syllable in the making when its field was deactivated, kept for a
  * moment in case the same field comes straight back (see im_done). */
 static struct {
     gboolean valid;
+    gboolean live;             /* it was live: still text in the field */
     HangulIC ic;
     char    *surr;
     uint32_t cursor;
@@ -108,6 +174,41 @@ static uint32_t now_ms(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
+/* When we last passed a key on to the application (vk_osk, vk_pass), and
+ * when the syllable in the making last changed: a preedit becomes live
+ * text only SETTLE_MS after the one and IDLE_MS after the other (head
+ * comment 1.). Half a second is far past the lag at which keys and text
+ * crossed at 30 ms a key in the test VM; a client further behind than that
+ * mixes them up with or without live text. */
+#define IDLE_MS   300
+#define SETTLE_MS 500
+static uint32_t key_ms, comp_ms;
+static gboolean key_any;
+
+static void key_sent(uint32_t code)
+{
+    switch (code) {
+    case KEY_LEFTSHIFT: case KEY_RIGHTSHIFT: case KEY_LEFTCTRL: case KEY_RIGHTCTRL:
+    case KEY_LEFTALT: case KEY_RIGHTALT: case KEY_LEFTMETA: case KEY_RIGHTMETA:
+    case KEY_CAPSLOCK:
+        return;                 /* no text, no cursor: nothing to overtake */
+    default:
+        key_ms = now_ms();
+        key_any = TRUE;
+    }
+}
+
+/* How long until a preedit may become text; 0 when it may now. */
+static uint32_t settle_left(void)
+{
+    uint32_t now = now_ms(), a = now - comp_ms, b = now - key_ms, left = 0;
+    if (a < IDLE_MS)
+        left = IDLE_MS - a;
+    if (key_any && b < SETTLE_MS && SETTLE_MS - b > left)
+        left = SETTLE_MS - b;
+    return left;
 }
 
 static void flush(void)
@@ -340,6 +441,7 @@ static void vk_press(struct zwp_virtual_keyboard_v1 *vk, uint32_t code,
                      uint32_t mask)
 {
     uint32_t t = now_ms();
+    key_sent(code);
     if (mask)
         zwp_virtual_keyboard_v1_modifiers(vk, mask, 0, 0, 0);
     zwp_virtual_keyboard_v1_key(vk, t, code, WL_KEYBOARD_KEY_STATE_PRESSED);
@@ -451,31 +553,201 @@ static gboolean im_route(void)
     return im && ims.active;
 }
 
+/* Whether this field takes live text at all (head comment 1.): it sends
+ * its text, and it is one where any letter is at home. */
+static gboolean live_ok(void)
+{
+    if (!im_route() || !ims.surr_seen)
+        return FALSE;
+    switch (ims.purpose) {
+    case PURPOSE_NORMAL: case PURPOSE_ALPHA: case PURPOSE_URL:
+    case PURPOSE_EMAIL:  case PURPOSE_NAME:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+/* The field's text, as it last told us, has our live syllable right
+ * before the cursor. */
+static gboolean live_at_cursor(void)
+{
+    size_t n = strlen(live);
+    return n && ims.surr && ims.cursor >= n && ims.cursor <= strlen(ims.surr) &&
+           memcmp(ims.surr + ims.cursor - n, live, n) == 0;
+}
+
+/* Presses of mice, touchpads and touchscreens by their kernel time
+ * (evdev.c), and the ones that were on our own keys by their event time
+ * (ui.c): one clock, CLOCK_MONOTONIC in ms, which libinput and so the
+ * compositor stamp events with. live_ms is when the live syllable last
+ * went out; a press after it, not on our keys, may have moved the cursor
+ * (head comment 1.). */
+#define PRESSES 16
+static uint32_t press_ext[PRESSES], press_osk[PRESSES];
+static unsigned n_ext, n_osk;
+static uint32_t live_ms;
+
+static gboolean live_convert(void);
+
+/* A click or a touch may be what takes the focus away, before any key
+ * could finish the syllable: one shown as a preedit becomes text now,
+ * while the field still has it - unless a key went out less than
+ * SETTLE_MS ago, which the text could overtake (head comment 1.; every
+ * tap on our own keys is a press too, and a Space tapped just before
+ * must stay before). It stays in the making, from the press's time, so
+ * that live_check still asks at the next jamo whether the press was on
+ * our keys. */
+void type_pointer_press(uint32_t ms)
+{
+    press_ext[n_ext++ % PRESSES] = ms;
+    if ((!key_any || (uint32_t)(now_ms() - key_ms) >= SETTLE_MS) && live_convert())
+        live_ms = ms;
+}
+
+void type_osk_press(uint32_t ms)
+{
+    press_osk[n_osk++ % PRESSES] = ms;
+}
+
+static gboolean pressed_elsewhere(void)
+{
+    for (unsigned i = 0; i < n_ext && i < PRESSES; i++) {
+        uint32_t t = press_ext[(n_ext - 1 - i) % PRESSES];
+        if ((int32_t)(t - live_ms) < 0)
+            continue;                 /* before the syllable went out */
+        gboolean ours = FALSE;
+        for (unsigned j = 0; j < n_osk && j < PRESSES && !ours; j++)
+            ours = t - press_osk[(n_osk - 1 - j) % PRESSES] + 20u <= 40u;
+        if (!ours)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static void composition_drop(void);
+
+/* Before a jamo or a BackSpace works on the live syllable: if a press
+ * elsewhere may have moved the cursor, the syllable is finished text and
+ * what comes now starts afresh wherever the cursor is. */
+static void live_check(void)
+{
+    if (live[0] && pressed_elsewhere()) {
+        g_debug("im: pressed outside the keyboard; live syllable left as text");
+        composition_drop();
+    }
+}
+
+static void settle_arm(void);
+
+/* The live syllable became commit + pre. While the syllable is still in
+ * the making (no commit), pre replaces it as text; once it is finished,
+ * commit replaces it and the next syllable, pre, is a preedit again.
+ * Whatever still matches stays; otherwise the live syllable is deleted (1:
+ * see head comment 1.) first. A syllable that has emptied (BackSpace) is
+ * a deletion alone. */
+static void live_send(const char *commit, const char *pre)
+{
+    gboolean done = *commit != 0;
+    const char *want = done ? commit : pre, *show = done ? pre : "";
+    size_t n = strlen(live);
+    gboolean del = n && strncmp(want, live, n) != 0;
+    const char *add = del ? want : want + n;
+    if (del)
+        zwp_input_method_v2_delete_surrounding_text(im, 1, 0);
+    if (*add)
+        zwp_input_method_v2_commit_string(im, add);
+    if (*show)
+        zwp_input_method_v2_set_preedit_string(im, show, (int)strlen(show),
+                                               (int)strlen(show));
+    if (del || *add || *show) {
+        zwp_input_method_v2_commit(im, ims.serial);
+        flush();
+    }
+    ims.preedit_sent = *show != 0;
+    g_strlcpy(live, done ? "" : pre, sizeof live);
+    live_ms = now_ms();
+    if (ims.preedit_sent)
+        settle_arm();
+}
+
+static void syllable(char pre[8])
+{
+    uint32_t p = hangul_preedit(&hic);
+    pre[p ? g_unichar_to_utf8(p, pre) : 0] = 0;
+}
+
+/* The syllable shown as a preedit becomes the same text, live. */
+static gboolean live_convert(void)
+{
+    if (!im_route() || live[0] || !ims.preedit_sent || !type_composing() || !live_ok())
+        return FALSE;
+    char pre[8];
+    syllable(pre);
+    zwp_input_method_v2_commit_string(im, pre);
+    zwp_input_method_v2_set_preedit_string(im, "", 0, 0);
+    zwp_input_method_v2_commit(im, ims.serial);
+    flush();
+    ims.preedit_sent = FALSE;
+    g_strlcpy(live, pre, sizeof live);
+    live_ms = now_ms();
+    g_debug("im: preedit %s is text now", pre);
+    return TRUE;
+}
+
+/* The pause that turns a preedit into text (head comment 1.). */
+static guint settle_id;
+
+static gboolean settle_fire(gpointer data)
+{
+    (void)data;
+    settle_id = 0;
+    if (settle_left())
+        settle_arm();
+    else
+        live_convert();
+    return G_SOURCE_REMOVE;
+}
+
+static void settle_arm(void)
+{
+    if (!settle_id && live_ok())
+        settle_id = g_timeout_add(settle_left() + 10, settle_fire, NULL);
+}
+
 static void composition_changed(const char *commit)
 {
-    char pre[8] = "";
-    uint32_t p = hangul_preedit(&hic);
-    if (p)
-        pre[g_unichar_to_utf8(p, pre)] = 0;
-    if (im_route())
-        im_send(commit, pre);
-    else
+    char pre[8];
+    syllable(pre);
+    comp_ms = now_ms();
+    if (!im_route()) {
         vk_compose(commit, pre);
+    } else if (live[0]) {
+        live_send(commit, pre);
+    } else {
+        im_send(commit, pre);
+        if (ims.preedit_sent)
+            settle_arm();
+    }
 }
 
 /* Forget a composition without committing it: the field it belonged to is
- * gone, or the application changed the text under it. */
+ * gone, or the application changed the text under it. A live syllable
+ * stays in the field as the text it already is. */
 static void composition_drop(void)
 {
     hangul_reset(&hic);
     shown[0] = 0;
+    live[0] = 0;
     ims.preedit_sent = FALSE;
 }
 
 void type_flush(void)
 {
     uint32_t c = hangul_flush(&hic);
-    if (im_route() && (c || ims.preedit_sent)) {
+    if (live[0]) {
+        live[0] = 0;        /* already text, where it belongs */
+    } else if (im_route() && (c || ims.preedit_sent)) {
         char s[8] = "";
         if (c)
             s[g_unichar_to_utf8(c, s)] = 0;
@@ -498,6 +770,7 @@ void type_jamo(uint32_t jamo)
         return;
     }
     HangulOut o = {{0}, 0};
+    live_check();
     hangul_feed(&hic, jamo, &o);
     char commit[32];
     int k = 0;
@@ -509,6 +782,7 @@ void type_jamo(uint32_t jamo)
 
 void type_backspace(uint32_t mods)
 {
+    live_check();
     if (!(mods & (MOD_CTRL | MOD_ALT)) && hangul_backspace(&hic)) {
         composition_changed("");
         return;
@@ -636,10 +910,12 @@ static void pass_key(uint32_t time, uint32_t key, uint32_t state)
     if (!vk_pass || !pass_keymap)
         return;
     zwp_virtual_keyboard_v1_key(vk_pass, time, key, state);
-    if (state == WL_KEYBOARD_KEY_STATE_PRESSED)
+    if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
         BIT_SET(pass_down, key);
-    else
+        key_sent(key);
+    } else {
         BIT_CLR(pass_down, key);
+    }
 }
 
 static void rep_stop(void)
@@ -971,6 +1247,7 @@ static void im_done(void *d, struct zwp_input_method_v2 *m)
         ims.surr = ims.pending_surr;
         ims.cursor = ims.pending_cursor;
         ims.pending_surr = NULL;
+        ims.surr_seen = TRUE;
     }
     g_debug("im done: serial %u pending %d active %d cause %u purpose %u "
             "composing %d surrounding \"%s\" cursor %u%s",
@@ -995,20 +1272,35 @@ static void im_done(void *d, struct zwp_input_method_v2 *m)
          * keyboard device comes or goes (a USB keyboard unplugged, a
          * virtual one closed) - the compositor deactivates and activates
          * the field in one breath and the half-typed syllable would
-         * otherwise be lost. Put it back and carry on. */
-        if (fresh && bounce.valid &&
+         * otherwise be lost. Put it back and carry on - a live syllable
+         * is still in the text, so only the automaton comes back; a
+         * preedit is shown again. */
+        if (fresh && bounce.valid && ims.surr_seen &&
             g_get_monotonic_time() - bounce.at < 300000 &&
             !g_strcmp0(bounce.surr, ims.surr) && bounce.cursor == ims.cursor) {
             hic = bounce.ic;
-            composition_changed("");
+            if (bounce.live) {
+                uint32_t p = hangul_preedit(&hic);
+                live[p ? g_unichar_to_utf8(p, live) : 0] = 0;
+            } else {
+                composition_changed("");
+            }
             g_debug("im: focus bounce, composition restored");
         }
         bounce.valid = FALSE;
+        /* Activated again while we were in it: GTK does that on every
+         * click in the field, and the click may have put the cursor
+         * somewhere else. A live syllable not right before the cursor any
+         * more stays text where it is; replacing it would delete whatever
+         * character is before the cursor now. */
+        if (!fresh && live[0] && ims.surr_changed && !live_at_cursor())
+            composition_drop();
         osk_im_activated(fresh);
         osk_state_changed();
     } else if (pend == 0) {
         bounce.valid = type_composing() && ims.surr;
         if (bounce.valid) {
+            bounce.live = live[0] != 0;
             bounce.ic = hic;
             g_free(bounce.surr);
             bounce.surr = g_strdup(ims.surr);
@@ -1018,18 +1310,21 @@ static void im_done(void *d, struct zwp_input_method_v2 *m)
         grab_stop();
         ims.active = FALSE;
         ims.purpose = 0;
+        ims.surr_seen = FALSE;
         composition_drop();
         ui_field_purpose(0);
         osk_im_deactivated();
         osk_state_changed();
     } else if (ims.active && ims.cause == CAUSE_OTHER && ims.surr_changed &&
-               type_composing()) {
+               type_composing() && !(live[0] && live_at_cursor())) {
         /* The application changed its text without us - a tap moved the
          * cursor, a shortcut cut a word. Whatever it did with our preedit,
          * the syllable we were building no longer sits where we think it
          * does; continuing it would put half a syllable somewhere else.
          * (GTK also sends "other" with nothing changed, after a refocus;
-         * that is no reason to throw the syllable away.) */
+         * that is no reason to throw the syllable away.) A live syllable
+         * still right before the cursor is our own edit coming back, not
+         * the application's: that one goes on. */
         composition_drop();
     }
     ims.cause = 0;

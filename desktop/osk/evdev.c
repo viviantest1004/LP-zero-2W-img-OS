@@ -21,6 +21,13 @@
  * from a button and are never kept: this records WHEN and WHAT KIND,
  * nothing about which key.
  *
+ * The presses of mice, touchpads and touchscreens also go to type.c, with
+ * the kernel's time on the monotonic clock (EVIOCSCLOCKID, per open file,
+ * so nobody else's timestamps change): a press may take the focus away,
+ * so a Hangul syllable shown as a preedit becomes text at once, and one
+ * already typed live ends at a press that was not on our keys, because
+ * GTK does not say when a click moves the cursor (type.c, head comment 1.).
+ *
  * Reading /dev/input needs the permission start-desktop gives the session
  * user (or membership of group input). Without it this reports
  * "no access" and the keyboard falls back to the button and the gesture;
@@ -36,6 +43,7 @@
 #include <string.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #define MAXDEV 32
@@ -138,8 +146,12 @@ static gboolean on_dev(gint fd, GIOCondition cond, gpointer data)
     gboolean pressed = FALSE;
     while ((n = read(fd, ev, sizeof ev)) > 0) {
         for (size_t i = 0; i < (size_t)n / sizeof ev[0]; i++)
-            if (ev[i].type == EV_KEY && ev[i].value == 1)
+            if (ev[i].type == EV_KEY && ev[i].value == 1) {
                 pressed = TRUE;
+                if (d->kind != INPUT_KEY)
+                    type_pointer_press((uint32_t)((uint64_t)ev[i].input_event_sec * 1000u +
+                                                  (uint64_t)ev[i].input_event_usec / 1000u));
+            }
     }
     if (n < 0 && errno == ENODEV) {
         d->watch = 0;
@@ -177,6 +189,8 @@ static void add_node(const char *name)
         return;
     }
     set_mask(fd, kind);
+    int clk = CLOCK_MONOTONIC;
+    ioctl(fd, EVIOCSCLOCKID, &clk);
     Dev *d = &devs[ndevs++];
     d->fd = fd;
     d->kind = kind;
