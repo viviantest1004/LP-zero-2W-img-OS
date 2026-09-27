@@ -784,8 +784,14 @@ firewall boot || echo "[rc]   no firewall - every port is open"
 #
 # In the background it cannot hold the boot up. A runaway there is then
 # an ordinary runaway, which is guard's job and which guard can see.
-# (sh -q: stay quiet when the file is not there)
-bootcount && sh -q /data/rc.local &
+# (sh -q: stay quiet when the file is not there.) On the desktop /bin/sh
+# is dash, which has no -q and stopped right there; our shell is lpsh.
+if test -x /bin/lpsh
+then
+    bootcount && lpsh -q /data/rc.local &
+else
+    bootcount && sh -q /data/rc.local &
+fi
 
 echo "[rc] checking what survived the reboot"
 # The root filesystem is inside the kernel image and unpacked into RAM
