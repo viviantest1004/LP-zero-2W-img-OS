@@ -469,6 +469,14 @@ static void ask_keep(const out_t *before_o, const char *old_mode, const char *ol
     confirm_tick(c);
     c->timer = g_timeout_add(1000, confirm_tick, c);
     lp_dialog_present(c->dlg);
+    /* Enter keeps, as Keep being the default button says (and as GNOME's
+     * "Keep Changes" does). GTK 4 gives a window shown with nothing focused
+     * its first button, here Cancel, and a focused button takes Enter before
+     * the default widget sees it: Enter put the old mode back at once. Only
+     * this dialog: in the other entry-less ones (Reset all settings?) Enter
+     * landing on Cancel is the safe way round. Escape and doing nothing
+     * still go back. */
+    gtk_widget_grab_focus(lp_dialog_ok_button(c->dlg));
 }
 
 static out_t *sel_out(disp_t *d)
