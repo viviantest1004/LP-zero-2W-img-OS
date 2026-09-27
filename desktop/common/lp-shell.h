@@ -128,6 +128,11 @@ void lp_on_tap(GtkWidget *w, LpTapFn fn, gpointer data);
 
 /* A GtkMenu popped at a point inside w, from a hold. */
 void lp_menu_popup_at(GtkWidget *menu, GtkWidget *w, double x, double y);
+/* Destroy a menu once it has closed - after the item that closed it has
+ * run. GTK closes a menu before it activates the chosen item, so a menu
+ * destroyed in its own "deactivate" loses the item's handler first and a
+ * choice does nothing. */
+void lp_menu_destroy_when_closed(GtkWidget *menu);
 
 /* ── small things ────────────────────────────────────────────────── */
 

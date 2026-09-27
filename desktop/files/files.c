@@ -1257,6 +1257,7 @@ static void name_bind(GtkSignalListItemFactory *f, GtkListItem *cell,
 
     gtk_image_set_from_icon_name(GTK_IMAGE(icon), item->icon_name);
     gtk_label_set_text(GTK_LABEL(label), item->display);
+    g_object_set_data(G_OBJECT(box), "lpf-item", item);
 
     /* Row widgets are recycled as the list scrolls, so a class left by
      * whichever row this widget showed last is still on it. Take both
@@ -1289,6 +1290,8 @@ static void size_bind(GtkSignalListItemFactory *f, GtkListItem *cell,
     (void)f; (void)data;
     gtk_label_set_text(GTK_LABEL(gtk_list_item_get_child(cell)),
                        LPF_ITEM(gtk_list_item_get_item(cell))->size_text);
+    g_object_set_data(G_OBJECT(gtk_list_item_get_child(cell)), "lpf-item",
+                      gtk_list_item_get_item(cell));
 }
 
 static void date_bind(GtkSignalListItemFactory *f, GtkListItem *cell,
@@ -1297,6 +1300,8 @@ static void date_bind(GtkSignalListItemFactory *f, GtkListItem *cell,
     (void)f; (void)data;
     gtk_label_set_text(GTK_LABEL(gtk_list_item_get_child(cell)),
                        LPF_ITEM(gtk_list_item_get_item(cell))->date_text);
+    g_object_set_data(G_OBJECT(gtk_list_item_get_child(cell)), "lpf-item",
+                      gtk_list_item_get_item(cell));
 }
 
 static void tile_setup(GtkSignalListItemFactory *f, GtkListItem *cell,
@@ -1331,6 +1336,7 @@ static void tile_bind(GtkSignalListItemFactory *f, GtkListItem *cell,
 
     gtk_image_set_from_icon_name(GTK_IMAGE(icon), item->icon_name);
     gtk_label_set_text(GTK_LABEL(label), item->display);
+    g_object_set_data(G_OBJECT(box), "lpf-item", item);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2807,6 +2813,34 @@ static void popup_menu(App *app, GtkWidget *over, double x, double y)
     gtk_popover_popup(GTK_POPOVER(app->menu));
 }
 
+/* What a right click is about, the way every file manager does it: on a
+ * file that is not selected, that file alone becomes the selection; on a
+ * selected one, the selection stays; on the empty space, nothing is
+ * selected. Without this the menu was always the empty space's - New
+ * folder, Select all - whatever was under the pointer. The cell widgets
+ * carry their item ("lpf-item", set when bound). */
+static void select_under(App *app, GtkWidget *over, double x, double y)
+{
+    LpfItem *hit = NULL;
+    for (GtkWidget *w = gtk_widget_pick(over, x, y, GTK_PICK_DEFAULT);
+         w && !hit; w = w == over ? NULL : gtk_widget_get_parent(w))
+        hit = g_object_get_data(G_OBJECT(w), "lpf-item");
+    if (!hit) {
+        gtk_selection_model_unselect_all(app->selection);
+        return;
+    }
+    guint n = g_list_model_get_n_items(G_LIST_MODEL(app->selection));
+    for (guint i = 0; i < n; i++) {
+        gpointer it = g_list_model_get_item(G_LIST_MODEL(app->selection), i);
+        g_object_unref(it);
+        if (it == hit) {
+            if (!gtk_selection_model_is_selected(app->selection, i))
+                gtk_selection_model_select_item(app->selection, i, TRUE);
+            return;
+        }
+    }
+}
+
 static void on_right_click(GtkGestureClick *gesture, int n_press,
                            double x, double y, gpointer data)
 {
@@ -2814,6 +2848,7 @@ static void on_right_click(GtkGestureClick *gesture, int n_press,
     App *app = data;
     GtkWidget *over = gtk_event_controller_get_widget(
         GTK_EVENT_CONTROLLER(gesture));
+    select_under(app, over, x, y);
     popup_menu(app, over, x, y);
 }
 

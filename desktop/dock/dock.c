@@ -444,7 +444,7 @@ static void on_hold(GtkWidget *w, double x, double y, gpointer d)
     gtk_widget_show_all(menu);
     dock_menus++;
     g_signal_connect(menu, "deactivate", G_CALLBACK(dock_menu_done), NULL);
-    g_signal_connect(menu, "deactivate", G_CALLBACK(gtk_widget_destroy), NULL);
+    lp_menu_destroy_when_closed(menu);
     lp_menu_popup_at(menu, w, x, y);
 }
 

@@ -431,12 +431,27 @@ static void on_long_press(GtkGestureLongPress *g, double x, double y,
     hold_fire(w, x, y, d);
 }
 
+/* The right button asks for the menu when it comes up, not when it goes
+ * down. A GtkMenu opened on the press takes that button's release as the
+ * end of a press-drag-release: released anywhere but on an item, which is
+ * where the pointer is (at the menu's corner), and later than half a
+ * second after the press it has as its opening time - which on Wayland,
+ * with no trigger event to take the time from, it does not know - the menu
+ * closes again. Every right-click menu was gone before the pointer could
+ * move to it. Opened on the release there is no release left to close it. */
 static void on_right_press(GtkGestureMultiPress *g, int n, double x,
                            double y, gpointer d)
 {
+    (void)n; (void)x; (void)y; (void)d;
+    /* Claimed now, so the button under the pointer does not take it. */
+    gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
+}
+
+static void on_right_release(GtkGestureMultiPress *g, int n, double x,
+                             double y, gpointer d)
+{
     (void)n;
     GtkWidget *w = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
-    gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
     hold_fire(w, x, y, d);
 }
 
@@ -475,6 +490,7 @@ void lp_on_hold(GtkWidget *w, LpHoldFn fn, gpointer data)
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(rc),
                                                GTK_PHASE_CAPTURE);
     g_signal_connect(rc, "pressed", G_CALLBACK(on_right_press), h);
+    g_signal_connect(rc, "released", G_CALLBACK(on_right_release), h);
     g_object_set_data_full(G_OBJECT(w), "lp-hold-rc", rc, g_object_unref);
 
     GtkGesture *any = gtk_gesture_multi_press_new(w);
@@ -523,6 +539,24 @@ gboolean lp_hold_consumed(GtkWidget *w)
     gboolean c = g_object_get_data(G_OBJECT(w), "lp-hold-consumed") != NULL;
     g_object_set_data(G_OBJECT(w), "lp-hold-consumed", NULL);
     return c;
+}
+
+static gboolean menu_destroy_idle(gpointer m)
+{
+    gtk_widget_destroy(m);
+    g_object_unref(m);
+    return G_SOURCE_REMOVE;
+}
+
+static void menu_closed(GtkMenuShell *m, gpointer d)
+{
+    (void)d;
+    g_idle_add(menu_destroy_idle, g_object_ref(m));
+}
+
+void lp_menu_destroy_when_closed(GtkWidget *menu)
+{
+    g_signal_connect(menu, "deactivate", G_CALLBACK(menu_closed), NULL);
 }
 
 void lp_menu_popup_at(GtkWidget *menu, GtkWidget *w, double x, double y)

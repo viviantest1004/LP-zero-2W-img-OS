@@ -581,10 +581,19 @@ static void m_keyboard_settings(GtkMenuItem *m, gpointer d)
     lp_spawn(a);
 }
 
+/* The right button's press is only swallowed (so the button does not
+ * toggle); the menu comes on its release, as lp_on_hold's do - opened on
+ * the press, the release that follows closes it again (lp-shell.c). */
 static gboolean on_lang_press(GtkWidget *w, GdkEventButton *e, gpointer d)
 {
+    (void)w; (void)d;
+    return e->button == GDK_BUTTON_SECONDARY;
+}
+
+static gboolean on_lang_release(GtkWidget *w, GdkEventButton *e, gpointer d)
+{
     (void)d;
-    if (e->type != GDK_BUTTON_PRESS || e->button != GDK_BUTTON_SECONDARY)
+    if (e->button != GDK_BUTTON_SECONDARY)
         return FALSE;
     if (!lang_menu) {
         lang_menu = gtk_menu_new();
@@ -885,6 +894,7 @@ static Bar *bar_new(GdkMonitor *mon)
     gtk_style_context_add_class(gtk_widget_get_style_context(b->lang), "lp-lang");
     g_signal_connect(b->lang, "clicked", G_CALLBACK(on_lang), b);
     g_signal_connect(b->lang, "button-press-event", G_CALLBACK(on_lang_press), b);
+    g_signal_connect(b->lang, "button-release-event", G_CALLBACK(on_lang_release), b);
     gtk_box_pack_start(GTK_BOX(right), b->lang, FALSE, FALSE, 0);
 
     GtkWidget *kbd = gtk_button_new();

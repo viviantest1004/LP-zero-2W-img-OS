@@ -381,7 +381,7 @@ static void on_icon_hold(GtkWidget *w, double x, double y, gpointer data)
         menu_item(menu, T("Open in Files", "파일에서 열기"), G_CALLBACK(m_files), ic, FALSE);
     menu_item(menu, T("Move to Trash", "휴지통으로 이동"), G_CALLBACK(m_trash), ic, TRUE);
     gtk_widget_show_all(menu);
-    g_signal_connect(menu, "deactivate", G_CALLBACK(gtk_widget_destroy), NULL);
+    lp_menu_destroy_when_closed(menu);
     lp_menu_popup_at(menu, w, x, y);
 }
 
@@ -678,7 +678,7 @@ static void on_desk_hold(GtkWidget *w, double x, double y, gpointer data)
     menu_item(menu, T("Appearance…", "모양…"), G_CALLBACK(m_background), NULL, FALSE);
     menu_item(menu, T("Display Settings…", "디스플레이 설정…"), G_CALLBACK(m_display), NULL, FALSE);
     gtk_widget_show_all(menu);
-    g_signal_connect(menu, "deactivate", G_CALLBACK(gtk_widget_destroy), NULL);
+    lp_menu_destroy_when_closed(menu);
     lp_menu_popup_at(menu, w, x, y);
 }
 

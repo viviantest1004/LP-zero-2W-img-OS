@@ -151,7 +151,7 @@ static void on_hold(GtkWidget *w, double x, double y, gpointer d)
     g_signal_connect(p, "activate", G_CALLBACK(m_pin), info);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), p);
     gtk_widget_show_all(menu);
-    g_signal_connect(menu, "deactivate", G_CALLBACK(gtk_widget_destroy), NULL);
+    lp_menu_destroy_when_closed(menu);
     lp_menu_popup_at(menu, w, x, y);
 }
 
