@@ -92,6 +92,15 @@ wpa -d
 # battery or backlight it applies what exists and waits.
 ?/bin/lp-tune lp-tune -d
 
+# The two root helpers the desktop's apps talk to. Each asks the
+# person's password (sudo group) before it does anything, keeps the
+# answer for five minutes, and takes only validated verbs - never a
+# shell string. lp-privd installs and removes packages (Software), and
+# lp-diskd partitions, formats and checks disks (Disks). A board without
+# the desktop has neither binary and skips both lines.
+?/bin/lp-privd lp-privd -d
+?/bin/lp-diskd lp-diskd -d
+
 # The SSH server.
 #   -F  stay in the foreground. init can only supervise a child that
 #       stays alive; going to the background looks like an instant death.

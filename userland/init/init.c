@@ -41,9 +41,57 @@ static const char *shell_path(void)
  * in /etc/lp/services there, and the boards keep the old path. */
 #define SERVICES_OURS   "/etc/lp/services"
 #define SERVICES_LEGACY "/etc/services"
+/* A netbase port table has lines like "ssh 22/tcp". Started as a list
+ * of programs, every one of those lines is a service that cannot run,
+ * restarted every thirty seconds forever - which is what the first
+ * desktop image did when it carried an init older than /etc/lp/services.
+ * So the old path is only believed when it does not look like that. */
+static bool is_port_table(const char *path)
+{
+    static char buf[4096];
+    long n = proc_read(path, buf, sizeof buf - 1);
+    if (n <= 0)
+        return false;
+    buf[n] = '\0';
+    for (char *l = buf; l && *l; ) {
+        char *next = strchr(l, '\n');
+        if (next)
+            *next++ = '\0';
+        while (*l == ' ' || *l == '\t')
+            l++;
+        if (*l && *l != '#') {
+            char *w = l;
+            while (*w && *w != ' ' && *w != '\t')
+                w++;                       /* skip the first word */
+            while (*w == ' ' || *w == '\t')
+                w++;
+            char *d = w;
+            while (*d >= '0' && *d <= '9')
+                d++;
+            if (d > w && (strncmp(d, "/tcp", 4) == 0 ||
+                          strncmp(d, "/udp", 4) == 0))
+                return true;
+        }
+        l = next;
+    }
+    return false;
+}
+
 static const char *services_path(void)
 {
-    return lp_exists(SERVICES_OURS) ? SERVICES_OURS : SERVICES_LEGACY;
+    static const char *chosen;
+    if (!chosen) {
+        if (lp_exists(SERVICES_OURS) || !lp_exists(SERVICES_LEGACY))
+            chosen = SERVICES_OURS;
+        else if (is_port_table(SERVICES_LEGACY)) {
+            dprintf(STDERR_FILENO, "init: %s is a port table, not a service"
+                    " list - put services in %s\n", SERVICES_LEGACY,
+                    SERVICES_OURS);
+            chosen = SERVICES_OURS;
+        } else
+            chosen = SERVICES_LEGACY;
+    }
+    return chosen;
 }
 #define SERVICES     services_path()
 

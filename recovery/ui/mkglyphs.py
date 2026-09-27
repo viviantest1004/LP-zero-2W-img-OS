@@ -26,13 +26,6 @@ all of printable ASCII in M and S, because those two also draw text that
 is not in the catalog (account names, fsck's output). That keeps a
 Hangul-capable atlas to a few hundred kilobytes.
 
-A fourth face, C, is the recovery shell's terminal: D2Coding (the
-desktop's monospace face) at 48 px, a 24 x 53 cell on the 4K panel -
-printable ASCII, the box-drawing and block characters full-screen
-programs draw frames with, and a few symbols. It is emitted inside
-#ifdef LPG_CONSOLE_FACE, which only lp-recovery defines, so the boot
-menu in the firmware does not carry it.
-
 Alpha is stored at 4 bits a pixel, two to a byte, cropped to each
 glyph's ink. Sixteen levels of edge coverage are indistinguishable from
 256 at these sizes, and it halves the table.
@@ -50,8 +43,8 @@ out on purpose: every syllable at this size is megabytes of source, and
 the shell's own messages are English (a Korean file name shows as boxes
 two cells wide, and `ls` still lists it correctly).
 
-Needs Pillow, the Pretendard variable font and D2Coding; LP_FONT and
-LP_MONO override where they are. (The build host's default python3 has a broken Pillow, which
+Needs Pillow and the Pretendard variable font; LP_FONT overrides where
+the font is. (The build host's default python3 has a broken Pillow, which
 is why the command above names 3.12.) The output is committed, so a
 normal build needs neither.
 """
@@ -66,21 +59,13 @@ FONT = os.environ.get(
     "LP_FONT",
     "/home/user/kernel-work/deb/usr/share/fonts/truetype/pretendard/PretendardVariable.ttf")
 
-MONO = os.environ.get(
-    "LP_MONO",
-    "/home/user/kernel-work/deb/usr/share/fonts/truetype/d2coding/D2Coding-Ver1.3.2-20180524.ttf")
-MONO_PX = 48
-MONO_CHARS = ("".join(chr(c) for c in range(0x20, 0x7F)) +
-              "".join(chr(c) for c in range(0x2500, 0x25A0)) +
-              "◆°±·•…←↑→↓▲▼►◄✓✗")
-
 # class -> (pixel size, weight on the variable font's wght axis)
 FACES = [("T", 104, 600), ("M", 60, 500), ("S", 40, 400)]
 
 ASCII = "".join(chr(c) for c in range(0x20, 0x7F))
 # Characters drawn by code rather than written in a string: the password
 # bullet, the on-screen keyboard's special keys, the replacement box.
-EXTRA = {"T": "0123456789", "M": ASCII + "•⌫⏎⇧×←↑→↓", "S": ASCII + "•…·"}
+EXTRA = {"T": "0123456789", "M": ASCII + "•⌫⏎⇧×", "S": ASCII + "•…·"}
 
 
 MONO_FONT = os.environ.get(
@@ -195,33 +180,6 @@ def main():
             w("    0\n")
         w("};\n\n")
         faces.append((cls, size, asc, desc, int(round(size * 1.3)), len(glyphs)))
-    # The terminal face, for lp-recovery only.
-    font = ImageFont.truetype(MONO, MONO_PX)
-    probe = bytes(font.getmask("\U0010FFFD"))
-    glyphs = []
-    data = bytearray()
-    for ch in MONO_CHARS:
-        if ch != " " and bytes(font.getmask(ch)) == probe:
-            continue                    # not in D2Coding: drawn as a box
-        adv, x0, y0, gw, gh, bits = render(font, ch)
-        glyphs.append((ord(ch), adv, x0, y0, gw, gh, len(data)))
-        data += bits
-    asc, desc = font.getmetrics()
-    total += len(data) + len(glyphs) * 16
-    w("#ifdef LPG_CONSOLE_FACE\n")
-    w("/* C: D2Coding %d px, %d glyphs, %d bytes of alpha */\n" % (MONO_PX, len(glyphs), len(data)))
-    w("static const lpg_glyph_t LPG_C_G[%d] = {\n" % len(glyphs))
-    for g in glyphs:
-        w("    { 0x%04x, %d, %d, %d, %d, %d, %d },\n" % g)
-    w("};\n")
-    w("static const unsigned char LPG_C_D[%d] = {\n" % max(1, len(data)))
-    for i in range(0, len(data), 24):
-        w("    " + ",".join("%d" % b for b in data[i:i + 24]) + ",\n")
-    w("};\n")
-    w("static const lpg_face_t LPG_CONSOLE = { %d, %d, %d, %d, %d, LPG_C_G, LPG_C_D };\n"
-      % (MONO_PX, asc, desc, asc + desc, len(glyphs)))
-    w("#endif\n\n")
-
     w("enum { LPG_T, LPG_M, LPG_S };\n")
     w("static const lpg_face_t LPG_FACES[3] = {\n")
     for cls, size, asc, desc, line, n in faces:

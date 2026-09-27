@@ -50,6 +50,16 @@ void sys_init(void)
     ser_fd = (int)lp_open("/dev/ttyS0", O_WRONLY | O_NOCTTY_ | O_NONBLOCK | O_CLOEXEC, 0);
 }
 
+void sys_log_pause(bool pause)
+{
+    if (pause && log_fd >= 0) {
+        lp_fsync(log_fd);
+        lp_close(log_fd);
+        log_fd = -1;
+    } else if (!pause && log_fd < 0)
+        log_fd = (int)lp_open(LOG_FILE, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+}
+
 void rlog_line(const char *msg)
 {
     char line[480];

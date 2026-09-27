@@ -12,9 +12,10 @@
  * while stores through mmap() wait for deferred I/O (the boot splash
  * found this first; userland/splash/splash.c).
  *
- * The VT is put in KD_GRAPHICS while the menu is up, so the kernel's
- * console does not draw text or a cursor over it, and back in KD_TEXT for
- * the recovery shell, which is a text console.
+ * The VT is put in KD_GRAPHICS for as long as the program runs, so the
+ * kernel's console never draws text or a cursor over it - the recovery
+ * shell included, which is drawn by term.c, not by the console (whose
+ * font is a few millimetres high at 4K and has no on-screen keyboard).
  *
  * ── Input ──
  *
@@ -23,13 +24,20 @@
  * classified by what it reports - keys, absolute position (a touch screen
  * or a tablet), relative motion (a mouse). Keyboards are GRABBED while
  * the menu owns the screen. Without that the kernel's keyboard handler
- * also feeds every key to tty1, and the password typed into the menu
- * would be sitting in tty1's input queue when the shell starts - and the
- * shell would run it as a command, echoing it on the screen. The grab is
- * released only for the shell, and the queue is flushed before it starts.
+ * also feeds every key to tty1, and a password typed into the menu would
+ * sit in tty1's input queue for whatever reads tty1 next.
  *
  * Devices are looked for again every two seconds, so a USB keyboard
  * plugged in after the menu came up works.
+ *
+ * A touch screen is read finger by finger (the multitouch slots of
+ * ABS_MT_*, protocol B), and each finger's press, move and lift is its
+ * own event: two thumbs typing fast on the on-screen keyboard overlap,
+ * and the second key must not be lost because the first finger was still
+ * down. Single-touch screens (ABS_X/Y with BTN_TOUCH) and tablets are
+ * finger 0. The keyboard grab stays on for the recovery shell too: the
+ * shell runs on a pty inside this program (term.c), so every key it gets
+ * comes from here, and tty1 never sees one.
  */
 #include "recovery.h"
 
@@ -130,25 +138,56 @@ void scr_present(const lpui_canvas_t *c, int x, int y, int w, int h)
 }
 
 /* ── Input devices ────────────────────────────────────────────────── */
-#define MAXDEV 24
+#define MAXDEV   24
+#define MAXSLOT  10             /* fingers tracked per touch screen */
 enum { D_KBD = 1, D_ABS = 2, D_MT = 4, D_REL = 8 };
+typedef struct {
+    int  x, y;                  /* device units */
+    bool down, was_down, changed;
+} slot_t;
 typedef struct {
     int  fd, num, kind;
     int  minx, maxx, miny, maxy;
-    int  x, y;                  /* last absolute position, device units */
-    bool down, was_down, moved;
+    slot_t s[MAXSLOT];          /* single-touch devices use s[0] */
     int  slot;                  /* current multitouch slot */
+    bool moved;                 /* relative mouse moved, or its button */
+    bool btn;                   /* mouse / tablet button, BTN_TOUCH */
 } dev_t_;
 static dev_t_ devs[MAXDEV];
 static int ndev;
 static bool grabbed;
 static s64 last_scan;
-static bool shift_l, shift_r, caps;
+static bool shift_l, shift_r, ctrl_l, ctrl_r, alt_l, alt_r, caps;
 static int mouse_x = -1, mouse_y = -1;
+static int extra_fd = -1;
+
+/* A frame (EV_SYN) can change several fingers at once, and in_wait hands
+ * out one event per call, so events wait here. */
+#define QN 32
+static uev_t queue[QN];
+static int qhead, qlen;
+
+static void push(const uev_t *e)
+{
+    if (qlen == QN)
+        return;
+    queue[(qhead + qlen++) % QN] = *e;
+}
+
+static bool pop(uev_t *e)
+{
+    if (!qlen)
+        return false;
+    *e = queue[qhead];
+    qhead = (qhead + 1) % QN;
+    qlen--;
+    return true;
+}
+
+void in_watch_fd(int fd) { extra_fd = fd; }
 
 #define EVIOCGBIT(ev, len) _LP_IOC(2u, 'E', 0x20 + (ev), (len))
 #define EVIOCGABS(abs)     _LP_IOC(2u, 'E', 0x40 + (abs), 24)
-#define EVIOCGPROP(len)    _LP_IOC(2u, 'E', 0x09, (len))
 #define EVIOCGRAB          _LP_IOC(1u, 'E', 0x90, sizeof(int))
 #define TEST(bits, n)      ((bits)[(n) / 8] & (1u << ((n) % 8)))
 
@@ -222,8 +261,8 @@ void scr_graphics(bool on)
     for (int i = 0; i < ndev; i++)
         if (devs[i].kind & D_KBD)
             lp_ioctl(devs[i].fd, EVIOCGRAB, (void *)(long)(on ? 1 : 0));
-    /* Whatever reached the tty's queue before the grab (or while the
-     * shell ran) must not be read by the next reader. */
+    /* Whatever reached the tty's queue before the grab must not be read
+     * by anybody later. */
     lp_ioctl(STDIN_FILENO, TCFLSH, (void *)0);
 }
 
@@ -233,11 +272,12 @@ void in_drain(void)
     for (int i = 0; i < ndev; i++)
         while (lp_read(devs[i].fd, buf, sizeof buf) > 0)
             ;
+    qlen = 0;
 }
 
-/* US layout. The recovery menu types passwords and one confirmation
- * word; the owner's Korean input is a desktop feature (the OSK track's
- * input method) and passwords are ASCII. */
+/* US layout. Passwords and the one confirmation word are ASCII, and the
+ * recovery shell is an English console; Korean input is a desktop
+ * feature (the OSK track's input method). */
 static const char KEYMAP[2][58] = {
     { 0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 8, 9,
       'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', 13, 0,
@@ -248,9 +288,15 @@ static const char KEYMAP[2][58] = {
       'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0, '|',
       'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' ' },
 };
+/* The keypad, as with Num Lock on: KEY_KP7 (71) .. KEY_KPDOT (83). */
+static const char KEYPAD[] = "789-456+1230.";
 
 static u32 key_char(int code)
 {
+    if (code >= 71 && code <= 83)
+        return (u8)KEYPAD[code - 71];
+    if (code == 98)
+        return '/';                     /* KEY_KPSLASH */
     if (code <= 0 || code >= 58)
         return 0;
     bool shift = shift_l || shift_r;
@@ -263,8 +309,30 @@ static u32 key_char(int code)
 
 typedef struct { u16 type, code; s32 value; } ie_t;
 
-/* One read of one device into zero or one UI event. */
-static int dev_read(dev_t_ *d, uev_t *out)
+static void ptr_event(dev_t_ *d, int slot, int x, int y, bool down)
+{
+    uev_t e;
+    memset(&e, 0, sizeof e);
+    e.kind = UEV_PTR;
+    e.slot = slot;
+    if (d->kind & D_REL) {
+        e.x = mouse_x;
+        e.y = mouse_y;
+        e.mouse = true;
+    } else {
+        e.x = (int)((s64)(x - d->minx) * SW / (d->maxx - d->minx));
+        e.y = (int)((s64)(y - d->miny) * SH / (d->maxy - d->miny));
+    }
+    if (e.x < 0) e.x = 0;
+    if (e.y < 0) e.y = 0;
+    if (e.x >= SW) e.x = SW - 1;
+    if (e.y >= SH) e.y = SH - 1;
+    e.down = down;
+    push(&e);
+}
+
+/* Read what one device has into the queue. -1 when it is gone. */
+static int dev_read(dev_t_ *d)
 {
     u8 raw[sizeof(long) * 2 + 8];
     for (;;) {
@@ -274,38 +342,62 @@ static int dev_read(dev_t_ *d, uev_t *out)
         ie_t e;
         memcpy(&e, raw + sizeof(long) * 2, sizeof e);
         if (e.type == 1 && (d->kind & D_KBD) && e.code < 0x100) {       /* EV_KEY */
-            if (e.code == 42) { shift_l = e.value != 0; continue; }
-            if (e.code == 54) { shift_r = e.value != 0; continue; }
-            if (e.code == 58 && e.value == 1) { caps = !caps; continue; }
+            bool on = e.value != 0;
+            switch (e.code) {
+            case 42:  shift_l = on; continue;
+            case 54:  shift_r = on; continue;
+            case 29:  ctrl_l = on; continue;
+            case 97:  ctrl_r = on; continue;
+            case 56:  alt_l = on; continue;
+            case 100: alt_r = on; continue;
+            case 58:  if (e.value == 1) caps = !caps; continue;
+            }
             if (e.value == 0)
                 continue;
-            out->kind = UEV_KEY;
-            out->code = e.code;
-            out->ch = key_char(e.code);
-            out->press = true;
-            return 1;
+            uev_t k;
+            memset(&k, 0, sizeof k);
+            k.kind = UEV_KEY;
+            k.code = e.code;
+            k.ch = key_char(e.code);
+            k.press = true;
+            k.shift = shift_l || shift_r;
+            k.ctrl = ctrl_l || ctrl_r;
+            k.alt = alt_l || alt_r;
+            push(&k);
+            continue;
         }
         if (e.type == 1 && (e.code == 0x14a || e.code == 0x110)) {       /* BTN_TOUCH/LEFT */
-            d->down = e.value != 0;
+            d->btn = e.value != 0;
+            if (!(d->kind & D_MT)) {
+                d->s[0].down = d->btn;
+                d->s[0].changed = true;
+            }
             d->moved = true;
             continue;
         }
         if (e.type == 3 && (d->kind & D_ABS)) {
             if (d->kind & D_MT) {
-                if (e.code == 0x2f) d->slot = e.value;                  /* ABS_MT_SLOT */
-                else if (d->slot == 0 && e.code == 0x35) { d->x = e.value; d->moved = true; }
-                else if (d->slot == 0 && e.code == 0x36) { d->y = e.value; d->moved = true; }
-                else if (d->slot == 0 && e.code == 0x39) { d->down = e.value >= 0; d->moved = true; }
+                if (e.code == 0x2f) {                                   /* ABS_MT_SLOT */
+                    d->slot = e.value >= 0 && e.value < MAXSLOT ? e.value : -1;
+                    continue;
+                }
+                slot_t *s = d->slot >= 0 ? &d->s[d->slot] : 0;
+                if (!s)
+                    continue;
+                if (e.code == 0x35) { s->x = e.value; s->changed = true; }
+                else if (e.code == 0x36) { s->y = e.value; s->changed = true; }
+                else if (e.code == 0x39) { s->down = e.value >= 0; s->changed = true; }  /* TRACKING_ID */
             } else {
-                if (e.code == 0) { d->x = e.value; d->moved = true; }
-                else if (e.code == 1) { d->y = e.value; d->moved = true; }
+                if (e.code == 0) { d->s[0].x = e.value; d->s[0].changed = true; }
+                else if (e.code == 1) { d->s[0].y = e.value; d->s[0].changed = true; }
             }
             continue;
         }
         if (e.type == 2 && (d->kind & D_REL)) {
             if (mouse_x < 0) { mouse_x = SW / 2; mouse_y = SH / 2; }
-            if (e.code == 0) mouse_x += e.value * (lpui_px(4) > 1 ? lpui_px(4) : 1);
-            if (e.code == 1) mouse_y += e.value * (lpui_px(4) > 1 ? lpui_px(4) : 1);
+            int k = lpui_px(4) > 1 ? lpui_px(4) : 1;
+            if (e.code == 0) mouse_x += e.value * k;
+            if (e.code == 1) mouse_y += e.value * k;
             if (mouse_x < 0) mouse_x = 0;
             if (mouse_y < 0) mouse_y = 0;
             if (mouse_x >= SW) mouse_x = SW - 1;
@@ -313,20 +405,25 @@ static int dev_read(dev_t_ *d, uev_t *out)
             d->moved = true;
             continue;
         }
-        if (e.type == 0 && d->moved) {                                  /* EV_SYN */
-            d->moved = false;
-            out->kind = UEV_PTR;
+        if (e.type == 0) {                                              /* EV_SYN */
             if (d->kind & D_REL) {
-                out->x = mouse_x;
-                out->y = mouse_y;
-                out->mouse = true;
-            } else {
-                out->x = (int)((s64)(d->x - d->minx) * SW / (d->maxx - d->minx));
-                out->y = (int)((s64)(d->y - d->miny) * SH / (d->maxy - d->miny));
-                out->mouse = false;
+                if (d->moved)
+                    ptr_event(d, 0, 0, 0, d->btn);
+                d->moved = false;
+                continue;
             }
-            out->down = d->down;
-            return 1;
+            for (int i = 0; i < MAXSLOT; i++) {
+                slot_t *s = &d->s[i];
+                if (!s->changed)
+                    continue;
+                s->changed = false;
+                /* A tablet (usb-tablet in a VM) moves with nothing down:
+                 * that is hover, which the menu shows like a mouse. */
+                if (s->down || s->was_down || !(d->kind & D_MT))
+                    ptr_event(d, i, s->x, s->y, s->down);
+                s->was_down = s->down;
+            }
+            d->moved = false;
         }
     }
 }
@@ -336,30 +433,41 @@ typedef struct { int fd; short events, revents; } pollfd_t;
 int in_wait(uev_t *ev, int timeout_ms)
 {
     memset(ev, 0, sizeof *ev);
+    if (pop(ev))
+        return 1;
     s64 now = lp_monotonic_ms();
     if (now - last_scan > 2000)
         in_rescan();
-    /* Anything already queued first. */
-    for (int i = 0; i < ndev; i++) {
-        int r = dev_read(&devs[i], ev);
-        if (r > 0)
-            return 1;
-        if (r < 0) { dev_drop(i); i--; }
-    }
-    pollfd_t pf[MAXDEV];
+    pollfd_t pf[MAXDEV + 1];
+    int n = 0;
     for (int i = 0; i < ndev; i++)
-        pf[i] = (pollfd_t){ devs[i].fd, 1 /* POLLIN */, 0 };
+        pf[n++] = (pollfd_t){ devs[i].fd, 1 /* POLLIN */, 0 };
+    int xi = -1;
+    if (extra_fd >= 0) {
+        xi = n;
+        pf[n++] = (pollfd_t){ extra_fd, 1, 0 };
+    }
+    if (timeout_ms < 0)
+        timeout_ms = 0;
     struct { long s, ns; } ts = { timeout_ms / 1000, (long)(timeout_ms % 1000) * 1000000L };
-    long r = sys_call5(SYS_ppoll, (long)pf, ndev, (long)&ts, 0, 8);
+    long r = sys_call5(SYS_ppoll, (long)pf, n, (long)&ts, 0, 8);
     if (r <= 0)
         return 0;
     for (int i = 0; i < ndev; i++) {
         if (!pf[i].revents)
             continue;
-        int k = dev_read(&devs[i], ev);
-        if (k > 0)
-            return 1;
-        if (k < 0 || (pf[i].revents & (8 | 16))) { dev_drop(i); i--; }   /* ERR, HUP */
+        if (dev_read(&devs[i]) < 0 || (pf[i].revents & (8 | 16))) {  /* ERR, HUP */
+            dev_drop(i);
+            /* keep pf in step with devs */
+            pf[i] = pf[ndev];
+            i--;
+        }
+    }
+    if (pop(ev))
+        return 1;
+    if (xi >= 0 && pf[xi].revents) {
+        ev->kind = UEV_FD;
+        return 1;
     }
     return 0;
 }
