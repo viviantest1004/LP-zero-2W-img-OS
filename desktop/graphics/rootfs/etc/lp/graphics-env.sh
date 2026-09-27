@@ -61,7 +61,7 @@ export _JAVA_AWT_WM_NONREPARENTING=1        # Java/AWT draws blank windows witho
 # loads a cursor itself), so the pointer does not change size between
 # windows.
 export XCURSOR_THEME=Adwaita
-export XCURSOR_SIZE=24
+export XCURSOR_SIZE=16
 
 # ── Which GPU draws ────────────────────────────────────────────────
 lp_gfx_card=

@@ -29,7 +29,10 @@ monospace-font-name='D2Coding 10.5'
 # Greyscale, not subpixel, and slight hinting: /etc/fonts/local.conf says why.
 font-antialiasing='grayscale'
 font-hinting='slight'
-# 24 logical pixels = 48 on the panel at scale 2, the same size the
-# compositor and Xwayland draw (XCURSOR_SIZE=24 in /etc/lp/graphics-env.sh).
+# 16 logical pixels: 32 on a panel at scale 2 (a 4K laptop, a Retina VM
+# window), where 24 gave a 48-pixel pointer that looked oversized next to
+# everything else. Adwaita's smallest image is 24, so at scale 1 the
+# pointer stays 24. The same size everywhere: the compositors (sway's
+# seat, wayfire.ini) and Xwayland (XCURSOR_SIZE, session-run).
 cursor-theme='Adwaita'
-cursor-size=24
+cursor-size=16

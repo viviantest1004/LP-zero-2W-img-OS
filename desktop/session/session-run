@@ -67,6 +67,11 @@ fi
 command -v wayfire > /dev/null 2>&1 || LP_COMPOSITOR=sway
 export WLR_LIBINPUT_NO_DEVICES=1
 export GDK_BACKEND=wayland
+# The pointer's theme and size for everything that loads a cursor itself
+# (Xwayland apps, the compositors' defaults): the same 16 as GTK
+# (desktop/theme/settings.ini) and sway's seat, 32 pixels at scale 2.
+export XCURSOR_THEME=Adwaita
+export XCURSOR_SIZE=16
 # The terminal's shell: the account's own (lpsh, with its line editor,
 # prompt and history), or /bin/sh if passwd names something that cannot
 # run - foot once read /bin/false there and opened nothing.
