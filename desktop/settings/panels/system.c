@@ -37,6 +37,8 @@
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
 #include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 static char *cpu_words(void)
 {
@@ -192,6 +194,85 @@ static void info_done(int st, const char *out, const char *err, gpointer p)
     g_free(t);
 }
 
+/* ── usage, live ─────────────────────────────────────────────────── */
+
+typedef struct {
+    GtkWidget *cpu, *mem, *disk, *up;
+    guint64 idle0, total0;
+    int ncpu;
+    guint timer;
+} Usage;
+
+static void usage_free(gpointer p)
+{
+    Usage *u = p;
+    if (u->timer)
+        g_source_remove(u->timer);
+    g_free(u);
+}
+
+static gboolean usage_tick(gpointer p)
+{
+    Usage *u = p;
+    char *stat = lp_slurp("/proc/stat");
+    if (stat) {
+        guint64 v[10] = { 0 };
+        if (sscanf(stat, "cpu %" G_GUINT64_FORMAT " %" G_GUINT64_FORMAT " %" G_GUINT64_FORMAT
+                   " %" G_GUINT64_FORMAT " %" G_GUINT64_FORMAT " %" G_GUINT64_FORMAT
+                   " %" G_GUINT64_FORMAT " %" G_GUINT64_FORMAT,
+                   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) >= 4) {
+            guint64 idle = v[3] + v[4], total = 0;
+            for (int i = 0; i < 8; i++) total += v[i];
+            if (u->total0 && total > u->total0) {
+                double busy = 1.0 - (double)(idle - u->idle0) / (double)(total - u->total0);
+                char *t = g_strdup_printf(T("%.0f%% of %d cores", "%.0f%% (코어 %d개)"),
+                                          CLAMP(busy, 0.0, 1.0) * 100.0, u->ncpu);
+                row_set_value(u->cpu, t);
+                g_free(t);
+            }
+            u->idle0 = idle;
+            u->total0 = total;
+        }
+        g_free(stat);
+    }
+    char *mi = lp_slurp("/proc/meminfo");
+    if (mi) {
+        guint64 tot = 0, avail = 0;
+        const char *a = strstr(mi, "MemTotal:"), *b = strstr(mi, "MemAvailable:");
+        if (a) sscanf(a, "MemTotal: %" G_GUINT64_FORMAT, &tot);
+        if (b) sscanf(b, "MemAvailable: %" G_GUINT64_FORMAT, &avail);
+        if (tot) {
+            char *used = lp_human((tot - avail) * 1024), *all = lp_human(tot * 1024);
+            char *t = g_strdup_printf(T("%s of %s (%.0f%%)", "%s / %s (%.0f%%)"), used, all,
+                                      100.0 * (double)(tot - avail) / (double)tot);
+            row_set_value(u->mem, t);
+            g_free(t); g_free(used); g_free(all);
+        }
+        g_free(mi);
+    }
+    struct statvfs sv;
+    if (statvfs("/", &sv) == 0 && sv.f_blocks) {
+        guint64 all = (guint64)sv.f_blocks * sv.f_frsize;
+        guint64 freeb = (guint64)sv.f_bavail * sv.f_frsize;
+        char *used = lp_human(all - freeb), *tot = lp_human(all);
+        char *t = g_strdup_printf(T("%s of %s (%.0f%%)", "%s / %s (%.0f%%)"), used, tot,
+                                  100.0 * (double)(all - freeb) / (double)all);
+        row_set_value(u->disk, t);
+        g_free(t); g_free(used); g_free(tot);
+    }
+    char *up = lp_slurp("/proc/uptime");
+    if (up) {
+        long s = atol(up);
+        long d = s / 86400, h = (s % 86400) / 3600, m = (s % 3600) / 60;
+        char *t = d ? g_strdup_printf(T("%ld days, %ld h %ld min", "%ld일 %ld시간 %ld분"), d, h, m)
+                    : g_strdup_printf(T("%ld h %ld min", "%ld시간 %ld분"), h, m);
+        row_set_value(u->up, t);
+        g_free(t);
+        g_free(up);
+    }
+    return G_SOURCE_CONTINUE;
+}
+
 static void on_info(GtkWidget *row, gpointer p)
 {
     (void)row; (void)p;
@@ -292,6 +373,19 @@ static GtkWidget *build(void)
         g_free(d);
     }
     g_free(cpu); g_free(mem); g_free(gpu);
+
+    /* Live: what the machine is doing now, every two seconds while the
+     * page is on screen (the timer stops when the page is destroyed). */
+    GtkWidget *ug = group_new(page, T("Usage", "사용량"));
+    Usage *us = g_new0(Usage, 1);
+    us->cpu = row_value(ug, T("Processor use", "CPU 사용률"), NULL, "…");
+    us->mem = row_value(ug, T("Memory use", "메모리 사용량"), NULL, "…");
+    us->disk = row_value(ug, T("Disk use", "디스크 사용량"), NULL, "…");
+    us->up = row_value(ug, T("Up for", "가동 시간"), NULL, "…");
+    us->ncpu = (int)sysconf(_SC_NPROCESSORS_ONLN);
+    usage_tick(us);
+    us->timer = g_timeout_add_seconds(2, usage_tick, us);
+    g_object_set_data_full(G_OBJECT(page), "lp-usage", us, usage_free);
 
     GtkWidget *sg = group_new(page, T("Software", "소프트웨어"));
     row_value(sg, T("Operating system", "운영체제"), NULL, os);

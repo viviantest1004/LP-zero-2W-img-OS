@@ -14,7 +14,7 @@
  * types.h does; lpboot.c does it itself).
  *
  * ── What is here ──
- *   - the desktop's aubergine gradient, from the same table the boot
+ *   - the desktop's deep-blue gradient, from the same table the boot
  *     splash uses (userland/splash/logo.h), ordered-dithered so a dark
  *     gradient across 3840 pixels has no contour lines;
  *   - the LP mark from desktop/branding/c/lp-logo-alpha.h, shrunk with an
@@ -46,8 +46,8 @@
 
 /* ── Design tokens ────────────────────────────────────────────────── */
 #define LPUI_INK        0xffffffu   /* text on the gradient */
-#define LPUI_INK2       0xefe3ecu   /* secondary text: the wordmark's tint */
-#define LPUI_ACCENT     0xff6a3du   /* the mark's orange: focus, progress */
+#define LPUI_INK2       0xdbe8f0u   /* secondary text: the wordmark's tint */
+#define LPUI_ACCENT     0xf28c28u   /* the mark's orange: focus, progress */
 #define LPUI_DANGER     0xff5a5au   /* destructive choices, errors */
 #define LPUI_CARD_A     26          /* card fill: white at ~10% */
 #define LPUI_LINE_A     44          /* card hairline: white at ~17% */

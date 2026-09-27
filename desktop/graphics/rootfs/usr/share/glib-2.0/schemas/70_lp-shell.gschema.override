@@ -16,3 +16,9 @@ icon-theme='LP'
 gtk-theme='Adwaita'
 color-scheme='prefer-dark'
 cursor-theme='Adwaita'
+
+# Minimise, maximise and close on the right of every header bar. Under
+# sway, which cannot minimise, lp-shell-start takes minimise out again
+# for that session.
+[org.gnome.desktop.wm.preferences]
+button-layout='appmenu:minimize,maximize,close'

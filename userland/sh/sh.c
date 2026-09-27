@@ -894,6 +894,9 @@ static tok_type_t next_token(char **p, char **word_out)
 
     while (is_space(*s)) s++;
     if (*s == '\0') { *p = s; return TOK_END; }
+    /* A # where a word would start begins a comment, to the end of the
+     * line: `echo x # note` printed "x # note". */
+    if (*s == '#') { *p = s + strlen(s); return TOK_END; }
 
     /* An operator is a token in itself. Two-character ones (&& ||) must
      * be checked before the single-character ones (|). */
@@ -3356,6 +3359,7 @@ static const char *unquoted_semicolon(const char *p)
     char quote = 0;
     int  depth = 0;              /* nesting inside $( ) */
     bool backtick = false;
+    const char *start = p;
 
     for (; *p; p++) {
         if (*p == '\\' && p[1]) { p++; continue; }
@@ -3379,6 +3383,13 @@ static const char *unquoted_semicolon(const char *p)
         if (*p == '$' && p[1] == '(') { depth++; p++; continue; }
         if (*p == '(')                { depth++; continue; }
         if (*p == ')' && depth)       { depth--; continue; }
+
+        /* A word that starts with # starts a comment, and a semicolon
+         * in a comment is prose: `# it the daemon; calling ...` in
+         * /etc/rc ran "calling" as a command. */
+        if (*p == '#' && depth == 0 &&
+            (p == start || p[-1] == ' ' || p[-1] == '\t'))
+            return NULL;
 
         if (*p == ';' && depth == 0)
             return p;
@@ -3445,7 +3456,7 @@ static int split_statements(const char *line, block_line_t *out, int max)
 
     while (*p && n < max) {
         while (*p == ' ' || *p == '\t') p++;
-        if (!*p) break;
+        if (!*p || *p == '#') break;     /* an indented comment line */
 
         const char *semi = unquoted_semicolon(p);
         size_t len = semi ? (size_t)(semi - p) : strlen(p);

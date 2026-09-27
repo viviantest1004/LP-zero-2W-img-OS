@@ -1,11 +1,19 @@
 /*
- * dock.c - lp-dock, the full-height dock on the left.
+ * dock.c - lp-dock, the floating dock at the bottom of the screen.
  *
- * The owner's mockup, top to bottom: notes, terminal, files, text
- * editor, code editor, browser, mail, calculator, software store,
- * system monitor, settings, clock - colourful app icons with a small
- * dot to the left of each one that is running - then a separator and
- * the 3x3 app-grid button at the bottom.
+ *            ╭──────────────────────────────────────────╮
+ *            │ ▣  ▣  ▣  ▣  ▣  ▣  ▣  ▣  ▣  ▣  │  ⠿ │
+ *            ╰───•──────•──────────────────────────────╯
+ *
+ * A rounded, translucent bar centred above the bottom edge, not touching
+ * it: files, browser, terminal, editors, the everyday apps, settings -
+ * colourful app icons with a small dot under each one that is running
+ * (a wider orange bar under the one in front) - then a separator and the
+ * app-grid button. It reserves its height, so a maximised window stops
+ * above it instead of sliding under.
+ *
+ * It used to be a full-height column on the left, which is where
+ * Ubuntu keeps its dock; LP's is its own shape.
  *
  * ── the mockup's apps and what is behind them ──
  *
@@ -71,6 +79,7 @@
 #define _GNU_SOURCE 1
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "lp-apps.h"
@@ -78,8 +87,14 @@
 #include "lp-shell.h"
 #include "lp-toplevel.h"
 
-#define DOCK_WIDTH 72
-#define ICON_PX 48
+/* The icons' size: Settings > Appearance > Dock size writes small,
+ * medium or large into ~/.config/lp/dock.conf. The dock reads it at start
+ * and, when the file changes, exits - lp-shell-start starts it again a
+ * second later at the new size, which is simpler and surer than resizing
+ * every item and the layer surface in place. */
+static int icon_px = 44;
+#define ICON_PX icon_px
+#define DOCK_MARGIN 8      /* between the dock and the screen's bottom edge */
 #define EDGE_PX 8           /* the bottom-edge catcher's height */
 #define LAUNCH_GIVE_UP 8    /* seconds */
 
@@ -90,21 +105,19 @@ typedef struct {
     const char *icon;       /* its icon, when nothing fills it */
 } Slot;
 
-/* The mockup's order. */
+/* The dock's order: where a person goes most, first. */
 static const Slot slots[] = {
-    { { "org.gnome.Gnote.desktop", "gnote.desktop" }, "gnote",
-      "Notes", "메모", "gnote" },
+    { { "lp-files.desktop" }, NULL, "Files", "파일", "system-file-manager" },
+    { { "firefox-esr.desktop", "firefox.desktop" }, "firefox-esr",
+      "Web Browser", "웹 브라우저", "firefox-esr" },
     { { "foot.desktop", "org.codeberg.dnkl.foot.desktop" }, "foot",
       "Terminal", "터미널", "utilities-terminal" },
-    { { "lp-files.desktop" }, NULL, "Files", "파일", "system-file-manager" },
     { { "org.gnome.gedit.desktop", "org.gnome.TextEditor.desktop" }, "gedit",
       "Text Editor", "텍스트 편집기", "accessories-text-editor" },
     { { "geany.desktop", "org.geany.Geany.desktop" }, "geany",
       "Code Editor", "코드 편집기", "geany" },
-    { { "firefox-esr.desktop", "firefox.desktop" }, "firefox-esr",
-      "Web Browser", "웹 브라우저", "firefox-esr" },
-    { { "thunderbird.desktop", "org.mozilla.Thunderbird.desktop" }, "thunderbird",
-      "Mail", "메일", "thunderbird" },
+    { { "libreoffice-writer.desktop" }, "libreoffice-writer",
+      "Documents", "문서", "libreoffice-writer" },
     { { "org.gnome.Calculator.desktop" }, "gnome-calculator",
       "Calculator", "계산기", "accessories-calculator" },
     { { "lp-software.desktop" }, NULL,
@@ -112,8 +125,6 @@ static const Slot slots[] = {
     { { "lp-tasks.desktop" }, NULL,
       "Task Manager", "작업 관리자", "utilities-system-monitor" },
     { { "lp-settings.desktop" }, NULL, "Settings", "설정", "preferences-system" },
-    { { "org.gnome.clocks.desktop" }, "gnome-clocks",
-      "Clocks", "시계", "org.gnome.clocks" },
 };
 #define NSLOTS (sizeof slots / sizeof slots[0])
 
@@ -299,7 +310,7 @@ static void launch(Item *it)
 static void show_missing(Item *it)
 {
     GtkWidget *pop = gtk_popover_new(it->button);
-    gtk_popover_set_position(GTK_POPOVER(pop), GTK_POS_RIGHT);
+    gtk_popover_set_position(GTK_POPOVER(pop), GTK_POS_TOP);
     gtk_style_context_add_class(gtk_widget_get_style_context(pop), "lp-note");
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     GtkWidget *t = gtk_label_new(T(it->slot->en, it->slot->ko));
@@ -529,8 +540,10 @@ static gboolean dot_draw(GtkWidget *w, cairo_t *cr, gpointer d)
     gtk_style_context_lookup_color(sc, "lp_t2", &a);
     gtk_style_context_lookup_color(sc, "lp_accent", &b);
     double f = CLAMP(it->focus.x, 0, 1);
-    double dw = 5.0 * r, dh = (5.0 + 9.0 * it->focus.x) * r;
-    double x = (W - dw) / 2, y = (H - dh) / 2, rad = dw / 2;
+    /* Under the icon: a round dot, stretched sideways into a short bar
+     * when the app is the one in front. */
+    double dh = 5.0 * r, dw = (5.0 + 11.0 * it->focus.x) * r;
+    double x = (W - dw) / 2, y = (H - dh) / 2, rad = dh / 2;
     cairo_set_source_rgba(cr, a.red + (b.red - a.red) * f, a.green + (b.green - a.green) * f,
                           a.blue + (b.blue - a.blue) * f, CLAMP(r, 0, 1));
     cairo_new_sub_path(cr);
@@ -585,19 +598,19 @@ static Item *add_item(const char *id, GDesktopAppInfo *info, const Slot *slot,
     gtk_style_context_add_class(sc, "lp-dock-item");
     if (!info)
         gtk_style_context_add_class(sc, "lp-missing");
-    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    it->dot = gtk_drawing_area_new();
-    gtk_style_context_add_class(gtk_widget_get_style_context(it->dot), "lp-dot");
-    gtk_widget_set_size_request(it->dot, 9, 18);
-    gtk_widget_set_valign(it->dot, GTK_ALIGN_CENTER);
-    g_signal_connect(it->dot, "draw", G_CALLBACK(dot_draw), it);
-    gtk_box_pack_start(GTK_BOX(row), it->dot, FALSE, FALSE, 0);
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     GtkWidget *img = app_image(it);
     it->img = img;
-    gtk_widget_set_hexpand(img, TRUE);
-    gtk_widget_set_margin_end(img, 8);
+    gtk_widget_set_vexpand(img, TRUE);
+    gtk_widget_set_margin_top(img, 6);
     g_signal_connect(img, "draw", G_CALLBACK(img_draw), it);
     gtk_box_pack_start(GTK_BOX(row), img, TRUE, TRUE, 0);
+    it->dot = gtk_drawing_area_new();
+    gtk_style_context_add_class(gtk_widget_get_style_context(it->dot), "lp-dot");
+    gtk_widget_set_size_request(it->dot, 20, 9);
+    gtk_widget_set_halign(it->dot, GTK_ALIGN_CENTER);
+    g_signal_connect(it->dot, "draw", G_CALLBACK(dot_draw), it);
+    gtk_box_pack_start(GTK_BOX(row), it->dot, FALSE, FALSE, 0);
     lp_spring_init(&it->run, LP_SPRING_INSERT, 0.0);
     lp_spring_init(&it->focus, LP_SPRING_EXPAND, 0.0);
     lp_spring_init(&it->pulse, LP_SPRING_WINDOW, 0.0);
@@ -877,6 +890,16 @@ static void edge_for(GdkMonitor *mon)
     gtk_widget_show_all(GTK_WIDGET(e));
 }
 
+static void on_conf_changed(GFileMonitor *m, GFile *f, GFile *o,
+                            GFileMonitorEvent ev, gpointer d)
+{
+    (void)m; (void)f; (void)o; (void)d;
+    if (ev == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT ||
+        ev == G_FILE_MONITOR_EVENT_CREATED ||
+        ev == G_FILE_MONITOR_EVENT_MOVED_IN)
+        exit(0);                 /* lp-shell-start brings it back resized */
+}
+
 static void on_command(int argc, char **argv, gpointer d)
 {
     (void)d;
@@ -904,32 +927,28 @@ int main(int argc, char **argv)
     items = g_ptr_array_new_with_free_func(item_free);
     dot_memory = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 
-    win = lp_layer_window("lp-dock", GTK_LAYER_SHELL_LAYER_TOP,
-                          LP_EDGE_TOP | LP_EDGE_BOTTOM | LP_EDGE_LEFT);
+    /* Anchored to the bottom edge only: the compositor centres it
+     * across, and it is as wide as its icons. The exclusive zone is its
+     * height plus the gap under it, so windows stop above it. */
+    win = lp_layer_window("lp-dock", GTK_LAYER_SHELL_LAYER_TOP, LP_EDGE_BOTTOM);
+    gtk_layer_set_margin(win, GTK_LAYER_SHELL_EDGE_BOTTOM, DOCK_MARGIN);
     gtk_layer_auto_exclusive_zone_enable(win);
-    gtk_widget_set_size_request(GTK_WIDGET(win), DOCK_WIDTH, -1);
 
-    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_style_context_add_class(gtk_widget_get_style_context(outer), "lp-dock");
     gtk_container_add(GTK_CONTAINER(win), outer);
 
-    /* The items scroll when there are more than fit - a dock that grows
-     * past the screen edge hides its last items where no finger can
-     * reach them. GtkScrolledWindow scrolls kinetically under a finger
-     * by default. */
-    GtkWidget *sw = gtk_scrolled_window_new(NULL, NULL);
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_NEVER,
-                                   GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_overlay_scrolling(GTK_SCROLLED_WINDOW(sw), TRUE);
-    gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(sw), TRUE);
-    gtk_widget_set_vexpand(sw, TRUE);
-    list = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_valign(list, GTK_ALIGN_START);
-    gtk_container_add(GTK_CONTAINER(sw), list);
-    gtk_box_pack_start(GTK_BOX(outer), sw, TRUE, TRUE, 0);
+    /* The items sit straight in the bar, which is as wide as they are.
+     * (A GtkScrolledWindow around them, for a dock wider than the
+     * screen, made the layer surface take the scroller's minimum width,
+     * which is none: the dock came up as the grid button alone.) Ten
+     * slots at 62 px is 620 px, well inside the narrowest screen this
+     * runs on at its scale. */
+    list = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_box_pack_start(GTK_BOX(outer), list, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(outer),
-                       gtk_separator_new(GTK_ORIENTATION_HORIZONTAL),
+                       gtk_separator_new(GTK_ORIENTATION_VERTICAL),
                        FALSE, FALSE, 0);
     grid_button = gtk_button_new();
     GtkStyleContext *gsc = gtk_widget_get_style_context(grid_button);
@@ -944,6 +963,21 @@ int main(int argc, char **argv)
 
     if (lp_toplevels_init())
         lp_toplevels_watch(on_toplevels, NULL);
+
+    /* The size, and a watch on it (see icon_px). */
+    char *conf = lp_config_path("dock.conf");
+    char *cs = NULL;
+    if (g_file_get_contents(conf, &cs, NULL, NULL)) {
+        if (strstr(cs, "size=small")) icon_px = 36;
+        else if (strstr(cs, "size=large")) icon_px = 56;
+        g_free(cs);
+    }
+    GFile *cf = g_file_new_for_path(conf);
+    GFileMonitor *conf_monitor = g_file_monitor_file(cf, G_FILE_MONITOR_NONE, NULL, NULL);
+    if (conf_monitor)
+        g_signal_connect(conf_monitor, "changed", G_CALLBACK(on_conf_changed), NULL);
+    g_object_unref(cf);
+    g_free(conf);
 
     char *path = lp_config_path("dock");
     GFile *f = g_file_new_for_path(path);

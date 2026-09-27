@@ -348,9 +348,13 @@ fi
 if [[ -d "$D/session" ]]; then
     cp -a "$D/session/start-desktop" "$ROOT/usr/lib/lp/start-desktop.session"
     cp -a "$D/session/session-run" "$ROOT/bin/session-run"
-    for s in lp-audio-start lp-idle lp-autoscale; do
+    for s in lp-audio-start lp-idle lp-autoscale lp-shell-start lp-lock lp-logout; do
         [[ -f "$D/session/$s" ]] && cp -a "$D/session/$s" "$ROOT/usr/local/bin/$s"
     done
+    if [[ -d "$D/session/fcitx5" ]]; then
+        mkdir -p "$H/.config/fcitx5"
+        cp -a "$D/session/fcitx5/profile" "$D/session/fcitx5/config" "$H/.config/fcitx5/"
+    fi
     [[ -f "$D/session/wayfire.ini" ]] && mkdir -p "$H/.config" &&
         cp -a "$D/session/wayfire.ini" "$H/.config/wayfire.ini"
     if [[ -f "$D/session/sway.config" ]]; then
@@ -394,6 +398,38 @@ for f in "$D"/*/lp-*.desktop; do
     [[ -f "$f" ]] && cp -a "$f" "$ROOT/usr/local/share/applications/"
 done
 log "$n desktop programs"
+
+# The command-line tools (desktop/cli): lp-time, lp-info, lp-hostname.
+# Debian's timedatectl and hostnamectl ask systemd over D-Bus, and there
+# is no systemd here - Settings' Date & Time and machine name went
+# through them and failed every time. Ours take their place, diverted so
+# that an apt upgrade of systemd does not put Debian's back.
+if [[ -d "$D/cli" ]]; then
+    for f in "$D"/cli/*; do
+        [[ -f "$f" ]] && install -m 755 "$f" "$ROOT/usr/local/bin/$(basename "$f")"
+    done
+    for pair in timedatectl:lp-time hostnamectl:lp-hostname; do
+        name=${pair%%:*} tool=${pair##*:}
+        if [[ -e "$ROOT/usr/bin/$name" && ! -L "$ROOT/usr/bin/$name" ]]; then
+            in_root dpkg-divert --local --rename --divert "/usr/bin/$name.debian" \
+                --add "/usr/bin/$name" >/dev/null
+        fi
+        ln -sfn "/usr/local/bin/$tool" "$ROOT/usr/bin/$name"
+        ln -sfn "$tool" "$ROOT/usr/local/bin/$name"
+    done
+    log "cli: $(ls "$D/cli" | tr '\n' ' ')(timedatectl, hostnamectl)"
+fi
+
+# What this system is (desktop/branding/os-release): LP, like Debian for
+# apt's sake. base-files ships Debian's; it is diverted, not overwritten.
+if [[ -f "$D/branding/os-release" ]]; then
+    if [[ ! -e "$ROOT/usr/lib/os-release.debian" ]]; then
+        in_root dpkg-divert --local --rename --divert /usr/lib/os-release.debian \
+            --add /usr/lib/os-release >/dev/null
+    fi
+    install -m 644 "$D/branding/os-release" "$ROOT/usr/lib/os-release"
+    ln -sfn ../usr/lib/os-release "$ROOT/etc/os-release"
+fi
 
 # The wallpapers (branding track), at the resolutions they were drawn
 # for; sway.config points at the 3840x2160 dark one.

@@ -22,6 +22,8 @@
 #include <gtk/gtk.h>
 #include "lp-i18n.h"
 #include <sys/statvfs.h>
+#include <glib/gstdio.h>
+#include <stdio.h>
 #include <string.h>
 
 #define APP_ID "org.lpzero.Files"
@@ -855,6 +857,75 @@ static void on_launched(GObject *source, GAsyncResult *result, gpointer data)
     g_free(launch);
 }
 
+/* ── a program, opened by a tap ──────────────────────────────────────
+ *
+ * A file that is executable and is a program (an ELF binary, or a script
+ * with a #! line) is not opened like a document: a tap asks first, and
+ * says what it is. Running whatever was downloaded because someone
+ * double-clicked it is how a desktop gets owned. "Run" starts it in a
+ * terminal, so its output and its questions have somewhere to go;
+ * "Open as text" shows a script's contents instead. */
+static gboolean is_program(const char *path)
+{
+    if (!g_file_test(path, G_FILE_TEST_IS_EXECUTABLE) ||
+        g_file_test(path, G_FILE_TEST_IS_DIR))
+        return FALSE;
+    char head[4] = { 0 };
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return FALSE;
+    size_t n = fread(head, 1, sizeof head, f);
+    fclose(f);
+    return (n >= 4 && !memcmp(head, "\177ELF", 4)) || (n >= 2 && head[0] == '#' && head[1] == '!');
+}
+
+typedef struct { App *app; char *path; } RunAsk;
+
+static void on_run_response(GtkDialog *d, int response, gpointer data)
+{
+    RunAsk *r = data;
+    if (response == 1) {
+        char *dir = g_path_get_dirname(r->path);
+        const char *argv[] = { "foot", "--hold", "--working-directory", dir, r->path, NULL };
+        GError *err = NULL;
+        if (!g_spawn_async(dir, (char **)argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &err)) {
+            say(r->app, T("could not be run", "실행하지 못했습니다"), r->path, err->message);
+            g_clear_error(&err);
+        }
+        g_free(dir);
+    } else if (response == 2) {
+        const char *argv[] = { "gnome-text-editor", r->path, NULL };
+        if (!g_spawn_async(NULL, (char **)argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL)) {
+            const char *alt[] = { "gedit", r->path, NULL };
+            g_spawn_async(NULL, (char **)alt, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL);
+        }
+    }
+    g_free(r->path);
+    g_free(r);
+    gtk_window_destroy(GTK_WINDOW(d));
+}
+
+static void ask_run(App *app, const char *path, const char *display)
+{
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    GtkWidget *d = gtk_message_dialog_new(app->window, GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+                                          GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
+                                          T("Run “%s”?", "“%s” 을(를) 실행할까요?"), display);
+    gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(d), "%s",
+        T("This file is a program. Run it only if you know where it came from.",
+          "이 파일은 프로그램입니다. 어디서 온 것인지 알 때만 실행하십시오."));
+    gtk_dialog_add_button(GTK_DIALOG(d), T("Cancel", "취소"), GTK_RESPONSE_CANCEL);
+    gtk_dialog_add_button(GTK_DIALOG(d), T("Open as Text", "텍스트로 열기"), 2);
+    gtk_dialog_add_button(GTK_DIALOG(d), T("Run", "실행"), 1);
+    gtk_dialog_set_default_response(GTK_DIALOG(d), GTK_RESPONSE_CANCEL);
+    G_GNUC_END_IGNORE_DEPRECATIONS
+    RunAsk *r = g_new0(RunAsk, 1);
+    r->app = app;
+    r->path = g_strdup(path);
+    g_signal_connect(d, "response", G_CALLBACK(on_run_response), r);
+    gtk_window_present(GTK_WINDOW(d));
+}
+
 static void open_item(App *app, LpfItem *item)
 {
     char *path = g_build_filename(app->path, item->name, NULL);
@@ -870,6 +941,8 @@ static void open_item(App *app, LpfItem *item)
         say(app, T("cannot be opened", "열 수 없습니다"), item->display, T("No permission to read it.", "읽기 권한이 없습니다."));
     } else if (item->is_dir) {
         navigate(app, path, TRUE);
+    } else if (is_program(path)) {
+        ask_run(app, path, item->display);
     } else {
         GFile  *file   = g_file_new_for_path(path);
         char   *uri    = g_file_get_uri(file);
@@ -1357,6 +1430,85 @@ static char *trash_dir(void)
 /* Drives the system mounted, not drives it might have. README's
  * automount puts USB storage under /media, so that is where we look; an
  * empty /media means no USB row, which is the honest answer. */
+/* The block device mounted at `point`, from the kernel's own table. */
+static char *device_at(const char *point)
+{
+    char *text = NULL, *dev = NULL;
+    if (!g_file_get_contents("/proc/self/mounts", &text, NULL, NULL))
+        return NULL;
+    char **lines = g_strsplit(text, "\n", -1);
+    for (int i = 0; lines[i] && !dev; i++) {
+        char **f = g_strsplit(lines[i], " ", 3);
+        if (f[0] && f[1] && !strcmp(f[1], point) && g_str_has_prefix(f[0], "/dev/"))
+            dev = g_strdup(f[0]);
+        g_strfreev(f);
+    }
+    g_strfreev(lines);
+    g_free(text);
+    return dev;
+}
+
+/* Eject: unmount the drive through udisks, which asks polkit - and the
+ * image's polkit rule (50-lp-removable.pkla) lets the person at the
+ * desk (group plugdev) do it without a password, the way every desktop
+ * does. Then the sidebar is rebuilt without it, and if the window was
+ * looking inside it, it goes home. */
+static void on_eject(GtkButton *b, gpointer data)
+{
+    App *app = data;
+    const char *point = g_object_get_data(G_OBJECT(b), "lp-point");
+    char *dev = point ? device_at(point) : NULL;
+    if (!dev) {
+        say(app, T("could not be ejected", "꺼내지 못했습니다"), point ? point : "?",
+            T("It is not mounted any more.", "이미 마운트되어 있지 않습니다."));
+        return;
+    }
+    const char *argv[] = { "udisksctl", "unmount", "--no-user-interaction", "-b", dev, NULL };
+    char *err = NULL;
+    int st = 1;
+    g_spawn_sync(NULL, (char **)argv, NULL, G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL,
+                 NULL, NULL, NULL, &err, &st, NULL);
+    if (!g_spawn_check_wait_status(st, NULL)) {
+        say(app, T("could not be ejected", "꺼내지 못했습니다"), point,
+            err && *err ? err : T("Something on it is still in use.", "안의 무언가가 아직 쓰이고 있습니다."));
+    } else {
+        if (app->path && g_str_has_prefix(app->path, point))
+            navigate(app, g_get_home_dir(), TRUE);
+        gtk_widget_set_visible(gtk_widget_get_parent(GTK_WIDGET(b)), FALSE);
+        update_places(app);
+    }
+    g_free(err);
+    g_free(dev);
+}
+
+static void add_usb_rows(App *app, GtkWidget *box);
+
+static gboolean refill_usb(gpointer data)
+{
+    GtkWidget *usb = data;
+    GFileMonitor *mm = g_object_get_data(G_OBJECT(usb), "lp-media-monitor");
+    App *app = mm ? g_object_get_data(G_OBJECT(mm), "lp-app") : NULL;
+    g_object_set_data(G_OBJECT(usb), "lp-refill", NULL);
+    if (!app)
+        return G_SOURCE_REMOVE;
+    GtkWidget *c;
+    while ((c = gtk_widget_get_first_child(usb)))
+        gtk_box_remove(GTK_BOX(usb), c);
+    add_usb_rows(app, usb);
+    return G_SOURCE_REMOVE;
+}
+
+static void on_media_changed(GFileMonitor *m, GFile *f, GFile *o,
+                             GFileMonitorEvent ev, gpointer data)
+{
+    (void)m; (void)f; (void)o; (void)ev;
+    /* A mount is a burst of events; one refill a moment later. */
+    if (!g_object_get_data(G_OBJECT(data), "lp-refill")) {
+        g_object_set_data(G_OBJECT(data), "lp-refill", GINT_TO_POINTER(1));
+        g_timeout_add(500, refill_usb, data);
+    }
+}
+
 static void add_usb_rows(App *app, GtkWidget *box)
 {
     GDir *media = g_dir_open("/media", 0, NULL);
@@ -1367,10 +1519,23 @@ static void add_usb_rows(App *app, GtkWidget *box)
     while ((name = g_dir_read_name(media)) != NULL) {
         char *path = g_build_filename("/media", name, NULL);
 
-        if (g_file_test(path, G_FILE_TEST_IS_DIR))
-            gtk_box_append(GTK_BOX(box),
-                           sidebar_row(app, name,
-                                       "drive-removable-media-symbolic", path));
+        if (g_file_test(path, G_FILE_TEST_IS_DIR)) {
+            GtkWidget *line = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+            GtkWidget *row = sidebar_row(app, name, "drive-removable-media-symbolic", path);
+            gtk_widget_set_hexpand(row, TRUE);
+            gtk_box_append(GTK_BOX(line), row);
+            char *dev = device_at(path);
+            if (dev) {
+                GtkWidget *ej = gtk_button_new_from_icon_name("media-eject-symbolic");
+                gtk_button_set_has_frame(GTK_BUTTON(ej), FALSE);
+                gtk_widget_set_tooltip_text(ej, T("Eject", "꺼내기"));
+                g_object_set_data_full(G_OBJECT(ej), "lp-point", g_strdup(path), g_free);
+                g_signal_connect(ej, "clicked", G_CALLBACK(on_eject), app);
+                gtk_box_append(GTK_BOX(line), ej);
+                g_free(dev);
+            }
+            gtk_box_append(GTK_BOX(box), line);
+        }
         g_free(path);
     }
 
@@ -1478,7 +1643,19 @@ static GtkWidget *build_sidebar(App *app)
     gtk_widget_add_css_class(app->capacity_label, "lp-capacity-label");
     gtk_box_append(GTK_BOX(box), app->capacity_label);
 
-    add_usb_rows(app, box);
+    /* The drives come and go: /media is watched, and the rows under
+     * this heading are made again when a stick is mounted or taken out. */
+    GtkWidget *usb = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_append(GTK_BOX(box), usb);
+    add_usb_rows(app, usb);
+    GFile *mf = g_file_new_for_path("/media");
+    GFileMonitor *mm = g_file_monitor_directory(mf, G_FILE_MONITOR_NONE, NULL, NULL);
+    g_object_unref(mf);
+    if (mm) {
+        g_object_set_data(G_OBJECT(mm), "lp-app", app);
+        g_signal_connect(mm, "changed", G_CALLBACK(on_media_changed), usb);
+        g_object_set_data_full(G_OBJECT(usb), "lp-media-monitor", mm, g_object_unref);
+    }
     add_tag_rows(app, box);
 
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller),
@@ -1927,9 +2104,49 @@ static void put_on_clipboard(App *app, GPtrArray *files)
         g_string_append_c(uris, '\n');
         g_free(uri);
     }
+    /* Two shapes at once: a file list (text/uri-list - what other file
+     * managers, the desktop and GTK apps paste as files) and plain text
+     * (the paths as URIs, for a terminal or an editor). */
+    GSList *list = NULL;
+    for (guint i = files->len; i > 0; i--)
+        list = g_slist_prepend(list, g_ptr_array_index(files, i - 1));
+    GdkFileList *fl = gdk_file_list_new_from_list(list);
+    g_slist_free(list);
+    GdkContentProvider *parts[2] = {
+        gdk_content_provider_new_typed(GDK_TYPE_FILE_LIST, fl),
+        gdk_content_provider_new_typed(G_TYPE_STRING, uris->str),
+    };
+    g_boxed_free(GDK_TYPE_FILE_LIST, fl);
+    GdkContentProvider *both = gdk_content_provider_new_union(parts, 2);
     GdkClipboard *cb = gtk_widget_get_clipboard(GTK_WIDGET(app->window));
-    gdk_clipboard_set_text(cb, uris->str);
+    gdk_clipboard_set_content(cb, both);
+    g_object_unref(both);
     g_string_free(uris, TRUE);
+}
+
+/* Files copied in another program - another Files window, the desktop,
+ * a browser's download list - arrive on the system clipboard as a file
+ * list. Pasting them here copies them in. */
+static gboolean clipboard_has_files(App *app)
+{
+    GdkClipboard *cb = gtk_widget_get_clipboard(GTK_WIDGET(app->window));
+    return gdk_content_formats_contain_gtype(gdk_clipboard_get_formats(cb), GDK_TYPE_FILE_LIST);
+}
+
+static void on_clip_files(GObject *src, GAsyncResult *res, gpointer data)
+{
+    App *app = data;
+    const GValue *v = gdk_clipboard_read_value_finish(GDK_CLIPBOARD(src), res, NULL);
+    if (!v || !G_VALUE_HOLDS(v, GDK_TYPE_FILE_LIST))
+        return;
+    GSList *l = gdk_file_list_get_files(g_value_get_boxed(v));
+    GPtrArray *files = g_ptr_array_new_with_free_func(g_object_unref);
+    for (GSList *n = l; n; n = n->next)
+        g_ptr_array_add(files, g_object_ref(n->data));
+    g_slist_free_full(l, g_object_unref);
+    GFile *dest = g_file_new_for_path(app->path);
+    op_start(app, files, dest, FALSE, FALSE);
+    g_object_unref(dest);
 }
 
 static void set_clip(App *app, gboolean cut)
@@ -1964,8 +2181,13 @@ static void act_paste(GSimpleAction *a, GVariant *p, gpointer data)
 {
     (void)a; (void)p;
     App *app = data;
-    if (!app->clip || app->clip->len == 0)
+    if (!app->clip || app->clip->len == 0) {
+        if (clipboard_has_files(app))
+            gdk_clipboard_read_value_async(gtk_widget_get_clipboard(GTK_WIDGET(app->window)),
+                                           GDK_TYPE_FILE_LIST, G_PRIORITY_DEFAULT, NULL,
+                                           on_clip_files, app);
         return;
+    }
 
     GFile *dest = g_file_new_for_path(app->path);
     GPtrArray *copy = g_ptr_array_new_with_free_func(g_object_unref);
@@ -1996,6 +2218,65 @@ static void on_delete_response(GtkDialog *dialog, int response, gpointer data)
         g_ptr_array_unref(c->files);
     g_free(c);
     gtk_window_destroy(GTK_WINDOW(dialog));
+}
+
+/* ── the trash: back where it came from ──────────────────────────────
+ *
+ * g_file_trash() (Delete) moved the file to ~/.local/share/Trash/files
+ * and wrote where it was in Trash/info/NAME.trashinfo, "Path=" and the
+ * old place percent-encoded - the freedesktop.org trash spec. Restore
+ * reads that line back, moves the file there (as "name (2)" if the name
+ * has been taken since, never over it), and removes the .trashinfo. */
+static void act_restore(GSimpleAction *a, GVariant *p, gpointer data)
+{
+    (void)a; (void)p;
+    App *app = data;
+    GPtrArray *files = selected_files(app);
+    char *base = g_build_filename(g_get_user_data_dir(), "Trash", NULL);
+    guint ok = 0, bad = 0;
+    for (guint i = 0; i < files->len; i++) {
+        GFile *f = g_ptr_array_index(files, i);
+        char *name = g_file_get_basename(f);
+        char *info = g_strdup_printf("%s/info/%s.trashinfo", base, name);
+        char *text = NULL, *orig = NULL;
+        if (g_file_get_contents(info, &text, NULL, NULL)) {
+            char **lines = g_strsplit(text, "\n", -1);
+            for (int k = 0; lines[k]; k++)
+                if (g_str_has_prefix(lines[k], "Path="))
+                    orig = g_uri_unescape_string(lines[k] + 5, NULL);
+            g_strfreev(lines);
+        }
+        gboolean moved = FALSE;
+        if (orig && *orig == '/') {
+            GFile *want = g_file_new_for_path(orig);
+            GFile *dir = g_file_get_parent(want);
+            if (dir) {
+                g_file_make_directory_with_parents(dir, NULL, NULL);
+                char *bn = g_file_get_basename(want);
+                GFile *dst = free_name(dir, bn);
+                moved = g_file_move(f, dst, G_FILE_COPY_NOFOLLOW_SYMLINKS, NULL, NULL, NULL, NULL);
+                g_object_unref(dst);
+                g_free(bn);
+                g_object_unref(dir);
+            }
+            g_object_unref(want);
+        }
+        if (moved) {
+            g_unlink(info);
+            ok++;
+        } else {
+            bad++;
+        }
+        g_free(orig); g_free(text); g_free(info); g_free(name);
+    }
+    g_free(base);
+    g_ptr_array_unref(files);
+    if (bad)
+        say(app, T("could not be restored", "복원하지 못했습니다"),
+            T("Some items", "일부 항목"), T("Their original place is not known or not writable.",
+                                            "원래 위치를 모르거나 쓸 수 없습니다."));
+    (void)ok;
+    reload(app);
 }
 
 static void act_trash(GSimpleAction *a, GVariant *p, gpointer data)
@@ -2226,6 +2507,74 @@ static void prop_row(GtkWidget *grid, int row, const char *label,
     gtk_grid_attach(GTK_GRID(grid), v, 1, row, 1, 1);
 }
 
+/* ── permissions, editable ───────────────────────────────────────────
+ *
+ * Nine switches - read, write, run for the owner, the group and everyone
+ * else - under the numbers. Each change is written at once with
+ * g_file_set_attribute_uint32 (chmod), and a file this account does not
+ * own cannot be changed: the kernel refuses, and the box goes back. */
+typedef struct { GFile *file; guint32 bit; } PermBit;
+
+static void perm_bit_free(gpointer p)
+{
+    PermBit *b = p;
+    g_object_unref(b->file);
+    g_free(b);
+}
+
+static void on_perm_toggled(GtkCheckButton *cb, gpointer data)
+{
+    PermBit *b = data;
+    GFileInfo *fi = g_file_query_info(b->file, G_FILE_ATTRIBUTE_UNIX_MODE,
+                                      G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, NULL);
+    if (!fi)
+        return;
+    guint32 mode = g_file_info_get_attribute_uint32(fi, G_FILE_ATTRIBUTE_UNIX_MODE);
+    g_object_unref(fi);
+    gboolean on = gtk_check_button_get_active(cb);
+    guint32 want = on ? (mode | b->bit) : (mode & ~b->bit);
+    if (want == mode)
+        return;
+    GError *err = NULL;
+    if (!g_file_set_attribute_uint32(b->file, G_FILE_ATTRIBUTE_UNIX_MODE, want & 07777,
+                                     G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, &err)) {
+        g_signal_handlers_block_by_func(cb, on_perm_toggled, data);
+        gtk_check_button_set_active(cb, !on);
+        g_signal_handlers_unblock_by_func(cb, on_perm_toggled, data);
+        gtk_widget_set_tooltip_text(GTK_WIDGET(cb), err->message);
+        g_clear_error(&err);
+    }
+}
+
+static int perm_editor(GtkWidget *grid, int r, GFile *file, guint32 mode)
+{
+    static const char *who_en[] = { "Owner", "Group", "Others" };
+    static const char *who_ko[] = { "소유자", "그룹", "다른 사람" };
+    static const char *what_en[] = { "Read", "Write", "Run" };
+    static const char *what_ko[] = { "읽기", "쓰기", "실행" };
+    for (int w = 0; w < 3; w++) {
+        GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+        for (int k = 0; k < 3; k++) {
+            GtkWidget *cb = gtk_check_button_new_with_label(T(what_en[k], what_ko[k]));
+            guint32 bit = 1u << (8 - (w * 3 + k));
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(cb), (mode & bit) != 0);
+            PermBit *b = g_new0(PermBit, 1);
+            b->file = g_object_ref(file);
+            b->bit = bit;
+            g_object_set_data_full(G_OBJECT(cb), "lp-perm", b, perm_bit_free);
+            g_signal_connect(cb, "toggled", G_CALLBACK(on_perm_toggled), b);
+            gtk_box_append(GTK_BOX(row), cb);
+        }
+        GtkWidget *label = gtk_label_new(T(who_en[w], who_ko[w]));
+        gtk_label_set_xalign(GTK_LABEL(label), 1.0);
+        gtk_widget_add_css_class(label, "dim-label");
+        gtk_grid_attach(GTK_GRID(grid), label, 0, r, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), row, 1, r, 1, 1);
+        r++;
+    }
+    return r;
+}
+
 static void act_properties(GSimpleAction *a, GVariant *p, gpointer data)
 {
     (void)a; (void)p;
@@ -2301,6 +2650,7 @@ static void act_properties(GSimpleAction *a, GVariant *p, gpointer data)
             char *v = g_strdup_printf("%s (%04o)", perm, mode & 07777);
             prop_row(grid, r++, T("Permissions", "권한"), v);
             g_free(v);
+            r = perm_editor(grid, r, file, mode);
         }
 
         const char *owner = g_file_info_get_attribute_string(
@@ -2382,7 +2732,17 @@ static void popup_menu(App *app, GtkWidget *over, double x, double y)
 
     GMenu *menu = g_menu_new();
 
-    if (n >= 1) {
+    char *trash = trash_dir();
+    gboolean in_trash = g_strcmp0(app->path, trash) == 0;
+    g_free(trash);
+
+    if (n >= 1 && in_trash) {
+        GMenu *t = g_menu_new();
+        g_menu_append(t, T("Restore", "복원"), "win.restore");
+        g_menu_append(t, T("Delete for good", "영구히 지우기"), "win.delete");
+        g_menu_append_section(menu, NULL, G_MENU_MODEL(t));
+        g_object_unref(t);
+    } else if (n >= 1) {
         GMenu *first = g_menu_new();
         g_menu_append(first, T("Open", "열기"), "win.open");
 
@@ -2422,7 +2782,7 @@ static void popup_menu(App *app, GtkWidget *over, double x, double y)
         /* 빈 자리에서 눌렀다. 선택된 것이 없으므로 이 폴더에 대한
          * 것만 남는다. */
         GMenu *here = g_menu_new();
-        if (app->clip && app->clip->len)
+        if ((app->clip && app->clip->len) || clipboard_has_files(app))
             g_menu_append(here, T("Paste", "붙여넣기"), "win.paste");
         g_menu_append(here, T("New folder", "새 폴더"), "win.new-folder");
         g_menu_append(here, T("Select all", "전체 선택"), "win.select-all");
@@ -2549,6 +2909,21 @@ static GdkContentProvider *on_drag_prepare(GtkDragSource *source,
     return p;
 }
 
+static guint64 device_of(GFile *f)
+{
+    GFileInfo *fi = g_file_query_info(f, G_FILE_ATTRIBUTE_UNIX_DEVICE,
+                                      G_FILE_QUERY_INFO_NONE, NULL, NULL);
+    guint64 d = fi ? g_file_info_get_attribute_uint32(fi, G_FILE_ATTRIBUTE_UNIX_DEVICE) : 0;
+    g_clear_object(&fi);
+    return d;
+}
+
+static gboolean same_disk(GFile *a, GFile *b)
+{
+    guint64 da = device_of(a), db = device_of(b);
+    return da && da == db;
+}
+
 static gboolean on_drop(GtkDropTarget *target, const GValue *value,
                         double x, double y, gpointer data)
 {
@@ -2581,11 +2956,15 @@ static gboolean on_drop(GtkDropTarget *target, const GValue *value,
         return FALSE;
     }
 
-    /* 끌어 놓기는 복사다. 옮기기를 기본으로 하면, 잘못 놓았을 때
-     * 원본이 이미 없다. 옮기려면 잘라내기와 붙여넣기가 있고, 그쪽은
-     * 무엇을 하는지 이름이 말해 준다. */
+    /* On the same disk a drop moves, onto another disk it copies - what
+     * every file manager people have used does, and what "drag it into
+     * that folder" means. (It used to always copy, and a drag inside the
+     * home left the original behind every time.) A move is undone by
+     * dragging back; a copy onto a USB stick leaves the original where
+     * it was, which is what a stick is for. */
     GFile *dest = g_file_new_for_path(app->path);
-    op_start(app, sources, dest, FALSE, FALSE);
+    gboolean move = same_disk(g_ptr_array_index(sources, 0), dest);
+    op_start(app, sources, dest, move, FALSE);
     g_object_unref(dest);
     return TRUE;
 }
@@ -2593,12 +2972,12 @@ static gboolean on_drop(GtkDropTarget *target, const GValue *value,
 static void attach_dnd(App *app, GtkWidget *view)
 {
     GtkDragSource *source = gtk_drag_source_new();
-    gtk_drag_source_set_actions(source, GDK_ACTION_COPY);
+    gtk_drag_source_set_actions(source, GDK_ACTION_COPY | GDK_ACTION_MOVE);
     g_signal_connect(source, "prepare", G_CALLBACK(on_drag_prepare), app);
     gtk_widget_add_controller(view, GTK_EVENT_CONTROLLER(source));
 
     GtkDropTarget *target = gtk_drop_target_new(GDK_TYPE_FILE_LIST,
-                                                GDK_ACTION_COPY);
+                                                GDK_ACTION_COPY | GDK_ACTION_MOVE);
     g_signal_connect(target, "drop", G_CALLBACK(on_drop), app);
     gtk_widget_add_controller(view, GTK_EVENT_CONTROLLER(target));
 }
@@ -2771,6 +3150,7 @@ static const GActionEntry ACTIONS[] = {
     { "cut",        act_cut,        NULL, NULL, NULL, { 0 } },
     { "paste",      act_paste,      NULL, NULL, NULL, { 0 } },
     { "trash",      act_trash,      NULL, NULL, NULL, { 0 } },
+    { "restore",    act_restore,    NULL, NULL, NULL, { 0 } },
     { "delete",     act_delete,     NULL, NULL, NULL, { 0 } },
     { "rename",     act_rename,     NULL, NULL, NULL, { 0 } },
     { "new-folder", act_new_folder, NULL, NULL, NULL, { 0 } },

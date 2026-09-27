@@ -24,27 +24,29 @@ from geom import Seg, Arc, TR, TL, BL, BR, bbox, paths, fmt, rrect_path
 
 # ── colours ──────────────────────────────────────────────────────────────
 #
-# Aubergine and orange are the owner's mockup: an aubergine desktop and
-# orange on the switches that are on. The orange here is that one accent,
-# a little warmer than the familiar Ubuntu value so the two are not the
-# same colour, and it is also what the design system should use for "on".
+# Deep blue, teal and orange. The first desktop was aubergine with an
+# orange accent - which is Ubuntu's palette, and the owner said it looked
+# like Ubuntu. LP's is a deep ocean blue with teal where the light falls,
+# and one warm orange for "on" and for the mark's ring. The orange is a
+# yellower one than Ubuntu's #e95420, so the two are not confused.
 # It is not the design system's amber (#f0b350), which means "a limit is
 # in force" and must stay free for that.
-ORANGE = "#ff6a3d"        # the ring; "on"
-ORANGE_ON_LIGHT = "#e8552a"  # same hue, darker, keeps 3:1 on white
-INK_DARK = "#2a0f27"      # the L on light backgrounds: aubergine 900
+ORANGE = "#f28c28"        # the ring; "on"
+ORANGE_ON_LIGHT = "#d9731a"  # same hue, darker, keeps 3:1 on white
+INK_DARK = "#0d2740"      # the L on light backgrounds: deep blue 800
 WHITE = "#ffffff"
-MUTED_ON_DARK = "#e9dbe6"  # wordmark "linux" on dark: a warm off-white
+MUTED_ON_DARK = "#dbe8f0"  # wordmark "linux" on dark: a cool off-white
 
-# The aubergine ramp, light to deep. The wallpaper and the splash use it.
+# The deep-blue ramp, light to deep. The wallpaper and the splash use it.
+# (The name is the old one: every generator reads this table by it.)
 AUBERGINE = {
-    "300": "#d66a9e",
-    "400": "#b9407f",
-    "500": "#8f2a6c",
-    "600": "#6a1d5c",
-    "700": "#4a1546",
-    "800": "#2e0d31",
-    "900": "#1c0822",
+    "300": "#6cc9d6",
+    "400": "#2f9fb8",
+    "500": "#1b6f94",
+    "600": "#165a7c",
+    "700": "#123f5e",
+    "800": "#0d2740",
+    "900": "#08172a",
 }
 
 # ── the mark ─────────────────────────────────────────────────────────────
@@ -317,7 +319,7 @@ def lockup(text="linux-LP"):
 
 SPLASH_Q = 16
 SPLASH_INK = "#ffffff"          # the L
-SPLASH_WORD = "#efe3ec"         # the name under it: a warm off-white, one
+SPLASH_WORD = "#dbe8f0"         # the name under it: a warm off-white, one
                                 # step quieter than the mark
 
 

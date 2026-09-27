@@ -36,6 +36,8 @@
 #define NTP_PORT        123
 #define DNS_PORT        53
 #define CLOCK_FILE      "/data/.clock"
+/* Present: automatic time is off (lp-time ntp off). */
+#define NTP_OFF_FILE    "/etc/lp/ntp-off"
 
 /* 2020-01-01. An answer earlier than this means something is wrong. */
 #define SANITY_MIN      1577836800LL
@@ -246,6 +248,15 @@ static int run_daemon(const char **servers)
          * back to it, which is worse than nothing. */
         if (now >= SANITY_MIN)
             save_clock(now);
+
+        /* Automatic time turned off (lp-time ntp off, or Settings >
+         * Date & Time): keep saving the clock, but never set it from the
+         * network - a time set by hand must stay what it was set to. */
+        if (lp_access(NTP_OFF_FILE, F_OK) == 0) {
+            last_sync = 0;          /* turned back on: sync at once */
+            lp_sleep_ms(SAVE_EVERY_SEC * 1000);
+            continue;
+        }
 
         if (now - last_sync >= RESYNC_EVERY_SEC || last_sync == 0) {
             bool got_it = false;

@@ -1,4 +1,4 @@
-"""wallpaper.py - the aubergine desktop, and the gradient the boot splash shares.
+"""wallpaper.py - the deep-blue desktop, and the gradient the boot splash shares.
 
 The owner's mockup has an aubergine-to-magenta radial gradient, light at
 the top left and deep purple at the bottom right. Two things decide how
@@ -39,23 +39,23 @@ FOCUS = (0.10, 0.02)
 
 # (position 0..1 from the focus to the farthest corner, colour)
 DARK = [
-    (0.00, "#c9508c"),
-    (0.20, "#9a2f73"),
-    (0.46, "#5f1a56"),
-    (0.74, "#33103a"),
-    (1.00, "#1b0a28"),
+    (0.00, "#23a6a0"),
+    (0.20, "#177585"),
+    (0.46, "#12476e"),
+    (0.74, "#0d2846"),
+    (1.00, "#07121f"),
 ]
 
 # The light variant is the same light falling on a paler surface: it is
 # for the light interface style, where the desktop icons' labels turn dark,
 # so the top left has to be light enough for dark text and the bottom
-# right can keep some of the aubergine.
+# right can keep some of the blue.
 LIGHT = [
-    (0.00, "#fdf0f4"),
-    (0.28, "#efcfdf"),
-    (0.58, "#d4a2c6"),
-    (0.84, "#a676a8"),
-    (1.00, "#7d5190"),
+    (0.00, "#f1f8fa"),
+    (0.28, "#cfe6ec"),
+    (0.58, "#9fc7d6"),
+    (0.84, "#6b9dba"),
+    (1.00, "#46739a"),
 ]
 
 

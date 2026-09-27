@@ -287,12 +287,33 @@ static void on_lsblk(int st, const char *out, const char *err, gpointer p)
     }
 }
 
+/* The disks app: LP's own when there is one, else GNOME Disks, else
+ * GParted - whichever the image carries. */
+static const char *disks_app(void)
+{
+    if (lp_have("lp-disks")) return "lp-disks";
+    if (lp_have("gnome-disks")) return "gnome-disks";
+    if (lp_have("gparted")) return "gparted";
+    return NULL;
+}
+
 static void on_disks(GtkButton *b, gpointer p)
 {
     (void)b; (void)p;
-    static const char *const v[] = { "lp-disks", NULL };
+    const char *app = disks_app();
+    if (!app)
+        return;
+    const char *const v[] = { app, NULL };
     if (lp_spawn_bg(v))
         lp_toast(FALSE, T("Opening Disks", "디스크 앱을 엽니다"));
+}
+
+static void on_browse(GtkButton *b, gpointer p)
+{
+    (void)b; (void)p;
+    static const char *const v[] = { "lp-files", "/", NULL };
+    if (lp_spawn_bg(v))
+        lp_toast(FALSE, T("Opening Files", "파일 앱을 엽니다"));
 }
 
 static GtkWidget *build(void)
@@ -306,8 +327,11 @@ static GtkWidget *build(void)
     GtkWidget *disks = row_button(g, T("Disks", "디스크"),
                                   T("Format, partition, check and mount drives", "드라이브 포맷, 파티션, 검사, 마운트"),
                                   T("Open Disks", "디스크 열기"), G_CALLBACK(on_disks), NULL);
-    if (!lp_have("lp-disks"))
+    if (!disks_app())
         row_set_detail(disks, T("The Disks app is not installed", "디스크 앱이 설치되어 있지 않습니다"));
+    row_button(g, T("Browse", "둘러보기"),
+               T("The system disk's folders in Files", "시스템 디스크의 폴더를 파일 앱에서"),
+               T("Open Files", "파일 열기"), G_CALLBACK(on_browse), NULL);
     s->trash_row = row_button(g, T("Trash", "휴지통"), NULL, T("Empty…", "비우기…"),
                               G_CALLBACK(on_empty), (gpointer)"trash");
     s->cache_row = row_button(g, T("Cache", "캐시"), NULL, T("Clear…", "지우기…"),

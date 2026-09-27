@@ -1,0 +1,17 @@
+# fcitx5 for LP: English and 두벌식 Hangul, switched with the Hangul key
+# (Right Alt on this keyboard layout), Ctrl+Space or Shift+Space.
+[Hotkey]
+# Enumerate when press trigger key repeatedly
+EnumerateWithTriggerKeys=True
+EnumerateSkipFirst=False
+
+[Hotkey/TriggerKeys]
+0=Hangul
+1=Control+space
+2=Shift+space
+
+[Behavior]
+# Active By Default
+ActiveByDefault=False
+ShareInputState=All
+ShowInputMethodInformation=True

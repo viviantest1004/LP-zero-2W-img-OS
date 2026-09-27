@@ -101,6 +101,7 @@ void lp_getopt_init_ex(lp_getopt_t *st, int argc, char **argv,
     }
 
     int no = 0, np = 0, i = 1;
+    bool dashdash = false;
     while (i < argc) {
         const char *a = argv[i];
 
@@ -125,6 +126,7 @@ void lp_getopt_init_ex(lp_getopt_t *st, int argc, char **argv,
         }
         if (a[1] == '-' && a[2] == '\0') { /* "--": the rest are operands */
             i++;
+            dashdash = true;
             while (i < argc)
                 ops[np++] = argv[i++];
             break;
@@ -155,12 +157,18 @@ void lp_getopt_init_ex(lp_getopt_t *st, int argc, char **argv,
         }
     }
 
+    /* The "--" stays, between the options and the operands. Dropping
+     * it left argv one word short of argc, and the last word was then
+     * there twice: `grep -- pat file` searched file two times and
+     * printed its name on every line. lp_getopt stops at it. */
     for (int k = 0; k < no; k++)
         argv[1 + k] = opts[k];
+    if (dashdash)
+        argv[1 + no] = (char *)"--";
     for (int k = 0; k < np; k++)
-        argv[1 + no + k] = ops[k];
+        argv[1 + no + dashdash + k] = ops[k];
 
-    st->first_operand = 1 + no;
+    st->first_operand = 1 + no + dashdash;
     free(opts);
     free(ops);
 }
@@ -212,6 +220,10 @@ int lp_getopt(lp_getopt_t *st)
     }
 
     const char *a = st->argv[st->pos];
+    if (a[0] == '-' && a[1] == '-' && a[2] == '\0') {    /* the "--" left in place above */
+        st->pos = st->ind = st->first_operand;
+        return -1;
+    }
 
     if (a[0] == '-' && a[1] == '-') {
         const char *name = a + 2;

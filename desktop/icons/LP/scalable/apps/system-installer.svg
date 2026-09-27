@@ -3,8 +3,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
   <defs>
     <linearGradient id="system_installer_bg" x1="0" y1="0" x2=".35" y2="1">
-      <stop offset="0" stop-color="#8f2a6c"/>
-      <stop offset="1" stop-color="#2e0d31"/>
+      <stop offset="0" stop-color="#1b6f94"/>
+      <stop offset="1" stop-color="#0d2740"/>
     </linearGradient>
     <linearGradient id="system_installer_hl" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#fff" stop-opacity="0.3"/>
@@ -19,5 +19,5 @@
     <path d="M64 30V76M46 60L64 78L82 60" fill="none" stroke="#000" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
   </g>
     <path d="M30 78V92a6 6 0 0 0 6 6H92a6 6 0 0 0 6-6V78" fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M64 30V76M46 60L64 78L82 60" fill="none" stroke="#ff6a3d" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M64 30V76M46 60L64 78L82 60" fill="none" stroke="#f28c28" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

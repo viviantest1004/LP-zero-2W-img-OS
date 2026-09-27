@@ -1,13 +1,18 @@
 /*
  * panel.c - lp-panel, the top bar.
  *
- *   [현재 활동] Files            Sat 23:47            [⌨] [▾ ◖ ▮ ⏻]
+ *   [LP] Files               Sat Sep 27  23:47          [⌨] [▾ ◖ ▮ ⏻]
  *
- * The owner's mockup, left to right: 현재 활동 opens the app grid, then
- * the name of the application in front; the clock in the middle, which
- * opens a calendar; on the right the on-screen keyboard button and the
- * status area - Wi-Fi, volume, battery, power - which is one button and
- * opens quick settings.
+ * Left to right: the LP mark, which opens the LP menu (about this
+ * computer, the everyday apps, lock, log out, restart, shut down), then
+ * the name of the application in front; the date and time in the
+ * middle, which opens a calendar with a way into Date & Time settings;
+ * on the right the on-screen keyboard button and the status area -
+ * Wi-Fi, volume, battery, power - which is one button and opens quick
+ * settings.
+ *
+ * The bar used to start with a text button, 현재 활동 ("Activities"),
+ * which is GNOME's and Ubuntu's; the LP mark and its menu are LP's own.
  *
  * ── why a program and not waybar ──
  *
@@ -60,7 +65,7 @@
 #include "lp-shell.h"
 #include "lp-toplevel.h"
 
-#define BAR_HEIGHT 40
+#define BAR_HEIGHT 36
 
 typedef struct {
     GtkWindow *win;
@@ -131,7 +136,7 @@ static void set_clock(void)
     /* The mockup's "Sat 23:47". %a is the locale's own short weekday,
      * so a Korean session reads 토 23:47 - the same shape, in its own
      * words - without a second format string to keep in step. */
-    char *s = g_date_time_format(now, "%a %H:%M");
+    char *s = g_date_time_format(now, T("%a %b %-d  %H:%M", "%-m월 %-d일 (%a)  %H:%M"));
     for (GList *b = bars; b; b = b->next)
         gtk_label_set_text(GTK_LABEL(((Bar *)b->data)->clock_label), s);
     g_free(s);
@@ -169,6 +174,14 @@ static void fill_calendar(void)
     g_date_time_unref(now);
 }
 
+static void on_datetime_settings(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    lp_sheet_hide(cal.sheet);
+    const char *a[] = { "lp-settings", "datetime", NULL };
+    lp_spawn(a);
+}
+
 static void cal_build(void)
 {
     GtkWidget *cbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -183,6 +196,12 @@ static void cal_build(void)
     gtk_box_pack_start(GTK_BOX(cbox), cal.day, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(cbox), cal.date, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(cbox), cal.calendar, FALSE, FALSE, 0);
+    /* Where the time is set: the clock is the first place anyone looks
+     * for that. */
+    GtkWidget *dt = gtk_button_new_with_label(T("Date & Time Settings…", "날짜 및 시간 설정…"));
+    gtk_style_context_add_class(gtk_widget_get_style_context(dt), "lp-cal-settings");
+    g_signal_connect(dt, "clicked", G_CALLBACK(on_datetime_settings), NULL);
+    gtk_box_pack_start(GTK_BOX(cbox), dt, FALSE, FALSE, 0);
     gtk_widget_show_all(cbox);
     /* Anchored to the top edge only, so the compositor centres it under
      * the clock - which is in the middle of the bar. */
@@ -373,13 +392,83 @@ static int mon_index(Bar *bar)
     return 0;
 }
 
+/* ── the LP menu ─────────────────────────────────────────────────── */
+
+static void run_argv(const char *const *a)
+{
+    lp_spawn(a);
+}
+
+static void m_about(GtkMenuItem *m, gpointer d)
+{ (void)m; (void)d; const char *a[] = { "lp-settings", "system", NULL }; run_argv(a); }
+static void m_apps(GtkMenuItem *m, gpointer d)
+{ (void)m; (void)d; const char *a[] = { "lp-appgrid", "toggle", NULL }; ask("appgrid", a); }
+static void m_files(GtkMenuItem *m, gpointer d)
+{ (void)m; (void)d; const char *a[] = { "lp-files", NULL }; run_argv(a); }
+static void m_terminal(GtkMenuItem *m, gpointer d)
+{ (void)m; (void)d; const char *a[] = { "foot", NULL }; run_argv(a); }
+static void m_settings(GtkMenuItem *m, gpointer d)
+{ (void)m; (void)d; const char *a[] = { "lp-settings", NULL }; run_argv(a); }
+static void m_software(GtkMenuItem *m, gpointer d)
+{ (void)m; (void)d; const char *a[] = { "lp-software", NULL }; run_argv(a); }
+static void m_tasks(GtkMenuItem *m, gpointer d)
+{ (void)m; (void)d; const char *a[] = { "lp-tasks", NULL }; run_argv(a); }
+static void m_lock(GtkMenuItem *m, gpointer d)
+{ (void)m; (void)d; const char *a[] = { "lp-lock", NULL }; run_argv(a); }
+
+/* Logging out, restarting and shutting down ask first, in quick
+ * settings' own dialog: one question, asked the same way everywhere. */
+static void m_confirm(GtkMenuItem *m, gpointer d)
+{
+    (void)m;
+    const char *a[] = { "lp-quick", "confirm", d, NULL };
+    ask("quick", a);
+}
+
+static void menu_item(GtkWidget *menu, const char *label, GCallback cb, gpointer data)
+{
+    GtkWidget *mi = gtk_menu_item_new_with_label(label);
+    g_signal_connect(mi, "activate", cb, data);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
+}
+
+static void menu_sep(GtkWidget *menu)
+{
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+}
+
+static GtkWidget *lp_menu_build(void)
+{
+    GtkWidget *menu = gtk_menu_new();
+    menu_item(menu, T("About This Computer", "이 컴퓨터에 관하여"), G_CALLBACK(m_about), NULL);
+    menu_sep(menu);
+    menu_item(menu, T("All Applications", "모든 앱"), G_CALLBACK(m_apps), NULL);
+    menu_item(menu, T("Files", "파일"), G_CALLBACK(m_files), NULL);
+    menu_item(menu, T("Terminal", "터미널"), G_CALLBACK(m_terminal), NULL);
+    menu_item(menu, T("Software", "소프트웨어"), G_CALLBACK(m_software), NULL);
+    menu_item(menu, T("Task Manager", "작업 관리자"), G_CALLBACK(m_tasks), NULL);
+    menu_item(menu, T("Settings", "설정"), G_CALLBACK(m_settings), NULL);
+    menu_sep(menu);
+    menu_item(menu, T("Lock Screen", "화면 잠금"), G_CALLBACK(m_lock), NULL);
+    menu_item(menu, T("Log Out…", "로그아웃…"), G_CALLBACK(m_confirm), (gpointer)"logout");
+    menu_item(menu, T("Restart…", "다시 시작…"), G_CALLBACK(m_confirm), (gpointer)"restart");
+    menu_item(menu, T("Shut Down…", "시스템 종료…"), G_CALLBACK(m_confirm), (gpointer)"off");
+    gtk_style_context_add_class(gtk_widget_get_style_context(menu), "lp-menu");
+    gtk_widget_show_all(menu);
+    return menu;
+}
+
 static void on_activities(GtkButton *b, gpointer d)
 {
     (void)d;
     if (lp_hold_consumed(GTK_WIDGET(b)))
         return;
-    const char *a[] = { "lp-appgrid", "toggle", NULL };
-    ask("appgrid", a);
+    static GtkWidget *menu;
+    if (!menu)
+        menu = lp_menu_build();
+    GtkWidget *w = GTK_WIDGET(b);
+    gtk_menu_popup_at_widget(GTK_MENU(menu), w, GDK_GRAVITY_SOUTH_WEST,
+                             GDK_GRAVITY_NORTH_WEST, NULL);
 }
 
 static void on_keyboard(GtkButton *b, gpointer d)
@@ -508,7 +597,9 @@ static Bar *bar_new(GdkMonitor *mon)
 
     /* left */
     GtkWidget *left = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    b->activities = gtk_button_new_with_label(T("Activities", "현재 활동"));
+    b->activities = gtk_button_new();
+    gtk_container_add(GTK_CONTAINER(b->activities), lp_icon("distributor-logo-lp", 22));
+    gtk_widget_set_tooltip_text(b->activities, T("LP menu", "LP 메뉴"));
     gtk_style_context_add_class(gtk_widget_get_style_context(b->activities),
                                 "lp-activities");
     g_signal_connect(b->activities, "clicked", G_CALLBACK(on_activities), b);

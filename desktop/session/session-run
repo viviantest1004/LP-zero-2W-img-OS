@@ -35,21 +35,23 @@ export XDG_CACHE_HOME=$LP_HOME/.cache
 export XDG_DATA_DIRS=/usr/local/share:/usr/share
 export XDG_CONFIG_DIRS=/etc/xdg
 export GTK_THEME=LP
-export XDG_CURRENT_DESKTOP=sway
 export XDG_SESSION_TYPE=wayland
 export XKB_DEFAULT_LAYOUT=us
-# Software rendering, deliberately. A virtual machine has no GPU: wlroots
-# would pick the GLES renderer, fail to bring EGL up against a virtio_gpu
-# with no 3D, and segfault - which reads as "the desktop is broken"
-# rather than "there is no graphics card here". pixman draws on the CPU.
-export WLR_RENDERER=pixman
-export WLR_RENDERER_ALLOW_SOFTWARE=1
-export LIBGL_ALWAYS_SOFTWARE=1
+# Which compositor was decided by start-desktop, as root, from the
+# graphics card (see there): wayfire with 3D graphics, sway without.
+# ~/.config/lp/compositor (wayfire, sway or auto) is the person's own
+# override. The environment each one needs is set further down, in
+# run_compositor, because a failed wayfire start falls back to sway.
+LP_COMPOSITOR=sway
+if test -s /run/lp-session/compositor ; then
+    read -r LP_COMPOSITOR < /run/lp-session/compositor
+fi
+if test -s "$LP_HOME/.config/lp/compositor" ; then
+    read -r want < "$LP_HOME/.config/lp/compositor"
+    case $want in wayfire|sway) LP_COMPOSITOR=$want ;; esac
+fi
+command -v wayfire > /dev/null 2>&1 || LP_COMPOSITOR=sway
 export WLR_LIBINPUT_NO_DEVICES=1
-# GTK 4 asks for OpenGL first and there is none here. Told to use cairo
-# it draws on the CPU and starts; left to discover it, it prints
-# "Couldn't open libGL.so.1" and falls back anyway, one warning per app.
-export GSK_RENDERER=cairo
 export GDK_BACKEND=wayland
 # The terminal's shell: the account's own (lpsh, with its line editor,
 # prompt and history), or /bin/sh if passwd names something that cannot
@@ -85,6 +87,61 @@ export NO_AT_BRIDGE=1
 export GTK_A11Y=none
 cd "$LP_HOME"
 
+# ── the compositor ──
+#
+# sway: software rendering, deliberately. A virtual machine has no GPU:
+# wlroots would pick the GLES renderer, fail to bring EGL up against a
+# virtio_gpu with no 3D, and segfault - which reads as "the desktop is
+# broken" rather than "there is no graphics card here". pixman draws on
+# the CPU. GTK 4 is told to use cairo for the same reason: it asks for
+# OpenGL first, and left to discover there is none it prints a warning
+# per app and falls back anyway.
+#
+# wayfire: the graphics card draws everything, GTK 4 included.
+#
+# A wayfire that dies within 20 seconds of starting did not start (a
+# driver the check in start-desktop thought had 3D, and has not); the
+# session then goes on under sway, and ~/.cache/lp/wayfire.log says why.
+run_sway() {
+    export XDG_CURRENT_DESKTOP=sway:wlroots
+    export WLR_RENDERER=pixman
+    export WLR_RENDERER_ALLOW_SOFTWARE=1
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export GSK_RENDERER=cairo
+    exec /usr/bin/sway
+}
+
+run_compositor() {
+    if test "$LP_COMPOSITOR" = wayfire ; then
+        mkdir -p "$XDG_CACHE_HOME/lp"
+        log="$XDG_CACHE_HOME/lp/wayfire.log"
+        test -f "$log" && mv -f "$log" "$log.old"
+        # Korean from the laptop's keyboard. Under sway lp-osk is the input
+        # method for the physical keys too (osk/type.c); wayfire 0.7 never
+        # sends keys to an input method's keyboard grab, so there fcitx5
+        # (with its Hangul engine) takes them instead, through GTK's and
+        # Qt's own fcitx modules, which do not need the grab. Right Alt is
+        # the Hangul key (wayfire.ini's korean:ralt_hangul), Ctrl+Space too.
+        if command -v fcitx5 > /dev/null 2>&1 ; then
+            export GTK_IM_MODULE=fcitx QT_IM_MODULE=fcitx XMODIFIERS=@im=fcitx SDL_IM_MODULE=fcitx
+        fi
+        read -r t0 _ < /proc/uptime
+        XDG_CURRENT_DESKTOP=Wayfire:wlroots /usr/bin/wayfire \
+            -c "$XDG_CONFIG_HOME/wayfire.ini" > "$log" 2>&1
+        code=$?
+        read -r t1 _ < /proc/uptime
+        if test $(( ${t1%.*} - ${t0%.*} )) -ge 20 ; then
+            exit $code
+        fi
+        echo "session-run: wayfire stopped after $(( ${t1%.*} - ${t0%.*} ))s (exit $code); starting sway instead" >> "$log"
+    fi
+    run_sway
+}
+
+if test "${1:-}" = --compositor ; then
+    run_compositor
+fi
+
 # dbus-run-session 으로 감싸는 이유.
 #
 # GTK 앱은 세션 버스 없이도 뜨지만, 세션 버스가 없으면 파일 선택
@@ -95,4 +152,4 @@ cd "$LP_HOME"
 # dbus-run-session 은 버스를 하나 띄우고 DBUS_SESSION_BUS_ADDRESS 를
 # 넣은 채로 아래 명령을 돌린 뒤, 그 명령이 끝나면 버스도 같이 정리한다.
 # 별도로 데몬을 관리할 것이 없다.
-dbus-run-session -- /usr/bin/sway
+exec dbus-run-session -- /bin/session-run --compositor

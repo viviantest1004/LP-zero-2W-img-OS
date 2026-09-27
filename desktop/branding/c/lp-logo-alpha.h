@@ -17,10 +17,10 @@
 #ifndef LP_LOGO_ALPHA_H
 #define LP_LOGO_ALPHA_H
 
-#define LP_LOGO_RGB_ACCENT 0xff6a3d   /* 0xRRGGBB */
+#define LP_LOGO_RGB_ACCENT 0xf28c28   /* 0xRRGGBB */
 #define LP_LOGO_RGB_INK 0xffffff   /* 0xRRGGBB */
-#define LP_LOGO_RGB_ACCENT_ON_LIGHT 0xe8552a   /* 0xRRGGBB */
-#define LP_LOGO_RGB_INK_ON_LIGHT 0x2a0f27   /* 0xRRGGBB */
+#define LP_LOGO_RGB_ACCENT_ON_LIGHT 0xd9731a   /* 0xRRGGBB */
+#define LP_LOGO_RGB_INK_ON_LIGHT 0x0d2740   /* 0xRRGGBB */
 
 static inline void lp_logo_unpack(const unsigned char *rle, unsigned rle_len,
                                   unsigned char *out, unsigned out_len)

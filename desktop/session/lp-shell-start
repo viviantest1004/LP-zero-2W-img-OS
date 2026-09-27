@@ -1,0 +1,143 @@
+#!/bin/sh
+# lp-shell-start - everything on the screen that is not a window.
+#
+# Both compositors start exactly this: wayfire from wayfire.ini's
+# [autostart], sway from the one `exec` line in sway.config. What is on
+# the screen - the wallpaper and desktop icons, the top bar, the dock,
+# the on-screen keyboard, notifications - is then the same program under
+# either, and only the windows' frames differ.
+#
+# Each long-lived piece runs under keep(): when it exits it is started
+# again, after a second, so a bar that crashes is back before anyone has
+# worked out that it went. A piece that dies five times within a minute
+# of starting each time is left down (its log says why); restarting a
+# program that cannot start only burns the battery.
+#
+# Nothing is restarted once the compositor has gone: its socket is the
+# test. Without that, logging out left five loops trying to reach a
+# display that no longer existed.
+#
+# Logs: $XDG_RUNTIME_DIR/lp-shell/<name>.log, one per piece, kept small.
+
+LOGDIR="${XDG_RUNTIME_DIR:-/tmp}/lp-shell"
+mkdir -p "$LOGDIR"
+
+# The compositor's socket. wayfire exports WAYLAND_DISPLAY to its
+# autostart children; sway does too.
+SOCK="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY:-wayland-1}"
+
+uptime_s() {
+    read -r up _ < /proc/uptime
+    echo "${up%.*}"
+}
+
+alive() {
+    test -S "$SOCK"
+}
+
+keep() {
+    name=$1
+    shift
+    (
+        quick=0
+        while alive; do
+            start=$(uptime_s)
+            log="$LOGDIR/$name.log"
+            # Keep the last run's log beside this one, and no more.
+            test -f "$log" && mv -f "$log" "$log.old"
+            "$@" > "$log" 2>&1
+            code=$?
+            alive || exit 0
+            if test $(( $(uptime_s) - start )) -lt 60 ; then
+                quick=$((quick + 1))
+            else
+                quick=0
+            fi
+            if test "$quick" -ge 5 ; then
+                echo "lp-shell-start: $name exited $quick times in a row within a minute (last: $code); leaving it down" >> "$log"
+                exit 1
+            fi
+            sleep 1
+        done
+    ) &
+}
+
+have() {
+    command -v "$1" > /dev/null 2>&1
+}
+
+compositor=sway
+case "${XDG_CURRENT_DESKTOP:-}" in
+    *wayfire*|*Wayfire*) compositor=wayfire ;;
+esac
+
+# 0. After a logout (lp-logout left the marker) the new session starts
+#    locked: nobody gets back in without the password.
+if test -e "${XDG_RUNTIME_DIR}/lp-logout" ; then
+    rm -f "${XDG_RUNTIME_DIR}/lp-logout"
+    have lp-lock && lp-lock > "$LOGDIR/lock.log" 2>&1 &
+fi
+
+# Header bars: minimise only where it does something. sway ignores a
+# window's request to minimise, and a button that does nothing is worse
+# than none; wayfire minimises (and the dock brings the window back).
+if have gsettings ; then
+    if test "$compositor" = wayfire ; then
+        gsettings set org.gnome.desktop.wm.preferences button-layout 'appmenu:minimize,maximize,close'
+    else
+        gsettings set org.gnome.desktop.wm.preferences button-layout 'appmenu:maximize,close'
+    fi 2> /dev/null
+fi
+
+# 1. The screen's scale first: every surface below is sized for the
+#    scale it starts under, and a bar started at scale 1 on a 4K panel
+#    would be drawn at a quarter size until it restarted.
+have lp-autoscale && lp-autoscale > "$LOGDIR/autoscale.log" 2>&1
+
+# 2. Sound: pipewire, then wireplumber once pipewire is listening
+#    (lp-audio-start keeps the order and stays up as long as they do).
+have lp-audio-start && keep audio lp-audio-start
+
+# 3. What applications talk to: file choosers and screen sharing
+#    (portals), notifications.
+test -x /usr/libexec/xdg-desktop-portal-wlr && keep portal-wlr /usr/libexec/xdg-desktop-portal-wlr
+test -x /usr/libexec/xdg-desktop-portal && keep portal /usr/libexec/xdg-desktop-portal
+have mako && keep mako mako
+
+# 4. The shell. lp-desktop draws the wallpaper under everything (and the
+#    icons of ~/Desktop, and the menu a long press or right click on the
+#    wallpaper opens); swaybg is its stand-in only if it is missing.
+if have lp-desktop ; then
+    keep desktop lp-desktop
+elif have swaybg ; then
+    keep wallpaper swaybg -m fill -i /usr/share/backgrounds/lp/lp-wallpaper-dark-3840x2160.png
+fi
+if have lp-panel ; then
+    keep panel lp-panel
+elif have waybar ; then
+    keep panel waybar
+fi
+have lp-dock && keep dock lp-dock
+have lp-osk && keep osk lp-osk daemon
+# Korean from the laptop keyboard under wayfire (session-run says why):
+# fcitx5 in the foreground, so keep() can bring it back, and without its
+# Wayland input-method front end - that one needs the keyboard grab
+# wayfire does not give, and would take the seat's only input method
+# from the on-screen keyboard.
+if test "$compositor" = wayfire && have fcitx5 ; then
+    keep ime fcitx5 --disable=waylandim
+fi
+
+# Settings kept in our own files that a running program must be told
+# about (GSettings mirrors, night light) are put back, once per login.
+have lp-settings && lp-settings --restore > "$LOGDIR/restore.log" 2>&1 &
+
+# 5. The screen goes dark after the time Settings chose. lp-idle
+#    replaces itself when Settings changes the time, so it is not kept.
+have lp-idle && lp-idle > "$LOGDIR/idle.log" 2>&1 &
+
+# Stay as long as the compositor does: under sway this process is the
+# parent of the loops above, and they should not outlive it.
+while alive; do
+    sleep 5
+done

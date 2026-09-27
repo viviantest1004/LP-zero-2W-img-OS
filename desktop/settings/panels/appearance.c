@@ -369,7 +369,7 @@ static void on_dock_size(GObject *dd, GParamSpec *ps, gpointer p)
     g_free(c);
 }
 
-static void on_dock_hide(GObject *sw, GParamSpec *ps, gpointer p)
+G_GNUC_UNUSED static void on_dock_hide(GObject *sw, GParamSpec *ps, gpointer p)
 {
     (void)ps; (void)p;
     gboolean on = gtk_switch_get_active(GTK_SWITCH(sw));
@@ -379,6 +379,52 @@ static void on_dock_hide(GObject *sw, GParamSpec *ps, gpointer p)
                                "창이 자리를 쓰면 독을 숨깁니다")
                            : T("The dock always shows", "독을 항상 보입니다"));
     g_free(c);
+}
+
+/* ── window animation ───────────────────────────────────────────────── */
+/*
+ * How windows open, close, snap and switch workspace: wayfire's animation
+ * durations in wayfire.ini, which wayfire re-reads by itself. Off, fast,
+ * normal (what the image ships) or relaxed. Under sway there are no window
+ * animations to set; the choice is kept for the next wayfire session.
+ * Reduce motion (Accessibility) still wins: it zeroes these on its own.
+ */
+static const lp_opt_t ANIM[] = {
+    { "off",     "Off",     "끄기" },
+    { "fast",    "Fast",    "빠르게" },
+    { "normal",  "Normal",  "보통" },
+    { "relaxed", "Relaxed", "느긋하게" },
+    { NULL, NULL, NULL }
+};
+
+static const char *anim_ms(const char *v, gboolean window)
+{
+    if (!g_strcmp0(v, "off"))     return "0";
+    if (!g_strcmp0(v, "fast"))    return window ? "150" : "200";
+    if (!g_strcmp0(v, "relaxed")) return window ? "450" : "500";
+    return window ? "300" : "340";
+}
+
+static void on_anim(GObject *dd, GParamSpec *ps, gpointer p)
+{
+    (void)ps; (void)p;
+    const char *v = row_option_value(dd);
+    if (!v) return;
+    char *wf = wayfire_ini();
+    gboolean ok = ini_set(wf, "animate", "duration", anim_ms(v, TRUE)) &&
+                  ini_set(wf, "grid", "duration", anim_ms(v, TRUE)) &&
+                  ini_set(wf, "vswitch", "duration", anim_ms(v, FALSE)) &&
+                  ini_set(wf, "vswipe", "duration", anim_ms(v, FALSE)) &&
+                  ini_set(wf, "scale", "duration", anim_ms(v, FALSE)) &&
+                  ini_set(wf, "expo", "duration", anim_ms(v, FALSE));
+    g_free(wf);
+    char *c = lp_config_path("appearance.conf");
+    kv_set(c, "window-animation", v);
+    g_free(c);
+    if (ok)
+        lp_toast(FALSE, T("Window animation: %s", "창 애니메이션: %s"),
+                 !g_strcmp0(v, "off") ? T("Off", "끄기") : !g_strcmp0(v, "fast") ? T("Fast", "빠르게")
+                 : !g_strcmp0(v, "relaxed") ? T("Relaxed", "느긋하게") : T("Normal", "보통"));
 }
 
 /* ── building ───────────────────────────────────────────────────────── */
@@ -405,6 +451,16 @@ static GtkWidget *build(void)
     g_object_set_data_full(G_OBJECT(row), "lp-title", g_strdup(T("Dark style", "어두운 스타일")), g_free);
     gtk_list_box_append(GTK_LIST_BOX(g), row);
     LP_QUIET(accent_row(g));
+
+    GtkWidget *mg = group_new(page, T("Windows", "창"));
+    char *ac = lp_config_path("appearance.conf");
+    char *anim = kv_get(ac, "window-animation");
+    row_options(mg, T("Window animation", "창 애니메이션"),
+                lp_sway() ? T("Takes effect with 3D graphics (wayfire)", "3D 그래픽(wayfire)에서 적용됩니다")
+                          : T("Opening, closing, snapping and switching workspaces",
+                              "열기, 닫기, 스냅, 작업 공간 전환"),
+                ANIM, anim ? anim : "normal", 2, G_CALLBACK(on_anim), NULL);
+    g_free(anim); g_free(ac);
 
     GtkWidget *wg = group_new(page, T("Wallpaper", "배경 화면"));
     GtkWidget *flow = gtk_flow_box_new();
@@ -465,10 +521,6 @@ static GtkWidget *build(void)
     char *hide = kv_get(dc, "autohide");
     row_options(dg, T("Dock size", "독 크기"), NULL, DOCK_SIZE, size, 1,
                 G_CALLBACK(on_dock_size), NULL);
-    row_switch(dg, T("Hide the dock automatically", "독 자동 숨기기"),
-               T("It slides back when the pointer or a finger reaches the left edge",
-                 "포인터나 손가락이 왼쪽 끝에 닿으면 다시 나옵니다"),
-               hide && !strcmp(hide, "yes"), G_CALLBACK(on_dock_hide), NULL);
     g_free(size); g_free(hide); g_free(dc);
     return page;
 }

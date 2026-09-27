@@ -3,28 +3,94 @@
 
 The XPS 15's panel is 3840x2160 on 15.6 inches: at scale 1 every button
 is a quarter of the size a finger needs. An external 1080p monitor wants
-scale 1. sway's config cannot say "if the mode is wider than 2560", so
-this runs from exec_always and on every output change, and asks sway.
+scale 1. Neither compositor's config can say "if the mode is wider than
+2560", so this runs once the session is up (lp-shell-start) and, under
+sway, on every output change (exec_always), and asks the compositor.
 A scale someone set by hand in Settings (~/.config/lp/scale-<output>)
 wins over the guess.
+
+It talks wlr-output-management through wlr-randr, which wayfire and
+sway both implement, so the same program serves the session on a GPU
+(wayfire) and the one without (sway). swaymsg is the fallback for a
+root without wlr-randr.
 """
-import json, os, subprocess, sys
+import json, os, re, shutil, subprocess
 
-def outputs():
-    r = subprocess.run(["swaymsg", "-r", "-t", "get_outputs"],
-                       capture_output=True, text=True)
-    return json.loads(r.stdout or "[]")
+CONF = os.path.expanduser("~/.config/lp")
 
-conf = os.path.expanduser("~/.config/lp")
-for o in outputs():
-    name = o.get("name", "")
-    mode = o.get("current_mode") or {}
-    want = "2" if mode.get("width", 0) >= 2560 else "1"
+
+def run(argv):
     try:
-        with open(os.path.join(conf, "scale-" + name)) as f:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def outputs_wlr_randr():
+    """[(name, width, scale)] from wlr-randr's text (0.2 has no --json).
+
+      Virtual-1 "Red Hat, Inc. QEMU Monitor (Virtual-1)"
+        Enabled: yes
+        Modes:
+          1920x1080 px, 74.998001 Hz (preferred, current)
+        Scale: 1.000000
+    """
+    out, cur = [], None
+    for line in run(["wlr-randr"]).splitlines():
+        if line and not line[0].isspace():
+            cur = {"name": line.split()[0], "width": 0, "scale": 1.0, "enabled": True}
+            out.append(cur)
+        elif cur is not None:
+            s = line.strip()
+            m = re.match(r"(\d+)x(\d+) px.*\bcurrent\b", s)
+            if m:
+                cur["width"] = int(m.group(1))
+            elif s.startswith("Scale:"):
+                try:
+                    cur["scale"] = float(s.split()[1])
+                except (IndexError, ValueError):
+                    pass
+            elif s.startswith("Enabled:"):
+                cur["enabled"] = s.endswith("yes")
+    return [o for o in out if o["enabled"] and o["width"]]
+
+
+def outputs_sway():
+    try:
+        data = json.loads(run(["swaymsg", "-r", "-t", "get_outputs"]) or "[]")
+    except ValueError:
+        return []
+    return [{"name": o.get("name", ""),
+             "width": (o.get("current_mode") or {}).get("width", 0),
+             "scale": float(o.get("scale") or 1)} for o in data]
+
+
+def wanted(o):
+    want = "2" if o["width"] >= 2560 else "1"
+    try:
+        with open(os.path.join(CONF, "scale-" + o["name"])) as f:
             want = f.read().strip() or want
     except OSError:
         pass
-    if str(o.get("scale")) not in (want, want + ".0"):
-        subprocess.run(["swaymsg", "output", name, "scale", want],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return want
+
+
+def main():
+    use_randr = shutil.which("wlr-randr") is not None
+    outs = outputs_wlr_randr() if use_randr else outputs_sway()
+    for o in outs:
+        want = wanted(o)
+        try:
+            if abs(float(want) - o["scale"]) < 0.01:
+                continue
+        except ValueError:
+            continue
+        if use_randr:
+            subprocess.run(["wlr-randr", "--output", o["name"], "--scale", want],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.run(["swaymsg", "output", o["name"], "scale", want],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+main()

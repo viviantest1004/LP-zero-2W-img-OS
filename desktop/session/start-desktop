@@ -34,6 +34,51 @@ chmod 0666 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
 # 일들과 같다: 원래 logind 가 할 일을 한 번에 해 둔다.
 chmod 0666 /dev/snd/* 2>/dev/null
 
+# Which compositor: wayfire where there is 3D graphics, sway where
+# there is not.
+#
+# wayfire draws the window frames - title, minimise, maximise, close -
+# and the animations, and it draws everything with OpenGL. Without a
+# GPU that is Mesa's software path (kms_swrast), and on a virtual
+# graphics card with no 3D (QEMU's virtio-vga, UTM's default) wlroots'
+# GL renderer dies on the first frame there: tested, wayfire and sway
+# both. sway can instead draw on the CPU (pixman), so it is the one
+# that runs there; its windows draw their own frames (foot and GTK
+# apps do, see foot.ini and sway.config).
+#
+# The decision needs dmesg, which only root may read, so it is made
+# here and handed to the session in a file (setpriv --reset-env clears
+# the environment). session-run still falls back to sway if wayfire
+# dies at the start anyway, so a wrong guess costs seconds, not the
+# desktop. /etc/lp/compositor (wayfire, sway or auto) overrides it.
+mkdir -p /run/lp-session
+comp=sway
+why="no 3D graphics found"
+for card in /sys/class/drm/card[0-9]*; do
+    test -e "$card/device/driver" || continue
+    drv=$(basename "$(readlink -f "$card/device/driver")")
+    case $drv in
+        i915|amdgpu|radeon|nouveau|vmwgfx)
+            comp=wayfire; why="$drv"; break ;;
+        virtio_gpu|virtio-pci|virtio_pci)
+            # virtio-gpu has 3D only when the host gave it virgl
+            # (UTM: a "GPU Supported" display; QEMU: virtio-vga-gl).
+            if dmesg 2>/dev/null | grep -q 'features: +virgl'; then
+                comp=wayfire; why="virtio-gpu with virgl"; break
+            fi
+            why="virtio-gpu without 3D (virgl)" ;;
+        *)  why="$drv: no 3D" ;;
+    esac
+done
+if test -s /etc/lp/compositor; then
+    read -r want < /etc/lp/compositor
+    case $want in
+        wayfire|sway) comp=$want; why="/etc/lp/compositor" ;;
+    esac
+fi
+printf '%s\n%s\n' "$comp" "$why" > /run/lp-session/compositor
+chmod 644 /run/lp-session/compositor
+
 # The desktop account is whoever has uid 1000: "user" in the image as
 # built, the name the person chose once the installer has run (it keeps
 # /home/user as a link to the real home, for scripts written against the
@@ -52,8 +97,37 @@ chown -R 1000:1000 "$LP_HOME/" 2>/dev/null
 # sudo, so sudo refused them with their own password, and every other
 # group the installer gave them counted for nothing. setpriv
 # --init-groups reads /etc/group exactly as login does.
-if test -x /usr/bin/setpriv; then
-    exec /usr/bin/setpriv --reuid=1000 --regid=1000 --init-groups \
-        --reset-env /bin/session-run
-fi
-dropprivs 1000:1000 /bin/session-run
+#
+# The session runs again when it ends: after a logout (lp-logout), which
+# brings it back locked, and after a crash of the compositor, which
+# should not leave the machine at a black screen. Three quick deaths in
+# a row (under 30 s each) is a session that cannot start; it is left
+# down then, and /data/log/session.log has what it printed.
+run_session() {
+    if test -x /usr/bin/setpriv; then
+        /usr/bin/setpriv --reuid=1000 --regid=1000 --init-groups \
+            --reset-env /bin/session-run
+    else
+        dropprivs 1000:1000 /bin/session-run
+    fi
+}
+quick=0
+while :; do
+    read -r t0 _ < /proc/uptime
+    run_session >> /data/log/session.log 2>&1
+    read -r t1 _ < /proc/uptime
+    if test -e /run/user/1000/lp-logout; then
+        quick=0
+        continue
+    fi
+    if test $(( ${t1%.*} - ${t0%.*} )) -lt 30; then
+        quick=$((quick + 1))
+    else
+        quick=0
+    fi
+    if test $quick -ge 3; then
+        echo "start-desktop: the session ended three times within 30 s; not starting it again" >> /data/log/session.log
+        exit 1
+    fi
+    sleep 1
+done

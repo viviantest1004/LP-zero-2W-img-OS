@@ -26,6 +26,13 @@ if test "$SECS" = "0" ; then
     exit 0
 fi
 
+# Under wayfire the compositor does this itself, from [idle] dpms_timeout
+# in wayfire.ini, which Settings writes along with the file above. swayidle
+# would only be a second timer, and swaymsg has no sway to talk to there.
+case "${XDG_CURRENT_DESKTOP:-}" in
+    *wayfire*|*Wayfire*) exit 0 ;;
+esac
+
 # -w: 명령이 끝날 때까지 기다린다. 이것이 없으면 화면을 켜는 명령이
 # 끄는 명령보다 먼저 끝나서 꺼진 채로 남는 일이 있다.
 exec swayidle -w \

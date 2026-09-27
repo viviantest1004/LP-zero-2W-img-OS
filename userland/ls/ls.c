@@ -477,8 +477,16 @@ int main(int argc, char **argv)
     const char *paths[64];
     int npaths = 0;
 
+    bool opts_done = false;
     for (int i = 1; i < argc; i++) {
-        if (argv[i][0] == '-' && argv[i][1]) {
+        /* "--": everything after it is a name, even one that starts
+         * with a dash. */
+        if (!opts_done && strcmp(argv[i], "--") == 0) {
+            opts_done = true;
+            continue;
+        }
+        if (!opts_done && strcmp(argv[i], "--help") == 0) { usage(); return 0; }
+        if (!opts_done && argv[i][0] == '-' && argv[i][1]) {
             for (const char *o = argv[i] + 1; *o; o++) {
                 switch (*o) {
                 case 'l': opt_long = true; break;
@@ -499,7 +507,6 @@ int main(int argc, char **argv)
             }
             continue;
         }
-        if (strcmp(argv[i], "--help") == 0) { usage(); return 0; }
         if (npaths < 64)
             paths[npaths++] = argv[i];
     }

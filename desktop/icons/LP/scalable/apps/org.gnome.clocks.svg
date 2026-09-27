@@ -28,6 +28,6 @@
     <path d="M49 38.019L46 32.823" fill="none" stroke="#2b2f38" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity=".55"/>
     <path d="M64 64L64 40" fill="none" stroke="#2b2f38" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
     <path d="M64 64L82 75" fill="none" stroke="#2b2f38" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M58 73L73 47" fill="none" stroke="#e8552a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle cx="64" cy="64" r="5" fill="#e8552a"/>
+    <path d="M58 73L73 47" fill="none" stroke="#d9731a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="64" cy="64" r="5" fill="#d9731a"/>
 </svg>

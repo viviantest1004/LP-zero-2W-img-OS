@@ -1425,6 +1425,12 @@ static void on_command(int argc, char **argv, gpointer d)
         show();
     } else if (!strcmp(cmd, "hide")) {
         lp_sheet_hide(Q.sheet);
+    } else if (!strcmp(cmd, "confirm") && argc >= 3 &&
+               (!strcmp(argv[2], "logout") || !strcmp(argv[2], "restart") ||
+                !strcmp(argv[2], "off") || !strcmp(argv[2], "recovery"))) {
+        /* The top bar's LP menu asks for the same questions the power
+         * buttons here ask, in the same dialog. */
+        confirm(argv[2]);
     } else if (!strcmp(cmd, "refresh")) {
         if (lp_sheet_shown(Q.sheet))
             refresh();

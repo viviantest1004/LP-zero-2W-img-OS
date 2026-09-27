@@ -1,0 +1,25 @@
+#!/bin/sh
+# lp-lock - lock the screen: the wallpaper, dimmed, and the password.
+#
+# The quick settings panel's lock button, Super+L and a logout all come
+# here. swaylock checks the password through PAM (/etc/pam.d/swaylock),
+# the account's own, the same one sudo asks for.
+#
+# The ring is the theme's: teal while typing, orange on each key, red
+# when the password was wrong.
+WALL=/usr/share/backgrounds/lp/lp-wallpaper-dark-3840x2160.png
+set -- -f --show-failed-attempts \
+    --color 0B1722 \
+    --inside-color 0B1722CC --inside-clear-color 0B1722CC \
+    --inside-ver-color 16304ACC --inside-wrong-color 3A1414CC \
+    --ring-color 1FB5A8 --ring-ver-color 1FB5A8 --ring-clear-color 9FB3C4 \
+    --ring-wrong-color E8663D --key-hl-color F28C28 --bs-hl-color E8663D \
+    --line-color 00000000 --line-clear-color 00000000 \
+    --line-ver-color 00000000 --line-wrong-color 00000000 \
+    --separator-color 00000000 \
+    --text-color EAF2F8 --text-clear-color EAF2F8 \
+    --text-ver-color EAF2F8 --text-wrong-color EAF2F8 \
+    --indicator-radius 90 --indicator-thickness 8 \
+    --font "Pretendard Variable"
+test -r "$WALL" && set -- "$@" -i "$WALL" -s fill
+exec swaylock "$@"

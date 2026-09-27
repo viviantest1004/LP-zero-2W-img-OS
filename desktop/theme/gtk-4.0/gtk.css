@@ -38,24 +38,24 @@
 
 /* ── the mockup's values ──────────────────────────────────────────────── */
 
-@define-color lp_window        #232323;
-@define-color lp_window_back   #202020;
-@define-color lp_header        #2c2c2c;
-@define-color lp_header_back   #242424;
-@define-color lp_edge          #3a3a3a;
-@define-color lp_edge_back     #303030;
+@define-color lp_window        #152331;
+@define-color lp_window_back   #121e2a;
+@define-color lp_header        #1b2d40;
+@define-color lp_header_back   #172636;
+@define-color lp_edge          #2a4058;
+@define-color lp_edge_back     #233649;
 
-@define-color lp_sidebar       #1e1e1e;
-@define-color lp_sidebar_edge  #333333;
-@define-color lp_sidebar_sel   #333333;
+@define-color lp_sidebar       #111c27;
+@define-color lp_sidebar_edge  #22364a;
+@define-color lp_sidebar_sel   #1f3a55;
 
-@define-color lp_text          #e8e8e8;
-@define-color lp_text_back     #6a6a6a;
-@define-color lp_icon          #a8a8a8;
-@define-color lp_icon_back     #4a4a4a;
-@define-color lp_row           #a8a8a8;
-@define-color lp_row_icon      #8a8a8a;
-@define-color lp_group         #4a4a4a;
+@define-color lp_text          #eaf2f8;
+@define-color lp_text_back     #6b8499;
+@define-color lp_icon          #9fb3c4;
+@define-color lp_icon_back     #4a6178;
+@define-color lp_row           #9fb3c4;
+@define-color lp_row_icon      #7f95a8;
+@define-color lp_group         #4a6178;
 
 /* ── the window ───────────────────────────────────────────────────────── */
 

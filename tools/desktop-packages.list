@@ -90,6 +90,27 @@ ffmpeg
 gstreamer1.0-libav
 gstreamer1.0-plugins-good
 gstreamer1.0-plugins-bad
+# The owner's list of everyday apps (the other OS's screenshot): an
+# office suite - documents, spreadsheets, slides - drawn with GTK so it
+# looks like everything else, in Korean too; a code editor; a partition
+# manager beside GNOME Disks; a system monitor; a window for mpv.
+libreoffice-writer
+libreoffice-calc
+libreoffice-impress
+libreoffice-gtk3
+libreoffice-l10n-ko
+geany
+gparted
+gnome-system-monitor
+celluloid
+# Korean from a real keyboard: fcitx5 with the Hangul engine (두벌식 by
+# default). The on-screen keyboard has its own Hangul composer; this is
+# for the XPS's keyboard. Started by lp-shell-start when installed.
+fcitx5
+fcitx5-hangul
+fcitx5-frontend-gtk3
+fcitx5-frontend-gtk4
+fcitx5-config-qt
 
 # ── type ─────────────────────────────────────────────────────────────
 fonts-dejavu-core

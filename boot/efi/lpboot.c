@@ -386,7 +386,7 @@ static void draw_cursor(void)
     }
     rect_t r = { cursor_x - s / 2, cursor_y - s / 2, s, s };
     lpui_rrect(&frame, r.x, r.y, s, s, s / 2, 0xffffff, 230);
-    lpui_rrect_stroke(&frame, r.x, r.y, s, s, s / 2, s / 6 ? s / 6 : 1, 0x2a0f27, 200);
+    lpui_rrect_stroke(&frame, r.x, r.y, s, s, s / 2, s / 6 ? s / 6 : 1, 0x0d2740, 200);
     last_cursor = r;
     blt(&frame, r.x, r.y, r.w, r.h);
 }

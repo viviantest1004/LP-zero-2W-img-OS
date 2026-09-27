@@ -23,7 +23,7 @@
  * written by Settings - or by hand); $LP_SHARE/wallpaper.png, which the
  * image installs from desktop/branding/wallpaper.png when the branding
  * track has made one and from desktop/theme/wallpaper.png until then; and
- * if neither loads, the same aubergine gradient drawn with cairo, so a
+ * if neither loads, the same deep-blue gradient drawn with cairo, so a
  * missing file is never a black screen. The image is scaled to cover the
  * output once and kept at the output's pixel size; a redraw is a copy.
  * The config file is watched (inotify), so a new choice shows at once.
@@ -34,10 +34,11 @@
  * name GIO gives it; a .desktop file shows as the application it
  * launches. Tap opens it with its default application; a long press (or
  * right click) is a menu - Open, Open With Files for a folder, Move to
- * Trash. A long press on the wallpaper itself offers New Folder, Open
- * Desktop in Files, and Change Background…
+ * Trash. A long press (or right click) on the wallpaper itself offers
+ * New Folder, Open Desktop in Files, Files, Open Terminal Here, Change
+ * Background…, Appearance… and Display Settings…
  *
- * Icons sit on a 112x120 grid starting right of the dock and below the
+ * Icons sit on a 112x120 grid starting at the left edge and below the
  * bar, filling the first column downwards, the way the owner's mockup has
  * Documents, Welcome.txt and hello.sh. A finger that presses an icon and
  * moves carries it; on release it snaps to the nearest free cell on the
@@ -61,7 +62,7 @@
 
 #define CELL_W 112
 #define CELL_H 120
-#define ORIGIN_X (72 + 16)     /* right of the dock (dock.c: DOCK_WIDTH) */
+#define ORIGIN_X 24            /* the dock is at the bottom now; icons start at the left edge */
 #define ORIGIN_Y (40 + 16)     /* below the bar (panel.c: BAR_HEIGHT) */
 #define ICON_PX 56
 
@@ -125,17 +126,18 @@ static char *desktop_dir(void)
 
 /* ── the wallpaper ───────────────────────────────────────────────── */
 
-/* The mockup's aubergine: magenta top-left, into near-black. The same
- * stops desktop/theme/wallpaper.png was generated from. */
+/* The theme's deep blue: teal light top-left, into near-black navy. The
+ * same stops desktop/branding/src/wallpaper.py draws the wallpaper with. */
 static void draw_gradient(cairo_t *cr, double W, double H)
 {
     double cx = 0.18 * W, cy = 0.12 * H;
     double R = hypot(W - cx, H - cy);
     cairo_pattern_t *p = cairo_pattern_create_radial(cx, cy, 0, cx, cy, R);
-    cairo_pattern_add_color_stop_rgb(p, 0.00, 0x9a / 255.0, 0x3a / 255.0, 0x78 / 255.0);
-    cairo_pattern_add_color_stop_rgb(p, 0.35, 0x5e / 255.0, 0x1c / 255.0, 0x4f / 255.0);
-    cairo_pattern_add_color_stop_rgb(p, 0.75, 0x2e / 255.0, 0x0e / 255.0, 0x2a / 255.0);
-    cairo_pattern_add_color_stop_rgb(p, 1.00, 0x1a / 255.0, 0x08 / 255.0, 0x18 / 255.0);
+    cairo_pattern_add_color_stop_rgb(p, 0.00, 0x23 / 255.0, 0xa6 / 255.0, 0xa0 / 255.0);
+    cairo_pattern_add_color_stop_rgb(p, 0.20, 0x17 / 255.0, 0x75 / 255.0, 0x85 / 255.0);
+    cairo_pattern_add_color_stop_rgb(p, 0.46, 0x12 / 255.0, 0x47 / 255.0, 0x6e / 255.0);
+    cairo_pattern_add_color_stop_rgb(p, 0.74, 0x0d / 255.0, 0x28 / 255.0, 0x46 / 255.0);
+    cairo_pattern_add_color_stop_rgb(p, 1.00, 0x07 / 255.0, 0x12 / 255.0, 0x1f / 255.0);
     cairo_set_source(cr, p);
     cairo_paint(cr);
     cairo_pattern_destroy(p);
@@ -632,6 +634,30 @@ static void m_background(GtkMenuItem *m, gpointer d)
     lp_spawn(a);
 }
 
+static void m_files_home(GtkMenuItem *m, gpointer d)
+{
+    (void)m; (void)d;
+    const char *a[] = { "lp-files", NULL };
+    lp_spawn(a);
+}
+
+/* A terminal that opens in ~/Desktop, where the finger was. */
+static void m_terminal(GtkMenuItem *m, gpointer d)
+{
+    (void)m; (void)d;
+    char *dir = desktop_dir();
+    const char *a[] = { "foot", "--working-directory", dir, NULL };
+    lp_spawn(a);
+    g_free(dir);
+}
+
+static void m_display(GtkMenuItem *m, gpointer d)
+{
+    (void)m; (void)d;
+    const char *a[] = { "lp-settings", "display", NULL };
+    lp_spawn(a);
+}
+
 static void on_desk_hold(GtkWidget *w, double x, double y, gpointer data)
 {
     (void)data;
@@ -640,7 +666,12 @@ static void on_desk_hold(GtkWidget *w, double x, double y, gpointer data)
     menu_item(menu, T("Open Desktop in Files", "바탕 화면을 파일에서 열기"),
               G_CALLBACK(m_open_desktop), NULL, FALSE);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+    menu_item(menu, T("Files", "파일"), G_CALLBACK(m_files_home), NULL, FALSE);
+    menu_item(menu, T("Open Terminal Here", "여기서 터미널 열기"), G_CALLBACK(m_terminal), NULL, FALSE);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
     menu_item(menu, T("Change Background…", "배경 바꾸기…"), G_CALLBACK(m_background), NULL, FALSE);
+    menu_item(menu, T("Appearance…", "모양…"), G_CALLBACK(m_background), NULL, FALSE);
+    menu_item(menu, T("Display Settings…", "디스플레이 설정…"), G_CALLBACK(m_display), NULL, FALSE);
     gtk_widget_show_all(menu);
     g_signal_connect(menu, "deactivate", G_CALLBACK(gtk_widget_destroy), NULL);
     lp_menu_popup_at(menu, w, x, y);
