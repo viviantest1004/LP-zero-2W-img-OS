@@ -732,6 +732,11 @@ if [[ -f "$ROOT/etc/lp/services" && -x "$ROOT/usr/libexec/bluetooth/bluetoothd" 
     printf '\n# Bluetooth (bluez). -n: stay in the foreground, init watches it.\n?/usr/libexec/bluetooth/bluetoothd /usr/libexec/bluetooth/bluetoothd -n\n' \
         >> "$ROOT/etc/lp/services"
 fi
+# The screen's console asks for a login here (userland/init/init.c):
+# a laptop's Ctrl+Alt+F1 was otherwise a root shell with no password.
+mkdir -p "$ROOT/etc/lp"
+printf '%s\n' 'Present: init runs /bin/login on the virtual terminals, not a root shell.' \
+    > "$ROOT/etc/lp/console-login"
 # Which application opens what. Without a list GIO takes the first
 # application that claims a type in name order: folders opened in Disk
 # Usage Analyzer, text in Geany, photos in Drawing, PDFs in LibreOffice.

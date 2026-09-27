@@ -1005,6 +1005,25 @@ static pid_t spawn_shell_on(const char *tty, bool greet)
             NULL
         };
 
+        /* The screen of an installed desktop asks who you are.
+         *
+         * A root shell on tty1 with no password is right for a board on
+         * a desk, and wrong for a laptop: Ctrl+Alt+F1 at the lock screen
+         * gave whoever held the machine root. The desktop image says so
+         * with /etc/lp/console-login, and there a virtual terminal gets
+         * login (every account there has a password, root's is locked).
+         * The serial console keeps its shell: nobody reaches that
+         * without the case open or the VM's host, and it is the way back
+         * in when everything else is broken. */
+        if (tty && strncmp(tty, "/dev/tty", 8) == 0 &&
+            tty[8] >= '0' && tty[8] <= '9' &&
+            lp_exists("/etc/lp/console-login") && lp_exists("/bin/login")) {
+            char *largv[] = { (char *)"/bin/login", NULL };
+            lp_execve("/bin/login", largv, envp);
+            dprintf(STDERR_FILENO, "init: cannot run /bin/login\n");
+            lp_exit(127);
+        }
+
         lp_execve(SHELL_PATH, argv, envp);
 
         dprintf(STDERR_FILENO, "init: cannot run %s\n", SHELL_PATH);

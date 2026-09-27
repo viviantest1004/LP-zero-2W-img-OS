@@ -192,7 +192,7 @@ There are three ways back in, and it is worth knowing which one applies.
 
 | what happened | the way in |
 |---|---|
-| the session is running and you want a console | **Ctrl+Alt+F1**. wlroots switches virtual terminals itself, and init's shell is waiting on tty1. |
+| the session is running and you want a console | **Ctrl+Alt+F1**. wlroots switches virtual terminals itself, and init's login prompt is waiting on tty1 (a root shell on the boards; the desktop asks for an account and its password - /etc/lp/console-login). |
 | the compositor exited, cleanly or not | the tty1 shell, already there. wayfire puts the terminal back into text mode on the way out. |
 | the compositor was killed outright | **SSH**. See below. |
 
