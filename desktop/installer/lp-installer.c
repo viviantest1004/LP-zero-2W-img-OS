@@ -46,6 +46,8 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <pwd.h>
+#include <unistd.h>
 
 #define EXIT_TRY 10
 
@@ -140,9 +142,27 @@ static void on_continue(GtkButton *b, gpointer d)
     g_free(out);
 }
 
+/* "Try" goes to the live account's session, which reads its language
+ * from ~/.config/lp/locale (session-run): the language chosen on this
+ * page is written there, or a person who picked 한국어 got an English
+ * desktop. This window runs as that account (uid 1000) with a HOME of its
+ * own under /run, so the account's real home comes from passwd. */
 static void on_try(GtkButton *b, gpointer d)
 {
     (void)b; (void)d;
+    struct passwd *pw = getpwuid(getuid());
+    if (pw && pw->pw_dir) {
+        char *dir = g_build_filename(pw->pw_dir, ".config", "lp", NULL);
+        char *f = g_build_filename(dir, "locale", NULL);
+        GError *e = NULL;
+        g_mkdir_with_parents(dir, 0755);
+        if (!g_file_set_contents(f, su_korean ? "ko_KR.UTF-8\n" : "en_US.UTF-8\n", -1, &e)) {
+            g_printerr("lp-installer: %s: %s\n", f, e->message);
+            g_error_free(e);
+        }
+        g_free(f);
+        g_free(dir);
+    }
     A.exit_code = EXIT_TRY;
     gtk_window_destroy(GTK_WINDOW(A.win));
 }
