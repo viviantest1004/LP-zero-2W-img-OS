@@ -83,3 +83,7 @@ desktop/files/lp-files
 # 오브젝트 디렉터리 (아키텍처별)
 userland/build-*/
 *.a
+
+# Python bytecode caches, written whenever a script runs.
+__pycache__/
+*.pyc
