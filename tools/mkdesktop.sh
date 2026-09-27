@@ -331,6 +331,14 @@ if [[ -d "$D/theme" ]]; then
     mkdir -p "$ROOT/usr/share/themes/LP/gtk-4.0" "$ROOT/usr/share/themes/LP/gtk-3.0"
     cp -a "$D/theme/gtk-4.0/gtk.css" "$ROOT/usr/share/themes/LP/gtk-4.0/" 2>/dev/null || true
     cp -a "$D/theme/gtk-3.0/gtk.css" "$ROOT/usr/share/themes/LP/gtk-3.0/" 2>/dev/null || true
+    # The shell's own style (top bar, dock, quick settings, app grid, OSK)
+    # and the springs as CSS transitions. lp-shell.c reads them from
+    # /usr/local/share/lp; without them every shell surface is drawn in
+    # plain Adwaita and the dock sits under the top bar.
+    mkdir -p "$ROOT/usr/local/share/lp"
+    for f in shell.css shell-light.css motion.css wallpaper.png; do
+        [[ -f "$D/theme/$f" ]] && cp -a "$D/theme/$f" "$ROOT/usr/local/share/lp/$f"
+    done
 fi
 
 # The session. rc starts /bin/start-desktop; that name is the setup gate
@@ -486,12 +494,22 @@ chown -R 1000:1000 "$H"
 chmod 750 "$H"
 mkdir -p "$ROOT/data" "$ROOT/boot"
 
-# The one setuid program: lp-power, one word in, nothing exec'd - how an
-# account that is not root turns the machine off without logind.
-if [[ -f "$ROOT/bin/lp-power" ]]; then
-    chown 0:0 "$ROOT/bin/lp-power"
-    chmod 4755 "$ROOT/bin/lp-power"
-fi
+# The setuid programs.
+#   lp-power  one word in, nothing exec'd - how an account that is not
+#             root turns the machine off without logind
+#   sudo      asks the caller's own password (sudo group), then runs
+#   su        asks the target account's password
+#   passwd    changes the caller's own password, after the current one
+# Each checks its real uid before it does anything. Copied into the root
+# like every other program they arrived 0755, and sudo refused everyone
+# with "must be owned by uid 0 and have the setuid bit set" - on a
+# machine whose administrator is meant to be an ordinary account with a
+# password, nobody could administer it.
+for p in lp-power sudo su passwd; do
+    [[ -f "$ROOT/bin/$p" && ! -L "$ROOT/bin/$p" ]] || continue
+    chown 0:0 "$ROOT/bin/$p"
+    chmod 4755 "$ROOT/bin/$p"
+done
 
 # ── 8. what the image must not carry ─────────────────────────────────
 step "scrub"

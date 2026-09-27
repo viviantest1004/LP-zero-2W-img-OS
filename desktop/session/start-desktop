@@ -31,9 +31,26 @@ chmod 0666 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
 # 일들과 같다: 원래 logind 가 할 일을 한 번에 해 둔다.
 chmod 0666 /dev/snd/* 2>/dev/null
 
+# The desktop account is whoever has uid 1000: "user" in the image as
+# built, the name the person chose once the installer has run (it keeps
+# /home/user as a link to the real home, for scripts written against the
+# old name).
+LP_HOME=$(awk -F: '$3 == 1000 { print $6; exit }' /etc/passwd)
+test -n "$LP_HOME" || LP_HOME=/home/user
+
 # 홈이 root 소유로 남아 있으면 세션이 설정 하나 저장하지 못한다.
 # 이미지를 만들 때 맞춰 두지만, 첫 부팅에서 expandfs 가 파티션을
 # 늘리고 나면 새로 생기는 것들이 있어 여기서 한 번 더 맞춘다.
-chown -R 1000:1000 /home/user 2>/dev/null
+chown -R 1000:1000 "$LP_HOME/" 2>/dev/null
 
+# The session gets the account's groups - sudo, audio, video, ... - the
+# way a login would. dropprivs clears them (right for a network daemon,
+# wrong for a person): with only its own group the person was not in
+# sudo, so sudo refused them with their own password, and every other
+# group the installer gave them counted for nothing. setpriv
+# --init-groups reads /etc/group exactly as login does.
+if test -x /usr/bin/setpriv; then
+    exec /usr/bin/setpriv --reuid=1000 --regid=1000 --init-groups \
+        --reset-env /bin/session-run
+fi
 dropprivs 1000:1000 /bin/session-run

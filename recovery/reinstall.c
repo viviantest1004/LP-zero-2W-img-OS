@@ -489,8 +489,34 @@ static const char *boot_files(void)
         show(LPS_R_RE_BOOT, 930 + (int)i * 10, false);
     }
     if (!err) {
-        char cmd[96];
-        int n = snprintf(cmd, sizeof cmd, "root=PARTUUID=%s\n", p_root.partuuid);
+        /* This disk's root by PARTUUID, then every other word the line
+         * already had (console=, quiet, the splash's fbcon font ...) -
+         * the installer's rule. Writing the root alone left a system that
+         * booted with the kernel's defaults: the boot messages over the
+         * splash and no serial console. With no line to start from (the
+         * EFI partition was lost), the payload's own is used. */
+        static char old[1024], cmd[1100];
+        if (!file_read(MNT_ESP "/EFI/LP/cmdline.txt", old, sizeof old) &&
+            !file_read(PAYLOAD_DIR "/esp/cmdline.txt", old, sizeof old))
+            old[0] = 0;
+        int n = snprintf(cmd, sizeof cmd, "root=PARTUUID=%s", p_root.partuuid);
+        for (char *w = old; *w && n < (int)sizeof cmd - 2; ) {
+            while (*w == ' ' || *w == '\t' || *w == '\r' || *w == '\n')
+                w++;
+            if (!*w)
+                break;
+            char *e = w;
+            while (*e && *e != ' ' && *e != '\t' && *e != '\r' && *e != '\n')
+                e++;
+            if (strncmp(w, "root=", 5) != 0 && n + 1 + (e - w) < (int)sizeof cmd - 2) {
+                cmd[n++] = ' ';
+                memcpy(cmd + n, w, (size_t)(e - w));
+                n += (int)(e - w);
+            }
+            w = e;
+        }
+        cmd[n++] = '\n';
+        cmd[n] = 0;
         if (!file_write_atomic(MNT_ESP "/EFI/LP/cmdline.txt", cmd, (size_t)n, 0644))
             err = "writing cmdline.txt failed";
     }

@@ -1178,6 +1178,17 @@ def install(a, password):
         say("STEP", "boot", "Making the disk bootable")
         mount(p_esp, esp_mnt)
         have_menu = fill_esp(p_esp, esp_mnt, root_guid)
+        # The boot menu offers LP Recovery - and after two failed starts
+        # chooses it - only with this mark, which also names this disk's
+        # own recovery partition (a label is shared with the stick).
+        mark = os.path.join(esp_mnt, "EFI/LP/recovery.ok")
+        if has_recovery:
+            with open(mark, "w") as f:
+                f.write("root=PARTUUID=%s\n" % rec_guid)
+                f.flush()
+                os.fsync(f.fileno())
+        elif os.path.exists(mark):
+            os.unlink(mark)
         entry = None
         if boot_entry_wanted:
             try:

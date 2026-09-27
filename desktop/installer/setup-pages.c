@@ -296,16 +296,27 @@ static GtkStringList *load_zones(void)
     return sl;
 }
 
+/* Debian writes "Etc/UTC" to /etc/timezone, and zone1970.tab lists no
+ * alias, so a name that is not in the list lands on UTC - never on
+ * whatever happens to sort first (Africa/Abidjan). */
 static void select_zone(SuRegion *r, const char *tz)
 {
     guint n = g_list_model_get_n_items(G_LIST_MODEL(r->zones));
-    for (guint i = 0; i < n; i++)
-        if (!strcmp(gtk_string_list_get_string(r->zones, i), tz)) {
+    guint utc = 0;
+    for (guint i = 0; i < n; i++) {
+        const char *z = gtk_string_list_get_string(r->zones, i);
+        if (!strcmp(z, "UTC"))
+            utc = i;
+        if (!strcmp(z, tz)) {
             r->updating = TRUE;
             gtk_drop_down_set_selected(GTK_DROP_DOWN(r->tz), i);
             r->updating = FALSE;
             return;
         }
+    }
+    r->updating = TRUE;
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(r->tz), utc);
+    r->updating = FALSE;
 }
 
 void su_region_build(SuRegion *r)

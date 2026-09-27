@@ -769,6 +769,12 @@ echo "[rc] checking what survived the reboot"
 # mistakes, which is what actually happens.
 integrity || echo "[rc]   run 'integrity -u' if that change was yours"
 
+# This start came up. The boot menu (lpboot.efi) counts every start and
+# offers LP Recovery first once two in a row have not said this; without
+# it every ordinary start counted, and the second restart after installing
+# went to Recovery by itself. Quiet and harmless where there is no UEFI.
+lp-reboot-recovery --boot-ok 2>/dev/null
+
 # 데스크탑.
 #
 # 있으면 띄우고 없으면 아무 일도 하지 않는다. 파이(램 루트) 이미지에는

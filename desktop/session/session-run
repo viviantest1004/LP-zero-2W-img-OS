@@ -8,14 +8,28 @@
 # 부르면 /etc/passwd 에 같은 이름이 두 줄 생기고, getpwnam("lp") 은
 # 먼저 나오는 uid 7 을 돌려준다 - 세션이 홈도 셸도 잘못된 계정으로
 # 뜨는데 오류는 한 줄도 나지 않는다.
+#
+# The account is read from /etc/passwd rather than assumed: the
+# installer names it after the person (and leaves /home/user as a link,
+# which made every path here work while Files titled the home "user").
+LP_ENT=$(awk -F: '$3 == 1000 { print $1 ":" $6 ":" $7; exit }' /etc/passwd)
+LP_USER=${LP_ENT%%:*}
+LP_HOME=${LP_ENT#*:}; LP_HOME=${LP_HOME%%:*}
+LP_SHELL=${LP_ENT##*:}
+test -n "$LP_USER" || LP_USER=user
+test -d "$LP_HOME" || LP_HOME=/home/user
+export USER=$LP_USER LOGNAME=$LP_USER
+# /bin before /usr/bin: at the prompt a person gets our commands, and
+# GNU's stay reachable as /usr/bin/X (tools/lp-base/fixup.sh).
+export PATH=/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/sbin
 export XDG_RUNTIME_DIR=/run/user/1000
-export HOME=/home/user
-export XDG_CONFIG_HOME=/home/user/.config
-export XDG_DATA_HOME=/home/user/.local/share
+export HOME=$LP_HOME
+export XDG_CONFIG_HOME=$LP_HOME/.config
+export XDG_DATA_HOME=$LP_HOME/.local/share
 # wireplumber 는 여기에 마지막 볼륨과 기본 장치를 적는다. 없으면
 # 만들지 못하고, 어떤 판에서는 그것으로 그냥 나가 버린다.
-export XDG_STATE_HOME=/home/user/.local/state
-export XDG_CACHE_HOME=/home/user/.cache
+export XDG_STATE_HOME=$LP_HOME/.local/state
+export XDG_CACHE_HOME=$LP_HOME/.cache
 # 런처가 앱 목록을 여기서 읽는다. 비워 두면 fuzzel 이 아무것도 찾지
 # 못하고 빈 창이 뜬다.
 export XDG_DATA_DIRS=/usr/local/share:/usr/share
@@ -37,9 +51,14 @@ export WLR_LIBINPUT_NO_DEVICES=1
 # "Couldn't open libGL.so.1" and falls back anyway, one warning per app.
 export GSK_RENDERER=cairo
 export GDK_BACKEND=wayland
-# foot reads the login shell out of /etc/passwd and got /bin/false.
-# Saying it plainly costs nothing and removes a whole class of question.
-export SHELL=/bin/sh
+# The terminal's shell: the account's own (lpsh, with its line editor,
+# prompt and history), or /bin/sh if passwd names something that cannot
+# run - foot once read /bin/false there and opened nothing.
+case $LP_SHELL in
+    */false|*/nologin|"") LP_SHELL=/bin/sh ;;
+esac
+test -x "$LP_SHELL" || LP_SHELL=/bin/sh
+export SHELL=$LP_SHELL
 # 로케일.
 #
 # 이 기계의 기본 언어는 영어다. 한국어는 이미지에 같이 들어 있고
@@ -54,8 +73,8 @@ export SHELL=/bin/sh
 # Name[ko] 를 고를 때 그것을 보기 때문이다. LANG 만 두면 비어 있는
 # LC_MESSAGES 가 C 로 확정되는 경로가 있어서, 앱 이름만 영어로 남는다.
 LP_LOCALE=en_US.UTF-8
-if test -s /home/user/.config/lp/locale ; then
-    read LP_LOCALE < /home/user/.config/lp/locale
+if test -s "$LP_HOME/.config/lp/locale" ; then
+    read LP_LOCALE < "$LP_HOME/.config/lp/locale"
 fi
 export LANG=$LP_LOCALE
 export LC_MESSAGES=$LP_LOCALE
@@ -64,7 +83,7 @@ export EDITOR=edit
 # 한 문단씩 경고를 찍는데, 그건 고장이 아니다.
 export NO_AT_BRIDGE=1
 export GTK_A11Y=none
-cd /home/user
+cd "$LP_HOME"
 
 # dbus-run-session 으로 감싸는 이유.
 #

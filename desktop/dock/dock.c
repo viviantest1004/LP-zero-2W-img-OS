@@ -444,34 +444,77 @@ static GtkWidget *app_image(Item *it)
     return img;
 }
 
-/* The breathing icon: the transform goes on before GtkImage draws and
- * the fade is applied after, around a group. Nothing is paid for it
- * while the icon is still. */
-static gboolean img_draw_pre(GtkWidget *w, cairo_t *cr, gpointer d)
+/* The breathing icon. While it breathes the dock draws the icon itself -
+ * scaled about its centre and faded - and GtkImage does not draw at all;
+ * the rest of the time this returns at once and GtkImage draws as usual.
+ *
+ * It used to wrap GtkImage's own drawing in cairo_push_group() here and
+ * cairo_pop_group_to_source() in an after-handler. GTK 3 brackets every
+ * "draw" handler in its own cairo_save()/cairo_restore(), so the restore
+ * after the first handler met the pushed group instead: "cairo_restore()
+ * without matching cairo_save()", the context went into an error state,
+ * and every widget drawn after it that frame failed - the first tap on
+ * any app emptied the rest of the dock. One handler that does its own
+ * painting and returns TRUE has nothing to leave unbalanced.
+ *
+ * The icon's surface is loaded once per launch at the output's scale and
+ * kept on the widget until the breathing ends. */
+static cairo_surface_t *breath_surface(GtkWidget *w)
+{
+    int sf = gtk_widget_get_scale_factor(w);
+    cairo_surface_t *s = g_object_get_data(G_OBJECT(w), "lp-breath");
+    if (s && GPOINTER_TO_INT(g_object_get_data(G_OBJECT(w), "lp-breath-sf")) == sf)
+        return s;
+    GtkIconTheme *th = gtk_icon_theme_get_for_screen(gtk_widget_get_screen(w));
+    GtkIconInfo *ii = NULL;
+    GIcon *gi = NULL;
+    const char *name = NULL;
+    switch (gtk_image_get_storage_type(GTK_IMAGE(w))) {
+    case GTK_IMAGE_GICON:
+        gtk_image_get_gicon(GTK_IMAGE(w), &gi, NULL);
+        if (gi)
+            ii = gtk_icon_theme_lookup_by_gicon_for_scale(th, gi, ICON_PX, sf,
+                                                          GTK_ICON_LOOKUP_FORCE_SIZE);
+        break;
+    case GTK_IMAGE_ICON_NAME:
+        gtk_image_get_icon_name(GTK_IMAGE(w), &name, NULL);
+        if (name)
+            ii = gtk_icon_theme_lookup_icon_for_scale(th, name, ICON_PX, sf,
+                                                      GTK_ICON_LOOKUP_FORCE_SIZE);
+        break;
+    default:
+        break;
+    }
+    if (!ii)
+        return NULL;
+    s = gtk_icon_info_load_surface(ii, gtk_widget_get_window(w), NULL);
+    g_object_unref(ii);
+    if (!s)
+        return NULL;
+    g_object_set_data_full(G_OBJECT(w), "lp-breath", s,
+                           (GDestroyNotify)cairo_surface_destroy);
+    g_object_set_data(G_OBJECT(w), "lp-breath-sf", GINT_TO_POINTER(sf));
+    return s;
+}
+
+static gboolean img_draw(GtkWidget *w, cairo_t *cr, gpointer d)
 {
     Item *it = d;
-    double p = it->pulse.x;
-    if (p < 0.001)
+    double p = CLAMP(it->pulse.x, 0.0, 1.0);
+    if (p < 0.001) {
+        g_object_set_data(G_OBJECT(w), "lp-breath", NULL);
+        return FALSE;
+    }
+    cairo_surface_t *s = breath_surface(w);
+    if (!s)
         return FALSE;
     double W = gtk_widget_get_allocated_width(w), H = gtk_widget_get_allocated_height(w);
     double sc = 1.0 - 0.08 * p;
     cairo_translate(cr, W / 2, H / 2);
     cairo_scale(cr, sc, sc);
-    cairo_translate(cr, -W / 2, -H / 2);
-    cairo_push_group(cr);
-    g_object_set_data(G_OBJECT(w), "lp-grouped", GINT_TO_POINTER(1));
-    return FALSE;
-}
-
-static gboolean img_draw_post(GtkWidget *w, cairo_t *cr, gpointer d)
-{
-    Item *it = d;
-    if (!g_object_get_data(G_OBJECT(w), "lp-grouped"))
-        return FALSE;
-    g_object_set_data(G_OBJECT(w), "lp-grouped", NULL);
-    cairo_pop_group_to_source(cr);
-    cairo_paint_with_alpha(cr, 1.0 - 0.45 * CLAMP(it->pulse.x, 0, 1));
-    return FALSE;
+    cairo_set_source_surface(cr, s, -ICON_PX / 2.0, -ICON_PX / 2.0);
+    cairo_paint_with_alpha(cr, 1.0 - 0.45 * p);
+    return TRUE;
 }
 
 static gboolean dot_draw(GtkWidget *w, cairo_t *cr, gpointer d)
@@ -553,8 +596,7 @@ static Item *add_item(const char *id, GDesktopAppInfo *info, const Slot *slot,
     it->img = img;
     gtk_widget_set_hexpand(img, TRUE);
     gtk_widget_set_margin_end(img, 8);
-    g_signal_connect(img, "draw", G_CALLBACK(img_draw_pre), it);
-    g_signal_connect_after(img, "draw", G_CALLBACK(img_draw_post), it);
+    g_signal_connect(img, "draw", G_CALLBACK(img_draw), it);
     gtk_box_pack_start(GTK_BOX(row), img, TRUE, TRUE, 0);
     lp_spring_init(&it->run, LP_SPRING_INSERT, 0.0);
     lp_spring_init(&it->focus, LP_SPRING_EXPAND, 0.0);
@@ -566,8 +608,10 @@ static Item *add_item(const char *id, GDesktopAppInfo *info, const Slot *slot,
     gtk_container_add(GTK_CONTAINER(it->button), row);
     /* The name for the touchpad user who rests the pointer; a finger
      * user gets it from the long-press menu's heading. */
-    gtk_widget_set_tooltip_text(it->button, info ? lp_app_name(G_APP_INFO(info))
-                                                 : T(slot->en, slot->ko));
+    /* A mockup slot goes by what it is ("Terminal"), not by what the
+     * package happens to call itself ("Foot"). */
+    gtk_widget_set_tooltip_text(it->button, slot ? T(slot->en, slot->ko)
+                                                 : lp_app_name(G_APP_INFO(info)));
     g_signal_connect(it->button, "clicked", G_CALLBACK(on_item), it);
     lp_on_hold(it->button, on_hold, it);
     gtk_box_pack_start(GTK_BOX(list), it->button, FALSE, FALSE, 0);

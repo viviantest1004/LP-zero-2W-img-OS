@@ -216,6 +216,15 @@ EOF
 
 printf '%s\n' "${CONFFILES[@]}" > "$STAGE/DEBIAN/conffiles"
 
+# sudo, su and passwd are setuid root in the package itself, so that
+# dpkg sets the mode on every install and upgrade: a mode given only
+# by the image build would be reset to 0755 by the first
+# `apt install --reinstall lp-base`, and nobody could use sudo again.
+# (--root-owner-group makes them root:root.)
+for p in sudo su passwd; do
+    [ -f "$STAGE/bin/$p" ] && [ ! -L "$STAGE/bin/$p" ] && chmod 4755 "$STAGE/bin/$p"
+done
+
 SIZE_KB=$(du -sk --exclude=DEBIAN "$STAGE" | cut -f1)
 cat > "$STAGE/DEBIAN/control" <<EOF
 Package: lp-base

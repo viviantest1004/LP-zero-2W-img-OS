@@ -265,6 +265,7 @@ static int sel;                         /* the highlighted card */
 static int countdown_ms = 5000;         /* < 0: stopped */
 static int reason;                      /* LPS_ id of the explanation line, or -1 */
 static int failed_boots;
+static bool have_recovery;             /* \EFI\LP\recovery.ok: LP-RECOVERY holds a system */
 static char errtext[160];
 static lpui_spring_t hl;                /* highlight position, 0 = LP, 1.0 = Recovery */
 static int cursor_x = -1, cursor_y = -1;/* the mouse pointer, when there is one */
@@ -539,7 +540,26 @@ static void build_cmdline(int choice, char *out, int cap)
         out[o++] = ' ';
     }
     if (choice == CH_REC) {
-        PUT("root=PARTLABEL=LP-RECOVERY lp.mode=recovery");
+        /* The installer writes this disk's own recovery root into
+         * recovery.ok ("root=PARTUUID=..."). The label is only the
+         * fallback: every LP disk has an LP-RECOVERY, the USB stick
+         * this was installed from among them, and with the stick still
+         * plugged in the kernel may take the first it finds. */
+        char rec[128];
+        int rn = read_small(L"\\EFI\\LP\\recovery.ok", rec, sizeof(rec));
+        bool own = rn > 5 && rec[0] == 'r' && rec[1] == 'o' && rec[2] == 'o' &&
+                   rec[3] == 't' && rec[4] == '=';
+        if (own) {
+            int k = 0;
+            while (rec[k] && rec[k] != ' ' && rec[k] != '\t' && rec[k] != '\r' &&
+                   rec[k] != '\n')
+                k++;
+            rec[k] = 0;
+            PUT(rec);
+        } else {
+            PUT("root=PARTLABEL=LP-RECOVERY");
+        }
+        PUT(" lp.mode=recovery");
         if (lpui_korean)
             PUT(" lp.lang=ko");
     }
@@ -621,6 +641,23 @@ static EFI_STATUS start_kernel(int choice)
 
 static void boot(int choice)
 {
+    if (choice == CH_REC && !have_recovery) {
+        const char *m = lpui_korean ? "No recovery system on this disk"
+                                    : "No recovery system on this disk";
+        int k = 0;
+        for (; m[k] && k < (int)sizeof(errtext) - 1; k++)
+            errtext[k] = m[k];
+        errtext[k] = 0;
+        logf("recovery chosen, but there is no recovery system");
+        countdown_ms = -1;
+        draw_base();
+        lpui_copy_rect(&frame, &base, 0, 0, W, H);
+        last_hl.w = 0;
+        rect_t d;
+        compose(&d);
+        blt(&frame, 0, 0, W, H);
+        return;
+    }
     u32 count = var_u32(L"LPBootCount", 0);
     /* Count the attempt before making it: a boot that hangs never gets to
      * say it failed, so the number has to already be there. Recovery is
@@ -757,8 +794,23 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     if (next[0])
         RT->SetVariable(L"LPBootNext", &LP_GUID, VAR_ATTRS, 0, 0);   /* once */
 
+    /* The installer (and the image build) put \EFI\LP\recovery.ok on
+     * this partition only once LP-RECOVERY holds a recovery system. With
+     * no system there, Recovery is a kernel with no root to run - a
+     * machine that preselected it after two bad starts would hang on a
+     * black screen instead of trying LP again. So without the mark the
+     * menu never chooses Recovery by itself, and choosing it says why
+     * it cannot start. */
+    have_recovery = file_exists(L"\\EFI\\LP\\recovery.ok");
+
     reason = -1;
     sel = CH_LP;
+    if (!have_recovery) {
+        if (count >= 2 && count < REINSTALL_MARK)
+            set_u32(L"LPBootCount", 0);
+        count = 0;
+        asked = false;
+    }
     if (count >= REINSTALL_MARK) {
         sel = CH_REC;
         reason = LPS_B_REINSTALL_OPEN;
@@ -771,8 +823,9 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
         sel = CH_REC;
         reason = LPS_B_ASKED;
     }
-    logf("count=%d next=%s lang=%s -> %s", (int)count, next[0] ? next : "-",
-         lpui_korean ? "ko" : "en", sel == CH_LP ? "LP" : "LP Recovery");
+    logf("count=%d next=%s lang=%s recovery=%s -> %s", (int)count, next[0] ? next : "-",
+         lpui_korean ? "ko" : "en", have_recovery ? "yes" : "no",
+         sel == CH_LP ? "LP" : "LP Recovery");
 
     /* The GOP on the console's handle is the one the screen shows; any
      * GOP is second best. */
