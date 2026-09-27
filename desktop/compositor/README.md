@@ -51,14 +51,24 @@ cursor plane carries sway's cursor buffer (debugfs dri state: plane 33
 on crtc-0 with an fb), no fallback to a software cursor, and clicks land
 where the pointer is. Same exported symbols as Debian's library.
 
-Not in the patch: reusing one output buffer on virtual GPUs (so every
-commit carries the same FB and virtio-gpu uploads only FB_DAMAGE_CLIPS
-instead of the whole 1920x1080 plane per pointer motion). Tried and
-measured in QEMU (virtio-vga, sway/pixman): the FB did stay the same and
-wlroots sent a 24x24 clip, but every RESOURCE_FLUSH was still 1920x1080.
-LP's kernel (6.12.107) keeps `drm_plane_state.ignore_damage_clips` across
+Also in the patch: one output buffer on virtual GPUs drawn by pixman
+(sway). The swapchain handed out two dumb buffers in turn, so every
+commit carried a new FB, and virtio-gpu uploads the whole plane when the
+FB changes - a 1920x1080 TRANSFER_TO_HOST_2D + RESOURCE_FLUSH per pointer
+movement. On virtio_gpu, vmwgfx, qxl and cirrus, when the buffers are
+dumb buffers, the swapchain now keeps drawing into the buffer committed
+last: the FB stays the same and the driver uploads FB_DAMAGE_CLIPS only.
+That takes LP's kernel fix too (kernel/patches/0001-drm-clear-
+ignore_damage_clips-on-duplicate.patch): Linux 6.12 kept
+`drm_plane_state.ignore_damage_clips` across
 `__drm_atomic_helper_plane_duplicate_state()`, so after the first FB
-change (fbcon -> sway) virtio-gpu ignores damage clips for good - an
-upstream bug with a fix posted in 2026 ("drm/damage-helper: Clear
-ignore_damage_clips ..."). Without that kernel fix the single buffer only
-adds front-buffer drawing for no gain; with it, it is worth another try.
+change (fbcon -> sway) virtio-gpu ignored damage clips for good, and the
+single buffer alone changed nothing. Measured in QEMU (virtio-vga,
+sway/pixman, 60 pointer movements a second): RESOURCE_FLUSH went from
+1920x1080 every time to about 32x30 (the cursor's old and new place),
+and QEMU's main thread from about 12% to 4-5% of a core; window drags,
+menus, the launcher and a scrolling terminal left nothing behind.
+
+wayfire (GLES2 on virgl) keeps double buffering: its GBM buffers are what
+the host displays, not a copy of it, and there a single buffer brought the
+flushes down the same way but QEMU's CPU time not at all.
