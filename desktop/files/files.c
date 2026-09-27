@@ -2148,7 +2148,8 @@ static void on_clip_files(GObject *src, GAsyncResult *res, gpointer data)
     GPtrArray *files = g_ptr_array_new_with_free_func(g_object_unref);
     for (GSList *n = l; n; n = n->next)
         g_ptr_array_add(files, g_object_ref(n->data));
-    g_slist_free_full(l, g_object_unref);
+    /* transfer container: the list is ours, the files are the list's owner's */
+    g_slist_free(l);
     GFile *dest = g_file_new_for_path(app->path);
     op_start(app, files, dest, FALSE, FALSE);
     g_object_unref(dest);
@@ -2983,7 +2984,10 @@ static gboolean on_drop(GtkDropTarget *target, const GValue *value,
         if (!same)
             g_ptr_array_add(sources, g_object_ref(f));
     }
-    g_slist_free_full(l, g_object_unref);
+    /* transfer container: unreffing the files too freed them under the
+     * drag's own file list - on wayfire a drop from the desktop then moved
+     * nothing (g_file_move: 'G_IS_FILE (source)' failed). */
+    g_slist_free(l);
 
     if (sources->len == 0) {
         g_ptr_array_unref(sources);
