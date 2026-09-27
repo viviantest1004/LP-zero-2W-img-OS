@@ -702,6 +702,32 @@ slim
 if [[ -f "$ROOT/etc/lp/services" ]]; then
     sed -i 's|^?/bin/ec2 ec2 -d$|# ?/bin/ec2 ec2 -d   (not on the desktop: tools/mkdesktop.sh)|' "$ROOT/etc/lp/services"
 fi
+# Bluetooth: bluez's bus activation file hands the job to systemd
+# (Exec=/bin/false, SystemdService=...), so without a service line here
+# bluetoothd never ran and Settings > Bluetooth had no adapter to show.
+if [[ -f "$ROOT/etc/lp/services" && -x "$ROOT/usr/libexec/bluetooth/bluetoothd" ]] &&
+   ! grep -q bluetoothd "$ROOT/etc/lp/services"; then
+    printf '\n# Bluetooth (bluez). -n: stay in the foreground, init watches it.\n?/usr/libexec/bluetooth/bluetoothd /usr/libexec/bluetooth/bluetoothd -n\n' \
+        >> "$ROOT/etc/lp/services"
+fi
+# Which application opens what. Without a list GIO takes the first
+# application that claims a type in name order: folders opened in Disk
+# Usage Analyzer, text in Geany, photos in Drawing, PDFs in LibreOffice.
+mkdir -p "$ROOT/etc/xdg"
+{
+    echo '[Default Applications]'
+    echo 'inode/directory=lp-files.desktop'
+    for t in application/pdf application/x-pdf application/postscript image/tiff; do echo "$t=org.gnome.Evince.desktop"; done
+    for t in text/plain text/markdown text/x-log text/csv application/x-shellscript text/x-csrc text/x-chdr text/x-python application/json application/xml; do echo "$t=org.gnome.gedit.desktop"; done
+    for t in image/png image/jpeg image/gif image/webp image/bmp image/svg+xml image/x-icon image/heif image/avif; do echo "$t=org.gnome.eog.desktop"; done
+    for t in video/mp4 video/x-matroska video/webm video/quicktime video/x-msvideo video/mpeg video/ogg audio/mpeg audio/ogg audio/flac audio/x-wav audio/wav audio/mp4 audio/aac audio/x-vorbis+ogg; do echo "$t=io.github.celluloid_player.Celluloid.desktop"; done
+    for t in application/zip application/x-tar application/gzip application/x-compressed-tar application/x-xz-compressed-tar application/x-bzip2-compressed-tar application/x-7z-compressed application/vnd.rar application/x-rar application/zstd; do echo "$t=org.gnome.FileRoller.desktop"; done
+    for t in text/html application/xhtml+xml x-scheme-handler/http x-scheme-handler/https; do echo "$t=firefox-esr.desktop"; done
+    for t in application/vnd.oasis.opendocument.text application/msword application/vnd.openxmlformats-officedocument.wordprocessingml.document application/rtf; do echo "$t=libreoffice-writer.desktop"; done
+    for t in application/vnd.oasis.opendocument.spreadsheet application/vnd.ms-excel application/vnd.openxmlformats-officedocument.spreadsheetml.sheet; do echo "$t=libreoffice-calc.desktop"; done
+    for t in application/vnd.oasis.opendocument.presentation application/vnd.ms-powerpoint application/vnd.openxmlformats-officedocument.presentationml.presentation; do echo "$t=libreoffice-impress.desktop"; done
+} > "$ROOT/etc/xdg/mimeapps.list"
+log "default applications: $(grep -c = "$ROOT/etc/xdg/mimeapps.list") types; bluetoothd in init's services"
 scrub
 leaks || die "the image would carry what the build host left in it"
 log "no proxy, CA, apt lists, machine-id, host keys, histories or logs"
