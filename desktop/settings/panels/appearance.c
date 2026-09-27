@@ -48,6 +48,10 @@ static void mirror_style(gboolean light)
     lp_gtk_settings_set("gtk-application-prefer-dark-theme", light ? "0" : "1");
 }
 
+/* The page on screen, for its subtitle ("Dark style"), which is the
+ * state and was left saying the old one. Cleared when the page goes. */
+static GtkWidget *PAGE;
+
 static void set_style(gboolean light)
 {
     char *p = lp_config_path("style");
@@ -57,6 +61,8 @@ static void set_style(gboolean light)
     mirror_style(light);
     lp_apply_palette();
     lp_toast(FALSE, light ? T("Light style", "밝은 스타일") : T("Dark style", "어두운 스타일"));
+    if (PAGE)
+        page_set_subtitle(PAGE, light ? T("Light style", "밝은 스타일") : T("Dark style", "어두운 스타일"));
 }
 
 /* A small window drawn in the style it stands for: a title bar, a
@@ -459,6 +465,9 @@ static GtkWidget *build(void)
     GtkWidget *page = page_new(T("Appearance", "모양"),
                                lp_style_is_light() ? T("Light style", "밝은 스타일")
                                                    : T("Dark style", "어두운 스타일"));
+    if (PAGE) g_object_remove_weak_pointer(G_OBJECT(PAGE), (gpointer *)&PAGE);
+    PAGE = page;
+    g_object_add_weak_pointer(G_OBJECT(PAGE), (gpointer *)&PAGE);
 
     GtkWidget *g = group_new(page, T("Style", "스타일"));
     GtkWidget *cards = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
