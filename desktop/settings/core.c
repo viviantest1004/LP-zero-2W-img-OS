@@ -228,6 +228,9 @@ static const char *CSS =
     ".lp-settings calendar > grid > label:selected { background: @lp_accent; color: @lp_on_accent;"
     "  border-radius: 20px; }\n"
     ".lp-settings scrollbar slider { min-width: 8px; background: alpha(@lp_fg, 0.3); border-radius: 4px; }\n"
+    /* The sidebar's bar is always there (core.c, build_window); only the
+     * slider should show, not a trough down the sidebar's edge. */
+    ".lp-settings .lp-sidebar scrollbar { background: transparent; border: none; }\n"
     ".lp-settings .lp-toast { background: @lp_card; color: @lp_fg; border: 1px solid @lp_border;"
     "  border-radius: 10px; padding: 12px 18px; margin: 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.35); }\n"
     ".lp-settings .lp-toast.lp-toast-error { border-color: @lp_red; }\n"
