@@ -15,8 +15,11 @@ chown 1000:1000 /run/user/1000
 chmod 700 /run/user/1000
 mkdir -p /data/log
 chmod 0666 /dev/dri/card0 /dev/dri/renderD128 2>/dev/null
-chmod 0666 /dev/input/event0 /dev/input/event1 /dev/input/event2 2>/dev/null
-chmod 0666 /dev/input/event3 /dev/input/event4 /dev/input/event5 2>/dev/null
+# Every event node, not the first six: the XPS has more input devices
+# than that (keyboard, touchpad, touchscreen, pen, lid, buttons, the
+# video bus), and the touchscreen was often past event5 - lp-osk could
+# then not see that the last touch came from a finger, and never showed.
+chmod 0666 /dev/input/event* 2>/dev/null
 chmod 0666 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
 
 # 소리.
