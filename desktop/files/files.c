@@ -2819,13 +2819,20 @@ static void popup_menu(App *app, GtkWidget *over, double x, double y)
  * selected one, the selection stays; on the empty space, nothing is
  * selected. Without this the menu was always the empty space's - New
  * folder, Select all - whatever was under the pointer. The cell widgets
- * carry their item ("lpf-item", set when bound). */
-static void select_under(App *app, GtkWidget *over, double x, double y)
+ * carry their item ("lpf-item", set when bound); item_at reads it, and
+ * dragging and dropping ask it the same question. */
+static LpfItem *item_at(GtkWidget *over, double x, double y)
 {
     LpfItem *hit = NULL;
     for (GtkWidget *w = gtk_widget_pick(over, x, y, GTK_PICK_DEFAULT);
          w && !hit; w = w == over ? NULL : gtk_widget_get_parent(w))
         hit = g_object_get_data(G_OBJECT(w), "lpf-item");
+    return hit;
+}
+
+static void select_under(App *app, GtkWidget *over, double x, double y)
+{
+    LpfItem *hit = item_at(over, x, y);
     if (!hit) {
         gtk_selection_model_unselect_all(app->selection);
         return;
@@ -2916,11 +2923,31 @@ static int sort_by_date(gconstpointer a, gconstpointer b, gpointer user)
 /* Drag and drop                                                       */
 /* ------------------------------------------------------------------ */
 
+/* A drag that starts on a file or folder carries it; one that starts on
+ * the empty space is the rubberband's, and prepare says so by returning
+ * nothing.
+ *
+ * Why this runs in the capture phase and claims the press: the list's
+ * rubberband is a drag gesture of GTK's own on the list inside the view,
+ * and in GTK 4.8 it starts from anywhere, rows included. In the bubble
+ * phase it saw every motion before this source (a child before its
+ * parent), claimed it at the same threshold, and a drag out of Files
+ * never began - pressing on a file and dragging it onto a folder drew a
+ * selection rectangle instead (seen under wayfire; the order is GTK's,
+ * not the compositor's). Claiming here, before it sees the motion,
+ * cancels it for this one press. */
 static GdkContentProvider *on_drag_prepare(GtkDragSource *source,
                                            double x, double y, gpointer data)
 {
-    (void)source; (void)x; (void)y;
     App *app = data;
+    GtkWidget *view = gtk_event_controller_get_widget(
+        GTK_EVENT_CONTROLLER(source));
+
+    if (!item_at(view, x, y))
+        return NULL;
+    /* An unselected file is dragged on its own, a selected one with the
+     * rest of the selection - the right click's rule. */
+    select_under(app, view, x, y);
 
     GPtrArray *files = selected_files(app);
     if (files->len == 0) {
@@ -2941,6 +2968,7 @@ static GdkContentProvider *on_drag_prepare(GtkDragSource *source,
     GdkContentProvider *p =
         gdk_content_provider_new_typed(GDK_TYPE_FILE_LIST, fl);
     g_boxed_free(GDK_TYPE_FILE_LIST, fl);
+    gtk_gesture_set_state(GTK_GESTURE(source), GTK_EVENT_SEQUENCE_CLAIMED);
     return p;
 }
 
@@ -2959,14 +2987,24 @@ static gboolean same_disk(GFile *a, GFile *b)
     return da && da == db;
 }
 
+/* Dropped on a folder's row, the files go into that folder; anywhere
+ * else in the view, into the folder on screen. Without the first half
+ * the only drop Files took was from outside it: a file dragged onto a
+ * folder next to it landed back where it came from and nothing moved. */
 static gboolean on_drop(GtkDropTarget *target, const GValue *value,
                         double x, double y, gpointer data)
 {
-    (void)target; (void)x; (void)y;
     App *app = data;
 
     if (!G_VALUE_HOLDS(value, GDK_TYPE_FILE_LIST))
         return FALSE;
+
+    GtkWidget *view = gtk_event_controller_get_widget(
+        GTK_EVENT_CONTROLLER(target));
+    LpfItem *hit = item_at(view, x, y);
+    char *dest_path = hit && hit->is_dir
+        ? g_build_filename(app->path, hit->name, NULL)
+        : g_strdup(app->path);
 
     GdkFileList *fl = g_value_get_boxed(value);
     GSList      *l  = gdk_file_list_get_files(fl);
@@ -2975,10 +3013,18 @@ static gboolean on_drop(GtkDropTarget *target, const GValue *value,
     for (GSList *n = l; n; n = n->next) {
         GFile *f = n->data;
         /* 자기 자신이 있는 폴더로 끌어다 놓는 것은 아무 뜻이 없고,
-         * "(2)" 사본만 만들어 낸다. */
+         * "(2)" 사본만 만들어 낸다. 폴더를 자기 자신이나 자기 안으로
+         * 옮기는 것도 뜻이 없다 - 폴더 줄 위에서 놓으면 끌던 폴더가
+         * 바로 그 줄일 수 있다. */
         GFile *parent = g_file_get_parent(f);
         char  *pp = parent ? g_file_get_path(parent) : NULL;
-        gboolean same = pp && g_strcmp0(pp, app->path) == 0;
+        char  *fp = g_file_get_path(f);
+        gboolean same = pp && g_strcmp0(pp, dest_path) == 0;
+        if (fp && (g_strcmp0(fp, dest_path) == 0 ||
+                   (g_str_has_prefix(dest_path, fp) &&
+                    dest_path[strlen(fp)] == '/')))
+            same = TRUE;
+        g_free(fp);
         g_free(pp);
         g_clear_object(&parent);
         if (!same)
@@ -2991,6 +3037,7 @@ static gboolean on_drop(GtkDropTarget *target, const GValue *value,
 
     if (sources->len == 0) {
         g_ptr_array_unref(sources);
+        g_free(dest_path);
         return FALSE;
     }
 
@@ -3000,7 +3047,8 @@ static gboolean on_drop(GtkDropTarget *target, const GValue *value,
      * home left the original behind every time.) A move is undone by
      * dragging back; a copy onto a USB stick leaves the original where
      * it was, which is what a stick is for. */
-    GFile *dest = g_file_new_for_path(app->path);
+    GFile *dest = g_file_new_for_path(dest_path);
+    g_free(dest_path);
     gboolean move = same_disk(g_ptr_array_index(sources, 0), dest);
     op_start(app, sources, dest, move, FALSE);
     g_object_unref(dest);
@@ -3012,6 +3060,9 @@ static void attach_dnd(App *app, GtkWidget *view)
     GtkDragSource *source = gtk_drag_source_new();
     gtk_drag_source_set_actions(source, GDK_ACTION_COPY | GDK_ACTION_MOVE);
     g_signal_connect(source, "prepare", G_CALLBACK(on_drag_prepare), app);
+    /* Ahead of the rubberband: see on_drag_prepare. */
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(source),
+                                               GTK_PHASE_CAPTURE);
     gtk_widget_add_controller(view, GTK_EVENT_CONTROLLER(source));
 
     GtkDropTarget *target = gtk_drop_target_new(GDK_TYPE_FILE_LIST,
