@@ -745,7 +745,23 @@ static void build_window(GtkApplication *gapp)
     A.win = gtk_application_window_new(gapp);
     gtk_widget_add_css_class(A.win, "lp-settings");
     gtk_window_set_title(GTK_WINDOW(A.win), T("Settings", "설정"));
-    gtk_window_set_default_size(GTK_WINDOW(A.win), 1100, 760);
+    /* 1100x760, or less on a small screen: what is left of the monitor
+     * under the top bar (36) and above the dock's room (about 96), with a
+     * margin. A window taller than that was placed with its title bar -
+     * and its buttons - under the top bar, and its bottom under the dock:
+     * a VM window on a laptop, or a scaled 4K panel, is often that small. */
+    int dw = 1100, dh = 760;
+    GListModel *mons = gdk_display_get_monitors(gdk_display_get_default());
+    GdkMonitor *mon = mons && g_list_model_get_n_items(mons) > 0
+                    ? g_list_model_get_item(mons, 0) : NULL;
+    if (mon) {
+        GdkRectangle geo;
+        gdk_monitor_get_geometry(mon, &geo);
+        dw = MAX(560, MIN(dw, geo.width - 64));
+        dh = MAX(400, MIN(dh, geo.height - 36 - 96 - 24));
+        g_object_unref(mon);
+    }
+    gtk_window_set_default_size(GTK_WINDOW(A.win), dw, dh);
     load_css();
 
     GtkWidget *head = gtk_header_bar_new();
