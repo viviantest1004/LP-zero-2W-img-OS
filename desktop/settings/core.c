@@ -76,6 +76,7 @@ typedef struct {
     GtkWidget *side_hl;        /* the highlight drawn under the rows */
     GtkWidget *results;        /* list of search results */
     GtkWidget *side_stack;
+    GtkWidget *side_scroller;  /* the panel list's scrolled window */
     GtkWidget *search;
     GtkWidget *stack;          /* one scrolled window per page shown */
     GtkWidget *scroller;       /* the current page's scrolled window */
@@ -574,6 +575,28 @@ static void restore_scroll(GtkAdjustment *adj, gpointer p)
     g_free(r);
 }
 
+/* The chosen panel's row in view: `lp-settings users` and a search hit
+ * choose a panel that may be below the fold of a short window, and a
+ * selection nobody can see looks like no selection. */
+static gboolean side_reveal(gpointer p)
+{
+    (void)p;
+    GtkListBoxRow *r = gtk_list_box_get_selected_row(GTK_LIST_BOX(A.sidebar));
+    graphene_rect_t b;
+    if (!r || !A.side_scroller ||
+        !gtk_widget_compute_bounds(GTK_WIDGET(r), A.sidebar, &b))
+        return G_SOURCE_REMOVE;
+    GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(A.side_scroller));
+    double top = gtk_adjustment_get_value(adj), page = gtk_adjustment_get_page_size(adj);
+    if (page <= 0)
+        return G_SOURCE_REMOVE;             /* not laid out yet */
+    if (b.origin.y < top)
+        gtk_adjustment_set_value(adj, b.origin.y);
+    else if (b.origin.y + b.size.height > top + page)
+        gtk_adjustment_set_value(adj, b.origin.y + b.size.height - page);
+    return G_SOURCE_REMOVE;
+}
+
 typedef enum { MOVE_AUTO, MOVE_NONE } move_t;
 
 static void show_index_full(int i, const char *row, move_t how, double keep_y)
@@ -622,6 +645,7 @@ static void show_index_full(int i, const char *row, move_t how, double keep_y)
     gtk_list_box_select_row(GTK_LIST_BOX(A.sidebar), r);
     A.selecting = FALSE;
     hl_move();
+    g_idle_add(side_reveal, NULL);
 
     if (row && *row) {
         GtkWidget *hit = find_row(page, row);
@@ -838,6 +862,12 @@ static void build_window(GtkApplication *gapp)
     gtk_overlay_set_measure_overlay(GTK_OVERLAY(side_ov), A.sidebar, TRUE);
 
     GtkWidget *s1 = gtk_scrolled_window_new();
+    A.side_scroller = s1;
+    /* A scrollbar that is there, not one that appears on hover: in a
+     * short window (1280x800, or a VM window) the list ends mid-way with
+     * nothing to say that Date & time, Users and the rest are below, and
+     * a touch screen never hovers. */
+    gtk_scrolled_window_set_overlay_scrolling(GTK_SCROLLED_WINDOW(s1), FALSE);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(s1), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(s1), side_ov);
     gtk_scrolled_window_set_propagate_natural_width(GTK_SCROLLED_WINDOW(s1), TRUE);
