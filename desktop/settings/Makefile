@@ -12,23 +12,27 @@
 #
 # One compiler invocation for all the files rather than an object per
 # file. The whole program compiles in a few seconds, and no .o files are
-# left in the source tree.
+# left in the source tree - including ../common/lp-motion.c, the shared
+# springs, which is compiled in here rather than linked from
+# liblpshell.a because that archive is built against GTK 3 and this
+# program is GTK 4 (lp-motion.c is written for both). core.c also
+# includes ../theme/motion.css with .incbin, so it is a dependency.
 
 CC      ?= cc
 PKG     ?= pkg-config
-PKGS    := gtk4
+PKGS    := gtk4 gio-unix-2.0
 
 BIN     := lp-settings
-CORE    := core.c ui.c sys.c driver.c panels.c
+CORE    := core.c ui.c sys.c driver.c panels.c ../common/lp-motion.c
 PANELS  := $(wildcard panels/*.c)
 SRC     := $(CORE) $(PANELS)
-HDRS    := core.h ../common/lp-i18n.h
+HDRS    := core.h ../common/lp-i18n.h ../common/lp-motion.h ../theme/motion.css
 DESKTOP := lp-settings.desktop
 
 CFLAGS  ?= -O2 -g
 CFLAGS  += -std=c11 -Wall -Wextra -I. -I../common
 CFLAGS  += $(shell $(PKG) --cflags $(PKGS))
-LDLIBS  += $(shell $(PKG) --libs $(PKGS))
+LDLIBS  += $(shell $(PKG) --libs $(PKGS)) -lm
 
 PREFIX  ?= /usr/local
 BINDIR  := $(DESTDIR)$(PREFIX)/bin

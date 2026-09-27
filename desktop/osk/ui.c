@@ -372,6 +372,27 @@ static void key_text(const KeyDef *d, gboolean sh, gboolean caps, char *out,
     g_strlcpy(out, up && d->st ? d->st : d->t, n);
 }
 
+/* In Korean the letter keys hold one alternate: the other half of the
+ * Shift pair (ㄱ/ㄲ, ㅐ/ㅒ...), as Korean phone keyboards do, so a double
+ * consonant never needs the Shift key. The Latin accents mean nothing
+ * there. Returns the alternate, 0 when the key has none. */
+static uint32_t ko_alt(const KeyDef *d, gboolean sh)
+{
+    if (!is_letter(d) || !korean())
+        return 0;
+    uint32_t plain = type_ko_jamo(d->t[0], sh), other = type_ko_jamo(d->t[0], !sh);
+    return plain != other ? other : 0;
+}
+
+static gboolean has_alts(const KeyDef *d)
+{
+    if (secret_field())
+        return FALSE;
+    if (is_letter(d) && korean())
+        return ko_alt(d, FALSE) != 0;
+    return d->alts != NULL;
+}
+
 static gboolean repeats(const KeyDef *d)
 {
     if (d->kind == K_BKSP)
@@ -648,7 +669,7 @@ static void draw_key(cairo_t *cr, const Key *k)
             text_at(cr, up, NULL, k->x + k->w - 12, k->y + 13,
                     fs_small * 0.85, FALSE, C_T3);
         }
-        if (d->alts && !secret_field()) {
+        if (has_alts(d)) {
             /* a dot says "hold me for more" */
             cairo_arc(cr, k->x + k->w / 2, k->y + k->h - 7, 1.8, 0, 2 * G_PI);
             rgb(cr, C_T3, 1);
@@ -763,8 +784,12 @@ static void render_cache(void)
         cache = NULL;
     }
     if (!cache) {
+        /* GTK 3 takes this size in device pixels, not logical ones (the
+         * scale only sets the device scale): at scale 2 a logical-sized
+         * image covers a quarter of the keyboard. */
         cache = gdk_window_create_similar_image_surface(gw, CAIRO_FORMAT_ARGB32,
-                                                        alloc_w, (int)kb_h, scale);
+                                                        alloc_w * scale,
+                                                        (int)kb_h * scale, scale);
         cache_w = alloc_w;
         cache_h = (int)kb_h;
         cache_scale = scale;
@@ -987,6 +1012,7 @@ static void update_input_region(void)
         y = -1;
     if (y == last_ir_y)
         return;
+    g_debug("input region from y %d", y);
     last_ir_y = y;
     cairo_region_t *r = cairo_region_create();
     if (y >= 0) {
@@ -1022,6 +1048,9 @@ static void on_frame(GtkWidget *w, gpointer data)
 {
     (void)w; (void)data;
     double top = body_top();
+    if (slide.moving || drag_on)
+        g_debug("slide %.4f v %+.2f top %.1f%s", slide.x, slide.v, top,
+                want_shown ? "" : " (hiding)");
     if (top != last_top || slide.moving) {
         last_top = top;
         update_input_region();
@@ -1175,6 +1204,14 @@ static gboolean on_touch(GtkWidget *w, GdkEvent *ev, gpointer data);
 static gboolean on_button(GtkWidget *w, GdkEventButton *ev, gpointer data);
 static gboolean on_motion_ev(GtkWidget *w, GdkEventMotion *ev, gpointer data);
 
+static gboolean dbg_event(GtkWidget *w, GdkEvent *ev, gpointer d) /*DBGTMP*/
+{
+    (void)w; (void)d;
+    if (ev->type != GDK_MOTION_NOTIFY)
+        g_debug("win event type %d", ev->type);
+    return FALSE;
+}
+
 static void create_window(void)
 {
     win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
@@ -1209,6 +1246,7 @@ static void create_window(void)
     g_signal_connect(area, "size-allocate", G_CALLBACK(on_size_allocate), NULL);
     g_signal_connect(area, "notify::scale-factor", G_CALLBACK(on_scale), NULL);
     gtk_container_add(GTK_CONTAINER(win), area);
+    g_signal_connect(win, "event", G_CALLBACK(dbg_event), NULL); /*DBGTMP*/
 
     motion = lp_motion_new(area, on_frame, NULL);
     lp_spring_init(&slide, LP_SPRING_SHEET, 0);
@@ -1263,6 +1301,8 @@ static void begin_hide(double velocity, gboolean fling)
 {
     if (!win || !mapped)
         return;
+    g_debug("hide from slide %.3f v %+.2f%s", slide.x, fling ? velocity : slide.v,
+            slide.moving ? " (was moving)" : "");
     gboolean was = want_shown;
     want_shown = FALSE;
     cancel_all_touches();
@@ -1394,7 +1434,12 @@ static void emit(Touch *t, Key *k, const char *alt_text)
     switch (d->kind) {
     case K_TEXT:
         if (alt_text) {
-            type_text(alt_text);
+            /* a jamo from the menu joins the syllable being built */
+            gunichar c = g_utf8_get_char(alt_text);
+            if (hangul_is_jamo(c) && !*g_utf8_next_char(alt_text))
+                type_jamo(c);
+            else
+                type_text(alt_text);
         } else if (is_letter(d) && korean() && !t->ctrl && !t->alt) {
             type_jamo(type_ko_jamo(d->t[0], t->shift));
         } else if (t->ctrl || t->alt) {
@@ -1601,13 +1646,16 @@ static gboolean on_long_press(gpointer p)
     if (!t->used || !t->key || t->committed || t->drag || menu.open)
         return G_SOURCE_REMOVE;
     const KeyDef *d = t->key->d;
-    if (!d->alts || secret_field())
+    if (!has_alts(d))
         return G_SOURCE_REMOVE;
-    if (is_letter(d) && korean())
-        return G_SOURCE_REMOVE;
-    /* The alternates, capitalised when the key would type a capital. */
-    char **parts = g_strsplit(d->alts, " ", 12);
     menu.n = 0;
+    uint32_t ka = ko_alt(d, t->shift);
+    if (ka) {
+        menu.items[0][g_unichar_to_utf8(ka, menu.items[0])] = 0;
+        menu.n = 1;
+    }
+    /* The alternates, capitalised when the key would type a capital. */
+    char **parts = g_strsplit(ka ? "" : d->alts, " ", 12);
     gboolean up = is_letter(d) ? (t->shift != t->caps) : FALSE;
     for (int i = 0; parts[i] && menu.n < 12; i++) {
         if (!*parts[i])
@@ -1746,6 +1794,8 @@ static void touch_begin(gintptr id, double x, double y)
     if (!t)
         return;
     Key *k = hit(x, y);
+    g_debug("touch down %#lx at %.0f,%.0f on %s, slide %.3f%s", (unsigned long)id,
+            x, y, k ? k->d->name : "nothing", slide.x, slide.moving ? " (moving)" : "");
     if (!k)
         return;
     gint64 now = g_get_monotonic_time();
@@ -1799,7 +1849,7 @@ static void touch_begin(gintptr id, double x, double y)
         return;
     }
     preview_show_for(t);
-    if (k->d->kind == K_TEXT && k->d->alts)
+    if (k->d->kind == K_TEXT && has_alts(k->d))
         t->timer = g_timeout_add(400, on_long_press, t);
 }
 
@@ -1852,7 +1902,7 @@ static void touch_update(gintptr id, double x, double y)
         t->key = n;
         light(n);
         preview_show_for(t);
-        if (n->d->alts)
+        if (has_alts(n->d))
             t->timer = g_timeout_add(400, on_long_press, t);
     }
 }
@@ -1944,6 +1994,9 @@ static gboolean from_touch(GdkEvent *ev)
 static gboolean on_button(GtkWidget *w, GdkEventButton *ev, gpointer data)
 {
     (void)w; (void)data;
+    g_debug("button %s %u at %.0f,%.0f%s", ev->type == GDK_BUTTON_PRESS ? "press" :
+            ev->type == GDK_BUTTON_RELEASE ? "release" : "other", ev->button,
+            ev->x, ev->y, from_touch((GdkEvent *)ev) ? " (from touch)" : "");
     if (from_touch((GdkEvent *)ev) || ev->button != GDK_BUTTON_PRIMARY)
         return TRUE;
     if (ev->type == GDK_BUTTON_PRESS)

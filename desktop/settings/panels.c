@@ -13,9 +13,9 @@
 
 extern const lp_panel_t lp_panel_network, lp_panel_bluetooth,
     lp_panel_display, lp_panel_sound, lp_panel_power, lp_panel_notify,
-    lp_panel_appearance, lp_panel_touch, lp_panel_keyboard, lp_panel_users,
-    lp_panel_apps, lp_panel_storage, lp_panel_datetime, lp_panel_region,
-    lp_panel_updates, lp_panel_about, lp_panel_reset;
+    lp_panel_appearance, lp_panel_access, lp_panel_touch, lp_panel_keyboard,
+    lp_panel_users, lp_panel_apps, lp_panel_storage, lp_panel_datetime,
+    lp_panel_region, lp_panel_updates, lp_panel_system, lp_panel_reset;
 
 const lp_panel_t *const lp_panels[] = {
     &lp_panel_network,
@@ -25,6 +25,7 @@ const lp_panel_t *const lp_panels[] = {
     &lp_panel_power,
     &lp_panel_notify,
     &lp_panel_appearance,
+    &lp_panel_access,
     &lp_panel_touch,
     &lp_panel_keyboard,
     &lp_panel_region,
@@ -33,7 +34,7 @@ const lp_panel_t *const lp_panels[] = {
     &lp_panel_apps,
     &lp_panel_storage,
     &lp_panel_updates,
-    &lp_panel_about,
+    &lp_panel_system,
     &lp_panel_reset,
     NULL
 };

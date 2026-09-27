@@ -135,6 +135,13 @@ static A_UNUSED long a_fstat(int fd, a_stat_t *st)
     return 0;
 }
 
+/* Zero a buffer in a way the compiler may not drop as a dead store. */
+static A_UNUSED void a_wipe(void *p, size_t n)
+{
+    volatile char *v = (volatile char *)p;
+    while (n--) *v++ = 0;
+}
+
 /* ── Accounts ─────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -324,6 +331,38 @@ static A_UNUSED const char *a_shadow_why(int r)
     case LP_SHADOW_NOFILE:      return "cannot read the shadow file";
     default:                    return NULL;
     }
+}
+
+/* An account's password state without checking a password: what
+ * lp_shadow_check would say before it got as far as the hash, and
+ * LP_SHADOW_OK when there is a $6$ hash there to check against. su uses
+ * it to say "root login is disabled" before asking for a password that
+ * could never be right. */
+static A_UNUSED int a_shadow_state(const char *user)
+{
+    long len;
+    char *buf = a_slurp(a_shadow_path(), 1 << 20, &len);
+    if (!buf) return LP_SHADOW_NOFILE;
+    int res = LP_SHADOW_NOUSER;
+    size_t ul = strlen(user);
+    for (char *line = buf; line && *line; ) {
+        char *next = strchr(line, '\n');
+        if (next) *next++ = '\0';
+        if (strncmp(line, user, ul) == 0 && line[ul] == ':') {
+            char *hash = line + ul + 1;
+            char *end = strchr(hash, ':');
+            if (end) *end = '\0';
+            res = !*hash ? LP_SHADOW_EMPTY
+                : (*hash == '!' || *hash == '*') ? LP_SHADOW_LOCKED
+                : strncmp(hash, "$6$", 3) != 0 ? LP_SHADOW_UNSUPPORTED
+                : LP_SHADOW_OK;
+            break;
+        }
+        line = next;
+    }
+    a_wipe(buf, (size_t)len);
+    free(buf);
+    return res;
 }
 
 /* The kernel's struct termios (TCGETS), the same 36 bytes on x86-64,
@@ -535,13 +574,6 @@ static A_UNUSED void a_authlog(const char *prog, const char *msg)
         lp_close((int)fd);
     }
     lp_log(prog, msg);
-}
-
-/* Zero a buffer in a way the compiler may not drop as a dead store. */
-static A_UNUSED void a_wipe(void *p, size_t n)
-{
-    volatile char *v = (volatile char *)p;
-    while (n--) *v++ = 0;
 }
 
 #endif /* LP_AUTH_H */

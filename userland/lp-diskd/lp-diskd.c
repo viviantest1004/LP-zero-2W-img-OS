@@ -45,11 +45,13 @@
  * password makes that uid wait (2 s, doubling, at most 30 s) before the
  * next try is even looked at.
  *
- * Root never needs a password. That is on purpose, and it is what makes
- * the recovery shell work: the owner requires the recovery shell to be
- * root without a password, and lp-diskctl run as root does the work in
- * its own process, with no daemon, no socket and no question asked. In
- * the normal system a person gets root only through sudo, which asks.
+ * Root never needs a password here, because root is what the password
+ * would buy. That is what makes the recovery shell work: it becomes root
+ * only after the person has proved they are an administrator (an admin
+ * account's password, or the recovery password), and lp-diskctl run as
+ * root then does the work in its own process - no daemon, no socket, no
+ * second question. In the normal system a person gets root only through
+ * sudo, which asks.
  *
  * ── What a request can contain ──
  *
@@ -226,6 +228,19 @@ static bool starts(const char *s, const char *p)
     return strncmp(s, p, strlen(p)) == 0;
 }
 
+/* strcasecmp's answer for ASCII: 0 when equal ignoring case. UUIDs are
+ * written in either case, by different tools, for the same thing. */
+static int ieq_not(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++) {
+        char x = (*a >= 'A' && *a <= 'Z') ? (char)(*a + 32) : *a;
+        char y = (*b >= 'A' && *b <= 'Z') ? (char)(*b + 32) : *b;
+        if (x != y)
+            return 1;
+    }
+    return *a != *b;
+}
+
 /* A value out of sysfs, newline stripped. */
 static bool sys_read(const char *path, char *buf, size_t n)
 {
@@ -270,22 +285,27 @@ static bool parse_u64(const char *s, u64 *out)
 }
 
 /* "1.5 GiB". Binary units, because that is what the partitions are cut
- * in and what the application shows; one decimal below 100. */
+ * in and what the application shows; one decimal below 100, rounded to
+ * the nearest (1200 MiB is "1.2 GiB", not "1.1"). */
 static void human(u64 bytes, char *out, size_t n)
 {
     static const char *const unit[] = { "B", "KiB", "MiB", "GiB", "TiB", "PiB" };
     int u = 0;
-    u64 whole = bytes, frac = 0;
-    while (whole >= 1024 && u < 5) {
-        frac = (whole % 1024) * 10 / 1024;
-        whole /= 1024;
+    u64 div = 1;
+    while (u < 5 && bytes / div >= 1024) {
+        div *= 1024;
         u++;
     }
-    if (u == 0 || whole >= 100 || frac == 0)
-        snprintf(out, n, "%llu %s", (unsigned long long)whole, unit[u]);
+    if (u == 0) {
+        snprintf(out, n, "%llu B", (unsigned long long)bytes);
+        return;
+    }
+    u64 tenths = (bytes / div) * 10 + ((bytes % div) * 10 + div / 2) / div;
+    if (tenths >= 1000 || tenths % 10 == 0)
+        snprintf(out, n, "%llu %s", (unsigned long long)((tenths + 5) / 10), unit[u]);
     else
-        snprintf(out, n, "%llu.%llu %s", (unsigned long long)whole,
-                 (unsigned long long)frac, unit[u]);
+        snprintf(out, n, "%llu.%llu %s", (unsigned long long)(tenths / 10),
+                 (unsigned long long)(tenths % 10), unit[u]);
 }
 
 static int hexval(char c)
@@ -2489,7 +2509,7 @@ static bool mkfs_on(const char *name, fstype_t f, const char *label,
         if (run_in(fa, STAT_NONE, pass, passlen, false, true) != 0)
             return failed("failed", "cryptsetup could not format the partition");
         char map[48], mdev[80];
-        snprintf(map, sizeof map, "lpdiskd-%s", name);
+        snprintf(map, sizeof map, "lp-%s", name);
         snprintf(mdev, sizeof mdev, "/dev/mapper/%s", map);
         progress(55, "opening the encrypted volume");
         char *oa[] = { cs, "open", "--key-file=-", dev, map, NULL };
@@ -2721,8 +2741,27 @@ static u64 fs_min_size(const char *name, const probe_t *p)
         capture_run(argv, min_line);
         return min_found;
     }
-    if (p->used_known)
-        return p->used + p->used / 10 + 16 * MIB;   /* a margin: metadata */
+    if (p->used_known) {
+        u64 min = p->used + p->used / 10 + 16 * MIB;   /* a margin: metadata */
+        if (f == FS_FAT32) {
+            /* FAT32 with fewer than 65525 clusters is not FAT32 any more,
+             * and fatresize refuses it: that is the floor, whatever is
+             * used. */
+            char d[64];
+            u8 bs[512];
+            long fd = dev_path(name, d, sizeof d) ? lp_open(d, O_RDONLY | O_CLOEXEC, 0) : -1;
+            if (fd >= 0) {
+                if (read_at((int)fd, 0, bs, sizeof bs)) {
+                    u64 bps = le16(bs + 11), spc = bs[13];
+                    u64 meta = ((u64)le16(bs + 14) + (u64)bs[16] * le32(bs + 36)) * bps;
+                    u64 floor = 65525ull * spc * bps + meta;
+                    if (min < floor) min = floor;
+                }
+                lp_close((int)fd);
+            }
+        }
+        return min;
+    }
     return 0;
 }
 
@@ -3028,6 +3067,10 @@ typedef struct {
 
 static step_t steps[MAX_STEPS];
 static int    nsteps;
+/* How a plan that does not play through is answered: "invalid" for a
+ * malformed step, "refused" for one that is well formed but not allowed
+ * (the target is in use, or protected without the typed confirmation). */
+static const char *plan_code = "invalid";
 
 /* ── The model ──────────────────────────────────────────────────── */
 
@@ -3175,13 +3218,6 @@ static bool target_free(const step_t *s, char *why, size_t whyn)
     return !in_use(kn, &vital, why, whyn);
 }
 
-static const char *protected_of(const step_t *s)
-{
-    table_t *t = model_of(s->disk);
-    pent_t *p = t && s->num ? table_num(t, s->num) : NULL;
-    return p ? protected_tag(t, p) : NULL;
-}
-
 /* A new random GPT GUID, version 4. */
 static void new_guid(char *out)
 {
@@ -3289,8 +3325,10 @@ static bool plan_step(step_t *s, int idx, char **f, int nf, char *why, size_t wh
     }
 
     /* Everything but a create and a check needs its target unused. */
-    if (s->kind != S_CREATE && s->kind != S_MKLABEL && !target_free(s, why, whyn))
+    if (s->kind != S_CREATE && s->kind != S_MKLABEL && !target_free(s, why, whyn)) {
+        plan_code = "refused";
         return false;
+    }
 
     switch (s->kind) {
     case S_MKLABEL: {
@@ -3299,12 +3337,15 @@ static bool plan_step(step_t *s, int idx, char **f, int nf, char *why, size_t wh
             return false;
         }
         bool vital;
-        if (disk_busy(s->disk, &vital, why, whyn))
+        if (disk_busy(s->disk, &vital, why, whyn)) {
+            plan_code = "refused";
             return false;
+        }
         bool prot = false;
         for (int i = 0; i < t->n; i++)
             if (protected_tag(t, &t->p[i])) prot = true;
         if (prot && strcmp(s->confirm, "ALL")) {
+            plan_code = "refused";
             snprintf(why, whyn, "%s holds the ESP or LP-RECOVERY; a new table"
                      " needs the typed confirmation", s->disk);
             return false;
@@ -3406,6 +3447,7 @@ static bool plan_step(step_t *s, int idx, char **f, int nf, char *why, size_t wh
     case S_DELETE: {
         const char *tag = protected_tag(t, p);
         if (tag && strcmp(s->confirm, tag)) {
+            plan_code = "refused";
             snprintf(why, whyn, "%s is the %s; deleting it needs the typed"
                      " confirmation", kn, tag);
             return false;
@@ -3504,6 +3546,7 @@ static bool plan_step(step_t *s, int idx, char **f, int nf, char *why, size_t wh
         }
         const char *tag = p ? protected_tag(t, p) : NULL;
         if (tag && strcmp(s->confirm, tag)) {
+            plan_code = "refused";
             snprintf(why, whyn, "%s is the %s; formatting it needs the typed"
                      " confirmation", kn, tag);
             return false;
@@ -3581,14 +3624,17 @@ static bool plan_step(step_t *s, int idx, char **f, int nf, char *why, size_t wh
     case S_WIPE: {
         const char *tag = p ? protected_tag(t, p) : NULL;
         if (tag && strcmp(s->confirm, tag)) {
+            plan_code = "refused";
             snprintf(why, whyn, "%s is the %s; wiping it needs the typed"
                      " confirmation", kn, tag);
             return false;
         }
         if (!p) {
             bool vital;
-            if (disk_busy(kn, &vital, why, whyn))
+            if (disk_busy(kn, &vital, why, whyn)) {
+                plan_code = "refused";
                 return false;
+            }
         }
         snprintf(s->desc, sizeof s->desc, "Wipe the signatures on %s so nothing"
                  " recognises what was on it", what);
@@ -4173,6 +4219,7 @@ static void state_report(int failed_at)
  * Returns false (reason set) if any step would fail. */
 static bool plan_parse(char **f, int nf, char *why, size_t whyn)
 {
+    plan_code = "invalid";
     memset(models, 0, sizeof models);
     nsteps = 0;
     int i = 0;
@@ -4318,4 +4365,3035 @@ static void resume_move(void)
     }
     progress(100, "moved");
     done("the move is finished");
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * What is there: disks, partitions, free space
+ *
+ * One "disk" record per disk, then one "part" record per table entry
+ * (or one for a filesystem written straight onto a disk with no table),
+ * then one "free" record per gap a new partition could go into. Every
+ * field is key=value and every number is bytes, so the application
+ * never has to know a sector size, and a field added later breaks no
+ * reader.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    char   s[2300];
+    size_t n;
+} kv_t;
+
+static void kv_str(kv_t *k, const char *key, const char *val)
+{
+    size_t cap = sizeof k->s - 1;
+    if (k->n && k->n < cap) k->s[k->n++] = '\t';
+    for (const char *p = key; *p && k->n < cap; p++) k->s[k->n++] = *p;
+    if (k->n < cap) k->s[k->n++] = '=';
+    for (const char *p = val ? val : ""; *p && k->n < cap; p++) {
+        unsigned char c = (unsigned char)*p;
+        k->s[k->n++] = (c < 0x20 || c == 0x7f) ? ' ' : (char)c;
+    }
+    k->s[k->n] = '\0';
+}
+
+static void kv_u64(kv_t *k, const char *key, u64 v)
+{
+    char b[24];
+    snprintf(b, sizeof b, "%llu", (unsigned long long)v);
+    kv_str(k, key, b);
+}
+
+static void kv_int(kv_t *k, const char *key, long v)
+{
+    char b[24];
+    snprintf(b, sizeof b, "%ld", v);
+    kv_str(k, key, b);
+}
+
+/* The first device built on this one: the open LUKS mapping of a
+ * crypto_LUKS partition is its holder, dm-N. */
+static bool first_holder(const char *name, char *out, size_t n)
+{
+    char p[96];
+    snprintf(p, sizeof p, "/sys/class/block/%s/holders", name);
+    long fd = lp_open(p, O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0)
+        return false;
+    char buf[1024];
+    long got = sys_getdents((int)fd, buf, sizeof buf);
+    lp_close((int)fd);
+    for (long off = 0; off < got; ) {
+        u16 len = *(u16 *)(buf + off + DIRENT_RECLEN);
+        const char *nm = buf + off + DIRENT_NAME;
+        off += len;
+        if (nm[0] != '.') {
+            strlcpy(out, nm, n);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void list_part(const table_t *t, const pent_t *p, const char *kn)
+{
+    static kv_t k;
+    k.n = 0;
+    k.s[0] = '\0';
+    bool exists = blk_exists(kn);
+    probe_t pr;
+    memset(&pr, 0, sizeof pr);
+    if (exists)
+        probe_dev(kn, &pr);
+    u64 lss = t->lss;
+    u64 start = p ? p->start * lss : 0;
+    u64 size = p ? p->size * lss : blk_bytes(kn);
+    kv_str(&k, "disk", t->disk);
+    kv_str(&k, "name", kn);
+    kv_int(&k, "num", p ? p->num : 0);
+    kv_u64(&k, "start", start);
+    kv_u64(&k, "size", size);
+    if (p) {
+        const ptype_t *ty = ptype_find(p->type);
+        char fl[200];
+        flags_str(t, p, fl, sizeof fl);
+        const char *tag = protected_tag(t, p);
+        kv_str(&k, "type", p->type);
+        kv_str(&k, "typename", ty ? ty->name : "other");
+        kv_str(&k, "typedesc", ty ? ty->desc : p->type);
+        kv_str(&k, "partuuid", p->uuid);
+        kv_str(&k, "partlabel", p->name);
+        kv_str(&k, "flags", fl);
+        kv_int(&k, "aligned", start % MIB == 0);
+        kv_int(&k, "logical", p->logical);
+        kv_str(&k, "protected", tag ? tag : "");
+    }
+    kv_str(&k, "fs", pr.fs);
+    kv_str(&k, "label", pr.label);
+    kv_str(&k, "uuid", pr.uuid);
+    kv_str(&k, "state", pr.state);
+    kv_u64(&k, "fssize", pr.size);
+    const char *at = exists ? mounted_at(kn) : NULL;
+    u64 used = pr.used;
+    bool known = pr.used_known;
+    if (at) {
+        /* Mounted: the kernel's count is the live one; the superblock's
+         * is only brought up to date at unmount. */
+        u64 fr = 0, tot = 0;
+        if (lp_fs_space(at, &fr, &tot) == 0 && tot >= fr) {
+            used = tot - fr;
+            known = true;
+        }
+    }
+    if (known)
+        kv_u64(&k, "used", used);
+    kv_str(&k, "mount", at ? at : "");
+    bool vital = false;
+    char why[300] = "";
+    const char *iu = exists ? in_use(kn, &vital, why, sizeof why) : NULL;
+    kv_str(&k, "inuse", iu ? iu : "");
+    kv_str(&k, "why", iu ? why : "");
+    if (p) {
+        char sp[96];
+        snprintf(sp, sizeof sp, "/sys/class/block/%s/size", kn);
+        kv_int(&k, "kernel", exists && sys_u64(sp) * 512 == size);
+    }
+    char h[32];
+    if (!strcmp(pr.fs, "crypto_LUKS") && exists && first_holder(kn, h, sizeof h)) {
+        probe_t in;
+        probe_dev(h, &in);
+        const char *iat = mounted_at(h);
+        kv_str(&k, "inner", h);
+        kv_str(&k, "innerfs", in.fs);
+        kv_str(&k, "innerlabel", in.label);
+        kv_str(&k, "innermount", iat ? iat : "");
+    }
+    record("part", k.s);
+}
+
+/* The gaps between partitions, each starting on the next MiB and
+ * running to the sector before the next partition (or the last usable
+ * one): exactly the range a "create" step will accept. */
+static void list_free(const table_t *t)
+{
+    if (!strcmp(t->kind, "none") || t->last <= t->first)
+        return;
+    u64 al = ALIGN_BYTES / t->lss;
+    if (al == 0) al = 1;
+    int order[MAX_PARTS];
+    int n = 0;
+    for (int i = 0; i < t->n; i++)
+        order[n++] = i;
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0 && t->p[order[j - 1]].start > t->p[order[j]].start; j--) {
+            int x = order[j]; order[j] = order[j - 1]; order[j - 1] = x;
+        }
+    u64 cur = t->first;
+    for (int i = 0; i <= n; i++) {
+        u64 end = i < n ? t->p[order[i]].start : t->last + 1;   /* exclusive */
+        u64 s = align_up(cur, al);
+        if (end > s && end - s >= al) {
+            kv_t k;
+            k.n = 0;
+            k.s[0] = '\0';
+            kv_str(&k, "disk", t->disk);
+            kv_u64(&k, "start", s * t->lss);
+            kv_u64(&k, "size", (end - s) * t->lss);
+            record("free", k.s);
+        }
+        if (i < n) {
+            u64 pe = t->p[order[i]].start + t->p[order[i]].size;
+            if (pe > cur) cur = pe;
+        }
+    }
+}
+
+static void list_disk(const char *disk)
+{
+    static table_t t;
+    static kv_t k;
+    char v[128], p[96], tr[16];
+    table_read(disk, &t);
+    k.n = 0;
+    k.s[0] = '\0';
+    kv_str(&k, "name", disk);
+    kv_u64(&k, "size", blk_bytes(disk));
+    blk_model(disk, v, sizeof v);
+    kv_str(&k, "model", v);
+    blk_transport(disk, tr, sizeof tr);
+    kv_str(&k, "transport", tr);
+    kv_int(&k, "removable", blk_removable(disk));
+    snprintf(p, sizeof p, "/sys/block/%s/queue/rotational", disk);
+    kv_int(&k, "rotational", starts(disk, "loop") ? 0 : (long)sys_u64(p));
+    snprintf(p, sizeof p, "/sys/block/%s/ro", disk);
+    kv_int(&k, "ro", (long)sys_u64(p));
+    kv_str(&k, "table", t.kind);
+    kv_str(&k, "id", t.id);
+    kv_u64(&k, "lss", t.lss);
+    kv_u64(&k, "first", t.first * t.lss);
+    kv_u64(&k, "end", (t.last + 1) * t.lss);
+    kv_int(&k, "system", disk_is_system(disk));
+    kv_str(&k, "err", t.err);
+    record("disk", k.s);
+    if (!strcmp(t.kind, "none")) {
+        probe_t pr;
+        if (probe_dev(disk, &pr) && pr.fs[0])
+            list_part(&t, NULL, disk);
+        return;
+    }
+    for (int i = 0; i < t.n; i++) {
+        char kn[40];
+        part_name(disk, t.p[i].num, kn, sizeof kn);
+        list_part(&t, &t.p[i], kn);
+    }
+    list_free(&t);
+}
+
+static void answer_list(const char *only)
+{
+    mounts_refresh();
+    static char names[256][32];
+    int n = blk_all(names, 256);
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0 && strcmp(names[j - 1], names[j]) > 0; j--) {
+            char x[32];
+            strlcpy(x, names[j], 32);
+            strlcpy(names[j], names[j - 1], 32);
+            strlcpy(names[j - 1], x, 32);
+        }
+    for (int i = 0; i < n; i++) {
+        if (!blk_listable(names[i]))
+            continue;
+        if (only && strcmp(only, names[i]) != 0)
+            continue;
+        list_disk(names[i]);
+    }
+    journal_t j;
+    if (journal_read(&j)) {
+        kv_t k;
+        k.n = 0;
+        k.s[0] = '\0';
+        kv_str(&k, "disk", j.disk);
+        kv_str(&k, "partuuid", j.partuuid);
+        kv_u64(&k, "done", j.done);
+        kv_u64(&k, "len", j.len);
+        record("journal", k.s);
+    }
+    reply("done", "");
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * The other verbs
+ *
+ * Each ends the answer itself with exactly one "done" or "fail" line.
+ * The ones that only read (minsize, smart) are answered in a process
+ * of their own so that a SMART query does not wait for a resize; the
+ * ones that write run as the one job at a time.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static void fail_now(const char *why, const char *text)
+{
+    failed(why, text);
+    finish_fail();
+}
+
+/* ── How small can it get ─────────────────────────────────────────── */
+
+static void v_minsize(char **a, int n)
+{
+    (void)n;
+    const char *kn = a[0];
+    probe_t pr;
+    if (!probe_dev(kn, &pr)) {
+        fail_now("failed", "cannot read the device");
+        return;
+    }
+    fstype_t f = fs_of_probe(&pr);
+    const char *no_shrink = pr.fs[0] && f == FS_NONE ? "unknown filesystem"
+                                                     : resize_refusal(f, true);
+    const char *no_grow = pr.fs[0] && f == FS_NONE ? "unknown filesystem"
+                                                   : resize_refusal(f, false);
+    char bin[64];
+    if (f == FS_FAT32 && !tool("fatresize", bin, sizeof bin))
+        no_shrink = no_grow = "resizing FAT needs fatresize (Debian package"
+                              " fatresize), which is not installed";
+    u64 min = 0;
+    if (!no_shrink && f != FS_NONE && f != FS_SWAP)
+        min = fs_min_size(kn, &pr);
+    if (f == FS_SWAP || f == FS_NONE)
+        min = MIB;
+    /* Whatever the tool says, never offer less than it plus a margin
+     * for the journal and metadata growth after the next write. */
+    if (min && f != FS_NONE && f != FS_SWAP)
+        min = align_up(min + min / 50 + 8 * MIB, MIB);
+    kv_t k;
+    k.n = 0;
+    k.s[0] = '\0';
+    kv_str(&k, "name", kn);
+    kv_str(&k, "fs", pr.fs);
+    kv_u64(&k, "fssize", pr.size);
+    if (pr.used_known) kv_u64(&k, "used", pr.used);
+    kv_u64(&k, "min", min);
+    kv_int(&k, "shrink", no_shrink == NULL && (min > 0 || f == FS_NONE));
+    kv_int(&k, "grow", no_grow == NULL);
+    kv_str(&k, "noshrink", no_shrink ? no_shrink : "");
+    kv_str(&k, "nogrow", no_grow ? no_grow : "");
+    record("resize", k.s);
+    done("");
+}
+
+/* ── Health (SMART) ───────────────────────────────────────────────────
+ *
+ * smartctl knows every kind of drive and is what the numbers come from
+ * when it is installed; `nvme smart-log` is the fallback for the NVMe
+ * disk. The verdict is ours, in three words a person can act on:
+ *
+ *   good     the drive reports nothing wrong
+ *   warning  it has started to wear or has bad sectors: keep the backup
+ *            current, plan to replace it
+ *   failing  the drive itself says it is about to fail: copy the files
+ *            off now
+ *
+ * and "unknown" for what does not report (loop devices, most USB
+ * adapters, SD cards). The reasons go out as codes the application
+ * translates. */
+
+static struct {
+    char health[16];             /* PASSED FAILED OK "" */
+    long temp, hours, pct_used, realloc, pending, uncorr, media, crit;
+    char model[80], serial[64], fw[40];
+    bool any;
+} sm;
+
+static long num_after(const char *s)
+{
+    while (*s && (*s < '0' || *s > '9')) s++;
+    long v = 0;
+    bool seen = false;
+    for (; *s; s++) {
+        if (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); seen = true; }
+        else if (*s == ',' && seen) continue;
+        else break;
+    }
+    return seen ? v : -1;
+}
+
+static void val_after_colon(const char *s, char *out, size_t n)
+{
+    const char *c = strchr(s, ':');
+    if (!c) return;
+    c++;
+    while (*c == ' ') c++;
+    strlcpy(out, c, n);
+}
+
+static void smart_line(char *s)
+{
+    say(s);
+    char *c;
+    if ((c = strstr(s, "self-assessment test result:")) != NULL) {
+        sm.any = true;
+        strlcpy(sm.health, strstr(c, "PASSED") ? "PASSED" :
+                           strstr(c, "FAILED") ? "FAILED" : "", sizeof sm.health);
+    } else if (starts(s, "SMART Health Status:")) {
+        sm.any = true;
+        strlcpy(sm.health, strstr(s, "OK") ? "OK" : "FAILED", sizeof sm.health);
+    } else if (starts(s, "Device Model:") || starts(s, "Model Number:") ||
+               starts(s, "Product:")) {
+        val_after_colon(s, sm.model, sizeof sm.model);
+    } else if (starts(s, "Serial Number:") || starts(s, "Serial number:")) {
+        val_after_colon(s, sm.serial, sizeof sm.serial);
+    } else if (starts(s, "Firmware Version:")) {
+        val_after_colon(s, sm.fw, sizeof sm.fw);
+    } else if (starts(s, "Critical Warning:") || starts(s, "critical_warning")) {
+        sm.any = true;
+        const char *v = strchr(s, ':');
+        sm.crit = v ? strtol(v + 1, NULL, 0) : 0;
+    } else if (starts(s, "Temperature:") || starts(s, "temperature ") ||
+               starts(s, "Current Drive Temperature:")) {
+        sm.temp = num_after(strchr(s, ':') ? strchr(s, ':') : s);
+    } else if (starts(s, "Percentage Used:") || starts(s, "percentage_used")) {
+        sm.pct_used = num_after(strchr(s, ':'));
+    } else if (starts(s, "Media and Data Integrity Errors:") || starts(s, "media_errors")) {
+        sm.media = num_after(strchr(s, ':'));
+    } else if (starts(s, "Power On Hours:") || starts(s, "power_on_hours")) {
+        sm.hours = num_after(strchr(s, ':'));
+    } else {
+        /* An ATA attribute row: ID NAME FLAG VALUE WORST THRESH TYPE
+         * UPDATED WHEN_FAILED RAW - the raw value is the tenth field. */
+        char *t = s;
+        while (*t == ' ') t++;
+        long id = num_after(t);
+        if (id <= 0 || id > 255 || t[0] < '0' || t[0] > '9')
+            return;
+        char *f[12];
+        int nf = 0;
+        char tmp[300];
+        strlcpy(tmp, t, sizeof tmp);
+        for (char *q = tmp; *q && nf < 12; ) {
+            while (*q == ' ') q++;
+            if (!*q) break;
+            f[nf++] = q;
+            while (*q && *q != ' ') q++;
+            if (*q) *q++ = '\0';
+        }
+        if (nf < 10)
+            return;
+        long raw = num_after(f[9]);
+        sm.any = true;
+        switch (id) {
+        case 5:   sm.realloc = raw; break;
+        case 9:   sm.hours = raw; break;
+        case 190: if (sm.temp < 0) sm.temp = raw; break;
+        case 194: sm.temp = raw; break;
+        case 197: sm.pending = raw; break;
+        case 198: sm.uncorr = raw; break;
+        default: break;
+        }
+    }
+}
+
+static void v_smart(char **a, int n)
+{
+    (void)n;
+    char disk[32], dev[64], bin[64];
+    blk_disk(a[0], disk, sizeof disk);
+    memset(&sm, 0, sizeof sm);
+    sm.temp = sm.hours = sm.pct_used = sm.realloc = sm.pending = sm.uncorr =
+        sm.media = -1;
+    if (!dev_path(disk, dev, sizeof dev)) {
+        fail_now("failed", "the disk is gone");
+        return;
+    }
+    const char *used = "none";
+    if (!starts(disk, "loop") && tool("smartctl", bin, sizeof bin)) {
+        char *argv[] = { bin, "-H", "-i", "-A", dev, NULL };
+        used = "smartctl";
+        capture_run(argv, smart_line);
+    }
+    if (!sm.any && starts(disk, "nvme") && tool("nvme", bin, sizeof bin)) {
+        /* nvme0n1 -> the controller, nvme0. */
+        char ctl[64];
+        snprintf(ctl, sizeof ctl, "/dev/%s", disk);
+        char *pn = strchr(ctl + 9, 'n');
+        if (pn) *pn = '\0';
+        char *argv[] = { bin, "smart-log", ctl, NULL };
+        used = "nvme";
+        capture_run(argv, smart_line);
+        if (sm.any && !sm.health[0])
+            strlcpy(sm.health, sm.crit ? "FAILED" : "PASSED", sizeof sm.health);
+    }
+
+    const char *verdict = "unknown";
+    char reasons[160] = "";
+    #define WHY(s) do { if (reasons[0]) strlcat(reasons, ",", sizeof reasons); strlcat(reasons, s, sizeof reasons); } while (0)
+    if (sm.any) {
+        verdict = "good";
+        if (sm.realloc > 0)  { verdict = "warning"; WHY("realloc"); }
+        if (sm.pending > 0)  { verdict = "warning"; WHY("pending"); }
+        if (sm.uncorr > 0)   { verdict = "warning"; WHY("uncorrectable"); }
+        if (sm.media > 0)    { verdict = "warning"; WHY("media"); }
+        if (sm.pct_used >= 90) { verdict = "warning"; WHY("worn"); }
+        if (sm.crit > 0 && sm.crit != 2) { verdict = "failing"; WHY("critical"); }
+        else if (sm.crit == 2) { WHY("hot"); if (!strcmp(verdict, "good")) verdict = "warning"; }
+        if (!strcmp(sm.health, "FAILED")) { verdict = "failing"; WHY("selftest"); }
+    } else {
+        WHY(starts(disk, "loop") ? "loop" : !strcmp(used, "none") ? "notool" : "noreport");
+    }
+    #undef WHY
+    kv_t k;
+    k.n = 0;
+    k.s[0] = '\0';
+    kv_str(&k, "disk", disk);
+    kv_str(&k, "verdict", verdict);
+    kv_str(&k, "reasons", reasons);
+    kv_str(&k, "tool", used);
+    kv_str(&k, "model", sm.model);
+    kv_str(&k, "serial", sm.serial);
+    kv_str(&k, "firmware", sm.fw);
+    kv_int(&k, "temp", sm.temp);
+    kv_int(&k, "hours", sm.hours);
+    kv_int(&k, "pct_used", sm.pct_used);
+    kv_int(&k, "realloc", sm.realloc);
+    kv_int(&k, "pending", sm.pending);
+    kv_int(&k, "uncorrectable", sm.uncorr);
+    kv_int(&k, "media_errors", sm.media);
+    kv_int(&k, "critical", sm.crit);
+    record("smart", k.s);
+    done(verdict);
+}
+
+/* ── Benchmark ────────────────────────────────────────────────────────
+ *
+ * Reads only, never writes, so it is allowed on a mounted partition.
+ * O_DIRECT, so the numbers are the disk's and not the page cache's; half
+ * the time on 1 MiB sequential reads, half on 4 KiB reads at random
+ * places, which is what starting programs and opening folders is. Time
+ * boxed, because a benchmark of a 2 TB disk must not read 2 TB. */
+
+static void v_bench(char **a, int n)
+{
+    const char *kn = a[0];
+    u64 secs = 10;
+    if (n > 1) parse_u64(a[1], &secs);
+    if (secs < 2) secs = 2;
+    if (secs > 60) secs = 60;
+    char dev[64];
+    if (!dev_path(kn, dev, sizeof dev)) {
+        fail_now("failed", "the device is gone");
+        return;
+    }
+    u64 size = blk_bytes(kn);
+    if (size < 8 * MIB) {
+        fail_now("refused", "the device is too small to measure");
+        return;
+    }
+    bool direct = true;
+    long fd = lp_open(dev, O_RDONLY | O_DIRECT | O_CLOEXEC, 0);
+    if (fd < 0) {
+        direct = false;
+        fd = lp_open(dev, O_RDONLY | O_CLOEXEC, 0);
+        if (fd >= 0) lp_ioctl((int)fd, BLKFLSBUF_, NULL);
+    }
+    if (fd < 0) {
+        fail_now("failed", "cannot open the device");
+        return;
+    }
+    u8 *raw = malloc(MIB + 4096);
+    if (!raw) {
+        lp_close((int)fd);
+        fail_now("failed", "out of memory");
+        return;
+    }
+    u8 *buf = (u8 *)(((unsigned long)raw + 4095) & ~4095ul);
+    say(direct ? "reading with O_DIRECT (the page cache is bypassed)"
+               : "this device refuses O_DIRECT; the cache was dropped first");
+
+    s64 half = (s64)secs * 500;
+    s64 t0 = lp_monotonic_ms(), last = 0;
+    u64 seq = 0, off = 0;
+    while (lp_monotonic_ms() - t0 < half && !cancel_req) {
+        if (off + MIB > size) off = 0;
+        if (!read_at((int)fd, off, buf, MIB))
+            break;
+        off += MIB;
+        seq += MIB;
+        s64 now = lp_monotonic_ms();
+        if (now - last > 250) {
+            last = now;
+            progress((int)((now - t0) * 50 / half), "sequential read");
+        }
+    }
+    s64 seq_ms = lp_monotonic_ms() - t0;
+
+    u64 x = (u64)lp_monotonic_ms() * 0x9E3779B97F4A7C15ull;
+    lp_getrandom(&x, sizeof x, 0);
+    x |= 1;
+    u64 ops = 0, blocks = size / 4096;
+    s64 t1 = lp_monotonic_ms();
+    while (lp_monotonic_ms() - t1 < half && !cancel_req) {
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        if (!read_at((int)fd, (x % blocks) * 4096, buf, 4096))
+            break;
+        ops++;
+        s64 now = lp_monotonic_ms();
+        if (now - last > 250) {
+            last = now;
+            progress(50 + (int)((now - t1) * 50 / half), "random 4 KiB reads");
+        }
+    }
+    s64 rnd_ms = lp_monotonic_ms() - t1;
+    lp_close((int)fd);
+    free(raw);
+    if (cancel_req) {
+        fail_now("cancelled", "the benchmark was stopped");
+        return;
+    }
+    kv_t k;
+    k.n = 0;
+    k.s[0] = '\0';
+    kv_str(&k, "name", kn);
+    kv_int(&k, "direct", direct);
+    kv_u64(&k, "seq_bytes", seq);
+    kv_int(&k, "seq_ms", (long)seq_ms);
+    kv_u64(&k, "seq_mbps", seq_ms > 0 ? seq * 1000 / (u64)seq_ms / MIB : 0);
+    kv_u64(&k, "rand_ops", ops);
+    kv_int(&k, "rand_ms", (long)rnd_ms);
+    kv_u64(&k, "rand_iops", rnd_ms > 0 ? ops * 1000 / (u64)rnd_ms : 0);
+    kv_u64(&k, "rand_lat_us", ops ? (u64)rnd_ms * 1000 / ops : 0);
+    record("bench", k.s);
+    done("");
+}
+
+/* ── Images ───────────────────────────────────────────────────────────
+ *
+ * The file is the client's: it opened it, with its own permissions, and
+ * passed the descriptor with the request (see the top). Only regular
+ * files are accepted - a descriptor for a block device or a pipe would
+ * turn "save an image" into "copy my disk onto yours". */
+
+static int passed_fd = -1;           /* SCM_RIGHTS, from the request */
+
+static bool passed_file(u64 *size, bool want_write)
+{
+    if (passed_fd < 0)
+        return failed("invalid", "send the image file's descriptor with the"
+                      " request"), false;
+    char p[40];
+    snprintf(p, sizeof p, "/proc/self/fd/%d", passed_fd);
+    lp_stat_t st;
+    if (lp_stat(p, &st, true) < 0 || (st.mode & LP_S_IFMT) != LP_S_IFREG)
+        return failed("invalid", "the image has to be an ordinary file"), false;
+    /* A zero-length transfer checks the descriptor's mode and moves
+     * nothing: EBADF when it was not opened for that direction. */
+    char z = 0;
+    long r = want_write ? lp_write(passed_fd, &z, 0) : lp_read(passed_fd, &z, 0);
+    if (r < 0)
+        return failed("invalid", want_write ? "the image file is not open for writing"
+                                            : "the image file is not open for reading"), false;
+    *size = (u64)st.size;
+    return true;
+}
+
+static void v_image(bool save, char **a, int n)
+{
+    const char *kn = a[0];
+    char confirm[40] = "";
+    if (n > 1 && starts(a[1], "confirm="))
+        strlcpy(confirm, a[1] + 8, sizeof confirm);
+    mounts_refresh();
+    bool vital;
+    char why[300];
+    if (in_use(kn, &vital, why, sizeof why)) {
+        fail_now("refused", why);
+        return;
+    }
+    u64 fsize = 0;
+    if (!passed_file(&fsize, save)) {
+        finish_fail();
+        return;
+    }
+    u64 psize = blk_bytes(kn);
+    if (!save) {
+        if (fsize == 0 || fsize > psize) {
+            char msg[160], x[32], y[32];
+            human(fsize, x, sizeof x);
+            human(psize, y, sizeof y);
+            snprintf(msg, sizeof msg, "the image (%s) does not fit on %s (%s)", x, kn, y);
+            fail_now("refused", fsize ? msg : "the image file is empty");
+            return;
+        }
+        if (blk_is_part(kn)) {
+            static table_t t;
+            char disk[32];
+            blk_disk(kn, disk, sizeof disk);
+            pent_t *p = table_read(disk, &t) ? table_num(&t, blk_partno(kn)) : NULL;
+            const char *tag = p ? protected_tag(&t, p) : NULL;
+            if (tag && strcmp(confirm, tag)) {
+                snprintf(why, sizeof why, "%s is the %s; restoring over it needs the"
+                         " typed confirmation", kn, tag);
+                fail_now("refused", why);
+                return;
+            }
+        }
+    }
+    char dev[64];
+    if (!dev_path(kn, dev, sizeof dev)) {
+        fail_now("failed", "the device is gone");
+        return;
+    }
+    long dfd = lp_open(dev, (save ? O_RDONLY : O_RDWR) | O_CLOEXEC, 0);
+    if (dfd < 0) {
+        fail_now("failed", "cannot open the device");
+        return;
+    }
+    u64 len = save ? psize : fsize;
+    char msg[200], hs[32];
+    human(len, hs, sizeof hs);
+    snprintf(msg, sizeof msg, "%s %s %s", save ? "saving" : "restoring", hs,
+             save ? "into the image file" : "onto the partition");
+    say(msg);
+    audit(msg);
+    if (save) lp_ftruncate(passed_fd, 0);
+    lp_lseek(passed_fd, 0, SEEK_SET);
+    lp_lseek((int)dfd, 0, SEEK_SET);
+    u8 *buf = malloc(4 * MIB);
+    if (!buf) {
+        lp_close((int)dfd);
+        fail_now("failed", "out of memory");
+        return;
+    }
+    static lp_digest_t d;
+    lp_digest_init(&d, LP_SHA256);
+    int src = save ? (int)dfd : passed_fd, dst = save ? passed_fd : (int)dfd;
+    u64 done_b = 0;
+    s64 last = 0;
+    bool ok = true;
+    while (done_b < len) {
+        if (cancel_req) {
+            ok = false;
+            failed("cancelled", save ? "stopped: the image file is incomplete -"
+                                       " delete it"
+                                     : "stopped: the partition is now partly"
+                                       " overwritten - restore again or format it");
+            break;
+        }
+        size_t c = len - done_b < 4 * MIB ? (size_t)(len - done_b) : 4 * MIB;
+        size_t got = 0;
+        while (got < c) {
+            long r = lp_read(src, buf + got, c - got);
+            if (r == -EINTR_) continue;
+            if (r <= 0) break;
+            got += (size_t)r;
+        }
+        if (got != c) {
+            ok = false;
+            failed("failed", save ? "a read error on the device stopped the copy"
+                                  : "the image file could not be read");
+            break;
+        }
+        size_t put = 0;
+        while (put < c) {
+            long w = lp_write(dst, buf + put, c - put);
+            if (w == -EINTR_) continue;
+            if (w <= 0) break;
+            put += (size_t)w;
+        }
+        if (put != c) {
+            ok = false;
+            failed("failed", save ? "the image file could not be written (is the"
+                                    " disk it is on full?)"
+                                  : "a write error on the device stopped the restore");
+            break;
+        }
+        lp_digest_update(&d, buf, c);
+        done_b += c;
+        s64 now = lp_monotonic_ms();
+        if (now - last > 250) {
+            last = now;
+            progress((int)(done_b * 100 / len), save ? "saving the image" : "restoring");
+        }
+    }
+    free(buf);
+    lp_fsync(dst);
+    if (!save) lp_ioctl((int)dfd, BLKFLSBUF_, NULL);
+    lp_close((int)dfd);
+    if (!ok) {
+        finish_fail();
+        return;
+    }
+    char hex[80];
+    lp_digest_final(&d, hex);
+    kv_t k;
+    k.n = 0;
+    k.s[0] = '\0';
+    kv_str(&k, "name", kn);
+    kv_u64(&k, "bytes", done_b);
+    kv_str(&k, "sha256", hex);
+    record("image", k.s);
+    done(save ? "the image is saved" : "the image is restored");
+}
+
+static void v_image_save(char **a, int n)    { v_image(true, a, n); }
+static void v_image_restore(char **a, int n) { v_image(false, a, n); }
+
+/* ── Mounting, and the drive going away ───────────────────────────────
+ *
+ * The same places and rules as automount and lp-privd: /media/<label>,
+ * the label cleaned so it cannot climb out of /media, and FAT, exFAT
+ * and NTFS - which have no owners - handed to whoever asked. */
+
+static void safe_name(const char *label, const char *fallback, char *out, size_t n)
+{
+    size_t w = 0;
+    for (size_t i = 0; label && label[i] && w + 1 < n; i++) {
+        char c = label[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+                  (c == '.' && w > 0);
+        out[w++] = ok ? c : '-';
+    }
+    while (w > 0 && out[w - 1] == '-') w--;
+    if (w == 0) {
+        strlcpy(out, fallback, n);
+        return;
+    }
+    out[w] = '\0';
+}
+
+static bool point_in_use(const char *path)
+{
+    for (int i = 0; i < nmnts; i++)
+        if (strcmp(mnts[i].point, path) == 0)
+            return true;
+    return false;
+}
+
+static bool pick_point(const char *name, char *out, size_t n)
+{
+    snprintf(out, n, "/media/%s", name);
+    if (!point_in_use(out))
+        return true;
+    for (int s = 2; s < 20; s++) {
+        snprintf(out, n, "/media/%s-%d", name, s);
+        if (!point_in_use(out))
+            return true;
+    }
+    return false;
+}
+
+static long try_mount(const char *dev, const char *point, const char *fs,
+                      unsigned long flags, bool owned)
+{
+    char data[96];
+    const char *opts = NULL;
+    if (owned) {
+        if (!strcmp(fs, "vfat"))
+            snprintf(data, sizeof data, "uid=%u,gid=%u,umask=022,utf8=1,"
+                     "shortname=mixed,flush", caller_uid, caller_gid);
+        else
+            snprintf(data, sizeof data, "uid=%u,gid=%u,umask=022,iocharset=utf8",
+                     caller_uid, caller_gid);
+        opts = data;
+    }
+    return lp_mount(dev, point, fs, flags, opts);
+}
+
+/* Mount `name` (a partition, or the open mapping of an encrypted one). */
+static void v_mount(char **a, int n)
+{
+    (void)n;
+    char name[32];
+    strlcpy(name, a[0], sizeof name);
+    probe_t p;
+    probe_dev(name, &p);
+    if (!strcmp(p.fs, "crypto_LUKS")) {
+        char h[32];
+        if (!first_holder(name, h, sizeof h)) {
+            fail_now("refused", "the encrypted partition is locked; unlock it first");
+            return;
+        }
+        strlcpy(name, h, sizeof name);
+        probe_dev(name, &p);
+    }
+    mounts_refresh();
+    const char *at = mounted_at(name);
+    if (at) {
+        done(at);
+        return;
+    }
+    bool vital;
+    char why[300];
+    const char *iu = in_use(name, &vital, why, sizeof why);
+    if (iu) {
+        fail_now("refused", why);
+        return;
+    }
+    if (!p.fs[0] || !strcmp(p.fs, "swap")) {
+        fail_now("refused", "there is no filesystem here that can be mounted");
+        return;
+    }
+    char dev[64];
+    if (!dev_path(name, dev, sizeof dev)) {
+        fail_now("failed", "the device is gone");
+        return;
+    }
+    char clean[48], point[96];
+    safe_name(p.label, name, clean, sizeof clean);
+    if (!pick_point(clean, point, sizeof point)) {
+        fail_now("failed", "no free mount point under /media");
+        return;
+    }
+    lp_mkdir("/media", 0755);
+    if (lp_mkdir(point, 0755) < 0 && !lp_is_dir(point)) {
+        fail_now("failed", "cannot create the mount point");
+        return;
+    }
+    char line[200];
+    snprintf(line, sizeof line, "mount %s %s (%s)", dev, point, p.fs);
+    audit(line);
+    unsigned long flags = MS_NOSUID | MS_NODEV;
+    long r = -1;
+    const char *used = p.fs;
+    if (starts(p.fs, "ext") || !strcmp(p.fs, "btrfs")) {
+        r = try_mount(dev, point, p.fs, flags, false);
+    } else if (!strcmp(p.fs, "vfat") || !strcmp(p.fs, "exfat")) {
+        r = try_mount(dev, point, p.fs, flags, true);
+    } else if (!strcmp(p.fs, "ntfs")) {
+        used = "ntfs3";
+        r = try_mount(dev, point, "ntfs3", flags, true);
+        char ntfs3g[64];
+        if (r < 0 && tool("ntfs-3g", ntfs3g, sizeof ntfs3g)) {
+            char opts[96];
+            snprintf(opts, sizeof opts, "uid=%u,gid=%u,umask=022,nosuid,nodev",
+                     caller_uid, caller_gid);
+            char *argv[] = { ntfs3g, dev, point, "-o", opts, NULL };
+            used = "ntfs-3g";
+            r = run(argv) == 0 ? 0 : -1;
+        }
+    } else if (!strcmp(p.fs, "iso9660")) {
+        r = try_mount(dev, point, p.fs, flags | MS_RDONLY, false);
+    }
+    if (r < 0 && strcmp(used, "ntfs-3g")) {
+        /* A dirty FAT, or an NTFS Windows left hibernated, often mounts
+         * read-only when it will not mount writable - said out loud. */
+        bool own = !strcmp(p.fs, "vfat") || !strcmp(p.fs, "exfat") || !strcmp(p.fs, "ntfs");
+        r = try_mount(dev, point, !strcmp(p.fs, "ntfs") ? "ntfs3" : p.fs,
+                      flags | MS_RDONLY, own);
+        if (r == 0)
+            say("mounted read-only: the filesystem needs checking");
+    }
+    if (r < 0) {
+        lp_rmdir(point);
+        char msg[200];
+        snprintf(msg, sizeof msg, "the kernel would not mount it (%s, error %ld)", p.fs, -r);
+        fail_now("failed", msg);
+        return;
+    }
+    done(point);
+}
+
+/* Unmount every mount of one device, newest first. Busy is reported,
+ * not forced: a lazy detach would say nothing and leave the drive
+ * half-written when it is pulled. The running system's own mounts are
+ * never taken down here. */
+static bool unmount_dev(const char *name)
+{
+    u32 maj, min;
+    if (!blk_devnum(name, &maj, &min))
+        return true;
+    bool vital;
+    char why[300];
+    if (in_use(name, &vital, why, sizeof why) && vital)
+        return failed("refused", why);
+    for (int i = nmnts - 1; i >= 0; i--) {
+        if (mnts[i].maj != maj || mnts[i].min != min)
+            continue;
+        char line[300];
+        snprintf(line, sizeof line, "umount %s", mnts[i].point);
+        audit(line);
+        lp_sync();
+        long r = lp_umount(mnts[i].point, 0);
+        if (r == -EBUSY_)
+            return failed("busy", "a program still has files open on it");
+        if (r < 0) {
+            char msg[96];
+            snprintf(msg, sizeof msg, "the kernel would not unmount it (error %ld)", -r);
+            return failed("failed", msg);
+        }
+        if (starts(mnts[i].point, "/media/"))
+            lp_rmdir(mnts[i].point);
+    }
+    return true;
+}
+
+/* A partition and whatever is mounted from its open LUKS mapping. */
+static bool unmount_all_of(const char *name)
+{
+    char h[32];
+    if (first_holder(name, h, sizeof h) && !unmount_dev(h))
+        return false;
+    return unmount_dev(name);
+}
+
+static void v_unmount(char **a, int n)
+{
+    (void)n;
+    mounts_refresh();
+    if (!unmount_all_of(a[0])) {
+        finish_fail();
+        return;
+    }
+    done("unmounted");
+}
+
+static bool cryptsetup_close(const char *part)
+{
+    char h[32], nm[80], cs[64];
+    if (!first_holder(part, h, sizeof h))
+        return true;
+    char p[96];
+    snprintf(p, sizeof p, "/sys/class/block/%s/dm/name", h);
+    if (!sys_read(p, nm, sizeof nm) || !starts(nm, "lp-"))
+        return failed("refused", "that encrypted volume was opened by something"
+                      " else; close it there");
+    if (!need_tool("cryptsetup", "cryptsetup", cs, sizeof cs))
+        return false;
+    char *argv[] = { cs, "close", nm, NULL };
+    if (run(argv) != 0)
+        return failed("failed", "cryptsetup would not close it");
+    return true;
+}
+
+/* Everything on the disk unmounted and closed, the caches written out,
+ * and then - where the kernel has the switch - the device removed from
+ * it: that is what makes a stick's light go out. A loop device is
+ * detached from its file instead. */
+static bool eject_disk(const char *disk)
+{
+    mounts_refresh();
+    bool vital;
+    char why[300];
+    if (disk_busy(disk, &vital, why, sizeof why) && vital)
+        return failed("refused", why);
+    char parts[128][32];
+    int np = blk_parts(disk, parts, 128);
+    for (int i = 0; i < np; i++)
+        if (!unmount_all_of(parts[i]) || !cryptsetup_close(parts[i]))
+            return false;
+    if (!unmount_dev(disk))
+        return false;
+    lp_sync();
+    flush_dev(disk);
+    if (starts(disk, "loop")) {
+        char dev[64];
+        if (dev_path(disk, dev, sizeof dev)) {
+            long fd = lp_open(dev, O_RDONLY | O_CLOEXEC, 0);
+            if (fd >= 0) {
+                lp_ioctl((int)fd, 0x4C01 /* LOOP_CLR_FD */, NULL);
+                lp_close((int)fd);
+                audit("  loop device detached");
+            }
+        }
+        return true;
+    }
+    char p[96];
+    snprintf(p, sizeof p, "/sys/block/%s/device/delete", disk);
+    long fd = lp_open(p, O_WRONLY | O_CLOEXEC, 0);
+    if (fd >= 0) {
+        lp_write((int)fd, "1\n", 2);
+        lp_close((int)fd);
+        audit("  device removed from the kernel");
+    }
+    return true;
+}
+
+static void v_eject(char **a, int n)
+{
+    (void)n;
+    if (!eject_disk(a[0])) {
+        finish_fail();
+        return;
+    }
+    done("safe to remove");
+}
+
+/* Power off: eject, then have the USB port let go of the device, the
+ * way GNOME Disks' power button does. Only USB has that; anything else
+ * is ejected and the answer says so. */
+static void v_poweroff(char **a, int n)
+{
+    (void)n;
+    char p[160], link[512], usb[512] = "";
+    snprintf(p, sizeof p, "/sys/block/%s", a[0]);
+    long r = lp_readlink(p, link, sizeof link - 1);
+    link[r > 0 ? r : 0] = '\0';
+    /* ../devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host3/...:
+     * the USB device is the last component before the first ':' one. */
+    char *q = strstr(link, "/usb");
+    if (q) {
+        char *c = strchr(q + 1, '/');
+        while (c) {
+            char *next = strchr(c + 1, '/');
+            char comp[64];
+            size_t l = next ? (size_t)(next - c - 1) : strlen(c + 1);
+            if (l >= sizeof comp) break;
+            memcpy(comp, c + 1, l);
+            comp[l] = '\0';
+            if (strchr(comp, ':')) {
+                size_t pl = (size_t)(c - link);
+                snprintf(usb, sizeof usb, "/sys/block/%.*s/remove", (int)pl, link);
+                break;
+            }
+            c = next;
+        }
+    }
+    if (!eject_disk(a[0])) {
+        finish_fail();
+        return;
+    }
+    if (usb[0]) {
+        /* /sys/block/<disk> + "/" + "../devices/..." resolves to the
+         * USB device directory; its remove file disconnects the port. */
+        char path[600];
+        strlcpy(path, usb, sizeof path);
+        char *rel = strstr(path, "../");
+        char full[640];
+        if (rel) {
+            snprintf(full, sizeof full, "/sys/%s", rel + 3);
+            long fd = lp_open(full, O_WRONLY | O_CLOEXEC, 0);
+            if (fd >= 0) {
+                lp_write((int)fd, "1\n", 2);
+                lp_close((int)fd);
+                audit("  USB device powered off");
+                done("powered off");
+                return;
+            }
+        }
+    }
+    done("safe to remove (this drive has no power switch the system can use)");
+}
+
+/* ── Encrypted partitions ───────────────────────────────────────────── */
+
+static bool key_field(const char *f, char *out, size_t outn, size_t *len)
+{
+    return starts(f, "k:") && unhex(f + 2, out, outn, len) && *len >= 1;
+}
+
+static void v_luks_open(char **a, int n)
+{
+    (void)n;
+    const char *kn = a[0];
+    char pass[260], cs[64], dev[64], map[48];
+    size_t plen = 0;
+    if (!key_field(a[1], pass, sizeof pass, &plen)) {
+        fail_now("invalid", "the passphrase is hex after k:");
+        return;
+    }
+    probe_t p;
+    probe_dev(kn, &p);
+    char h[32];
+    if (strcmp(p.fs, "crypto_LUKS")) {
+        scrub(pass, sizeof pass);
+        fail_now("refused", "that is not an encrypted (LUKS) partition");
+        return;
+    }
+    if (first_holder(kn, h, sizeof h)) {
+        scrub(pass, sizeof pass);
+        done(h);
+        return;
+    }
+    if (!need_tool("cryptsetup", "cryptsetup", cs, sizeof cs) ||
+        !dev_path(kn, dev, sizeof dev)) {
+        scrub(pass, sizeof pass);
+        finish_fail();
+        return;
+    }
+    snprintf(map, sizeof map, "lp-%s", kn);
+    char *argv[] = { cs, "open", "--key-file=-", dev, map, NULL };
+    int rc = run_in(argv, STAT_NONE, pass, plen, false, true);
+    scrub(pass, sizeof pass);
+    if (rc == 2) {
+        fail_now("auth", "wrong passphrase");
+        return;
+    }
+    if (rc != 0 || !first_holder(kn, h, sizeof h)) {
+        fail_now("failed", "cryptsetup could not open it");
+        return;
+    }
+    done(h);
+}
+
+static void v_luks_close(char **a, int n)
+{
+    (void)n;
+    mounts_refresh();
+    char h[32];
+    if (!first_holder(a[0], h, sizeof h)) {
+        done("already locked");
+        return;
+    }
+    if (!unmount_dev(h) || !cryptsetup_close(a[0])) {
+        finish_fail();
+        return;
+    }
+    done("locked");
+}
+
+/* ── /etc/fstab ───────────────────────────────────────────────────────
+ *
+ * Shown whole; changed only where it concerns data partitions - an entry
+ * whose mount point is /mnt/<name> or /media/<name>, or a swap area
+ * named by UUID. The root, the ESP and everything the installer wrote
+ * are read-only here: a mistake in those lines is a system that does
+ * not boot. Entries go in by UUID with "nofail", so a data disk that is
+ * missing at boot costs a line in the log and not the boot. Written the
+ * persistence way: the old file kept as fstab.lp-diskd.bak, the new one
+ * written beside it, fsynced, renamed over, the directory fsynced. */
+
+static char fstab_buf[32768];
+
+static bool fstab_editable(const char *point, const char *fs, const char *spec)
+{
+    if ((starts(point, "/mnt/") || starts(point, "/media/")) &&
+        !strchr(strchr(point + 1, '/') + 1, '/'))
+        return true;
+    return !strcmp(fs, "swap") && starts(spec, "UUID=");
+}
+
+/* Split one fstab line into its fields (in place). */
+static int fstab_fields(char *line, char *f[6])
+{
+    int n = 0;
+    for (char *p = line; *p && n < 6; ) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p || *p == '#') break;
+        f[n++] = p;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        if (*p) *p++ = '\0';
+    }
+    return n;
+}
+
+/* The kernel name of what an fstab spec names, if it is here. */
+static bool fstab_resolve(const char *spec, char *out, size_t n)
+{
+    out[0] = '\0';
+    if (starts(spec, "/dev/")) {
+        const char *b = spec + 5;
+        if (dev_name_ok(b) && blk_exists(b)) { strlcpy(out, b, n); return true; }
+        return false;
+    }
+    const char *eq = strchr(spec, '=');
+    if (!eq) return false;
+    static char names[256][32];
+    int nn = blk_all(names, 256);
+    for (int i = 0; i < nn; i++) {
+        if (starts(names[i], "ram") || starts(names[i], "zram") || blk_bytes(names[i]) == 0)
+            continue;
+        if (starts(spec, "UUID=") || starts(spec, "LABEL=")) {
+            probe_t p;
+            if (!probe_dev(names[i], &p)) continue;
+            const char *v = starts(spec, "UUID=") ? p.uuid : p.label;
+            if (v[0] && !ieq_not(v, eq + 1)) { strlcpy(out, names[i], n); return true; }
+        } else if ((starts(spec, "PARTUUID=") || starts(spec, "PARTLABEL=")) &&
+                   blk_is_part(names[i])) {
+            static table_t t;
+            char disk[32];
+            blk_disk(names[i], disk, sizeof disk);
+            if (!table_read(disk, &t)) continue;
+            pent_t *p = table_num(&t, blk_partno(names[i]));
+            if (!p) continue;
+            const char *v = starts(spec, "PARTUUID=") ? p->uuid : p->name;
+            if (v[0] && !ieq_not(v, eq + 1)) { strlcpy(out, names[i], n); return true; }
+        }
+    }
+    return false;
+}
+
+static void answer_fstab(void)
+{
+    long got = proc_read(FSTAB_PATH, fstab_buf, sizeof fstab_buf - 1);
+    if (got < 0) got = 0;
+    fstab_buf[got] = '\0';
+    int ln = 0;
+    for (char *line = fstab_buf; line && *line; ) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        ln++;
+        char copy[1024];
+        strlcpy(copy, line, sizeof copy);
+        char *f[6];
+        int nf = fstab_fields(copy, f);
+        if (nf >= 2) {
+            char dev[32];
+            fstab_resolve(f[0], dev, sizeof dev);
+            kv_t k;
+            k.n = 0;
+            k.s[0] = '\0';
+            kv_int(&k, "line", ln);
+            kv_str(&k, "spec", f[0]);
+            kv_str(&k, "point", f[1]);
+            kv_str(&k, "fs", nf > 2 ? f[2] : "");
+            kv_str(&k, "opts", nf > 3 ? f[3] : "");
+            kv_str(&k, "pass", nf > 5 ? f[5] : "0");
+            kv_str(&k, "dev", dev);
+            kv_int(&k, "editable", fstab_editable(f[1], nf > 2 ? f[2] : "", f[0]));
+            record("fstab", k.s);
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+    reply("done", "");
+}
+
+/* Rewrite /etc/fstab with every editable line for `uuid` (or at
+ * `point`) dropped, and `add` (may be NULL) appended. */
+static bool fstab_rewrite(const char *uuid, const char *point, const char *add)
+{
+    long got = proc_read(FSTAB_PATH, fstab_buf, sizeof fstab_buf - 1);
+    if (got < 0) got = 0;
+    fstab_buf[got] = '\0';
+    static char out[34000];
+    size_t k = 0;
+    char spec[64];
+    snprintf(spec, sizeof spec, "UUID=%s", uuid);
+    bool removed = false;
+    for (char *line = fstab_buf; line && *line; ) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        char copy[1024];
+        strlcpy(copy, line, sizeof copy);
+        char *f[6];
+        int nf = fstab_fields(copy, f);
+        bool drop = false;
+        if (nf >= 3) {
+            bool same = !ieq_not(f[0], spec) || (point && !strcmp(f[1], point));
+            if (same && !fstab_editable(f[1], f[2], f[0]))
+                return failed("refused", "the system itself uses that entry of"
+                              " /etc/fstab; it is not changed here");
+            drop = same;
+        }
+        if (drop) {
+            /* ... and the comment this program put above it. */
+            static const char mark[] = "# added by Disks (lp-diskd)\n";
+            size_t ml = sizeof mark - 1;
+            if (k >= ml && !memcmp(out + k - ml, mark, ml))
+                k -= ml;
+            removed = true;
+        } else if (k + strlen(line) + 2 < sizeof out) {
+            k += strlcpy(out + k, line, sizeof out - k);
+            out[k++] = '\n';
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+    if (add) {
+        if (k + strlen(add) + 64 >= sizeof out)
+            return failed("failed", "/etc/fstab is too long to edit here");
+        k += strlcpy(out + k, "# added by Disks (lp-diskd)\n", sizeof out - k);
+        k += strlcpy(out + k, add, sizeof out - k);
+        out[k++] = '\n';
+    } else if (!removed) {
+        return failed("invalid", "there is no data-partition entry for that UUID");
+    }
+    out[k] = '\0';
+    /* fstab_buf was cut into lines above; read the file again for the
+     * copy of what it was. */
+    static char orig[34000];
+    long og = proc_read(FSTAB_PATH, orig, sizeof orig);
+    if (og > 0 && !lp_write_file_atomic(FSTAB_PATH ".lp-diskd.bak", orig, (size_t)og))
+        return failed("failed", "could not keep a copy of the old /etc/fstab");
+    if (!lp_write_file_atomic(FSTAB_PATH, out, k))
+        return failed("failed", "could not write /etc/fstab");
+    audit(add ? add : "  fstab entry removed");
+    return true;
+}
+
+static bool point_name_ok(const char *s)
+{
+    return alphabet_ok(s, "_.-", 32, true) && s[0] != '.';
+}
+
+static void v_fstab_set(char **a, int n)
+{
+    (void)n;
+    const char *kn = a[0];
+    if (!point_name_ok(a[1])) {
+        fail_now("invalid", "the mount point name is letters, digits, _ . -");
+        return;
+    }
+    bool automount = !strcmp(a[2], "auto");
+    bool ro = !strcmp(a[3], "ro");
+    if ((!automount && strcmp(a[2], "noauto")) || (!ro && strcmp(a[3], "rw"))) {
+        fail_now("invalid", "fstab-set <part> <name> auto|noauto rw|ro");
+        return;
+    }
+    probe_t p;
+    probe_dev(kn, &p);
+    if (!p.uuid[0] || !p.fs[0]) {
+        fail_now("refused", "there is no filesystem with a UUID on it");
+        return;
+    }
+    if (!strcmp(p.fs, "crypto_LUKS")) {
+        fail_now("refused", "an encrypted partition would need /etc/crypttab as"
+                 " well; unlock and mount it from Disks instead");
+        return;
+    }
+    char line[400], point[64];
+    const char *fs = !strcmp(p.fs, "ntfs") ? "ntfs3" : p.fs;
+    if (!strcmp(p.fs, "swap")) {
+        strlcpy(point, "none", sizeof point);
+        snprintf(line, sizeof line, "UUID=%s none swap sw,nofail 0 0", p.uuid);
+    } else {
+        snprintf(point, sizeof point, "/mnt/%s", a[1]);
+        char extra[80] = "";
+        if (!strcmp(p.fs, "vfat") || !strcmp(p.fs, "exfat") || !strcmp(p.fs, "ntfs"))
+            snprintf(extra, sizeof extra, ",uid=%u,gid=%u,umask=022", caller_uid, caller_gid);
+        snprintf(line, sizeof line, "UUID=%s %s %s %s,%s,nofail,nosuid,nodev%s 0 %d",
+                 p.uuid, point, fs, ro ? "ro" : "rw", automount ? "auto" : "noauto",
+                 extra, starts(p.fs, "ext") ? 2 : 0);
+    }
+    if (!fstab_rewrite(p.uuid, strcmp(point, "none") ? point : NULL, line)) {
+        finish_fail();
+        return;
+    }
+    if (strcmp(point, "none")) {
+        lp_mkdir("/mnt", 0755);
+        lp_mkdir(point, 0755);
+    }
+    done(line);
+}
+
+static void v_fstab_remove(char **a, int n)
+{
+    (void)n;
+    if (!alphabet_ok(a[0], "-", 36, true)) {
+        fail_now("invalid", "fstab-remove takes the filesystem UUID");
+        return;
+    }
+    if (!fstab_rewrite(a[0], NULL, NULL)) {
+        finish_fail();
+        return;
+    }
+    done("removed");
+}
+
+/* ── Secure erase ─────────────────────────────────────────────────────
+ *
+ * Removable media only (USB sticks, SD cards - and loop devices, which
+ * are files), after the person typed the disk's name. Every byte is
+ * overwritten with zeros, then the device is asked to discard, which on
+ * flash also releases the blocks the wear levelling kept aside. One
+ * pass is enough for any recovery that does not take the chips out; the
+ * application says that flash cannot promise more. */
+
+static void v_erase(char **a, int n)
+{
+    const char *disk = a[0];
+    if (n < 2 || !starts(a[1], "confirm=") || strcmp(a[1] + 8, disk)) {
+        fail_now("refused", "erasing needs the disk's name typed as confirmation");
+        return;
+    }
+    if (!blk_removable(disk)) {
+        fail_now("refused", "only removable drives (USB, SD cards) are erased here;"
+                 " for an internal disk, reinstall from Recovery instead");
+        return;
+    }
+    mounts_refresh();
+    bool vital;
+    char why[300];
+    if (disk_busy(disk, &vital, why, sizeof why)) {
+        fail_now("refused", why);
+        return;
+    }
+    char dev[64];
+    if (!dev_path(disk, dev, sizeof dev)) {
+        fail_now("failed", "the disk is gone");
+        return;
+    }
+    long fd = lp_open(dev, O_WRONLY | O_CLOEXEC, 0);
+    if (fd < 0) {
+        fail_now("failed", "cannot open the disk for writing");
+        return;
+    }
+    u64 len = blk_bytes(disk), off = 0;
+    u8 *z = malloc(4 * MIB);
+    if (!z) {
+        lp_close((int)fd);
+        fail_now("failed", "out of memory");
+        return;
+    }
+    memset(z, 0, 4 * MIB);
+    s64 last = 0;
+    bool ok = true;
+    int since = 0;
+    while (off < len) {
+        if (cancel_req) {
+            char msg[200], x[32];
+            human(off, x, sizeof x);
+            snprintf(msg, sizeof msg, "stopped: the first %s are erased, the rest"
+                     " is not; the partition table is gone", x);
+            failed("cancelled", msg);
+            ok = false;
+            break;
+        }
+        size_t c = len - off < 4 * MIB ? (size_t)(len - off) : 4 * MIB;
+        if (!write_at((int)fd, off, z, c)) {
+            failed("failed", "a write error stopped the erase");
+            ok = false;
+            break;
+        }
+        off += c;
+        if (++since >= 32) { lp_fsync((int)fd); since = 0; }
+        s64 now = lp_monotonic_ms();
+        if (now - last > 250) {
+            last = now;
+            progress((int)(off * 100 / len), "overwriting with zeros");
+        }
+    }
+    lp_fsync((int)fd);
+    if (ok) {
+        u64 range[2] = { 0, len };
+        lp_ioctl((int)fd, BLKDISCARD_, range);   /* not every device can */
+    }
+    lp_ioctl((int)fd, BLKFLSBUF_, NULL);
+    lp_close((int)fd);
+    free(z);
+    char w[300];
+    kernel_sync(disk, w, sizeof w);
+    if (!ok) {
+        finish_fail();
+        return;
+    }
+    done("erased");
+}
+
+/* ── Plans, and finishing an interrupted move ──────────────────────── */
+
+static void v_plan(char **a, int n)
+{
+    char why[400];
+    if (!plan_parse(a, n, why, sizeof why)) {
+        for (int i = 0; i < MAX_STEPS; i++) scrub(steps[i].pass, sizeof steps[i].pass);
+        fail_now(plan_code, why);
+        return;
+    }
+    plan_run();
+    for (int i = 0; i < MAX_STEPS; i++) scrub(steps[i].pass, sizeof steps[i].pass);
+}
+
+/* "check" for the plan without doing it: the same model, the same
+ * refusals, and the plain-words description of every step. */
+static void v_preview(char **a, int n)
+{
+    char why[400], line[500];
+    bool ok = plan_parse(a, n, why, sizeof why);
+    for (int i = 0; i < MAX_STEPS; i++) scrub(steps[i].pass, sizeof steps[i].pass);
+    if (!ok) {
+        fail_now(plan_code, why);
+        return;
+    }
+    for (int i = 0; i < nsteps; i++) {
+        snprintf(line, sizeof line, "%d %d %s", i + 1, nsteps, steps[i].desc);
+        reply("describe", line);
+    }
+    done("the plan can be applied");
+}
+
+/* Make the kernel's partitions match the table on the disk again -
+ * after another tool rewrote the table, or a kernel that cannot parse
+ * it dropped them (BLKRRPART without the GPT parser removes them all). */
+static void v_rescan(char **a, int n)
+{
+    (void)n;
+    mounts_refresh();
+    char why[300];
+    if (!kernel_sync(a[0], why, sizeof why)) {
+        fail_now("failed", why);
+        return;
+    }
+    done("the kernel's view matches the partition table");
+}
+
+/* "Do this from Recovery": the partition that holds the running
+ * system cannot be changed while it runs, so the application offers to
+ * restart into Recovery, where it is not in use. lp-reboot-recovery
+ * (the boot-recovery track's) sets the boot menu's one-shot variable
+ * and restarts; this only runs it, from a fixed path, with nothing of
+ * the caller's in its argv. */
+static void v_reboot_recovery(char **a, int n)
+{
+    (void)a; (void)n;
+    char bin[64];
+    if (!need_tool("lp-reboot-recovery", "lp-base", bin, sizeof bin)) {
+        finish_fail();
+        return;
+    }
+    char *argv[] = { bin, NULL };
+    if (run(argv) != 0) {
+        fail_now("failed", "lp-reboot-recovery could not set the next boot");
+        return;
+    }
+    done("restarting into Recovery");
+}
+
+static void v_resume(char **a, int n)
+{
+    (void)a; (void)n;
+    resume_move();
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * The password
+ *
+ * The same bargain as sudo and lp-privd: the caller's own password,
+ * checked against /etc/shadow with crypt6, kept five minutes per uid in
+ * this process's memory only, counted on CLOCK_BOOTTIME so a suspended
+ * laptop does not come back authorised. A wrong password makes that uid
+ * wait - a time stamp, not a sleep, so nobody else waits with it.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+#define KEEP_SLOTS    32
+#define WAIT_STEP_MS  2000
+#define WAIT_MAX_MS   30000
+
+typedef struct {
+    u32 uid;
+    s64 until, not_before, used;
+    int fails;
+} keep_t;
+
+static keep_t keeps[KEEP_SLOTS];
+
+static s64 boottime_ms(void)
+{
+    s64 ts[2] = { 0, 0 };
+    if (sys_call2(SYS_clock_gettime, 7 /* CLOCK_BOOTTIME */, (long)ts) < 0)
+        return lp_monotonic_ms();
+    return ts[0] * 1000 + ts[1] / 1000000;
+}
+
+static keep_t *keep_for(u32 uid, bool make)
+{
+    keep_t *free_slot = NULL, *oldest = &keeps[0];
+    for (int i = 0; i < KEEP_SLOTS; i++) {
+        keep_t *k = &keeps[i];
+        if (k->used && k->uid == uid)
+            return k;
+        if (!k->used && !free_slot)
+            free_slot = k;
+        if (k->used < oldest->used)
+            oldest = k;
+    }
+    if (!make)
+        return NULL;
+    keep_t *k = free_slot ? free_slot : oldest;
+    memset(k, 0, sizeof *k);
+    k->uid = uid;
+    k->used = boottime_ms();
+    return k;
+}
+
+static long keep_left(u32 uid)
+{
+    keep_t *k = keep_for(uid, false);
+    s64 now = boottime_ms();
+    if (!k || k->until <= now)
+        return 0;
+    return (long)((k->until - now + 999) / 1000);
+}
+
+/* Even hex, 1..255 bytes, no NUL byte in it (a NUL would cut the
+ * password short where the person did not). */
+static bool pw_hex_ok(const char *s)
+{
+    size_t n = strlen(s);
+    if (n < 2 || n % 2 || n > 2 * (LP_CRYPT6_PW_MAX - 1))
+        return false;
+    for (size_t i = 0; i < n; i++)
+        if (hexval(s[i]) < 0)
+            return false;
+    for (size_t i = 0; i < n; i += 2)
+        if (s[i] == '0' && s[i + 1] == '0')
+            return false;
+    return true;
+}
+
+static void answer_auth(u32 uid, const char *user, const char *who, char *hex)
+{
+    keep_t *k = keep_for(uid, true);
+    s64 now = boottime_ms();
+    char line[300], msg[160];
+    k->used = now;
+    if (now < k->not_before) {
+        long secs = (long)((k->not_before - now + 999) / 1000);
+        snprintf(line, sizeof line, "%s: auth *** -> auth (waiting, %lds left)", who, secs);
+        audit(line);
+        snprintf(msg, sizeof msg, "auth wait %ld s: too soon after a wrong password", secs);
+        reply("fail", msg);
+        scrub(hex, strlen(hex));
+        return;
+    }
+    char pw[LP_CRYPT6_PW_MAX];
+    size_t len = 0;
+    bool shaped = unhex(hex, pw, sizeof pw, &len);
+    scrub(hex, strlen(hex));
+    int r = shaped ? lp_shadow_check(NULL, user, pw) : LP_SHADOW_WRONG;
+    scrub(pw, sizeof pw);
+    const char *code = "failed", *text = "cannot read /etc/shadow";
+    switch (r) {
+    case LP_SHADOW_OK:
+        k->until = now + AUTH_KEEP_MS;
+        k->fails = 0;
+        k->not_before = 0;
+        snprintf(line, sizeof line, "%s: auth *** -> ok, kept %ds", who, AUTH_KEEP_MS / 1000);
+        audit(line);
+        snprintf(msg, sizeof msg, "authorised for %d s", AUTH_KEEP_MS / 1000);
+        reply("done", msg);
+        return;
+    case LP_SHADOW_WRONG: {
+        k->fails++;
+        k->until = 0;
+        s64 wait = (s64)WAIT_STEP_MS * k->fails;
+        k->not_before = now + (wait > WAIT_MAX_MS ? WAIT_MAX_MS : wait);
+        snprintf(line, sizeof line, "%s: auth *** -> wrong password (%d in a row)", who, k->fails);
+        audit(line);
+        reply("fail", "auth wrong password");
+        return;
+    }
+    case LP_SHADOW_LOCKED:
+    case LP_SHADOW_EMPTY:
+        code = "denied"; text = "this account has no password to check; set one with passwd";
+        break;
+    case LP_SHADOW_UNSUPPORTED:
+        code = "denied"; text = "this account's password is stored in a form this system"
+                                " cannot check; set it again with passwd";
+        break;
+    case LP_SHADOW_NOUSER:
+        code = "denied"; text = "this account has no entry in /etc/shadow";
+        break;
+    default:
+        break;
+    }
+    snprintf(line, sizeof line, "%s: auth *** -> %s (%s)", who, code, text);
+    audit(line);
+    snprintf(msg, sizeof msg, "%s %s", code, text);
+    reply("fail", msg);
+}
+
+/* Root, or a member of group sudo - by /etc/group, not by the peer's
+ * supplementary groups: the desktop session is started with none, and
+ * the account database is what makes a removal from sudo take effect
+ * at once. */
+static bool is_admin(u32 uid, u32 gid, char *user, size_t usern)
+{
+    lp_user_t u;
+    if (lp_user_by_uid(uid, &u))
+        strlcpy(user, u.name, usern);
+    else
+        snprintf(user, usern, "%u", uid);
+    if (uid == 0)
+        return true;
+    if (!lp_user_by_uid(uid, &u))
+        return false;
+    static char grp[16384];
+    long got = proc_read("/etc/group", grp, sizeof grp - 1);
+    if (got <= 0)
+        return false;
+    grp[got] = '\0';
+    for (char *line = grp; line && *line; ) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        if (starts(line, "sudo:")) {
+            char *f2 = strchr(line + 5, ':');
+            char *f3 = f2 ? strchr(f2 + 1, ':') : NULL;
+            if (f2 && ((u32)atoi(f2 + 1) == gid || (u32)atoi(f2 + 1) == u.gid))
+                return true;
+            for (char *m = f3 ? f3 + 1 : NULL; m && *m; ) {
+                char *comma = strchr(m, ',');
+                if (comma) *comma = '\0';
+                if (!strcmp(m, u.name))
+                    return true;
+                m = comma ? comma + 1 : NULL;
+            }
+            return false;
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+    return false;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * The verbs
+ * ═══════════════════════════════════════════════════════════════════ */
+
+typedef enum {
+    K_DEV,        /* a block device: disk or partition */
+    K_DISK,       /* a whole disk we list */
+    K_PART,       /* a partition */
+    K_SECS,       /* 1..60 */
+    K_HEX,        /* a password, hex */
+    K_KEY,        /* k:<hex>, a passphrase */
+    K_CONFIRM,    /* confirm=<typed word> */
+    K_WORD,       /* a lower-case word the verb checks */
+    K_TOKEN,      /* letters, digits, _ . - (a name or a UUID) */
+    K_PLAN        /* plan fields: the plan parser checks every one */
+} kind_t;
+
+typedef enum { RUN_INLINE, RUN_READER, RUN_JOB } runmode_t;
+
+typedef struct {
+    const char *verb;
+    bool        admin;
+    runmode_t   mode;
+    int         min, max;
+    kind_t      kind[4];       /* per position; the last one repeats */
+    void      (*fn)(char **a, int n);
+    const char *help;
+} verb_t;
+
+static const verb_t VERBS[] = {
+    { "ping",          false, RUN_INLINE, 0, 0,   {K_WORD}, NULL, "who am I, and may I change things" },
+    { "status",        false, RUN_INLINE, 0, 0,   {K_WORD}, NULL, "what is running now" },
+    { "auth",          false, RUN_INLINE, 1, 1,   {K_HEX}, NULL, "<password as hex>: allow changes for 5 minutes" },
+    { "forget",        false, RUN_INLINE, 0, 0,   {K_WORD}, NULL, "end those 5 minutes now" },
+    { "list",          false, RUN_INLINE, 0, 1,   {K_DISK}, NULL, "disks, partitions and free space" },
+    { "fstab",         false, RUN_INLINE, 0, 0,   {K_WORD}, NULL, "the entries of /etc/fstab" },
+    { "minsize",       false, RUN_READER, 1, 1,   {K_DEV}, v_minsize, "how far a filesystem can shrink" },
+    { "smart",         false, RUN_READER, 1, 1,   {K_DEV}, v_smart, "the drive's health, in plain words" },
+    { "preview",       false, RUN_READER, 1, MAX_FIELDS - 1, {K_PLAN}, v_preview, "check a plan without doing it" },
+    { "cancel",        true,  RUN_INLINE, 0, 0,   {K_WORD}, NULL, "stop the running job where that is safe" },
+    { "plan",          true,  RUN_JOB,    1, MAX_FIELDS - 1, {K_PLAN}, v_plan, "<step> [args] [| <step> ...]: change the disks" },
+    { "resume",        true,  RUN_JOB,    0, 0,   {K_WORD}, v_resume, "finish a move a power cut interrupted" },
+    { "rescan",        true,  RUN_JOB,    1, 1,   {K_DISK}, v_rescan, "make the kernel's partitions match the table" },
+    { "reboot-recovery", true, RUN_JOB,   0, 0,   {K_WORD}, v_reboot_recovery, "restart into Recovery (lp-reboot-recovery)" },
+    { "mount",         true,  RUN_JOB,    1, 1,   {K_PART}, v_mount, "mount a partition under /media" },
+    { "unmount",       true,  RUN_JOB,    1, 1,   {K_DEV}, v_unmount, "unmount it (and its unlocked contents)" },
+    { "eject",         true,  RUN_JOB,    1, 1,   {K_DISK}, v_eject, "unmount a whole drive so it can be pulled" },
+    { "poweroff",      true,  RUN_JOB,    1, 1,   {K_DISK}, v_poweroff, "eject, then power the USB drive down" },
+    { "luks-open",     true,  RUN_JOB,    2, 2,   {K_PART, K_KEY}, v_luks_open, "<part> k:<hex>: unlock an encrypted partition" },
+    { "luks-close",    true,  RUN_JOB,    1, 1,   {K_PART}, v_luks_close, "lock it again" },
+    { "bench",         true,  RUN_JOB,    1, 2,   {K_DEV, K_SECS}, v_bench, "<dev> [seconds]: read speed, read-only" },
+    { "image-save",    true,  RUN_JOB,    1, 1,   {K_DEV}, v_image_save, "<part> + a file descriptor: save an image" },
+    { "image-restore", true,  RUN_JOB,    1, 2,   {K_PART, K_CONFIRM}, v_image_restore, "<part> [confirm=] + a descriptor: restore it" },
+    { "fstab-set",     true,  RUN_JOB,    4, 4,   {K_PART, K_TOKEN, K_WORD, K_WORD}, v_fstab_set, "<part> <name> auto|noauto rw|ro: mount at /mnt/<name> at boot" },
+    { "fstab-remove",  true,  RUN_JOB,    1, 1,   {K_TOKEN}, v_fstab_remove, "<fs UUID>: remove that data-partition entry" },
+    { "erase",         true,  RUN_JOB,    2, 2,   {K_DISK, K_CONFIRM}, v_erase, "<disk> confirm=<disk>: overwrite a removable drive" },
+    { NULL, false, RUN_INLINE, 0, 0, {K_WORD}, NULL, NULL }
+};
+
+static bool arg_ok(kind_t k, const char *s, char *why, size_t whyn)
+{
+    switch (k) {
+    case K_DEV:
+    case K_DISK:
+    case K_PART:
+        if (!dev_name_ok(s) || !blk_exists(s)) {
+            snprintf(why, whyn, "\"%.32s\" is not a block device here", s);
+            return false;
+        }
+        if (k == K_DISK && (blk_is_part(s) || !blk_listable(s))) {
+            snprintf(why, whyn, "%s is not a whole disk", s);
+            return false;
+        }
+        if (k == K_PART && !blk_is_part(s)) {
+            snprintf(why, whyn, "%s is not a partition", s);
+            return false;
+        }
+        return true;
+    case K_SECS: {
+        u64 v;
+        if (!parse_u64(s, &v) || v < 1 || v > 60) {
+            snprintf(why, whyn, "seconds are 1 to 60");
+            return false;
+        }
+        return true;
+    }
+    case K_HEX:
+        if (!pw_hex_ok(s)) {
+            snprintf(why, whyn, "the password is sent as hex");
+            return false;
+        }
+        return true;
+    case K_KEY: {
+        size_t n = strlen(s);
+        bool ok = starts(s, "k:") && n > 2 && n % 2 == 0 && n <= 2 + 512;
+        for (size_t i = 2; ok && i < n; i++)
+            if (hexval(s[i]) < 0) ok = false;
+        if (!ok) snprintf(why, whyn, "a passphrase is k: and its hex");
+        return ok;
+    }
+    case K_CONFIRM:
+        if (!starts(s, "confirm=") || !alphabet_ok(s + 8, "-", 32, true)) {
+            snprintf(why, whyn, "a confirmation is confirm=<what was typed>");
+            return false;
+        }
+        return true;
+    case K_WORD:
+        if (!alphabet_ok(s, "", 16, false)) {
+            snprintf(why, whyn, "\"%.20s\" is not a word this verb takes", s);
+            return false;
+        }
+        return true;
+    case K_TOKEN:
+        if (!alphabet_ok(s, "_.-", 40, true)) {
+            snprintf(why, whyn, "names are letters, digits, _ . -");
+            return false;
+        }
+        return true;
+    case K_PLAN:
+        /* Every field is re-checked for its position by plan_step();
+         * here only the length, and that nothing starts with a dash
+         * except the ones plan_step() knows how to read. */
+        if (strlen(s) > 1100) {
+            snprintf(why, whyn, "a plan field is too long");
+            return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * The daemon
+ * ═══════════════════════════════════════════════════════════════════ */
+
+typedef struct { u16 family; char path[108]; } sun_t;
+
+static bool sun_fill(sun_t *sa, const char *path)
+{
+    memset(sa, 0, sizeof *sa);
+    sa->family = AF_UNIX_;
+    if (strlen(path) >= sizeof sa->path)
+        return false;
+    strlcpy(sa->path, path, sizeof sa->path);
+    return true;
+}
+
+static bool peer_cred(int fd, u32 *pid, u32 *uid, u32 *gid)
+{
+    u32 cred[3];
+    u32 len = sizeof cred;
+    long r = sys_call5(SYS_getsockopt, fd, SOL_SOCKET, SO_PEERCRED_,
+                       (long)cred, (long)&len);
+    if (r < 0 || len < sizeof cred)
+        return false;
+    *pid = cred[0];
+    *uid = cred[1];
+    *gid = cred[2];
+    return true;
+}
+
+/* struct msghdr and cmsghdr as the kernel lays them out for this
+ * machine: pointers and size_t are the machine's width, so plain C
+ * types give the right layout on all three. */
+typedef struct { void *base; size_t len; } iov_t;
+typedef struct {
+    void  *name;
+    u32    namelen;
+    iov_t *iov;
+    size_t iovlen;
+    void  *control;
+    size_t controllen;
+    int    flags;
+} msghdr_t;
+typedef struct { size_t len; int level; int type; } cmsg_t;
+#define CMSG_HDR_   ((sizeof(cmsg_t) + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1))
+#define MSG_CMSG_CLOEXEC_ 0x40000000
+
+/* Read one request line, at most REQ_TIMEOUT late, with any descriptor
+ * that rides along (recvmsg, so SCM_RIGHTS is not silently dropped).
+ * Exactly one line: bytes after the newline are a second request trying
+ * to ride along, and are refused. */
+static long read_request(int fd, char *buf, size_t n, int *fd_out)
+{
+    size_t got = 0;
+    *fd_out = -1;
+    s64 deadline = lp_monotonic_ms() + REQ_TIMEOUT;
+    while (got < n - 1) {
+        s64 left = deadline - lp_monotonic_ms();
+        if (left <= 0)
+            return -1;
+        lp_pollfd_t p = { fd, LP_POLLIN, 0 };
+        if (lp_poll(&p, 1, (int)left) <= 0)
+            continue;
+        iov_t iov = { buf + got, n - 1 - got };
+        u64 ctl[16];
+        msghdr_t m;
+        memset(&m, 0, sizeof m);
+        m.iov = &iov;
+        m.iovlen = 1;
+        m.control = ctl;
+        m.controllen = sizeof ctl;
+        long r = sys_call3(SYS_recvmsg_, fd, (long)&m, MSG_CMSG_CLOEXEC_);
+        if (r == -EINTR_)
+            continue;
+        if (r <= 0)
+            return -1;
+        if (m.controllen >= sizeof(cmsg_t)) {
+            cmsg_t *c = (cmsg_t *)ctl;
+            if (c->level == SOL_SOCKET && c->type == SCM_RIGHTS_ &&
+                c->len >= CMSG_HDR_ + sizeof(int)) {
+                int *fds = (int *)((u8 *)ctl + CMSG_HDR_);
+                size_t nfd = (c->len - CMSG_HDR_) / sizeof(int);
+                for (size_t i = 0; i < nfd; i++) {
+                    if (*fd_out < 0) *fd_out = fds[i];
+                    else lp_close(fds[i]);
+                }
+            }
+        }
+        for (long i = 0; i < r; i++) {
+            if (buf[got + (size_t)i] == '\n') {
+                if (i != r - 1)
+                    return -1;
+                buf[got + (size_t)i] = '\0';
+                return (long)(got + (size_t)i);
+            }
+        }
+        got += (size_t)r;
+    }
+    return -1;
+}
+
+static pid_t worker = 0;           /* the one job that writes, or 0 */
+static char  worker_desc[300];
+static int   readers;              /* minsize/smart/preview children alive */
+
+static void answer_status(void)
+{
+    char buf[700];
+    long got = proc_read(JOB_FILE, buf, sizeof buf - 1);
+    if (got <= 0) {
+        reply("done", "idle");
+        return;
+    }
+    buf[got] = '\0';
+    char *nl = strchr(buf, '\n');
+    if (nl) {
+        *nl = '\0';
+        char *nl2 = strchr(nl + 1, '\n');
+        if (nl2) *nl2 = '\0';
+        reply("progress", nl + 1);
+    }
+    reply("done", buf);
+}
+
+/* The worker takes this lock for as long as it runs, so a root
+ * lp-diskctl in another terminal (which runs without the daemon) and
+ * the daemon's job cannot both be rewriting a partition table. */
+static bool take_lock(void)
+{
+    long fd = lp_open(LOCK_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return true;                    /* no /run: nothing else can run either */
+    return sys_call2(SYS_flock_, fd, LOCK_EX_ | LOCK_NB_) == 0;
+}
+
+static void reap(void);
+
+static void handle(int fd)
+{
+    client = fd;
+    u32 pid = 0, uid = 0, gid = 0;
+    if (!peer_cred(fd, &pid, &uid, &gid)) {
+        reply("fail", "denied could not tell who is asking");
+        return;
+    }
+    static char req[MAX_REQ];
+    int pfd = -1;
+    long len = read_request(fd, req, sizeof req, &pfd);
+    char user[40];
+    bool admin = is_admin(uid, gid, user, sizeof user);
+    char who[96];
+    snprintf(who, sizeof who, "uid=%u(%s) pid=%u", uid, user, pid);
+    char line[1400];
+    if (len < 0) {
+        snprintf(line, sizeof line, "%s: no request line -> invalid", who);
+        audit(line);
+        reply("fail", "invalid one line of at most 16 KiB, ending in a newline,"
+              " within 3 seconds, and nothing after it");
+        if (pfd >= 0) lp_close(pfd);
+        return;
+    }
+    for (long i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)req[i];
+        if (c != '\t' && (c < 0x20 || c > 0x7e)) {
+            snprintf(line, sizeof line, "%s: a byte outside the protocol -> invalid", who);
+            audit(line);
+            reply("fail", "invalid requests are printable ASCII fields separated by tabs");
+            if (pfd >= 0) lp_close(pfd);
+            return;
+        }
+    }
+
+    static char *fields[MAX_FIELDS];
+    int nf = 0;
+    for (char *p = req; p && nf < MAX_FIELDS; ) {
+        fields[nf++] = p;
+        char *t = strchr(p, '\t');
+        if (t) *t++ = '\0';
+        p = t;
+    }
+    /* What the log says was asked: every field, but never a password or
+     * a passphrase. */
+    static char printable[MAX_REQ];
+    size_t pk = 0;
+    for (int i = 0; i < nf && pk < sizeof printable - 8; i++) {
+        if (i) printable[pk++] = ' ';
+        const char *f = fields[i];
+        if ((i == 1 && !strcmp(fields[0], "auth")) || starts(f, "k:"))
+            f = starts(f, "k:") ? "k:***" : "***";
+        pk += strlcpy(printable + pk, f, sizeof printable - pk);
+        if (pk >= sizeof printable) pk = sizeof printable - 1;
+    }
+    printable[pk] = '\0';
+
+    const verb_t *v = NULL;
+    for (int i = 0; VERBS[i].verb; i++)
+        if (!strcmp(VERBS[i].verb, fields[0]))
+            v = &VERBS[i];
+    int nargs = nf - 1;
+    char **args = fields + 1;
+    char why[300] = "";
+    const char *code = NULL;
+    mounts_refresh();
+
+    if (!v) {
+        code = "invalid"; snprintf(why, sizeof why, "unknown verb");
+    } else if (uid != 0 && uid < 1000) {
+        code = "denied"; snprintf(why, sizeof why, "only a person at this machine may ask");
+    } else if ((v->admin || !strcmp(v->verb, "auth")) && !admin) {
+        code = "denied";
+        snprintf(why, sizeof why, "%s is not an administrator (group sudo)", user);
+    } else if (nargs < v->min || nargs > v->max) {
+        code = "invalid";
+        snprintf(why, sizeof why, "%s takes %d to %d arguments", v->verb, v->min, v->max);
+    } else {
+        for (int i = 0; i < nargs && !code; i++) {
+            kind_t k = v->kind[0] == K_PLAN ? K_PLAN : v->kind[i < 4 ? i : 3];
+            if (!arg_ok(k, args[i], why, sizeof why))
+                code = "invalid";
+        }
+    }
+    /* The refusals that do not depend on who asks come before the
+     * password, so nobody types it for a request that was never going
+     * to be allowed: a plan is played through on the model here (the
+     * job does it again, fresh, before touching anything), and the
+     * running system's own partitions are refused by name. */
+    if (!code && !strcmp(v->verb, "plan")) {
+        char w[400];
+        bool ok = plan_parse(args, nargs, w, sizeof w);
+        for (int i = 0; i < MAX_STEPS; i++) scrub(steps[i].pass, sizeof steps[i].pass);
+        if (!ok) {
+            code = plan_code;
+            strlcpy(why, w, sizeof why);
+        }
+    }
+    if (!code && v->mode == RUN_JOB && nargs > 0 && strcmp(v->verb, "plan") &&
+        strcmp(v->verb, "bench") && strcmp(v->verb, "fstab-remove") &&
+        strcmp(v->verb, "rescan") &&
+        dev_name_ok(args[0]) && blk_exists(args[0])) {
+        bool vital = false;
+        char w[300];
+        if (blk_is_part(args[0])) in_use(args[0], &vital, w, sizeof w);
+        else disk_busy(args[0], &vital, w, sizeof w);
+        if (vital) {
+            code = "refused";
+            strlcpy(why, w, sizeof why);
+        }
+    }
+    /* Last, and only for what would otherwise go ahead: the password. */
+    if (!code && v->admin && uid != 0 && keep_left(uid) == 0) {
+        code = "auth"; snprintf(why, sizeof why, "password required");
+    }
+    if (!code && pfd >= 0 && strcmp(v->verb, "image-save") && strcmp(v->verb, "image-restore")) {
+        code = "invalid"; snprintf(why, sizeof why, "this verb takes no file descriptor");
+    }
+    if (code) {
+        snprintf(line, sizeof line, "%s: %s -> %s (%s)", who, printable, code, why);
+        audit(line);
+        char msg[400];
+        snprintf(msg, sizeof msg, "%s %s", code, why);
+        reply("fail", msg);
+        if (v && !strcmp(v->verb, "auth") && nargs > 0) scrub(args[0], strlen(args[0]));
+        for (int i = 0; i < nargs; i++) if (starts(args[i], "k:")) scrub(args[i], strlen(args[i]));
+        if (pfd >= 0) lp_close(pfd);
+        return;
+    }
+
+    if (!strcmp(v->verb, "ping")) {
+        char msg[200];
+        snprintf(msg, sizeof msg, "uid=%u user=%s admin=%s auth=%ld job=%s", uid, user,
+                 admin ? "yes" : "no", uid == 0 ? (long)(AUTH_KEEP_MS / 1000) : keep_left(uid),
+                 worker ? "yes" : "no");
+        reply("done", msg);
+        return;
+    }
+    if (!strcmp(v->verb, "auth")) {
+        if (uid == 0) {
+            scrub(args[0], strlen(args[0]));
+            reply("done", "root needs no password here");
+            return;
+        }
+        answer_auth(uid, user, who, args[0]);
+        return;
+    }
+    if (!strcmp(v->verb, "forget")) {
+        keep_t *k = keep_for(uid, false);
+        if (k) k->until = 0;
+        snprintf(line, sizeof line, "%s: forget -> done", who);
+        audit(line);
+        reply("done", "the password will be asked for again");
+        return;
+    }
+    if (!strcmp(v->verb, "status")) { answer_status(); return; }
+    if (!strcmp(v->verb, "list"))   { answer_list(nargs ? args[0] : NULL); return; }
+    if (!strcmp(v->verb, "fstab"))  { answer_fstab(); return; }
+    if (!strcmp(v->verb, "cancel")) {
+        if (!worker) {
+            reply("done", "nothing is running");
+            return;
+        }
+        snprintf(line, sizeof line, "%s: cancel -> sent to %s", who, worker_desc);
+        audit(line);
+        lp_kill(worker, SIGUSR1);
+        reply("done", "asked the job to stop where that is safe");
+        return;
+    }
+
+    /* A job that has just sent its last line may not have exited yet;
+     * a client that asks again at once must not be told "busy" for the
+     * few milliseconds that takes. */
+    for (int i = 0; v->mode == RUN_JOB && worker && i < 30; i++) {
+        reap();
+        if (worker) lp_sleep_ms(10);
+    }
+    if (v->mode == RUN_JOB && worker) {
+        snprintf(line, sizeof line, "%s: %s -> busy (%s)", who, printable, worker_desc);
+        audit(line);
+        char msg[400];
+        snprintf(msg, sizeof msg, "busy another job is running: %s", worker_desc);
+        reply("fail", msg);
+        if (pfd >= 0) lp_close(pfd);
+        return;
+    }
+    snprintf(line, sizeof line, "%s: %s -> accepted", who, printable);
+    audit(line);
+
+    pid_t w = lp_fork();
+    if (w < 0) {
+        reply("fail", "failed could not start the job");
+        if (pfd >= 0) lp_close(pfd);
+        return;
+    }
+    if (w == 0) {
+        caller_uid = uid;
+        caller_gid = gid;
+        passed_fd = pfd;
+        cancel_req = 0;
+        lp_signal_handler(SIGUSR1, on_cancel);
+        s64 t0 = lp_monotonic_ms();
+        if (v->mode == RUN_JOB) {
+            if (!take_lock()) {
+                reply("fail", "busy another lp-diskctl is working on the disks");
+                lp_exit(1);
+            }
+            strlcpy(job_desc, printable, sizeof job_desc);
+            long lf = lp_open(LAST_PATH, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0640);
+            last_fd = lf >= 0 ? (int)lf : -1;
+            if (last_fd >= 0) {
+                char head[500];
+                int k = snprintf(head, sizeof head, "# %s %s\n", who, printable);
+                if (k > 0) lp_write(last_fd, head, (size_t)k);
+            }
+            job_file(0, "starting");
+        }
+        job_rc = 1;
+        v->fn(args, nargs);
+        if (v->mode == RUN_JOB) {
+            char end[500];
+            snprintf(end, sizeof end, "%s: %s -> %s after %lds", who, printable,
+                     job_rc == 0 ? "done" : "failed",
+                     (long)((lp_monotonic_ms() - t0) / 1000));
+            audit(end);
+            lp_unlink(JOB_FILE);
+        }
+        if (client >= 0) lp_close(client);
+        lp_exit(job_rc);
+    }
+    if (pfd >= 0) lp_close(pfd);
+    if (v->mode == RUN_JOB) {
+        worker = w;
+        strlcpy(worker_desc, printable, sizeof worker_desc);
+    } else {
+        readers++;
+    }
+    client = -1;                          /* the child has it now */
+}
+
+static void reap(void)
+{
+    int status;
+    pid_t p;
+    while ((p = lp_waitpid(-1, &status, WNOHANG)) > 0) {
+        if (p == worker) {
+            worker = 0;
+            worker_desc[0] = '\0';
+            lp_unlink(JOB_FILE);
+        } else if (readers > 0) {
+            readers--;
+        }
+    }
+}
+
+static void close_client(int fd)
+{
+    if (client >= 0) {
+        /* Read away whatever was not read - the rest of an over-long
+         * line - or the close becomes a reset that overtakes the
+         * "fail" saying why. */
+        lp_shutdown(client, 1);
+        char junk[4096];
+        for (int i = 0; i < 16; i++)
+            if (lp_recvfrom(client, junk, sizeof junk, MSG_DONTWAIT_, NULL, NULL) <= 0)
+                break;
+        lp_close(client);
+        client = -1;
+    } else {
+        lp_close(fd);
+    }
+}
+
+static int serve(void)
+{
+    lp_signal_ignore(13);                  /* SIGPIPE */
+    sys_call1(SYS_umask_, 022);
+    lp_chdir("/");
+    lp_unlink(sock_path);
+    sun_t sa;
+    long ls = sun_fill(&sa, sock_path) ? lp_socket(AF_UNIX_, SOCK_STREAM, 0) : -1;
+    if (ls < 0 || lp_bind((int)ls, &sa, sizeof sa) < 0 || lp_listen((int)ls, 16) < 0) {
+        dprintf(STDERR_FILENO, "lp-diskd: cannot listen on %s\n", sock_path);
+        return 1;
+    }
+    lp_chmod(sock_path, 0666);
+    audit("listening");
+    journal_t j;
+    if (journal_read(&j)) {
+        char msg[200];
+        snprintf(msg, sizeof msg, "an interrupted move of %s on %s is waiting:"
+                 " run lp-diskctl resume", j.partuuid, j.disk);
+        audit(msg);
+    }
+    for (;;) {
+        /* Asleep in poll() for good when nothing runs: an idle laptop
+         * pays no wakeups for this daemon. */
+        lp_pollfd_t p = { (int)ls, LP_POLLIN, 0 };
+        lp_poll(&p, 1, (worker || readers) ? 500 : -1);
+        reap();
+        if (!(p.revents & LP_POLLIN))
+            continue;
+        long fd = lp_accept((int)ls, NULL, NULL, LP_SOCK_CLOEXEC);
+        if (fd < 0)
+            continue;
+        handle((int)fd);
+        close_client((int)fd);
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * lp-diskctl - the same thing from a terminal
+ *
+ * Run as root (the recovery shell, or sudo) it does not need the
+ * daemon: it makes a socket pair, a child of its own becomes "the
+ * daemon" for exactly one request through exactly the code above, and
+ * this side prints the answer. Run as anybody else it asks the daemon,
+ * and asks for the password when the daemon says so. Either way the
+ * checks, the model, the refusals and the log are the daemon's.
+ *
+ * Ctrl-C asks the job to stop where stopping is safe (a check, a copy
+ * that has not started overwriting); it never kills it half way. In
+ * the root case the job runs in a session of its own for that reason,
+ * so the terminal's SIGINT cannot reach it.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static volatile int sigint_seen;
+static void on_sigint(int sig) { (void)sig; sigint_seen = 1; }
+
+static bool read_secret(const char *prompt, char *out, size_t n)
+{
+    dprintf(STDERR_FILENO, "%s", prompt);
+    lp_termios_t saved;
+    bool quiet = lp_term_cbreak(STDIN_FILENO, &saved) == 0;
+    size_t used = 0;
+    bool ok = true;
+    for (;;) {
+        char ch;
+        long r = lp_read(STDIN_FILENO, &ch, 1);
+        if (r == -EINTR_) { ok = false; break; }
+        if (r <= 0) { ok = used > 0; break; }
+        if (ch == '\n' || ch == '\r') break;
+        if (ch == 3) { ok = false; break; }
+        if (ch == 0x7f || ch == '\b') { if (used) used--; continue; }
+        if (used < n - 1) out[used++] = ch;
+    }
+    out[used] = '\0';
+    if (quiet) lp_term_restore(STDIN_FILENO, &saved);
+    dprintf(STDERR_FILENO, "\n");
+    return ok;
+}
+
+static void to_hex(const char *s, size_t n, char *out, size_t outn)
+{
+    static const char hx[] = "0123456789abcdef";
+    size_t k = 0;
+    for (size_t i = 0; i < n && k + 3 < outn; i++) {
+        out[k++] = hx[(u8)s[i] >> 4];
+        out[k++] = hx[(u8)s[i] & 15];
+    }
+    out[k] = '\0';
+}
+
+/* The value of key in a TAB-separated key=value record. */
+static bool rec_get(const char *rec, const char *key, char *out, size_t n)
+{
+    size_t kl = strlen(key);
+    for (const char *p = rec; p && *p; ) {
+        if (!strncmp(p, key, kl) && p[kl] == '=') {
+            const char *v = p + kl + 1;
+            const char *e = strchr(v, '\t');
+            size_t l = e ? (size_t)(e - v) : strlen(v);
+            if (l >= n) l = n - 1;
+            memcpy(out, v, l);
+            out[l] = '\0';
+            return true;
+        }
+        p = strchr(p, '\t');
+        if (p) p++;
+    }
+    out[0] = '\0';
+    return false;
+}
+
+static u64 rec_u64(const char *rec, const char *key)
+{
+    char v[32];
+    u64 x = 0;
+    if (rec_get(rec, key, v, sizeof v)) parse_u64(v, &x);
+    return x;
+}
+
+/* One line of the answer, for a person: records as a table, progress
+ * redrawn in place on a terminal. `silent` swallows everything (the
+ * answer to the password, which is not news). */
+static bool pretty = true, progress_open = false, silent = false;
+
+/* Columns on a terminal are cells, not bytes: Hangul and the other
+ * wide scripts take two, so a Korean label must be padded by what it
+ * shows, or every column after it slides. */
+static int cells(const char *s)
+{
+    int w = 0;
+    for (const u8 *p = (const u8 *)s; *p; ) {
+        u32 c = *p;
+        int len = c < 0x80 ? 1 : (c & 0xe0) == 0xc0 ? 2 : (c & 0xf0) == 0xe0 ? 3 : 4;
+        if (len > 1) {
+            c &= 0x3f >> (len - 1);
+            for (int k = 1; k < len && p[k]; k++) c = (c << 6) | (p[k] & 0x3f);
+        }
+        bool wide = (c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0xa4cf) ||
+                    (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff) ||
+                    (c >= 0xfe30 && c <= 0xfe4f) || (c >= 0xff00 && c <= 0xff60) ||
+                    (c >= 0xffe0 && c <= 0xffe6);
+        w += wide ? 2 : 1;
+        for (int k = 0; k < len && *p; k++) p++;
+    }
+    return w;
+}
+
+static void padded(const char *s, int width)
+{
+    printf("%s", s);
+    for (int w = cells(s); w < width; w++) printf(" ");
+}
+
+static void show_line(const char *line)
+{
+    bool tty = lp_isatty(STDOUT_FILENO);
+    if (silent)
+        return;
+    if (!pretty) {
+        printf("%s\n", line);
+        return;
+    }
+    if (starts(line, "progress ")) {
+        if (tty) {
+            char *end;
+            long pct = strtol(line + 9, &end, 10);
+            printf("\r\033[K  %3ld%%%s", pct, end);
+            progress_open = true;
+        }
+        return;
+    }
+    if (progress_open) {
+        printf("\n");
+        progress_open = false;
+    }
+    char a[64], b[64], c[64], d[64], e[128], f[128], g[200];
+    const char *rec = strchr(line, '\t') ? strchr(line, '\t') + 1 : "";
+    if (starts(line, "disk\t")) {
+        rec_get(rec, "name", a, sizeof a);
+        human(rec_u64(rec, "size"), b, sizeof b);
+        rec_get(rec, "table", c, sizeof c);
+        rec_get(rec, "model", e, sizeof e);
+        rec_get(rec, "transport", d, sizeof d);
+        upcase(c);
+        printf("\n%s  %s  %s  %s (%s)%s%s\n", a, b, !strcmp(c, "NONE") ? "no table" : c, e, d,
+               rec_u64(rec, "removable") ? "  removable" : "",
+               rec_u64(rec, "system") ? "  - the running system's disk" : "");
+        rec_get(rec, "err", g, sizeof g);
+        if (g[0]) printf("  ! %s\n", g);
+        printf("  %-3s %-12s %10s %10s  %-8s %-16s %s\n", "#", "device", "start", "size",
+               "fs", "label", "type / mounted / note");
+        return;
+    }
+    if (starts(line, "part\t")) {
+        rec_get(rec, "num", a, sizeof a);
+        rec_get(rec, "name", b, sizeof b);
+        char st[32], sz[32];
+        human(rec_u64(rec, "start"), st, sizeof st);
+        human(rec_u64(rec, "size"), sz, sizeof sz);
+        rec_get(rec, "fs", c, sizeof c);
+        rec_get(rec, "label", e, sizeof e);
+        rec_get(rec, "typedesc", f, sizeof f);
+        rec_get(rec, "mount", g, sizeof g);
+        printf("  %-3s %-12s %10s %10s  %-8s ", a, b, st, sz, c[0] ? c : "-");
+        padded(e[0] ? e : "-", 16);
+        printf(" %s", f);
+        if (g[0]) printf(", mounted at %s", g);
+        rec_get(rec, "inuse", d, sizeof d);
+        if (!strcmp(d, "vital")) printf(" [system]");
+        rec_get(rec, "protected", d, sizeof d);
+        if (d[0]) printf(" [%s]", d);
+        printf("\n");
+        return;
+    }
+    if (starts(line, "free\t")) {
+        char st[32], sz[32];
+        human(rec_u64(rec, "start"), st, sizeof st);
+        human(rec_u64(rec, "size"), sz, sizeof sz);
+        printf("  %-3s %-12s %10s %10s  unallocated\n", "", "", st, sz);
+        return;
+    }
+    if (starts(line, "journal\t")) {
+        rec_get(rec, "partuuid", a, sizeof a);
+        printf("\n! a move of %s was interrupted: run  lp-diskctl resume\n", a);
+        return;
+    }
+    if (starts(line, "log ")) {
+        printf("  %s\n", line + 4);
+        return;
+    }
+    if (starts(line, "smart\t")) {
+        rec_get(rec, "verdict", a, sizeof a);
+        rec_get(rec, "reasons", g, sizeof g);
+        rec_get(rec, "model", e, sizeof e);
+        const char *say_ = !strcmp(a, "good") ? "the drive reports no problems" :
+                           !strcmp(a, "warning") ? "the drive has started to wear or has bad"
+                                                   " sectors: keep your backup current" :
+                           !strcmp(a, "failing") ? "the drive expects to fail soon: copy your"
+                                                   " files off it now" :
+                           "this device does not report its health";
+        printf("Health: %s - %s%s%s%s\n", a, say_, g[0] ? " (" : "", g, g[0] ? ")" : "");
+        if (e[0]) printf("  model %s\n", e);
+        long t = (long)rec_u64(rec, "temp"), h = (long)rec_u64(rec, "hours");
+        rec_get(rec, "temp", b, sizeof b);
+        if (b[0] && b[0] != '-') printf("  temperature %ld C\n", t);
+        rec_get(rec, "hours", b, sizeof b);
+        if (b[0] && b[0] != '-') printf("  powered on %ld hours\n", h);
+        return;
+    }
+    if (starts(line, "resize\t")) {
+        char mn[32];
+        rec_get(rec, "name", a, sizeof a);
+        human(rec_u64(rec, "min"), mn, sizeof mn);
+        rec_get(rec, "noshrink", g, sizeof g);
+        if (rec_u64(rec, "shrink"))
+            printf("%s can shrink to %s\n", a, mn);
+        else
+            printf("%s cannot shrink: %s\n", a, g[0] ? g : "unknown");
+        return;
+    }
+    if (starts(line, "bench\t")) {
+        printf("sequential read %llu MB/s, random 4 KiB reads %llu IOPS (%llu us each)%s\n",
+               (unsigned long long)rec_u64(rec, "seq_mbps"),
+               (unsigned long long)rec_u64(rec, "rand_iops"),
+               (unsigned long long)rec_u64(rec, "rand_lat_us"),
+               rec_u64(rec, "direct") ? "" : " - cached reads, not the disk's own speed");
+        return;
+    }
+    if (starts(line, "describe ") || starts(line, "plan "))
+        return;
+    if (starts(line, "step ")) {
+        const char *t = strchr(line + 5, ' ');
+        t = t ? strchr(t + 1, ' ') : NULL;
+        long n1 = strtol(line + 5, NULL, 10);
+        const char *sp = strchr(line + 5, ' ');
+        long n2 = sp ? strtol(sp + 1, NULL, 10) : 0;
+        printf("[%ld/%ld] %s\n", n1, n2, t ? t + 1 : "");
+        return;
+    }
+    if (starts(line, "stepdone "))
+        return;
+    printf("%s\n", line);
+}
+
+/* Send one request (and a descriptor, if fdx >= 0) on fd. */
+static bool send_req(int fd, const char *req, size_t k, int fdx)
+{
+    iov_t iov = { (void *)req, k };
+    u64 ctl[4];
+    msghdr_t m;
+    memset(&m, 0, sizeof m);
+    m.iov = &iov;
+    m.iovlen = 1;
+    if (fdx >= 0) {
+        memset(ctl, 0, sizeof ctl);
+        cmsg_t *c = (cmsg_t *)ctl;
+        c->len = CMSG_HDR_ + sizeof(int);
+        c->level = SOL_SOCKET;
+        c->type = SCM_RIGHTS_;
+        *(int *)((u8 *)ctl + CMSG_HDR_) = fdx;
+        m.control = ctl;
+        m.controllen = (CMSG_HDR_ + sizeof(int) + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1);
+    }
+    return sys_call3(SYS_sendmsg_, fd, (long)&m, MSG_NOSIGNAL_) == (long)k;
+}
+
+/* Read the answer, line by line. Returns 0 done, 1 fail; *auth_needed
+ * when the answer was "fail auth password required" (not printed). */
+static int read_answer(int fd, bool *auth_needed, char *last, size_t lastn,
+                       pid_t cancel_group)
+{
+    static char buf[8192];
+    size_t have = 0;
+    int rc = 1;
+    for (;;) {
+        long r = lp_read(fd, buf + have, sizeof buf - 1 - have);
+        if (r == -EINTR_ || (r < 0 && sigint_seen)) {
+            if (sigint_seen) {
+                sigint_seen = 0;
+                dprintf(STDERR_FILENO, "\nasking the job to stop where that is safe...\n");
+                if (cancel_group > 0) {
+                    lp_kill(-cancel_group, SIGUSR1);
+                } else {
+                    sun_t sa;
+                    long c = sun_fill(&sa, sock_path) ? lp_socket(AF_UNIX_, SOCK_STREAM, 0) : -1;
+                    if (c >= 0 && lp_connect((int)c, &sa, sizeof sa) == 0) {
+                        lp_write((int)c, "cancel\n", 7);
+                        char junk[256];
+                        while (lp_read((int)c, junk, sizeof junk) > 0) ;
+                    }
+                    if (c >= 0) lp_close((int)c);
+                }
+            }
+            continue;
+        }
+        if (r <= 0)
+            break;
+        have += (size_t)r;
+        buf[have] = '\0';
+        char *start = buf;
+        char *nl;
+        while ((nl = strchr(start, '\n')) != NULL) {
+            *nl = '\0';
+            if (starts(start, "fail auth password required") && auth_needed) {
+                *auth_needed = true;
+            } else {
+                show_line(start);
+                if (last) strlcpy(last, start, lastn);
+            }
+            if (starts(start, "done")) rc = 0;
+            else if (starts(start, "fail")) rc = 1;
+            start = nl + 1;
+        }
+        have = strlen(start);
+        memmove(buf, start, have);
+        if (have >= sizeof buf - 1) have = 0;     /* a line too long to be ours */
+    }
+    if (progress_open) { printf("\n"); progress_open = false; }
+    return rc;
+}
+
+/* Root: be the daemon for one request, in a child. */
+static int ctl_local(const char *req, size_t k, int fdx)
+{
+    int sv[2];
+    if (sys_call4(SYS_socketpair_, AF_UNIX_, SOCK_STREAM, 0, (long)sv) < 0) {
+        dprintf(STDERR_FILENO, "lp-diskctl: socketpair failed\n");
+        return 2;
+    }
+    pid_t child = lp_fork();
+    if (child == 0) {
+        lp_close(sv[1]);
+        lp_setsid();
+        lp_signal_ignore(SIGUSR1);
+        lp_signal_ignore(SIGINT);
+        lp_signal_ignore(13);
+        sys_call1(SYS_umask_, 022);
+        handle(sv[0]);
+        close_client(sv[0]);
+        int st;
+        while (lp_waitpid(-1, &st, 0) > 0 || lp_waitpid(-1, &st, 0) == -EINTR_)
+            ;
+        lp_exit(0);
+    }
+    lp_close(sv[0]);
+    if (!send_req(sv[1], req, k, fdx)) {
+        dprintf(STDERR_FILENO, "lp-diskctl: could not send the request\n");
+        return 2;
+    }
+    int rc = read_answer(sv[1], NULL, NULL, 0, child);
+    lp_close(sv[1]);
+    int st;
+    while (lp_waitpid(child, &st, 0) == -EINTR_)
+        ;
+    return rc;
+}
+
+static int talk(const char *req, size_t k, int fdx, bool *auth_needed, char *last, size_t lastn)
+{
+    sun_t sa;
+    long fd = sun_fill(&sa, sock_path) ? lp_socket(AF_UNIX_, SOCK_STREAM, 0) : -1;
+    if (fd < 0 || lp_connect((int)fd, &sa, sizeof sa) < 0) {
+        dprintf(STDERR_FILENO, "lp-diskctl: the disk service is not running (%s)\n", sock_path);
+        if (fd >= 0) lp_close((int)fd);
+        return 2;
+    }
+    if (!send_req((int)fd, req, k, fdx)) {
+        lp_close((int)fd);
+        return 2;
+    }
+    int rc = read_answer((int)fd, auth_needed, last, lastn, 0);
+    lp_close((int)fd);
+    return rc;
+}
+
+/* Ask for the password on the terminal and hand it to the daemon.
+ * 0 accepted, 1 not, 2 the daemon cannot be reached. A "wait N s"
+ * answer is waited out and the same password sent again once, rather
+ * than making the person type it twice for the daemon's pause. */
+static int auth_prompt(void)
+{
+    if (!lp_isatty(STDIN_FILENO))
+        return 1;
+    lp_user_t u;
+    char prompt[80], pw[LP_CRYPT6_PW_MAX];
+    snprintf(prompt, sizeof prompt, "[lp-diskd] password for %s: ",
+             lp_user_by_uid((uid_t)lp_getuid(), &u) ? u.name : "you");
+    if (!read_secret(prompt, pw, sizeof pw))
+        return 1;
+    static char areq[2 * LP_CRYPT6_PW_MAX + 16];
+    size_t ak = strlcpy(areq, "auth\t", sizeof areq);
+    to_hex(pw, strlen(pw), areq + ak, sizeof areq - ak - 2);
+    scrub(pw, sizeof pw);
+    ak = strlen(areq);
+    areq[ak++] = '\n';
+    char last[300] = "";
+    bool dummy = false, was = pretty;
+    int ar;
+    pretty = false;
+    silent = true;
+    for (int round = 0; ; round++) {
+        ar = talk(areq, ak, -1, &dummy, last, sizeof last);
+        long secs = starts(last, "fail auth wait ") ? strtol(last + 15, NULL, 10) : 0;
+        if (ar == 1 && round == 0 && secs > 0 && secs <= 30) {
+            dprintf(STDERR_FILENO, "lp-diskctl: waiting %ld s after a wrong password\n", secs);
+            lp_sleep_ms(secs * 1000 + 100);
+            continue;
+        }
+        break;
+    }
+    pretty = was;
+    silent = false;
+    scrub(areq, sizeof areq);
+    if (ar == 1 && last[0])
+        dprintf(STDERR_FILENO, "lp-diskctl: %s\n", last);
+    return ar;
+}
+
+static int ctl_remote(const char *req, size_t k, int fdx)
+{
+    bool need = false;
+    int rc = talk(req, k, fdx, &need, NULL, 0);
+    /* Three tries, as sudo gives; the daemon makes each wrong one wait. */
+    for (int attempt = 0; need && attempt < 3; attempt++) {
+        int ar = auth_prompt();
+        if (ar == 2)
+            return 2;
+        if (ar == 0) {
+            need = false;
+            rc = talk(req, k, fdx, &need, NULL, 0);
+            break;
+        }
+        if (!lp_isatty(STDIN_FILENO))
+            break;
+    }
+    if (need) {
+        printf("fail auth password required\n");
+        return 1;
+    }
+    return rc;
+}
+
+/* "300G", "512MiB", "1.5T", "4096" (bytes). Binary units. */
+static bool parse_size(const char *s, u64 *out)
+{
+    u64 whole = 0, frac = 0, fdiv = 1;
+    const char *p = s;
+    if (*p < '0' || *p > '9') return false;
+    for (; *p >= '0' && *p <= '9'; p++) whole = whole * 10 + (u64)(*p - '0');
+    if (*p == '.') {
+        for (p++; *p >= '0' && *p <= '9' && fdiv < 1000000; p++) {
+            frac = frac * 10 + (u64)(*p - '0');
+            fdiv *= 10;
+        }
+    }
+    u64 mul = 1;
+    switch (*p) {
+    case 'k': case 'K': mul = 1024ull; p++; break;
+    case 'm': case 'M': mul = MIB; p++; break;
+    case 'g': case 'G': mul = GIB; p++; break;
+    case 't': case 'T': mul = 1024ull * GIB; p++; break;
+    case '\0': break;
+    default: return false;
+    }
+    if (mul > 1 && (!strcmp(p, "iB") || !strcmp(p, "B") || !strcmp(p, "ib"))) p += strlen(p);
+    if (*p) return false;
+    *out = whole * mul + frac * mul / fdiv;
+    return true;
+}
+
+/* A label as the protocol wants it: itself when it is plain, else x:hex. */
+static void label_field(const char *l, char *out, size_t n)
+{
+    if (!l[0]) { strlcpy(out, "-", n); return; }
+    if (alphabet_ok(l, " _.-", 255, true) && l[0] != ' ') { strlcpy(out, l, n); return; }
+    strlcpy(out, "x:", n);
+    to_hex(l, strlen(l), out + 2, n - 2);
+}
+
+static void ctl_usage(void)
+{
+    printf("usage: lp-diskctl [--raw] [--confirm WORD] <command> [arg...]\n\n"
+           "Disks from a terminal: the same checks and refusals as the Disks\n"
+           "application. As root (the recovery shell) it works without the\n"
+           "service; otherwise it asks lp-diskd, and your password when needed.\n"
+           "Sizes take binary units: 300G, 512M, 1.5T; a bare number is bytes.\n\n"
+           "  list [disk]                     disks, partitions, free space\n"
+           "  smart <disk>                    health, in plain words\n"
+           "  minsize <part>                  how far it can shrink\n"
+           "  check <part> | repair <part>    fsck (read-only | repair)\n"
+           "  resize <part> <size>            grow or shrink (ext4, NTFS, FAT, swap)\n"
+           "  move <part> <start>             move it on the disk (slow)\n"
+           "  format <part> <fs> [label]      ext4 btrfs fat32 exfat ntfs swap luks-ext4\n"
+           "  create <disk> <start> <size> <fs> [label] [type]\n"
+           "  delete <part>   wipe <dev>   mklabel <disk> gpt|mbr\n"
+           "  label <dev> <label>   name <part> <name>   type <part> <type>\n"
+           "  flags <part> <esp,boot,msftdata,lvm,raid,hidden,legacy_boot|none>\n"
+           "  mount <part>   unmount <dev>   eject <disk>   poweroff <disk>\n"
+           "  luks-open <part>   luks-close <part>\n"
+           "  bench <dev> [seconds]   image-save <part> <file>   image-restore <part> <file>\n"
+           "  fstab   fstab-set <part> <name> auto|noauto rw|ro   fstab-remove <uuid>\n"
+           "  erase <disk>                    overwrite a removable drive\n"
+           "  plan <step> [args] [| <step> ...]    several steps as one plan\n"
+           "  rescan <disk>                   make the kernel match the table\n"
+           "  status   cancel   resume   auth   forget   ping\n\n"
+           "Every request is written to %s.\n", LOG_PATH);
+}
+
+static int ctl(int argc, char **argv)
+{
+    char confirm[48] = "";
+    int a = 0;
+    while (a < argc && argv[a][0] == '-' && argv[a][1] == '-') {
+        if (!strcmp(argv[a], "--raw")) { pretty = false; a++; }
+        else if (!strcmp(argv[a], "--confirm") && a + 1 < argc) {
+            snprintf(confirm, sizeof confirm, "confirm=%s", argv[a + 1]);
+            a += 2;
+        } else if (!strcmp(argv[a], "--socket") && a + 1 < argc) {
+            sock_path = argv[a + 1];
+            a += 2;
+        } else break;
+    }
+    if (a >= argc || !strcmp(argv[a], "help") || !strcmp(argv[a], "-h") ||
+        !strcmp(argv[a], "--help")) {
+        ctl_usage();
+        return a >= argc ? 2 : 0;
+    }
+    const char *cmd = argv[a++];
+    int n = argc - a;
+    char **x = argv + a;
+    static char *f[MAX_FIELDS];
+    static char store[MAX_FIELDS][600];
+    int nf = 0;
+    int fdx = -1;
+    char pass[260] = "";
+    #define PUT(s) do { if (nf < MAX_FIELDS) { strlcpy(store[nf], (s), sizeof store[nf]); f[nf] = store[nf]; nf++; } } while (0)
+
+    static const char *const PLAN1[] = { "check", "repair", "delete", "wipe", NULL };
+    bool is_plan1 = false;
+    for (int i = 0; PLAN1[i]; i++) if (!strcmp(cmd, PLAN1[i])) is_plan1 = true;
+    char tmp[600];
+    u64 v1, v2;
+
+    if (!strcmp(cmd, "auth")) {
+        /* `lp-diskctl auth`: ask now, like `sudo -v`. */
+        if (lp_getuid() == 0) { printf("done root needs no password\n"); return 0; }
+        int ar = auth_prompt();
+        if (ar == 0) printf("done authorised for %d s\n", AUTH_KEEP_MS / 1000);
+        return ar;
+    } else if (is_plan1 && n == 1) {
+        PUT("plan"); PUT(cmd); PUT(x[0]);
+        if (confirm[0]) PUT(confirm);
+    } else if ((!strcmp(cmd, "resize") || !strcmp(cmd, "move")) && n == 2) {
+        if (!parse_size(x[1], &v1)) { dprintf(2, "lp-diskctl: \"%s\" is not a size\n", x[1]); return 2; }
+        snprintf(tmp, sizeof tmp, "%llu", (unsigned long long)v1);
+        PUT("plan"); PUT(cmd); PUT(x[0]); PUT(tmp);
+    } else if (!strcmp(cmd, "format") && (n == 2 || n == 3)) {
+        PUT("plan"); PUT("format"); PUT(x[0]); PUT(x[1]);
+        label_field(n == 3 ? x[2] : "", tmp, sizeof tmp); PUT(tmp);
+        if (!strcmp(x[1], "luks-ext4")) {
+            char again[260];
+            if (!read_secret("passphrase for the new encrypted partition: ", pass, sizeof pass) ||
+                !read_secret("the same passphrase again: ", again, sizeof again)) return 1;
+            if (strcmp(pass, again) || strlen(pass) < 8) {
+                scrub(again, sizeof again);
+                dprintf(2, "lp-diskctl: the passphrases differ, or it is shorter than 8\n");
+                return 1;
+            }
+            scrub(again, sizeof again);
+            strlcpy(tmp, "k:", sizeof tmp);
+            to_hex(pass, strlen(pass), tmp + 2, sizeof tmp - 2);
+            PUT(tmp);
+        }
+        if (confirm[0]) PUT(confirm);
+    } else if (!strcmp(cmd, "create") && n >= 4 && n <= 6) {
+        if (!parse_size(x[1], &v1) || !parse_size(x[2], &v2)) { dprintf(2, "lp-diskctl: bad start or size\n"); return 2; }
+        PUT("plan"); PUT("create"); PUT(x[0]);
+        snprintf(tmp, sizeof tmp, "%llu", (unsigned long long)v1); PUT(tmp);
+        snprintf(tmp, sizeof tmp, "%llu", (unsigned long long)v2); PUT(tmp);
+        PUT(x[3]);
+        label_field(n >= 5 ? x[4] : "", tmp, sizeof tmp); PUT(tmp);
+        PUT(n == 6 ? x[5] : "auto");
+        if (!strcmp(x[3], "luks-ext4")) {
+            char again[260];
+            if (!read_secret("passphrase for the new encrypted partition: ", pass, sizeof pass) ||
+                !read_secret("the same passphrase again: ", again, sizeof again)) return 1;
+            bool same = !strcmp(pass, again) && strlen(pass) >= 8;
+            scrub(again, sizeof again);
+            if (!same) { dprintf(2, "lp-diskctl: the passphrases differ, or it is shorter than 8\n"); return 1; }
+            strlcpy(tmp, "k:", sizeof tmp);
+            to_hex(pass, strlen(pass), tmp + 2, sizeof tmp - 2);
+            PUT(tmp);
+        }
+    } else if ((!strcmp(cmd, "label") || !strcmp(cmd, "name")) && n == 2) {
+        PUT("plan"); PUT(cmd); PUT(x[0]);
+        label_field(x[1], tmp, sizeof tmp); PUT(tmp);
+    } else if ((!strcmp(cmd, "type") || !strcmp(cmd, "flags") || !strcmp(cmd, "mklabel")) && n == 2) {
+        PUT("plan"); PUT(cmd); PUT(x[0]); PUT(x[1]);
+        if (confirm[0]) PUT(confirm);
+    } else if (!strcmp(cmd, "luks-open") && n == 1) {
+        if (!read_secret("passphrase: ", pass, sizeof pass)) return 1;
+        strlcpy(tmp, "k:", sizeof tmp);
+        to_hex(pass, strlen(pass), tmp + 2, sizeof tmp - 2);
+        PUT("luks-open"); PUT(x[0]); PUT(tmp);
+    } else if ((!strcmp(cmd, "image-save") || !strcmp(cmd, "image-restore")) && n == 2) {
+        bool save = !strcmp(cmd, "image-save");
+        long fd = save ? lp_open(x[1], O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644)
+                       : lp_open(x[1], O_RDONLY | O_CLOEXEC, 0);
+        if (fd < 0) { dprintf(2, "lp-diskctl: cannot open %s\n", x[1]); return 2; }
+        fdx = (int)fd;
+        PUT(cmd); PUT(x[0]);
+        if (!save && confirm[0]) PUT(confirm);
+    } else if (!strcmp(cmd, "erase") && n == 1) {
+        char typed[64];
+        dprintf(2, "Everything on %s will be overwritten and cannot be recovered.\n", x[0]);
+        if (!confirm[0]) {
+            if (!lp_isatty(STDIN_FILENO)) { dprintf(2, "lp-diskctl: use --confirm %s\n", x[0]); return 2; }
+            dprintf(2, "Type the disk's name (%s) to go ahead: ", x[0]);
+            long r = readline(STDIN_FILENO, typed, sizeof typed);
+            if (r < 0) return 1;
+            snprintf(confirm, sizeof confirm, "confirm=%s", typed);
+        }
+        PUT("erase"); PUT(x[0]); PUT(confirm);
+    } else {
+        /* Anything else goes as it is: list, smart, plan ..., fstab-set ... */
+        PUT(cmd);
+        for (int i = 0; i < n; i++) PUT(x[i]);
+        if (confirm[0] && !strcmp(cmd, "image-restore")) PUT(confirm);
+    }
+    #undef PUT
+
+    static char req[MAX_REQ];
+    size_t k = 0;
+    for (int i = 0; i < nf; i++) {
+        if (i && k < sizeof req - 1) req[k++] = '\t';
+        k += strlcpy(req + k, f[i], sizeof req - k);
+        if (k >= sizeof req - 2) {
+            dprintf(2, "lp-diskctl: the request is too long\n");
+            return 2;
+        }
+    }
+    req[k++] = '\n';
+    req[k] = '\0';
+    scrub(pass, sizeof pass);
+    for (int i = 0; i < nf; i++) if (starts(store[i], "k:")) scrub(store[i], sizeof store[i]);
+
+    lp_signal_handler(SIGINT, on_sigint);
+    int rc;
+    if (lp_getuid() == 0)
+        rc = ctl_local(req, k, fdx);
+    else
+        rc = ctl_remote(req, k, fdx);
+    scrub(req, sizeof req);
+    if (fdx >= 0) lp_close(fdx);
+    return rc;
+}
+
+static void daemon_usage(void)
+{
+    printf("usage: lp-diskd -d [--socket PATH]     run the disk service (root)\n"
+           "       lp-diskctl <command> [arg...]   use it (see lp-diskctl help)\n"
+           "       lp-diskd ctl <command> [arg...] the same, without the second name\n\n"
+           "Verbs the service answers:\n");
+    for (int i = 0; VERBS[i].verb; i++)
+        printf("  %-14s %s%s\n", VERBS[i].verb, VERBS[i].help,
+               VERBS[i].admin ? "  (sudo + password)" : "");
+}
+
+int main(int argc, char **argv)
+{
+    const char *base = strrchr(argv[0], '/');
+    base = base ? base + 1 : argv[0];
+    if (!strcmp(base, "lp-diskctl"))
+        return ctl(argc - 1, argv + 1);
+    int a = 1;
+    bool daemon = false;
+    while (a < argc && argv[a][0] == '-') {
+        if (!strcmp(argv[a], "-d")) { daemon = true; a++; }
+        else if (!strcmp(argv[a], "--socket") && a + 1 < argc) { sock_path = argv[a + 1]; a += 2; }
+        else if (!strcmp(argv[a], "-h") || !strcmp(argv[a], "--help")) { daemon_usage(); return 0; }
+        else break;
+    }
+    if (daemon) {
+        if (lp_getuid() != 0) {
+            dprintf(STDERR_FILENO, "lp-diskd: the service has to run as root\n");
+            return 1;
+        }
+        return serve();
+    }
+    if (a < argc && !strcmp(argv[a], "ctl"))
+        return ctl(argc - a - 1, argv + a + 1);
+    daemon_usage();
+    return a < argc ? 2 : 0;
 }

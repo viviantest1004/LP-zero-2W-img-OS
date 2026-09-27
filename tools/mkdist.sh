@@ -17,10 +17,19 @@
 #         userland, its own kernel, its own dropbear, and a zImage the
 #         GPU firmware loads.
 #
-#   dist/linux-LP_amd64.img.xz                 amd64, a PC or a desktop VM.
-#         Called linux-LP inside, because it is not a Raspberry Pi.
-#         UEFI only - which is how a PC boots anyway - so one bzImage,
-#         no firmware blobs, no device tree, no config.txt.
+#   dist/linux-LP_desktop.img.xz               amd64, the desktop OS for a PC
+#         (the owner's Dell XPS 15 9550). Written to a USB stick it boots
+#         on UEFI into the installer, with a persistent root on the
+#         stick; the installer copies it onto the internal disk (GPT: ESP,
+#         LP-RECOVERY, LP-ROOT). Nothing of it runs from RAM. Built by
+#         tools/mkdesktop.sh, which calls tools/mkdisk.sh.
+#
+#         Before booting it on the XPS: BIOS (F2) -> Secure Boot off, and
+#         System Configuration -> SATA Operation -> AHCI; lp-install says
+#         so on screen too, and the ESP's README.txt.
+#
+# (The RAM-live amd64 image, linux-LP_amd64.img.xz, is no longer made:
+# the amd64 system is installed on a disk, like any desktop OS.)
 #
 # Why the arm64 pair and not one image: the universal one has to hold a
 # kernel the GPU can read, and a VM has no use for either that or
@@ -31,7 +40,7 @@
 #   ./tools/mkdist.sh utm      arm64 VM only
 #   ./tools/mkdist.sh sd       arm64 Pi image only  (Zero 2 W)
 #   ./tools/mkdist.sh armv6    armv6 Pi image only  (Zero W)
-#   ./tools/mkdist.sh amd64    amd64 only
+#   ./tools/mkdist.sh amd64    the amd64 desktop image only
 #
 # Every image is built here, by this script, and nowhere else. The two
 # Pi images used to be assembled by hand from the notes in a session
@@ -111,38 +120,38 @@ if [[ "$WHAT" == "all" || "$WHAT" == "armv6" ]]; then
     xz -9 -T0 -c "$IMG" > "${DIST}/linux-LP_armv6_ZeroW.img.xz"
     log "linux-LP_armv6_ZeroW.img.xz  $(stat -c%s "${DIST}/linux-LP_armv6_ZeroW.img.xz") bytes"
 
-    # Put the arm64 userland and rootfs back, for the same reason the
-    # amd64 section below does: the three share kernel/out and
-    # userland/build only through this script's ordering.
+    # Put the arm64 userland and rootfs back: the Pi images share
+    # kernel/out and userland/build only through this script's ordering.
+    # (The amd64 desktop has its own - kernel/out-amd64-disk,
+    # userland/build-amd64 - and needs no such step.)
     make -C "${REPO_ROOT}/userland" >/dev/null
     ( cd "${REPO_ROOT}/userland" && ./mkrootfs.sh >/dev/null )
 fi
 
-# ── amd64 ────────────────────────────────────────────────────────
+# ── amd64: the desktop ───────────────────────────────────────────
 if [[ "$WHAT" == "all" || "$WHAT" == "amd64" ]]; then
-    step "amd64 이미지 (PC / 데스크톱 가상머신)"
+    step "amd64 desktop image (installer USB stick, installs to the NVMe)"
 
-    # Its own userland, rootfs and kernel: different instruction set,
-    # different name inside, different dropbear.
+    # Its inputs: the amd64 userland and rootfs, and lp-base made from
+    # them - an older package would put last week's commands on the
+    # image. The Debian base is tools/apply-packages.sh's.
     make -C "${REPO_ROOT}/userland" ARCH=amd64 >/dev/null
     ( cd "${REPO_ROOT}/userland" \
       && LP_ARCH=amd64 LP_BINDIR=bin-amd64 LP_ROOTFS_DIR=rootfs-amd64 \
          LP_CPIO_NAME=initramfs-amd64.cpio.gz \
          LP_HOSTNAME=linux-lp LP_OS_NAME=linux-LP ./mkrootfs.sh >/dev/null )
-    LP_ARCH=amd64 LP_ROOTFS_DIR=rootfs-amd64 "${REPO_ROOT}/kernel/build.sh" >/dev/null
-    LP_ARCH=amd64 LP_ROOTFS_DIR=rootfs-amd64 \
-        "${REPO_ROOT}/tools/mksdcard.sh" --linux --uefi-only >/dev/null
-    [[ -f "$IMG" ]] || die "amd64 이미지가 만들어지지 않았습니다"
+    "${REPO_ROOT}/tools/mkdeb.sh" amd64 >/dev/null
+    "${REPO_ROOT}/tools/mkdesktop.sh"
+    DESK="${REPO_ROOT}/sdcard/linux-LP_desktop.img"
+    [[ -f "$DESK" ]] || die "the desktop image was not made"
 
-    rm -f "${DIST}/linux-LP_amd64.img.xz"
-    xz -9 -T0 -c "$IMG" > "${DIST}/linux-LP_amd64.img.xz"
-    log "linux-LP_amd64.img.xz  $(stat -c%s "${DIST}/linux-LP_amd64.img.xz") bytes"
-
-    # And rebuild the arm64 kernel, because the two share kernel/out
-    # only through this script's own ordering - leaving the tree holding
-    # an amd64 rootfs would make the next `make` quietly wrong.
-    make -C "${REPO_ROOT}/userland" >/dev/null
-    ( cd "${REPO_ROOT}/userland" && ./mkrootfs.sh >/dev/null )
+    rm -f "${DIST}/linux-LP_desktop.img.xz" "${DIST}/linux-LP_amd64.img.xz"
+    # The image is sparse: the recovery partition and the root's free
+    # space are holes, and xz reads them as the zeros they are.
+    xz -9 -T0 -c "$DESK" > "${DIST}/linux-LP_desktop.img.xz"
+    log "linux-LP_desktop.img.xz  $(stat -c%s "${DIST}/linux-LP_desktop.img.xz") bytes"
+    # The raw image is several GB; the compressed one is the product.
+    rm -f "$DESK"
 fi
 
 # 체크섬은 여기서 만든다.

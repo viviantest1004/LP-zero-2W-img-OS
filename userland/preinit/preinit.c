@@ -101,6 +101,14 @@
  * `storage` uses one: sda2 becomes sdb2 the moment another disk is
  * plugged in, and a root that moves is a machine that does not boot.
  *
+ * ── Checking it first ──
+ *
+ * Between mounting the root read-only and handing over, the root's own
+ * e2fsck -p and fsck.fat -a check the root and the EFI partition beside
+ * it (check_filesystems). It is the last moment nothing is writing to
+ * either, and the one that makes a power cut cost a few seconds of work
+ * rather than a filesystem nobody checked.
+ *
  * GPT is read here rather than in libc's disk.h, which handles MBR only
  * on purpose (the Pi's firmware reads an MBR). This program is the one
  * place that must understand the amd64 disks, and it is also the one
@@ -733,6 +741,109 @@ static bool try_mount(const char *dev)
     return lp_mount(dev, NEWROOT, "ext4", MS_RDONLY, NULL) == 0;
 }
 
+/* ── checking before handing over ────────────────────────────────── */
+
+/* GPT type "EFI system partition", on-disk byte order. */
+static const u8 ESP_TYPE[16] = {
+    0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
+    0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b
+};
+
+/* Run a program from the new root, chrooted into it, and return its
+ * exit status (-1 if it could not be run at all). Under "quiet" its
+ * output goes nowhere: e2fsck says "clean, 51234/196608 files" on every
+ * good boot, and that line is exactly the flash of console text the
+ * quiet boot exists to avoid. What matters is the exit status, and that
+ * is what the caller acts on - loudly, when it is bad. */
+static int run_in_root(char *const argv[])
+{
+    if (lp_access(argv[0], F_OK) != 0)
+        return -1;
+    pid_t pid = lp_fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        if (lp_chroot(NEWROOT) < 0 || lp_chdir("/") < 0)
+            lp_exit(127);
+        if (g_quiet) {
+            long fd = lp_open("/dev/null", O_RDWR, 0);
+            if (fd >= 0) {
+                lp_dup2((int)fd, 1);
+                lp_dup2((int)fd, 2);
+            }
+        }
+        char *env[] = { "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", NULL };
+        /* argv[0] is the path as seen from outside; inside the chroot
+         * it is the same path without the NEWROOT prefix. */
+        lp_execve(argv[0] + sizeof NEWROOT - 1, argv, env);
+        lp_exit(127);
+    }
+    int st = 0;
+    if (lp_waitpid(pid, &st, 0) != pid || !LP_WIFEXITED(st))
+        return -1;
+    return LP_WEXITSTATUS(st);
+}
+
+/* Check the root and the EFI partition before anything writes to them.
+ *
+ * This is the one moment it can be done properly: the root is mounted,
+ * but read-only, and nothing has opened a file on it for writing yet.
+ * /etc/rc remounts it read-write a few lines into its run, and from then
+ * on e2fsck may only look. (rc's own fsck line checks partition 2 of the
+ * boards' cards - on this disk layout that is LP-RECOVERY, not the root.)
+ *
+ * The checkers are the root's own - Debian's e2fsck and fsck.fat, run in
+ * a chroot - because the initramfs holds one program and is compiled
+ * into the kernel; carrying a second copy of e2fsprogs there would mean
+ * a kernel rebuild for every e2fsprogs update.
+ *
+ * A power cut is the case this is for. ext4's journal has already been
+ * replayed by the mount; -p (preen) then repairs whatever the journal
+ * could not, without asking, and does nothing but read the superblock
+ * when the filesystem is clean - milliseconds on a normal boot. */
+static void check_filesystems(const char *root_dev)
+{
+    scan();
+    int r = -1;
+    for (int i = 0; i < g_nparts; i++)
+        if (strcmp(g_parts[i].path, root_dev) == 0)
+            r = i;
+
+    char e2[] = NEWROOT "/usr/sbin/e2fsck";
+    char *e2argv[] = { e2, "-p", (char *)root_dev, NULL };
+    int st = run_in_root(e2argv);
+    if (st >= 0 && (st & 4)) {
+        dprintf(STDERR_FILENO,
+            "preinit: ** the root filesystem (%s) has damage e2fsck -p could\n"
+            "preinit:    not repair on its own. Starting anyway; restart and\n"
+            "preinit:    choose \"LP Recovery\" -> \"Check and repair disks\".\n",
+            root_dev);
+    } else if (st >= 0 && (st & 2)) {
+        /* Repairs made to a mounted root - even a read-only one - leave
+         * the kernel's cached view of it stale. e2fsck's own advice, and
+         * the only safe one, is to start again. */
+        dprintf(STDERR_FILENO, "preinit: the root filesystem was repaired;"
+                               " restarting\n");
+        lp_sleep_ms(1500);
+        lp_reboot(LINUX_REBOOT_CMD_RESTART);
+    }
+
+    /* The EFI partition on the same disk: FAT has no journal, and it
+     * holds the kernel. -a repairs without asking, -w writes each fix at
+     * once. It is not mounted yet (rc mounts it read-only later). */
+    if (r < 0)
+        return;
+    char fat[] = NEWROOT "/usr/sbin/fsck.fat";
+    for (int i = 0; i < g_nparts; i++) {
+        if (g_parts[i].disk != g_parts[r].disk || !g_parts[i].gpt ||
+            memcmp(g_parts[i].type, ESP_TYPE, 16) != 0)
+            continue;
+        char *fargv[] = { fat, "-a", "-w", g_parts[i].path, NULL };
+        run_in_root(fargv);
+        break;
+    }
+}
+
 /* Say what IS there. "no root found" with nothing else is the least
  * useful message a computer can print. */
 static void list_partitions(void)
@@ -961,6 +1072,12 @@ int main(void)
     lp_mount("/proc", NEWROOT "/proc", NULL, MS_MOVE, NULL);
     lp_mount("/sys",  NEWROOT "/sys",  NULL, MS_MOVE, NULL);
     lp_mount("/dev",  NEWROOT "/dev",  NULL, MS_MOVE, NULL);
+
+    /* With /dev and /proc now inside the new root, its own checkers can
+     * run there. The recovery system checks its own disks, from its
+     * menu, and is left alone here. */
+    if (!cmdline_has("lp.mode=recovery"))
+        check_filesystems(chosen);
 
     /* The handover. After the chroot there is no way back, so anything
      * that could fail has already been done. */

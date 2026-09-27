@@ -88,7 +88,20 @@ static struct {
     uint32_t purpose, pending_purpose;
     uint32_t cause;
     gboolean preedit_sent;     /* the application shows a preedit of ours */
+    char    *surr, *pending_surr;   /* surrounding text (without preedit) */
+    uint32_t cursor, pending_cursor;
+    gboolean surr_changed;     /* this done batch moved the text or cursor */
 } ims = { .pending = -1 };
+
+/* A syllable in the making when its field was deactivated, kept for a
+ * moment in case the same field comes straight back (see im_done). */
+static struct {
+    gboolean valid;
+    HangulIC ic;
+    char    *surr;
+    uint32_t cursor;
+    gint64   at;
+} bounce;
 
 static uint32_t now_ms(void)
 {
@@ -888,7 +901,10 @@ static void im_deactivate(void *d, struct zwp_input_method_v2 *m)
 static void im_surrounding(void *d, struct zwp_input_method_v2 *m,
                            const char *text, uint32_t cursor, uint32_t anchor)
 {
-    (void)d; (void)m; (void)text; (void)cursor; (void)anchor;
+    (void)d; (void)m; (void)anchor;
+    g_free(ims.pending_surr);
+    ims.pending_surr = g_strdup(text ? text : "");
+    ims.pending_cursor = cursor;
 }
 
 static void im_cause(void *d, struct zwp_input_method_v2 *m, uint32_t cause)
@@ -910,6 +926,22 @@ static void im_done(void *d, struct zwp_input_method_v2 *m)
     ims.serial++;
     int pend = ims.pending;
     ims.pending = -1;
+    /* Surrounding text is double-buffered like everything else: it only
+     * counts once done says so. */
+    ims.surr_changed = FALSE;
+    if (ims.pending_surr) {
+        ims.surr_changed = g_strcmp0(ims.surr, ims.pending_surr) != 0 ||
+                           ims.cursor != ims.pending_cursor;
+        g_free(ims.surr);
+        ims.surr = ims.pending_surr;
+        ims.cursor = ims.pending_cursor;
+        ims.pending_surr = NULL;
+    }
+    g_debug("im done: serial %u pending %d active %d cause %u purpose %u "
+            "composing %d surrounding \"%s\" cursor %u%s",
+            ims.serial, pend, ims.active, ims.cause, ims.pending_purpose,
+            type_composing(), ims.surr ? ims.surr : "", ims.cursor,
+            ims.surr_changed ? " (changed)" : "");
 
     if (pend == 1) {
         gboolean fresh = !ims.active;
@@ -923,9 +955,31 @@ static void im_done(void *d, struct zwp_input_method_v2 *m)
         grab_start();
         if (fresh || old != ims.purpose)
             ui_field_purpose(ims.purpose);
+        /* The same field back within a moment, text and cursor exactly as
+         * they were: a focus bounce, not a person moving on. Seen when a
+         * keyboard device comes or goes (a USB keyboard unplugged, a
+         * virtual one closed) - the compositor deactivates and activates
+         * the field in one breath and the half-typed syllable would
+         * otherwise be lost. Put it back and carry on. */
+        if (fresh && bounce.valid &&
+            g_get_monotonic_time() - bounce.at < 300000 &&
+            !g_strcmp0(bounce.surr, ims.surr) && bounce.cursor == ims.cursor) {
+            hic = bounce.ic;
+            composition_changed("");
+            g_debug("im: focus bounce, composition restored");
+        }
+        bounce.valid = FALSE;
         osk_im_activated(fresh);
         osk_state_changed();
     } else if (pend == 0) {
+        bounce.valid = type_composing() && ims.surr;
+        if (bounce.valid) {
+            bounce.ic = hic;
+            g_free(bounce.surr);
+            bounce.surr = g_strdup(ims.surr);
+            bounce.cursor = ims.cursor;
+            bounce.at = g_get_monotonic_time();
+        }
         grab_stop();
         ims.active = FALSE;
         ims.purpose = 0;
@@ -933,11 +987,14 @@ static void im_done(void *d, struct zwp_input_method_v2 *m)
         ui_field_purpose(0);
         osk_im_deactivated();
         osk_state_changed();
-    } else if (ims.active && ims.cause == CAUSE_OTHER && type_composing()) {
+    } else if (ims.active && ims.cause == CAUSE_OTHER && ims.surr_changed &&
+               type_composing()) {
         /* The application changed its text without us - a tap moved the
          * cursor, a shortcut cut a word. Whatever it did with our preedit,
          * the syllable we were building no longer sits where we think it
-         * does; continuing it would put half a syllable somewhere else. */
+         * does; continuing it would put half a syllable somewhere else.
+         * (GTK also sends "other" with nothing changed, after a refocus;
+         * that is no reason to throw the syllable away.) */
         composition_drop();
     }
     ims.cause = 0;

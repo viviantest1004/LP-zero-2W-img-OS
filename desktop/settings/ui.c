@@ -49,6 +49,7 @@
 #include "lp-motion.h"
 
 #include <math.h>
+#include <string.h>
 
 /* 30 calls a second, the brief's ceiling for live sliders. */
 #define SCALE_MIN_MS 33
@@ -380,6 +381,15 @@ void row_set_value(GtkWidget *row, const char *value)
         gtk_label_set_text(GTK_LABEL(c), value ? value : "");
 }
 
+GtkWidget *row_widget(GtkWidget *list, const char *title, const char *detail,
+                      GtkWidget *widget)
+{
+    GtkWidget *row = row_shell(title, detail);
+    set_control(row, widget);
+    if (list) row_add(list, row);
+    return row;
+}
+
 /* switch */
 
 typedef void (*switch_fn)(GObject *sw, GParamSpec *ps, gpointer data);
@@ -510,6 +520,35 @@ GtkWidget *row_choice(GtkWidget *list, const char *title, const char *detail,
     }
     if (list) row_add(list, row);
     return row;
+}
+
+GtkWidget *row_options(GtkWidget *list, const char *title, const char *detail,
+                       const lp_opt_t *opts, const char *current, guint dflt,
+                       GCallback cb, gpointer data)
+{
+    GPtrArray *labels = g_ptr_array_new();
+    guint sel = dflt;
+    for (guint i = 0; opts[i].value; i++) {
+        g_ptr_array_add(labels, (gpointer)T(opts[i].en, opts[i].ko));
+        if (current && !strcmp(current, opts[i].value))
+            sel = i;
+    }
+    g_ptr_array_add(labels, NULL);
+    GtkWidget *row = row_choice(list, title, detail, (const char *const *)labels->pdata,
+                                sel, cb, data);
+    g_ptr_array_free(labels, TRUE);
+    g_object_set_data(G_OBJECT(row_control(row)), "lp-opts", (gpointer)opts);
+    return row;
+}
+
+const char *row_option_value(GObject *dd)
+{
+    const lp_opt_t *opts = g_object_get_data(dd, "lp-opts");
+    guint i = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
+    if (!opts) return NULL;
+    for (guint k = 0; opts[k].value; k++)
+        if (k == i) return opts[k].value;
+    return NULL;
 }
 
 /* scale */

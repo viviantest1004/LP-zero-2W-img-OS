@@ -54,6 +54,13 @@ static const char CSS[] =
     ".su-body { font-size: 17px; }\n"
     ".su-note { font-size: 15px; color: @su_dim; }\n"
     ".su-warn { font-size: 17px; color: #ffb4a6; }\n"
+    ".su-caption { font-size: 15px; font-weight: 600; color: @su_dim; }\n"
+    /* The one line that says what is still missing on a form page. Amber
+     * while something is, green once nothing is: the colour change is
+     * the confirmation, so it eases (the press spring's 130 ms). */
+    ".su-hint { font-size: 15px; color: #f5c16c; min-height: 22px;\n"
+    "  transition: color 130ms cubic-bezier(0.25, 0.8, 0.35, 1); }\n"
+    ".su-hint.su-ok { color: #8fd18f; }\n"
     "button.su-choice, button.su-primary, button.su-secondary,\n"
     "button.su-danger { background-image: none; }\n"
     "button.su-choice { min-height: 64px; padding: 10px 18px;\n"
@@ -76,6 +83,9 @@ static const char CSS[] =
     "button.su-secondary { background-color: alpha(white, 0.07); }\n"
     "entry.su-entry, passwordentry.su-entry { min-height: 52px; font-size: 18px;\n"
     "  border-radius: 10px; padding: 0 14px; }\n"
+    /* The focus ring in the accent, not Adwaita's blue. */
+    "entry.su-entry:focus-within, passwordentry.su-entry:focus-within {\n"
+    "  outline: 2px solid alpha(@su_accent, 0.85); outline-offset: -2px; }\n"
     "checkbutton.su-check { font-size: 17px; padding: 8px 0; }\n"
     "checkbutton.su-check check { min-width: 26px; min-height: 26px; }\n"
     "progressbar.su-progress trough { min-height: 12px; border-radius: 6px;\n"

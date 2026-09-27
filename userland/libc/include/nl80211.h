@@ -137,6 +137,7 @@
 #define NL80211_CMD_GET_INTERFACE       5
 #define NL80211_CMD_NEW_INTERFACE       7
 #define NL80211_CMD_NEW_KEY            11
+#define NL80211_CMD_SET_STATION        18
 #define NL80211_CMD_GET_REG            31
 #define NL80211_CMD_GET_SCAN           32
 #define NL80211_CMD_TRIGGER_SCAN       33
@@ -174,6 +175,9 @@
 #define NL80211_ATTR_REASON_CODE              54  /* u16!  not u32       */
 #define NL80211_ATTR_KEY_TYPE                 55  /* u32                 */
 #define NL80211_ATTR_TIMED_OUT                65  /* flag                */
+#define NL80211_ATTR_STA_FLAGS2               67  /* u32 mask, u32 set   */
+#define NL80211_ATTR_CONTROL_PORT             68  /* flag                */
+#define NL80211_STA_FLAG_AUTHORIZED            1  /* bit in STA_FLAGS2   */
 #define NL80211_ATTR_PRIVACY                  70  /* flag                */
 #define NL80211_ATTR_DISCONNECTED_BY_AP       71  /* flag                */
 #define NL80211_ATTR_STATUS_CODE              72  /* u16                 */
@@ -407,6 +411,15 @@ typedef struct {
      * wpa_rsn_ie_build() makes the one to send. */
     const u8 *ie;
     u16       ie_len;
+
+    /* NL80211_ATTR_CONTROL_PORT: keep the port closed to everything but
+     * EAPOL until nl_authorize() opens it, after the keys are in.
+     * Without it mac80211 opens the port at association, and whatever
+     * the machine sends during the handshake - a DHCP renewal, a TCP
+     * retransmission from before a roam - goes out in the clear before
+     * there is a key to encrypt it with. wpa_supplicant sets it for the
+     * same reason; nl_conn_wpa2_psk() sets it. */
+    bool      control_port;
 } nl_conn_t;
 
 /* ── What an interface is ──────────────────────────────────────────── */
@@ -550,6 +563,12 @@ bool nl_set_ptk(nl_t *nl, const u8 bssid[6], const u8 *tk, size_t tklen);
  * are thrown away as replays. rsc may be NULL when there is none. */
 bool nl_set_gtk(nl_t *nl, int keyidx, const u8 *gtk, size_t len,
                 const u8 rsc[6]);
+
+/* Open the port to the access point for data (NL80211_CMD_SET_STATION,
+ * the AUTHORIZED flag), after a CONNECT with control_port and a
+ * completed handshake. A fullmac driver that keeps the port in its
+ * firmware may answer EOPNOTSUPP, which the caller treats as done. */
+bool nl_authorize(nl_t *nl, const u8 peer[6]);
 
 /* The general form. addr NULL installs a group key, an address installs
  * a pairwise one. Note that no key is ever made the default transmit

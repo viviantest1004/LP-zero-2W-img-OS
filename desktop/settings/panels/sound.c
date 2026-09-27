@@ -178,8 +178,14 @@ static node_t *default_of(GPtrArray *a)
 
 /* ── applying ───────────────────────────────────────────────────────── */
 
+/* The balance while a drag is writing it, before sound.conf has it;
+ * 1000 until the slider has been moved. */
+static int balance_live = 1000;
+
 static int balance_get(void)
 {
+    if (balance_live != 1000)
+        return CLAMP(balance_live, -100, 100);
     char *c = lp_config_path("sound.conf");
     int b = kv_get_int(c, "balance", 0);
     g_free(c);
@@ -224,15 +230,20 @@ static void on_in_volume(GtkRange *r, gpointer p)
     send_volume(n->id, gtk_range_get_value(r) / 100.0, 0, "source-volume");
 }
 
+static void balance_save(gpointer p)
+{
+    char *c = lp_config_path("sound.conf");
+    kv_set(c, "balance", p);
+    g_free(c);
+}
+
 static void on_balance(GtkRange *r, gpointer p)
 {
     (void)p;
     int b = (int)lround(gtk_range_get_value(r));
-    char *c = lp_config_path("sound.conf");
-    char v[16];
-    g_snprintf(v, sizeof v, "%d", b);
-    kv_set(c, "balance", v);
-    g_free(c);
+    /* The sound follows the finger; the file is written once it stops. */
+    balance_live = b;
+    lp_later("sound-balance", 250, balance_save, g_strdup_printf("%d", b), g_free);
     node_t *n = SN ? default_of(SN->sinks) : NULL;
     if (n && SN->out_vol)
         send_volume(n->id, gtk_range_get_value(GTK_RANGE(row_control(SN->out_vol))) / 100.0,
@@ -475,3 +486,47 @@ static const char *const KEYS[] = {
 const lp_panel_t lp_panel_sound = {
     "sound", "Sound", "소리", "audio-volume-high-symbolic", build, KEYS, NULL
 };
+
+/* For the Reset panel (reset-and-factory-reset.md 2-4): volumes and the
+ * balance back, the chosen devices left alone - put back, sound would
+ * start coming out of a different device, and the volume keys would go
+ * on turning up the one that is silent. */
+gboolean lp_sound_reset(char **why)
+{
+    char *c = lp_config_path("sound.conf");
+    kv_set(c, "balance", "0");
+    g_free(c);
+    balance_live = 1000;
+    static const char *const out[] = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "0.40", NULL };
+    static const char *const in[] = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", "1.00", NULL };
+    char *err = NULL, *o = NULL;
+    int st = lp_run_full(out, NULL, &o, &err);
+    if (st == 0) {
+        g_free(err); g_free(o);
+        st = lp_run_full(in, NULL, &o, &err);
+    }
+    if (st != 0 && why) *why = lp_first_line(err, o);
+    /* Every app's own volume, for the ones playing now. */
+    static const char *const sv[] = { "wpctl", "status", NULL };
+    char *status = lp_run(sv);
+    if (status) {
+        snd_t tmp = { 0 };
+        tmp.sinks = g_ptr_array_new_with_free_func(node_free);
+        tmp.sources = g_ptr_array_new_with_free_func(node_free);
+        tmp.streams = g_ptr_array_new_with_free_func(node_free);
+        parse_status(&tmp, status);
+        for (guint i = 0; i < tmp.streams->len; i++) {
+            char ids[16];
+            g_snprintf(ids, sizeof ids, "%d", ((node_t *)g_ptr_array_index(tmp.streams, i))->id);
+            const char *a[] = { "wpctl", "set-volume", ids, "1.00", NULL };
+            char *x = lp_run(a);
+            g_free(x);
+        }
+        g_ptr_array_free(tmp.sinks, TRUE);
+        g_ptr_array_free(tmp.sources, TRUE);
+        g_ptr_array_free(tmp.streams, TRUE);
+        g_free(status);
+    }
+    g_free(err); g_free(o);
+    return st == 0;
+}

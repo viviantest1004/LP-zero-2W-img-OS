@@ -765,17 +765,24 @@ static void on_night(GObject *sw, GParamSpec *ps, gpointer p)
     night_apply();
 }
 
-static void on_night_temp(GtkRange *r, gpointer p)
+static void night_temp_now(gpointer p)
 {
-    (void)p;
     char *conf = lp_config_path("nightlight.conf");
-    char v[16];
-    g_snprintf(v, sizeof v, "%d", (int)(lround(gtk_range_get_value(r) / 100.0) * 100));
-    kv_set(conf, "temperature", v);
+    kv_set(conf, "temperature", p);
     char *en = kv_get(conf, "enabled");
     if (en && !strcmp(en, "yes")) night_apply();
     g_free(en);
     g_free(conf);
+}
+
+/* Written, and wlsunset restarted with it, once the slider has been
+ * still for a moment: restarting wlsunset thirty times a second while
+ * the finger moves would flicker the whole screen. */
+static void on_night_temp(GtkRange *r, gpointer p)
+{
+    (void)p;
+    char *v = g_strdup_printf("%d", (int)(lround(gtk_range_get_value(r) / 100.0) * 100));
+    lp_later("nightlight-temperature", 250, night_temp_now, v, g_free);
 }
 
 static char *kelvin(double v) { return g_strdup_printf("%dK", (int)(lround(v / 100.0) * 100)); }
@@ -1096,3 +1103,65 @@ static const char *const KEYS[] = {
 const lp_panel_t lp_panel_display = {
     "display", "Display", "화면", "video-display-symbolic", build, KEYS, restore
 };
+
+/* For the Reset panel (reset-and-factory-reset.md 2-3): every display
+ * back to what it says it prefers - its preferred mode, the scale its
+ * pixel density calls for (200% on the XPS's 4K panel), upright - and
+ * night light off. The "first values" are asked of the displays now,
+ * not remembered from the factory: a 1080p default forced back onto a
+ * 4K monitor would be a reset that breaks the screen. The wallpaper is
+ * not a display setting and stays. Returns FALSE with *why set when the
+ * displays could not be asked. */
+gboolean lp_display_reset(char **why)
+{
+    static const char *const v[] = { "wlr-randr", NULL };
+    char *out = NULL, *err = NULL;
+    int st = lp_run_full(v, NULL, &out, &err);
+    if (st != 0) {
+        if (why) *why = lp_first_line(err, out);
+        g_free(out); g_free(err);
+        return FALSE;
+    }
+    GPtrArray *outs = parse_randr(out);
+    gboolean ok = TRUE;
+    for (guint i = 0; i < outs->len; i++) {
+        out_t *o = g_ptr_array_index(outs, i);
+        if (!o->enabled) continue;
+        int pref = -1;
+        for (guint k = 0; k < o->modes->len; k++)
+            if (g_array_index(o->modes, mode_t_, k).preferred) { pref = k; break; }
+        if (pref >= 0) {
+            if (o->cur >= 0) g_array_index(o->modes, mode_t_, o->cur).current = FALSE;
+            o->cur = pref;
+        }
+        g_free(o->transform);
+        o->transform = g_strdup("normal");
+        o->scale = recommended_scale(o);
+        char sc[32];
+        g_ascii_formatd(sc, sizeof sc, "%.2f", o->scale);
+        char *mode = o->cur >= 0 ? mode_arg(&g_array_index(o->modes, mode_t_, o->cur)) : NULL;
+        GPtrArray *a = g_ptr_array_new();
+        g_ptr_array_add(a, "wlr-randr");
+        g_ptr_array_add(a, "--output");
+        g_ptr_array_add(a, o->name);
+        if (mode) { g_ptr_array_add(a, "--mode"); g_ptr_array_add(a, mode); }
+        else g_ptr_array_add(a, "--preferred");
+        g_ptr_array_add(a, "--transform");
+        g_ptr_array_add(a, "normal");
+        g_ptr_array_add(a, "--scale");
+        g_ptr_array_add(a, sc);
+        g_ptr_array_add(a, NULL);
+        ok &= randr((const char *const *)a->pdata);
+        g_ptr_array_free(a, TRUE);
+        g_free(mode);
+        persist(o);
+    }
+    g_ptr_array_free(outs, TRUE);
+    g_free(out); g_free(err);
+    char *conf = lp_config_path("nightlight.conf");
+    kv_set(conf, "enabled", "no");
+    g_free(conf);
+    stop_wlsunset();
+    if (!ok && why) *why = g_strdup(T("A display did not accept its preferred mode", "화면 하나가 권장 모드를 받아들이지 않았습니다"));
+    return ok;
+}

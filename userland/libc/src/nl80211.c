@@ -1507,6 +1507,7 @@ void nl_conn_wpa2_psk(nl_conn_t *req, const u8 *ssid, u8 ssid_len,
     req->akm_suites[0]       = WLAN_AKM_SUITE_PSK;
     req->n_akm_suites        = 1;
     req->privacy             = true;
+    req->control_port        = true;
 }
 
 /* The message this whole file exists to get right.
@@ -1550,6 +1551,9 @@ static bool build_connect(nl_t *nl, nlbuild_t *m, u8 *buf, size_t cap,
     if (req->ie && req->ie_len)
         put_bytes(m, NL80211_ATTR_IE, req->ie, req->ie_len);
 
+    if (req->control_port)
+        put_flag(m, NL80211_ATTR_CONTROL_PORT);
+
     return msg_finish(m);
 }
 
@@ -1579,7 +1583,10 @@ bool nl_connect(nl_t *nl, const nl_conn_t *req)
         return false;
     }
 
-    /* Deliberately NOT sent:
+    /* NL80211_ATTR_CONTROL_PORT is sent (see nl_conn_t.control_port):
+     * with it the kernel holds data back until nl_authorize().
+     *
+     * Deliberately NOT sent:
      *
      *   NL80211_ATTR_CONTROL_PORT_OVER_NL80211 - that would ask the
      *   kernel to deliver EAPOL frames here on this socket instead of
@@ -1730,6 +1737,36 @@ bool nl_set_gtk(nl_t *nl, int keyidx, const u8 *gtk, size_t len,
     if (!cipher_for_len(nl, len, "set group key", &cipher))
         return false;
     return nl_set_key(nl, NULL, keyidx, cipher, gtk, len, rsc, rsc ? 6 : 0);
+}
+
+/* ══ Opening the port ════════════════════════════════════════════════
+ *
+ * NL80211_CMD_SET_STATION on our own interface, naming the access point,
+ * with NL80211_ATTR_STA_FLAGS2 = { mask AUTHORIZED, set AUTHORIZED }.
+ * cfg80211 allows exactly this one flag on a managed interface's AP
+ * entry (cfg80211_check_station_change, CFG80211_STA_AP_STA); mac80211
+ * then moves the station to AUTHORIZED and data starts to flow. It is
+ * what wpa_supplicant's sta_set_flags does after the four-way handshake.
+ * The struct is two host-order u32s, nl80211_sta_flag_update. */
+bool nl_authorize(nl_t *nl, const u8 peer[6])
+{
+    u8 buf[96];
+    nlbuild_t m;
+    u32 seq = ++nl->seq;
+    u32 upd[2] = { 1u << NL80211_STA_FLAG_AUTHORIZED,
+                   1u << NL80211_STA_FLAG_AUTHORIZED };
+
+    msg_begin(&m, buf, sizeof buf, nl->family, NL80211_CMD_SET_STATION,
+              NLM_F_REQUEST | NLM_F_ACK, seq);
+    put_u32(&m, NL80211_ATTR_IFINDEX, nl->ifindex);
+    put_bytes(&m, NL80211_ATTR_MAC, peer, 6);
+    put_bytes(&m, NL80211_ATTR_STA_FLAGS2, upd, sizeof upd);
+    if (!msg_finish(&m)) {
+        nl_fail(nl, 22, "SET_STATION: request too large");
+        return false;
+    }
+    return nl_transact(nl, buf, m.len, seq, "NL80211_CMD_SET_STATION",
+                       NULL, NULL, NL_DEFAULT_TIMEOUT_MS) == 0;
 }
 
 /* ══ Regulatory domain ═══════════════════════════════════════════════ */

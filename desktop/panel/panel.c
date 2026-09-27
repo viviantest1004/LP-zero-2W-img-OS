@@ -32,13 +32,31 @@
  * quick settings panel send after they change something, so the icons
  * never wait out a poll to catch up with a key press. A query still
  * running when the next one is due is not started twice.
+ *
+ * ── motion ──
+ *
+ * The calendar is a sheet (desktop/common/lp-sheet.c) that slides and
+ * fades down from under the clock on the sheet spring, 260 ms in and
+ * 182 ms out, and turns round if it is tapped again half way. It used to
+ * be a GtkPopover, whose own transition is a fixed 150 ms timeline that
+ * cannot be interrupted and ignores the springs every other panel uses.
+ *
+ * A finger that lands on the bar and pulls down is quick settings coming
+ * down from the top edge: past 10 px of mostly-vertical travel the bar
+ * takes the touch away from whatever button it started on, and from then
+ * on hands the distance to lp-quick (drag-px), which follows it 1:1, and
+ * on release the finger's speed (release-px), which flings it open or
+ * shut. The panel draws nothing of that itself.
  */
 #define _GNU_SOURCE 1
 
+#include <string.h>
 #include <time.h>
 
 #include "lp-apps.h"
 #include "lp-json.h"
+#include "lp-motion.h"
+#include "lp-sheet.h"
 #include "lp-shell.h"
 #include "lp-toplevel.h"
 
@@ -51,11 +69,10 @@ typedef struct {
     GtkWidget *appname;
     GtkWidget *clock;
     GtkWidget *clock_label;
-    GtkWidget *cal_pop;
-    GtkWidget *cal_day;
-    GtkWidget *cal_date;
-    GtkWidget *calendar;
     GtkWidget *status;
+    GtkGesture *pull;           /* the top-edge drag */
+    LpVelocity pull_v;
+    gboolean   pulling;
     GtkWidget *wifi_icon;
     GtkWidget *vol_icon;
     GtkWidget *bat_icon;
@@ -64,6 +81,12 @@ typedef struct {
 
 static GList *bars;
 static GHashTable *app_cache;   /* app_id -> GDesktopAppInfo or NULL */
+
+/* One calendar, moved to whichever output's clock was tapped. */
+static struct {
+    LpSheet   *sheet;
+    GtkWidget *day, *date, *calendar;
+} cal;
 
 /* The state every bar shows. */
 static char *wifi_icon_name, *vol_icon_name, *bat_icon_name, *bat_text;
@@ -129,33 +152,55 @@ static gboolean clock_tick(gpointer d)
     return G_SOURCE_REMOVE;
 }
 
-static void fill_calendar(Bar *b)
+static void fill_calendar(void)
 {
     GDateTime *now = g_date_time_new_now_local();
     char *day = g_date_time_format(now, "%A");
     char *date = g_date_time_format(now, T("%B %-d, %Y", "%Y년 %-m월 %-d일"));
-    gtk_label_set_text(GTK_LABEL(b->cal_day), day);
-    gtk_label_set_text(GTK_LABEL(b->cal_date), date);
-    gtk_calendar_select_month(GTK_CALENDAR(b->calendar),
+    gtk_label_set_text(GTK_LABEL(cal.day), day);
+    gtk_label_set_text(GTK_LABEL(cal.date), date);
+    gtk_calendar_select_month(GTK_CALENDAR(cal.calendar),
                               g_date_time_get_month(now) - 1,
                               g_date_time_get_year(now));
-    gtk_calendar_select_day(GTK_CALENDAR(b->calendar),
+    gtk_calendar_select_day(GTK_CALENDAR(cal.calendar),
                             g_date_time_get_day_of_month(now));
     g_free(day);
     g_free(date);
     g_date_time_unref(now);
 }
 
+static void cal_build(void)
+{
+    GtkWidget *cbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_style_context_add_class(gtk_widget_get_style_context(cbox), "lp-cal");
+    cal.day = gtk_label_new("");
+    cal.date = gtk_label_new("");
+    gtk_widget_set_halign(cal.day, GTK_ALIGN_START);
+    gtk_widget_set_halign(cal.date, GTK_ALIGN_START);
+    gtk_style_context_add_class(gtk_widget_get_style_context(cal.day), "lp-cal-day");
+    gtk_style_context_add_class(gtk_widget_get_style_context(cal.date), "lp-cal-date");
+    cal.calendar = gtk_calendar_new();
+    gtk_box_pack_start(GTK_BOX(cbox), cal.day, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(cbox), cal.date, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(cbox), cal.calendar, FALSE, FALSE, 0);
+    gtk_widget_show_all(cbox);
+    /* Anchored to the top edge only, so the compositor centres it under
+     * the clock - which is in the middle of the bar. */
+    cal.sheet = lp_sheet_new("lp-calendar", LP_EDGE_TOP, cbox);
+    lp_sheet_set_dismiss(cal.sheet, TRUE);
+}
+
 static void on_clock(GtkButton *btn, gpointer d)
 {
     (void)btn;
     Bar *b = d;
-    if (gtk_widget_get_visible(b->cal_pop)) {
-        gtk_popover_popdown(GTK_POPOVER(b->cal_pop));
+    if (lp_sheet_shown(cal.sheet)) {
+        lp_sheet_hide(cal.sheet);
         return;
     }
-    fill_calendar(b);
-    gtk_popover_popup(GTK_POPOVER(b->cal_pop));
+    fill_calendar();
+    lp_sheet_set_monitor(cal.sheet, b->mon);
+    lp_sheet_show(cal.sheet);
 }
 
 /* ── status: Wi-Fi, volume, battery ─────────────────────────────── */
@@ -309,11 +354,32 @@ static gboolean poll_bat(gpointer d)
 
 /* ── buttons ─────────────────────────────────────────────────────── */
 
+/* Ask a running component first, over its socket; start it only if it
+ * is not there. A spawn is a fork, an exec and a GTK start-up before the
+ * finger's tap shows anything; the socket is a few hundred microseconds. */
+static void ask(const char *name, const char *const *argv)
+{
+    if (!lp_send(name, argv))
+        lp_spawn(argv);
+}
+
+static int mon_index(Bar *bar)
+{
+    GdkDisplay *dpy = gdk_display_get_default();
+    int n = gdk_display_get_n_monitors(dpy);
+    for (int i = 0; i < n; i++)
+        if (gdk_display_get_monitor(dpy, i) == bar->mon)
+            return i;
+    return 0;
+}
+
 static void on_activities(GtkButton *b, gpointer d)
 {
-    (void)b; (void)d;
+    (void)d;
+    if (lp_hold_consumed(GTK_WIDGET(b)))
+        return;
     const char *a[] = { "lp-appgrid", "toggle", NULL };
-    lp_spawn(a);
+    ask("appgrid", a);
 }
 
 static void on_keyboard(GtkButton *b, gpointer d)
@@ -329,15 +395,64 @@ static void on_status(GtkButton *b, gpointer d)
     Bar *bar = d;
     /* Tell quick settings which monitor to open on: the one whose bar
      * was touched, not whichever the compositor happens to prefer. */
-    int n = gdk_display_get_n_monitors(gdk_display_get_default());
-    int idx = 0;
-    for (int i = 0; i < n; i++)
-        if (gdk_display_get_monitor(gdk_display_get_default(), i) == bar->mon)
-            idx = i;
     char mon[16];
-    g_snprintf(mon, sizeof mon, "%d", idx);
+    g_snprintf(mon, sizeof mon, "%d", mon_index(bar));
     const char *a[] = { "lp-quick", "toggle", mon, NULL };
-    lp_spawn(a);
+    ask("quick", a);
+}
+
+/* ── pulling quick settings down from the top edge ──────────────── */
+
+static void pull_send(Bar *b, const char *verb, double v)
+{
+    char num[32], mon[16];
+    g_ascii_formatd(num, sizeof num, "%.1f", v);
+    g_snprintf(mon, sizeof mon, "%d", mon_index(b));
+    const char *a[] = { "lp-quick", verb, num, mon, NULL };
+    if (!lp_send("quick", a) && !strcmp(verb, "release-px") && v > 0) {
+        /* Not running: the drag could not be shown, but the intent was
+         * clear - open it. */
+        const char *s[] = { "lp-quick", "show", mon, NULL };
+        lp_spawn(s);
+    }
+}
+
+static void on_pull_update(GtkGestureDrag *g, double dx, double dy, gpointer d)
+{
+    Bar *b = d;
+    if (!b->pulling) {
+        /* Mostly downwards and past a threshold: a pull, not a tap that
+         * wobbled. Only then is the touch taken from the button. */
+        if (dy < 10 || dy < 1.5 * ABS(dx))
+            return;
+        b->pulling = TRUE;
+        gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
+        lp_velocity_reset(&b->pull_v);
+    }
+    double py = MAX(0.0, dy - 10);
+    lp_velocity_add(&b->pull_v, g_get_monotonic_time(), py);
+    pull_send(b, "drag-px", py);
+}
+
+static void on_pull_end(GtkGestureDrag *g, double dx, double dy, gpointer d)
+{
+    (void)g; (void)dx;
+    Bar *b = d;
+    if (!b->pulling)
+        return;
+    b->pulling = FALSE;
+    lp_velocity_add(&b->pull_v, g_get_monotonic_time(), MAX(0.0, dy - 10));
+    pull_send(b, "release-px", lp_velocity_get(&b->pull_v));
+}
+
+static void on_pull_cancel(GtkGesture *g, GdkEventSequence *seq, gpointer d)
+{
+    (void)g; (void)seq;
+    Bar *b = d;
+    if (b->pulling) {
+        b->pulling = FALSE;
+        pull_send(b, "release-px", 0);
+    }
 }
 
 /* ── commands from outside ───────────────────────────────────────── */
@@ -416,23 +531,6 @@ static Bar *bar_new(GdkMonitor *mon)
     g_signal_connect(b->clock, "clicked", G_CALLBACK(on_clock), b);
     gtk_box_set_center_widget(GTK_BOX(box), b->clock);
 
-    b->cal_pop = gtk_popover_new(b->clock);
-    gtk_popover_set_position(GTK_POPOVER(b->cal_pop), GTK_POS_BOTTOM);
-    gtk_style_context_add_class(gtk_widget_get_style_context(b->cal_pop), "lp-cal");
-    GtkWidget *cbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    b->cal_day = gtk_label_new("");
-    b->cal_date = gtk_label_new("");
-    gtk_widget_set_halign(b->cal_day, GTK_ALIGN_START);
-    gtk_widget_set_halign(b->cal_date, GTK_ALIGN_START);
-    gtk_style_context_add_class(gtk_widget_get_style_context(b->cal_day), "lp-cal-day");
-    gtk_style_context_add_class(gtk_widget_get_style_context(b->cal_date), "lp-cal-date");
-    b->calendar = gtk_calendar_new();
-    gtk_box_pack_start(GTK_BOX(cbox), b->cal_day, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(cbox), b->cal_date, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(cbox), b->calendar, FALSE, FALSE, 0);
-    gtk_widget_show_all(cbox);
-    gtk_container_add(GTK_CONTAINER(b->cal_pop), cbox);
-
     /* right */
     GtkWidget *right = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     GtkWidget *kbd = gtk_button_new();
@@ -459,6 +557,16 @@ static Bar *bar_new(GdkMonitor *mon)
     gtk_box_pack_start(GTK_BOX(right), b->status, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(box), right, FALSE, FALSE, 0);
 
+    /* Capture phase: the pull sees the touch before the button under it
+     * does, and takes it only once it is clearly a pull. */
+    b->pull = gtk_gesture_drag_new(box);
+    gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(b->pull), FALSE);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(b->pull),
+                                               GTK_PHASE_CAPTURE);
+    g_signal_connect(b->pull, "drag-update", G_CALLBACK(on_pull_update), b);
+    g_signal_connect(b->pull, "drag-end", G_CALLBACK(on_pull_end), b);
+    g_signal_connect(b->pull, "cancel", G_CALLBACK(on_pull_cancel), b);
+
     gtk_widget_show_all(GTK_WIDGET(b->win));
     bars = g_list_append(bars, b);
     return b;
@@ -467,6 +575,7 @@ static Bar *bar_new(GdkMonitor *mon)
 static void bar_free(Bar *b)
 {
     bars = g_list_remove(bars, b);
+    g_clear_object(&b->pull);
     gtk_widget_destroy(GTK_WIDGET(b->win));
     g_free(b);
 }
@@ -499,6 +608,7 @@ int main(int argc, char **argv)
     /* Values are never freed: the cache lives as long as the bar, and a
      * missing app is cached as NULL, which g_object_unref would not take. */
     app_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    cal_build();
 
     GdkDisplay *dpy = gdk_display_get_default();
     for (int i = 0; i < gdk_display_get_n_monitors(dpy); i++)

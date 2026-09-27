@@ -12,10 +12,12 @@
 #include <pwd.h>
 #include <string.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ── the stylesheet ───────────────────────────────────────────────── */
 
+static GtkCssProvider *css_motion;
 static GtkCssProvider *css_base;
 static GtkCssProvider *css_light;
 static GFileMonitor *style_monitor;
@@ -47,6 +49,41 @@ char *lp_config_path(const char *name)
     return g_build_filename(g_get_user_config_dir(), "lp", name, NULL);
 }
 
+gboolean lp_write_atomic(const char *path, const char *data, gssize len)
+{
+    char *dir = g_path_get_dirname(path);
+    g_mkdir_with_parents(dir, 0755);
+    g_free(dir);
+    GError *err = NULL;
+    gboolean ok = g_file_set_contents_full(path, data, len,
+        G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_DURABLE,
+        0644, &err);
+    if (!ok) {
+        g_printerr("lp-shell: %s: %s\n", path, err->message);
+        g_clear_error(&err);
+    }
+    return ok;
+}
+
+gboolean lp_config_write(const char *name, const char *data)
+{
+    char *p = lp_config_path(name);
+    gboolean ok = lp_write_atomic(p, data, -1);
+    g_free(p);
+    return ok;
+}
+
+char *lp_config_read(const char *name)
+{
+    char *p = lp_config_path(name), *s = NULL;
+    if (!g_file_get_contents(p, &s, NULL, NULL))
+        s = NULL;
+    g_free(p);
+    if (s)
+        g_strchomp(s);
+    return s;
+}
+
 gboolean lp_style_light(void)
 {
     char *p = lp_config_path("style"), *s = NULL;
@@ -58,7 +95,8 @@ gboolean lp_style_light(void)
     return light;
 }
 
-static void load_css(GtkCssProvider **prov, const char *file, gboolean on)
+static void load_css_at(GtkCssProvider **prov, const char *file, gboolean on,
+                        guint priority)
 {
     GdkScreen *scr = gdk_screen_get_default();
     if (*prov) {
@@ -79,12 +117,22 @@ static void load_css(GtkCssProvider **prov, const char *file, gboolean on)
         g_clear_error(&err);
     }
     gtk_style_context_add_provider_for_screen(scr, GTK_STYLE_PROVIDER(*prov),
-                                              LP_CSS_PRIORITY);
+                                              priority);
     g_free(path);
+}
+
+static void load_css(GtkCssProvider **prov, const char *file, gboolean on)
+{
+    load_css_at(prov, file, on, LP_CSS_PRIORITY);
 }
 
 static void apply_style(void)
 {
+    /* motion.css is main's: the springs as CSS transitions, including
+     * the rule that a press is answered with no transition at all and
+     * only the release fades. It goes one step under shell.css so that
+     * the shell can still say something more specific where it must. */
+    load_css_at(&css_motion, "motion.css", TRUE, LP_CSS_PRIORITY - 1);
     load_css(&css_base, "shell.css", TRUE);
     load_css(&css_light, "shell-light.css", lp_style_light());
 }
@@ -101,12 +149,7 @@ static void on_style_changed(GFileMonitor *m, GFile *f, GFile *o,
 
 void lp_style_set_light(gboolean light)
 {
-    char *p = lp_config_path("style");
-    char *dir = g_path_get_dirname(p);
-    g_mkdir_with_parents(dir, 0755);
-    g_file_set_contents(p, light ? "light\n" : "dark\n", -1, NULL);
-    g_free(dir);
-    g_free(p);
+    lp_config_write("style", light ? "light\n" : "dark\n");
 
     /* The applications. libadwaita and the portal read this key, not
      * GTK's settings.ini - see desktop/theme/settings.ini. It needs the
@@ -485,4 +528,47 @@ char *lp_user_display_name(void)
         return n;
     }
     return g_strdup(pw->pw_name);
+}
+
+cairo_surface_t *lp_widget_snapshot(GtkWidget *w)
+{
+    int W = gtk_widget_get_allocated_width(w);
+    int H = gtk_widget_get_allocated_height(w);
+    if (W < 2 || H < 2)
+        return NULL;
+    int sf = gtk_widget_get_scale_factor(w);
+    cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+                                                    W * sf, H * sf);
+    cairo_surface_set_device_scale(s, sf, sf);
+    cairo_t *c = cairo_create(s);
+    gtk_widget_draw(w, c);
+    cairo_destroy(c);
+    return s;
+}
+
+/* ── measuring ───────────────────────────────────────────────────── */
+
+gboolean lp_trace_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = g_getenv("LP_MOTION_TRACE");
+        on = e && *e && strcmp(e, "0") != 0;
+    }
+    return on;
+}
+
+gint64 lp_trace_now(void)
+{
+    struct timespec ts;
+    if (!lp_trace_on() || clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
+        return 0;
+    return (gint64)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+void lp_trace_draw(const char *what, gint64 start)
+{
+    if (lp_trace_on())
+        g_printerr("lp-shell: draw %s cpu_ms=%.2f\n", what,
+                   (lp_trace_now() - start) / 1000.0);
 }

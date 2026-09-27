@@ -886,7 +886,11 @@ static int command_line(GApplication *gapp, GApplicationCommandLine *cl, gpointe
             /* gnome-control-center's names, so muscle memory works. */
             const char *id = argv[i];
             if (!strcmp(id, "wifi") || !strcmp(id, "wlan")) id = "network";
-            else if (!strcmp(id, "info")) id = "about";
+            else if (!strcmp(id, "info") || !strcmp(id, "about")) id = "system";
+            else if (!strcmp(id, "universal-access") || !strcmp(id, "a11y")) id = "accessibility";
+            else if (!strcmp(id, "datetime") || !strcmp(id, "date")) id = "datetime";
+            else if (!strcmp(id, "user-accounts") || !strcmp(id, "users")) id = "users";
+            else if (!strcmp(id, "power")) id = "power";
             else if (!strcmp(id, "mouse") || !strcmp(id, "touchpad")) id = "touch";
             else if (!strcmp(id, "background")) id = "appearance";
             else if (!strcmp(id, "region")) id = "region";
@@ -904,6 +908,8 @@ static int command_line(GApplication *gapp, GApplicationCommandLine *cl, gpointe
  * (gsettings keys mirrored from our files, the night-light daemon) puts
  * it back. The files are the record; this makes the machine match them.
  * `--apply-night-light` does only that one, for the same reason. */
+static gboolean wake(gpointer p) { (void)p; return G_SOURCE_CONTINUE; }
+
 static int restore_all(void)
 {
     int n = 0;
@@ -912,6 +918,14 @@ static int restore_all(void)
             lp_panels[i]->restore();
             n++;
         }
+    /* Wait for what the restores started (gsettings, makoctl) - at most
+     * ten seconds, so a service that never answers cannot hold up the
+     * login. */
+    gint64 until = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+    guint tick = g_timeout_add(200, wake, NULL);
+    while (lp_jobs_pending() > 0 && g_get_monotonic_time() < until)
+        g_main_context_iteration(NULL, TRUE);
+    g_source_remove(tick);
     g_printerr("lp-settings: restored %d panels' settings\n", n);
     return 0;
 }

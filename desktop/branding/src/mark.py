@@ -362,8 +362,10 @@ SPLASH_LAYOUT = [
 # The splash's motion, from the design system's table (design/feel.md §2,
 # desktop/common/lp-motion.h). The logo arriving is the one long move -
 # the brief asks for about 400ms, the ceiling feel.md allows. The spinner
-# comes and goes as a sheet does. One revolution in 1.3 s is calm: a
-# faster spinner reads as urgency, and nothing is urgent at boot.
+# comes and goes in a sheet's times (critically damped here, where the
+# sheet spring is 0.95 - a difference no one can see in an opacity). One
+# revolution in 1.3 s is calm: a faster spinner reads as urgency, and
+# nothing is urgent at boot.
 SPLASH_MOTION = [
     ("LOGO_IN_MS", 400, "the logo fading in"),
     ("SPIN_DELAY_MS", 1000, "held back after the logo: a fast boot never shows it"),
@@ -384,38 +386,39 @@ def _splash_layout(A):
     A("")
 
 
+def _omega(ms):
+    """The natural frequency of a critically damped spring that has
+    settled by `ms` under lp-motion.c's rule: within 0.5% of the distance
+    and moving slower than 5% of it per second. (Position alone gives
+    w T = 7.43; the speed rule is what makes a short spring stiffer.)"""
+    import math
+    T = ms / 1000.0
+    u = 1.0
+    while (1 + u) * math.exp(-u) > 0.005 or u * u * math.exp(-u) / T > 0.05:
+        u += 0.0005
+    return u / T
+
+
 def _splash_motion(A):
     import math
     A("/* Motion (mark.py SPLASH_MOTION; design/feel.md §2). */")
     for k, v, what in SPLASH_MOTION:
         A(f"#define LP_MOTION_{k:14s} {v:6d}   /* {what} */")
     A("")
-    # A critically damped spring released from 0 towards 1:
-    #   x(t) = 1 - (1 + w t) e^(-w t)
-    # with w chosen so it is within 0.5% of 1 at the end of its time - the
-    # settle rule lp-motion.h uses. Sampled over that time, one curve
-    # serves every duration: the splash scales its clock, not the curve.
-    lo, hi = 1.0, 20.0
-    for _ in range(80):
-        mid = (lo + hi) / 2
-        if (1 + mid) * math.exp(-mid) > 0.005:
-            lo = mid
-        else:
-            hi = mid
-    a = hi
-    ease = [1 - (1 + a * i / 64) * math.exp(-a * i / 64) for i in range(65)]
-    ease = [int(round(min(1.0, e / ease[-1]) * 65535)) for e in ease]
-    A("/* LP_EASE[i]: that spring's position (0..65535) at i/64 of its settle")
-    A(f" * time; w*T = {a:.3f}. Interpolate between entries. */")
-    A("static const u16 LP_EASE[65] = {")
-    for i in range(0, 65, 13):
-        A("    " + " ".join(f"{v:5d}," for v in ease[i:i + 13]))
-    A("};")
+    # The fades are springs, x'' = -w^2 (x - target) - 2 w x', stepped in
+    # fixed point by splash.c. The splash has no floating point, so the
+    # one number each needs is solved here.
+    A("/* w for each of those springs (critically damped, settled by the time")
+    A(" * above under lp-motion.c's rule), in 1/16 rad/s. */")
+    for k in ("LOGO_IN_MS", "SPIN_IN_MS", "SPIN_OUT_MS", "REDUCED_MS"):
+        ms = dict((a, b) for a, b, _ in SPLASH_MOTION)[k]
+        A(f"#define LP_W16_{k[:-3]:10s} {int(round(_omega(ms) * 16)):5d}   /* {ms} ms */")
     A("")
     # the pulse: one smooth rise, (1 - cos(pi u)) / 2, used up then down
     wave = [int(round((1 - math.cos(math.pi * i / 64)) / 2 * 65535)) for i in range(65)]
     A("/* LP_WAVE[i]: (1 - cos(pi i/64)) / 2 in 0..65535 - a smooth rise from 0 to")
-    A(" * 1, run forwards then backwards for reduced motion's pulse. */")
+    A(" * 1: reduced motion's breathing, run forwards then backwards, and the")
+    A(" * cosine the spinner's head is placed with. */")
     A("static const u16 LP_WAVE[65] = {")
     for i in range(0, 65, 13):
         A("    " + " ".join(f"{v:5d}," for v in wave[i:i + 13]))

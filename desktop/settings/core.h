@@ -117,6 +117,10 @@ GtkWidget *row_switch(GtkWidget *list, const char *title, const char *detail,
                       gboolean on, GCallback cb, gpointer data);
 GtkWidget *row_button(GtkWidget *list, const char *title, const char *detail,
                       const char *label, GCallback cb, gpointer data);
+/* A row whose right side is any widget the panel made (a level bar, a
+ * pair of buttons). It becomes the row's control. */
+GtkWidget *row_widget(GtkWidget *list, const char *title, const char *detail,
+                      GtkWidget *widget);
 /* A row that opens something when tapped anywhere on it. */
 GtkWidget *row_chevron(GtkWidget *list, const char *title, const char *detail,
                        const char *value, GCallback cb, gpointer data);
@@ -126,6 +130,15 @@ GtkWidget *row_choice(GtkWidget *list, const char *title, const char *detail,
 GtkWidget *row_scale(GtkWidget *list, const char *title, const char *detail,
                      double min, double max, double step, double value,
                      GCallback cb, gpointer data);
+/* A drop-down over a fixed table of values: what is shown is the label in
+ * the screen's language, what the handler reads back (row_option_value
+ * on the drop-down it was handed) is the value to write. A current value
+ * that is not in the table selects `dflt` rather than pretending. */
+typedef struct { const char *value, *en, *ko; } lp_opt_t;
+GtkWidget  *row_options(GtkWidget *list, const char *title, const char *detail,
+                        const lp_opt_t *opts, const char *current, guint dflt,
+                        GCallback cb, gpointer data);
+const char *row_option_value(GObject *dropdown);
 /* A row whose right side is a group of toggle buttons, one of which is
  * active - for choices of two to four where a drop-down would hide them. */
 GtkWidget *row_segmented(GtkWidget *list, const char *title,
@@ -188,6 +201,8 @@ int      lp_run_full(const char *const *argv, const char *in,
  * panel), the callback is not called at all. owner may be NULL. */
 void     lp_run_async(const char *const *argv, const char *in,
                       GtkWidget *owner, lp_done_fn done, gpointer data);
+/* How many lp_run_async commands have not answered yet. */
+int      lp_jobs_pending(void);
 /* Fire and forget - for daemons (wlsunset) and apps (lp-disks). */
 gboolean lp_spawn_bg(const char *const *argv);
 
@@ -212,6 +227,10 @@ gboolean lp_is_admin(void);
  * one waiting; a newer argv replaces the waiting one. Failures go to the
  * banner. */
 void     lp_run_latest(const char *key, const char *const *argv);
+/* Run fn(data) once `key` has had no newer request for `ms`: for
+ * sliders whose value is a line in a file. data is freed with free_fn. */
+void     lp_later(const char *key, guint ms, void (*fn)(gpointer), gpointer data,
+                  GDestroyNotify free_fn);
 /* First line of err, or of out, for the banner. */
 char    *lp_first_line(const char *err, const char *out);
 

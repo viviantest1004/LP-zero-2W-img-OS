@@ -51,10 +51,9 @@
 #include "stdlib.h"
 #include "unistd.h"
 #include "net.h"
+#include "wpa4way.h"                    /* wpa_wipe, for the password */
 #include "../wpa/wpa-proto.h"
 
-#define AF_UNIX_   1
-#define MSG_NOSIGNAL_ 0x4000
 #define DIRENT_RECLEN 16
 #define DIRENT_NAME   19
 
@@ -78,50 +77,13 @@ static void pick_language(void)
 static char   reply[64 * 1024];
 static size_t reply_len;
 
-/* Send one request, collect the whole answer. false: the daemon is not
- * there (reply is then empty). */
+/* Send one request, collect the whole answer (wpa-proto.h). false: the
+ * daemon is not there (reply is then empty). */
 static bool ask(const char *line, int timeout_ms)
 {
-    reply_len = 0;
-    reply[0] = '\0';
-
-    struct { u16 family; char path[108]; } sa;
-    memset(&sa, 0, sizeof sa);
-    sa.family = AF_UNIX_;
-    strlcpy(sa.path, WPA_SOCK_PATH, sizeof sa.path);
-
-    long fd = lp_socket(AF_UNIX_, SOCK_STREAM | LP_SOCK_CLOEXEC, 0);
-    if (fd < 0)
-        return false;
-    if (lp_connect((int)fd, &sa, sizeof sa) < 0) {
-        lp_close((int)fd);
-        return false;
-    }
-    size_t n = strlen(line);
-    if (lp_sendto((int)fd, line, n, MSG_NOSIGNAL_, NULL, 0) != (long)n ||
-        lp_sendto((int)fd, "\n", 1, MSG_NOSIGNAL_, NULL, 0) != 1) {
-        lp_close((int)fd);
-        return false;
-    }
-    s64 deadline = lp_monotonic_ms() + timeout_ms;
-    for (;;) {
-        int left = (int)(deadline - lp_monotonic_ms());
-        if (left <= 0)
-            break;
-        lp_pollfd_t p = { (int)fd, LP_POLLIN, 0 };
-        if (lp_poll(&p, 1, left) <= 0)
-            break;
-        long got = lp_read((int)fd, reply + reply_len,
-                           sizeof reply - 1 - reply_len);
-        if (got <= 0)
-            break;
-        reply_len += (size_t)got;
-        if (reply_len >= sizeof reply - 1)
-            break;
-    }
-    reply[reply_len] = '\0';
-    lp_close((int)fd);
-    return reply_len > 0;
+    bool ok = wpa_ask(line, reply, sizeof reply, timeout_ms);
+    reply_len = strlen(reply);
+    return ok;
 }
 
 /* Split one line of the reply into TAB fields, in place. */
@@ -181,10 +143,11 @@ static int reply_fail(void)
     return 1;
 }
 
-/* Why the daemon is not there. */
+/* Why the daemon is not there: the fallback switch is on (and `wpa`
+ * became wpa_supplicant), or the service is not running. */
 static const char *no_daemon_code(void)
 {
-    if (lp_exists("/run/wpa_supplicant") || lp_exists("/var/run/wpa_supplicant"))
+    if (wpa_fallback_running(NULL, 0))
         return "fallback";
     return "no_daemon";
 }

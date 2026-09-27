@@ -49,39 +49,48 @@ logd
 #   init never gives up on this one, however often it fails.
 guard -r 32 -w 64
 
-# WiFi.
-#   Same story as guard: this was started from /etc/rc with -B, which
-#   backgrounds it, so nothing restarted it. On a board with no Ethernet
-#   port, wpa_supplicant dying means the machine is off the network with
-#   no way to reach it and nothing to notice - it has not crashed, so the
-#   watchdog is content, and dhcp cannot get an address on an interface
-#   that is not associated.
+# WiFi: LP's own, `wpa` (userland/wpa). You talk to it with `lp-net`;
+# `wifi` says at which step a connection stopped and why.
 #
-#   Without -B it stays in the foreground, which is what init needs.
-#   -i wlan0 is the only WiFi interface this board has.
+#   It replaced wpa_supplicant, under which the Pi associated and then
+#   the WPA2 four-way handshake never happened, with every cause outside
+#   wpa_supplicant ruled out. The same daemon runs the XPS's ath10k or
+#   BCM4350 and the Pi's brcmfmac: the kernel's own CONNECT does the
+#   association on both, and the handshake is ours.
 #
-#   The '?' asks whether there is a wlan0 at all before starting it. In
-#   a virtual machine there is not, and without the condition init spent
-#   its first minute restarting a program that printed a driver error
-#   and exited, twelve times over, about hardware that does not exist.
-#   -s sends its output to syslog, which here is the /dev/log socket
-#   logd listens on, so the lines end up in /data/log/messages and
-#   survive a reboot. Without it they went to the console and scrolled
-#   away, and /data/log/messages held not a single wireless line - so
-#   when the board associated and then dropped in a loop, the one line
-#   that says why (CTRL-EVENT-DISCONNECTED ... reason=15) was nowhere.
-#   It goes through /etc/wpa-start rather than straight to the binary,
-#   so that `touch /boot/wpa-debug` on the card - from any PC, no
-#   reflash - turns on the full frame-by-frame log on the next boot.
-#   When wireless will not associate there is no other way to ask for
-#   that, because asking needs the wireless.
-#   =wpa_supplicant names it. Without that init would call this service
-#   "sh", which is argv[0] of what it actually runs - and then
-#   `service status wpa_supplicant` answers that there is no such
-#   service on a machine that is running it, guard protects a name
-#   nobody recognises, and defend reports the SSH port as held by
-#   something init supervises as "sh".
-?/sys/class/net/wlan0 =wpa_supplicant sh /etc/wpa-start
+#   No '?' condition any more. The old line asked for /sys/class/net/wlan0
+#   because wpa_supplicant fails at once without it; `wpa` instead waits,
+#   asleep, for any wireless interface to appear - the desktop's is not
+#   called wlan0 (udev names it wlp2s0 or so), and a card whose firmware
+#   loads late would otherwise have been given up on.
+#
+#   Saved networks: /etc/lp-net/networks on the desktop, /data/lp-net/
+#   networks on a board - root-only, written atomically, rejoined at
+#   boot. /etc/wpa.conf, which rc builds from the card's
+#   wpa_supplicant.conf, is still read, so a Pi set up the old way keeps
+#   connecting.
+#
+#   `touch /boot/wpa-debug` on the card, from any PC, still turns on the
+#   frame-by-frame log (`wifi log`), because when the wireless will not
+#   connect there is no other way to ask for it.
+#
+#   THE FALLBACK - wpa_supplicant, kept as the way back. It is switched
+#   by a file, not by editing this line:
+#       /boot/wpa-supplicant       on the card, from any PC
+#       `sudo wifi fallback on`    (/etc/lp-net/fallback or
+#                                   /data/lp-net/fallback)
+#   With either present `wpa -d` becomes wpa_supplicant on the wireless
+#   interface, with /etc/wpa.conf and the saved networks (the file is in
+#   wpa_supplicant's format for this reason), and wpa_cli works. The
+#   service is still called "wpa", so `service restart wpa` applies a
+#   change of the switch. `wifi fallback off` switches back.
+wpa -d
+
+# Power profiles, the battery and the backlight (lp-tune). The only
+# writer of the backlight; it restores the last brightness at boot and
+# answers `lp-tune` and the top bar over its socket. On a board with no
+# battery or backlight it applies what exists and waits.
+?/bin/lp-tune lp-tune -d
 
 # The SSH server.
 #   -F  stay in the foreground. init can only supervise a child that

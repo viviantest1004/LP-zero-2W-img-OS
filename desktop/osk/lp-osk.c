@@ -291,23 +291,78 @@ static int key_kind(const char *s)
            !strcmp(s, "pointer") ? INPUT_POINTER : INPUT_UNKNOWN;
 }
 
+/* `lp-osk test tap a b c` types keys at a finger's pace: down, 40ms, up,
+ * 70ms, next. Taps fired back to back in one go would be nothing a person
+ * can do - the chatter filter rightly takes a second tap on the same key
+ * within 35ms for the screen bouncing - and they would never let a frame
+ * be drawn between two keys, which is where the previews and the fades
+ * live. So the reply comes when the last key is up. */
+typedef struct {
+    char             **keys;
+    int                i, n;
+    gboolean           down;
+    GSocketConnection *conn;
+    char               err[128];
+} TapJob;
+
+static void tap_finish(TapJob *j)
+{
+    GOutputStream *os = g_io_stream_get_output_stream(G_IO_STREAM(j->conn));
+    char *msg = j->err[0] ? g_strdup_printf("error: %s\n", j->err) : g_strdup("ok\n");
+    g_output_stream_write_all(os, msg, strlen(msg), NULL, NULL, NULL);
+    g_io_stream_close(G_IO_STREAM(j->conn), NULL, NULL);
+    g_object_unref(j->conn);
+    g_strfreev(j->keys);
+    g_free(msg);
+    g_free(j);
+}
+
+static gboolean tap_step(gpointer data)
+{
+    TapJob *j = data;
+    if (j->i >= j->n) {
+        tap_finish(j);
+        return G_SOURCE_REMOVE;
+    }
+    if (!ui_test_touch(1, j->down ? 2 : 0, j->keys[j->i], 0, 0, j->err, sizeof j->err)) {
+        if (j->down)          /* never leave a finger on the glass */
+            ui_test_touch(1, 3, "-", 0, 0, NULL, 0);
+        tap_finish(j);
+        return G_SOURCE_REMOVE;
+    }
+    j->down = !j->down;
+    if (!j->down)
+        j->i++;
+    g_timeout_add(j->down ? 40 : 70, tap_step, j);
+    return G_SOURCE_REMOVE;
+}
+
+static void tap_start(char **keys, int n, GSocketConnection *conn)
+{
+    TapJob *j = g_new0(TapJob, 1);
+    j->keys = g_new0(char *, n + 1);
+    for (int i = 0; i < n; i++)
+        j->keys[i] = g_strdup(keys[i]);
+    j->n = n;
+    j->conn = g_object_ref(conn);
+    tap_step(j);
+}
+
 /* `lp-osk test ...`: drives the keys through the same code a finger does. */
-static gboolean do_test(char **a, int n, GString *out)
+static gboolean do_test(char **a, int n, GString *out, GSocketConnection *conn,
+                        gboolean *deferred)
 {
     if (!test_mode) {
         reply(out, "error: test commands need LP_OSK_TEST=1 in the keyboard's environment\n");
         return FALSE;
     }
     if (n >= 1 && !strcmp(a[0], "tap")) {
-        char err[128];
-        for (int i = 1; i < n; i++) {
-            if (!ui_test_touch(1, 0, a[i], 0, 0, err, sizeof err) ||
-                !ui_test_touch(1, 2, a[i], 0, 0, err, sizeof err)) {
-                reply(out, "error: %s\n", err);
-                return FALSE;
-            }
+        if (!conn) {
+            reply(out, "error: tap needs a connection to answer on\n");
+            return FALSE;
         }
-        reply(out, "ok\n");
+        tap_start(a + 1, n - 1, conn);
+        *deferred = TRUE;
         return TRUE;
     }
     if (n >= 3 && !strcmp(a[0], "touch")) {
@@ -348,9 +403,11 @@ static gboolean do_test(char **a, int n, GString *out)
 
 /* One request: words separated by tabs, ended by a newline. The reply is
  * text; the connection closes after it (except for watch). */
-static gboolean handle(char **a, int n, GString *out, gboolean *keep)
+static gboolean handle(char **a, int n, GString *out, gboolean *keep,
+                       GSocketConnection *conn, gboolean *deferred)
 {
     *keep = FALSE;
+    *deferred = FALSE;
     const char *cmd = n ? a[0] : "daemon";   /* bare `lp-osk`: already running */
     if (!strcmp(cmd, "show") || !strcmp(cmd, "daemon")) {
         if (!strcmp(cmd, "show"))
@@ -380,7 +437,7 @@ static gboolean handle(char **a, int n, GString *out, gboolean *keep)
         *keep = TRUE;
         return TRUE;
     } else if (!strcmp(cmd, "test")) {
-        return do_test(a + 1, n - 1, out);
+        return do_test(a + 1, n - 1, out, conn, deferred);
     } else {
         reply(out, "error: unknown command \"%s\"\n", cmd);
         return FALSE;
@@ -400,20 +457,22 @@ static void client_line(GObject *src, GAsyncResult *res, gpointer data)
     gsize len;
     char *line = g_data_input_stream_read_line_finish_utf8(c->in, res, &len, NULL);
     GOutputStream *os = g_io_stream_get_output_stream(G_IO_STREAM(c->conn));
-    gboolean keep = FALSE;
+    gboolean keep = FALSE, deferred = FALSE;
     if (line) {
-        char **a = g_strsplit(line, "\t", 16);
+        char **a = g_strsplit(line, "\t", 64);
         int n = (int)g_strv_length(a);
         if (n == 1 && !*a[0])
             n = 0;
         GString *out = g_string_new(NULL);
-        handle(a, n, out, &keep);
+        handle(a, n, out, &keep, c->conn, &deferred);
         g_output_stream_write_all(os, out->str, out->len, NULL, NULL, NULL);
         g_string_free(out, TRUE);
         g_strfreev(a);
         g_free(line);
     }
-    if (keep) {
+    if (deferred) {
+        /* the test job holds the connection and answers on it */
+    } else if (keep) {
         watchers = g_list_prepend(watchers, g_object_ref(os));
         /* The connection object must outlive this request; it is dropped
          * with the watcher when a write to it fails. */
@@ -601,8 +660,8 @@ int main(int argc, char **argv)
 
     /* The request that started us is carried out like any other. */
     GString *out = g_string_new(NULL);
-    gboolean keep;
-    handle(argv + 1, argc - 1, out, &keep);
+    gboolean keep, deferred;
+    handle(argv + 1, argc - 1, out, &keep, NULL, &deferred);
     g_string_free(out, TRUE);
 
     gtk_main();

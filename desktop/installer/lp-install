@@ -13,6 +13,8 @@ serial console, from a script in a test, or by a person at a terminal.
     lp-install check [--json]        firmware facts that stop an install
     lp-install install --disk /dev/nvme0n1 [--yes] [--progress]
                        [--lang ko_KR.UTF-8] [--no-boot-entry]
+                       [--user NAME --fullname "Full Name" --password-stdin]
+                       [--hostname NAME] [--timezone Asia/Seoul]
 
 What an install writes (the disk layout contract, COMMON.md):
 
@@ -50,6 +52,17 @@ Why it is built the way it is:
     machine-id, no SSH host key, no installer marker. /etc/rc makes the
     first two on the first boot; the first-boot setup (lp-firstboot)
     runs once because the installer leaves /etc/lp/firstboot behind.
+
+  - The person's account is made here, in the copy, when the window
+    asked for it (--user, password on stdin): the stick's live account
+    (uid 1000, "user", no usable password) becomes theirs, with their
+    name, their password as a SHA-512 crypt hash, and group sudo; root
+    is locked. The same hash goes onto LP-RECOVERY as the recovery
+    password (/etc/lp/recovery-password, 0600), so the recovery shell
+    can still ask for it when LP-ROOT is too damaged to read. What was
+    answered here is recorded in /etc/lp/firstboot, and the first-boot
+    setup asks only the rest. The password is never on a command line,
+    where every process on the machine could read it from /proc.
 
   - Two firmware settings on the Dell XPS 15 9550 stop an install before
     it starts, and neither can be changed from here: Secure Boot (the
@@ -512,7 +525,7 @@ def copy_root(target, lo, hi):
                            % (rc, (err.strip().splitlines() or [""])[-1]))
 
 
-def make_fresh(target, lang):
+def make_fresh(target):
     """The copy becomes a machine nobody has used."""
     for p in ("etc/lp/installer-medium", "var/lib/dbus/machine-id",
               "etc/ssh/ssh_host_rsa_key", "etc/ssh/ssh_host_rsa_key.pub",
@@ -531,9 +544,284 @@ def make_fresh(target, lang):
     # Empty, not absent: /etc/rc writes one when it finds it empty, and
     # an empty file is what systemd-style tools read as "not yet made".
     write_atomic(os.path.join(target, "etc/machine-id"), "", 0o444)
-    write_atomic(os.path.join(target, "etc/lp/firstboot"),
-                 "# lp-firstboot runs while this file exists and removes it.\n"
-                 "lang=%s\n" % (lang or "en_US.UTF-8"))
+    # The installer's own leftovers: the live system's session state is
+    # the stick's, not the new machine's.
+    for p in ("var/log/lp-setup.log",):
+        try:
+            os.unlink(os.path.join(target, p))
+        except FileNotFoundError:
+            pass
+
+
+# ── the person's settings: account, language, place, name ─────────────
+#
+# Used twice: by `install`, on the new root before it is unmounted, and
+# by `configure --root /`, which the first-boot setup runs on the
+# installed system for whatever the installer did not ask. One
+# implementation, so the two cannot write different files.
+
+LOGIN_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+# The groups a person who owns the machine is in. sudo is the one that
+# makes them its administrator (COMMON.md, Administrator rights); the
+# rest open the devices a desktop uses when nothing like logind hands
+# them out per session.
+USER_GROUPS = ("sudo", "audio", "video", "input", "render", "plugdev",
+               "netdev", "users", "bluetooth")
+KEYBOARDS = {
+    # name: (xkb layout, xkb options)
+    "us": ("us", ""),
+    # Hangul on a keyboard with no 한/영 key (the XPS's US keyboard):
+    # right Alt becomes 한/영 and right Ctrl 한자, the usual Korean
+    # laptop arrangement. The composing itself is the input method's
+    # (lp-osk), for the physical keys and the on-screen ones alike.
+    "us,kr": ("us", "korean:ralt_hangul,korean:rctrl_hanja"),
+}
+FIRSTBOOT = "etc/lp/firstboot"
+
+
+def read_table(path):
+    try:
+        with open(path) as f:
+            return [ln.rstrip("\n").split(":") for ln in f if ln.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def write_table(path, rows, default_mode):
+    """Rewrite a colon file atomically, keeping its owner and mode."""
+    try:
+        st = os.stat(path)
+        mode, uid, gid = stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid
+    except FileNotFoundError:
+        mode, uid, gid = default_mode, 0, 0
+    write_atomic(path, "".join(":".join(r) + "\n" for r in rows), mode)
+    os.chown(path, uid, gid)
+
+
+def hash_password(pw):
+    """SHA-512 crypt ($6$), the only kind this system writes (pam_unix is
+    set to sha512 too, and libc's crypt6 checks it)."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        import crypt
+    h = crypt.crypt(pw, crypt.mksalt(crypt.METHOD_SHA512))
+    if not h or not h.startswith("$6$"):
+        raise RuntimeError("could not make a SHA-512 password hash")
+    return h
+
+
+def firstboot_done(root):
+    """The keys the installer already answered, from /etc/lp/firstboot."""
+    done = set()
+    for ln in read(os.path.join(root, FIRSTBOOT)).splitlines():
+        if ln.startswith("done="):
+            done.update(x for x in ln[5:].split(",") if x)
+    return done
+
+
+def write_firstboot(root, lang, done):
+    write_atomic(os.path.join(root, FIRSTBOOT),
+                 "# The first-boot setup (lp-firstboot) runs while this file exists,\n"
+                 "# asks what is not listed under done=, and removes the file.\n"
+                 "lang=%s\ndone=%s\n" % (lang or "en_US.UTF-8", ",".join(sorted(done))))
+
+
+def set_account(root, login, fullname, pwhash):
+    """The uid-1000 account becomes the person's; root is locked."""
+    if not LOGIN_RE.match(login or ""):
+        raise Refused("bad-user", "a user name is lower-case letters, digits, - and _,"
+                      " starting with a letter (%r)" % login)
+    etc = os.path.join(root, "etc")
+    pw = read_table(os.path.join(etc, "passwd"))
+    old = next((r for r in pw if len(r) > 6 and r[2] == "1000"), None)
+    for r in pw:
+        if r[0] == login and r is not old:
+            raise Refused("user-exists", "the name %s is taken by a system account" % login)
+    oldname = old[0] if old else None
+    oldhome = old[5] if old else None
+    home = "/home/" + login
+    shell = "/bin/lpsh" if os.path.exists(os.path.join(root, "bin/lpsh")) else "/bin/sh"
+    gecos = (fullname or login).replace(":", " ").replace("\n", " ") + ",,,"
+    row = [login, "x", "1000", "1000", gecos, home, shell]
+    if old:
+        old[:] = row
+    else:
+        pw.append(row)
+    write_table(os.path.join(etc, "passwd"), pw, 0o644)
+
+    def fix_groups(path, is_shadow):
+        rows = read_table(path)
+        if not rows:
+            return
+        mem = 3                 # the member list, in both files
+        have_own = False
+        for r in rows:
+            while len(r) < 4:
+                r.append("")
+            members = [m for m in r[mem].split(",") if m and m != oldname and m != login]
+            if (not is_shadow and r[2] == "1000") or (is_shadow and r[0] in (oldname, login)):
+                r[0] = login
+                have_own = True
+            if r[0] in USER_GROUPS:
+                members.append(login)
+            r[mem] = ",".join(members)
+        if not have_own:
+            rows.append([login, "x", "1000", ""] if not is_shadow else [login, "!", "", ""])
+        write_table(path, rows, 0o644 if not is_shadow else 0o640)
+
+    fix_groups(os.path.join(etc, "group"), False)
+    fix_groups(os.path.join(etc, "gshadow"), True)
+
+    sh = read_table(os.path.join(etc, "shadow"))
+    sh = [r for r in sh if r[0] not in (oldname, login)]
+    days = str(int(time.time() // 86400))
+    sh.append([login, pwhash, days, "0", "99999", "7", "", "", ""])
+    for r in sh:
+        while len(r) < 9:
+            r.append("")
+        if r[0] == "root":
+            # passwd -l: a "!" in front, so no password logs in as root;
+            # administration is sudo with the person's own password.
+            r[1] = r[1] if r[1].startswith("!") else "!" + r[1]
+        elif r[1] == "":
+            r[1] = "!"      # no account on this machine has an empty password
+    write_table(os.path.join(etc, "shadow"), sh, 0o640)
+
+    # The home directory follows the name. The desktop session still
+    # starts in /home/user (desktop/session/session-run), so that name
+    # stays as a link to the real one until the session reads the
+    # account's home from /etc/passwd.
+    if oldhome and oldhome != home:
+        src, dst = root + oldhome, root + home
+        if os.path.isdir(src) and not os.path.lexists(dst):
+            os.rename(src, dst)
+        if oldhome == "/home/user" and not os.path.lexists(src):
+            os.symlink(login, src)
+    os.makedirs(root + home, exist_ok=True)
+    os.chown(root + home, 1000, 1000)
+    os.chmod(root + home, 0o750)
+
+
+def user_home(root):
+    for r in read_table(os.path.join(root, "etc/passwd")):
+        if len(r) > 6 and r[2] == "1000":
+            return root + r[5]
+    return None
+
+
+def user_file(root, rel, data):
+    """A file in the person's home, theirs, written the durable way."""
+    home = user_home(root)
+    if not home or not os.path.isdir(home):
+        return
+    path = os.path.join(home, rel)
+    d = os.path.dirname(path)
+    parts = []
+    while d != home and not os.path.isdir(d):
+        parts.append(d)
+        d = os.path.dirname(d)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    for p in parts:
+        os.chown(p, 1000, 1000)
+    write_atomic(path, data, 0o644)
+    os.chown(path, 1000, 1000)
+
+
+def set_language(root, lang):
+    if lang not in ("en_US.UTF-8", "ko_KR.UTF-8"):
+        raise Refused("bad-lang", "language %r is not one this system carries" % lang)
+    write_atomic(os.path.join(root, "etc/default/locale"), "LANG=%s\n" % lang)
+    # Where the session reads the language from (per account, so it can
+    # be changed in Settings without an administrator).
+    user_file(root, ".config/lp/locale", lang + "\n")
+
+
+def set_hostname(root, name):
+    if not HOST_RE.match(name or ""):
+        raise Refused("bad-hostname", "a computer name is letters, digits and -,"
+                      " at most 63 (%r)" % name)
+    write_atomic(os.path.join(root, "etc/hostname"), name + "\n")
+    hosts = [ln for ln in read(os.path.join(root, "etc/hosts")).splitlines()
+             if not ln.startswith("127.0.1.1")]
+    if not any(ln.startswith("127.0.0.1") for ln in hosts):
+        hosts.insert(0, "127.0.0.1\tlocalhost")
+    hosts.insert(1, "127.0.1.1\t%s" % name)
+    write_atomic(os.path.join(root, "etc/hosts"), "\n".join(hosts) + "\n")
+
+
+def set_timezone(root, tz):
+    zi = os.path.join(root, "usr/share/zoneinfo")
+    if not tz or ".." in tz or tz.startswith("/") or not os.path.isfile(os.path.join(zi, tz)):
+        raise Refused("bad-timezone", "no time zone called %r" % tz)
+    link = os.path.join(root, "etc/localtime")
+    tmp = link + ".tmp"
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    os.symlink("/usr/share/zoneinfo/" + tz, tmp)
+    os.rename(tmp, link)
+    write_atomic(os.path.join(root, "etc/timezone"), tz + "\n")
+
+
+def set_keyboard(root, kb):
+    if kb not in KEYBOARDS:
+        raise Refused("bad-keyboard", "keyboard %r is not one of %s" % (kb, ", ".join(KEYBOARDS)))
+    layout, opts = KEYBOARDS[kb]
+    write_atomic(os.path.join(root, "etc/default/keyboard"),
+                 'XKBMODEL="pc105"\nXKBLAYOUT="%s"\nXKBVARIANT=""\nXKBOPTIONS="%s"\n'
+                 'BACKSPACE="guess"\n' % (layout, opts))
+    # The session's own copy, in the shape the Settings app writes it.
+    user_file(root, ".config/sway/input.conf",
+              "# Written by the LP setup; Settings -> Keyboard changes it.\n"
+              "input * {\n    xkb_layout %s\n%s}\n"
+              % (layout, "    xkb_options %s\n" % opts if opts else ""))
+
+
+def validate(root, a, password):
+    """Refuse bad answers before anything is written: a disk erased and
+    then refused for a typo in the computer's name is the worst order."""
+    if a.user:
+        if not LOGIN_RE.match(a.user):
+            raise Refused("bad-user", "a user name is lower-case letters, digits, - and _,"
+                          " starting with a letter (%r)" % a.user)
+        if not password:
+            raise Refused("no-password", "every account on LP has a password")
+    if a.hostname and not HOST_RE.match(a.hostname):
+        raise Refused("bad-hostname", "a computer name is letters, digits and -,"
+                      " at most 63 (%r)" % a.hostname)
+    if a.timezone and (".." in a.timezone or not os.path.isfile(
+            os.path.join(root, "usr/share/zoneinfo", a.timezone))):
+        raise Refused("bad-timezone", "no time zone called %r" % a.timezone)
+    if getattr(a, "keyboard", None) and a.keyboard not in KEYBOARDS:
+        raise Refused("bad-keyboard", "keyboard %r is not one of %s"
+                      % (a.keyboard, ", ".join(KEYBOARDS)))
+
+
+def configure(root, a, pwhash=None):
+    """Apply the answers in a (argparse namespace) to the system at root.
+    Returns the set of first-boot keys now answered."""
+    done = firstboot_done(root)
+    if a.user:
+        if not pwhash:
+            raise Refused("no-password", "every account on LP has a password")
+        set_account(root, a.user, a.fullname, pwhash)
+        done.add("account")
+    if a.lang:
+        set_language(root, a.lang)
+        done.add("lang")
+    if a.hostname:
+        set_hostname(root, a.hostname)
+        done.add("hostname")
+    if a.timezone:
+        set_timezone(root, a.timezone)
+        done.add("timezone")
+    if getattr(a, "keyboard", None):
+        set_keyboard(root, a.keyboard)
+        done.add("keyboard")
+    return done
 
 
 def write_fstab(target, root_uuid, esp_uuid):
@@ -580,34 +868,61 @@ def fill_esp(esp_dev, esp_mnt, root_uuid):
         for extra in ("EFI/LP/initrd.img", "startup.nsh", "README.txt"):
             if have_src and os.path.isfile(s(extra)):
                 shutil.copyfile(s(extra), os.path.join(esp_mnt, extra))
-        # What the boot menu passes to the kernel for a normal boot. The
+        # What the boot menu passes to the kernel for a normal boot: the
+        # stick's line with its root= replaced by this disk's. The
         # kernel's built-in line comes first and this is appended, and
-        # the last root= wins - so this one names this disk's root.
-        cmd = "root=PARTUUID=%s\n" % root_uuid
+        # the last root= wins (x86 prepends the compiled-in line; preinit
+        # reads the last root=) - so this one names this disk's root and
+        # nothing else's.
+        base = ""
+        for p in ("EFI/LP/cmdline.txt", "cmdline.txt"):
+            if have_src and os.path.isfile(s(p)):
+                base = read(s(p))
+                break
+        words = [w for w in base.split() if not w.startswith("root=")]
+        cmd = " ".join(["root=PARTUUID=%s" % root_uuid] + words) + "\n"
         for p in ("EFI/LP/cmdline.txt", "cmdline.txt"):
             with open(os.path.join(esp_mnt, p), "w") as f:
                 f.write(cmd)
+                f.flush()
+                os.fsync(f.fileno())
         return os.path.isfile(os.path.join(esp_mnt, "EFI/LP/lpboot.efi"))
     finally:
         if have_src:
             subprocess.run([tool("umount"), src], stderr=subprocess.DEVNULL)
 
 
-def fill_recovery(rec_dev, rec_mnt):
-    """The recovery system, copied from the stick's own LP-RECOVERY."""
+def fill_recovery(rec_dev, rec_mnt, pwhash):
+    """The recovery system, copied from the stick's own LP-RECOVERY.
+
+    tools/mkrecovery.sh (boot-recovery track) built that partition's tree
+    when the image was made - the small recovery root and the /reinstall
+    payload of this very system - so the copy is the whole job, plus the
+    one thing only an install knows: the administrator's password hash
+    (/etc/lp/recovery-password, 0600, the contract in COMMON.md). The
+    recovery shell asks for it when LP-ROOT cannot be read."""
     src_dev = running_part(name_want="LP-RECOVERY")
-    if not src_dev:
+    have = False
+    if src_dev:
+        src = os.path.join(WORK, "recovery-src")
+        mount(src_dev, src, "ro")
+        try:
+            run([tool("rsync"), "-aHAX", "--numeric-ids", src + "/", rec_mnt + "/"])
+        finally:
+            subprocess.run([tool("umount"), src], stderr=subprocess.DEVNULL)
+        have = os.listdir(rec_mnt) not in ([], ["lost+found"])
+    if not have:
         with open(os.path.join(rec_mnt, "README.txt"), "w") as f:
             f.write("This LP build carried no recovery system, so this partition\n"
-                    "is empty. Installing from a newer LP USB stick fills it.\n")
-        return False
-    src = os.path.join(WORK, "recovery-src")
-    mount(src_dev, src, "ro")
-    try:
-        run([tool("rsync"), "-aHAX", "--numeric-ids", src + "/", rec_mnt + "/"])
-    finally:
-        subprocess.run([tool("umount"), src], stderr=subprocess.DEVNULL)
-    return True
+                    "holds only the recovery password. Installing from a newer LP\n"
+                    "USB stick fills it.\n")
+    if pwhash:
+        d = os.path.join(rec_mnt, "etc/lp")
+        os.makedirs(d, exist_ok=True)
+        os.chmod(d, 0o755)
+        write_atomic(os.path.join(d, "recovery-password"), pwhash + "\n", 0o600)
+        os.chown(os.path.join(d, "recovery-password"), 0, 0)
+    return have
 
 
 # ── the firmware boot entry ───────────────────────────────────────────
@@ -755,7 +1070,10 @@ def boot_entry(disk, esp_no, esp_guid, root_uuid, have_menu):
 
 # ── the install, in order ─────────────────────────────────────────────
 
-def install(disk_path, yes, lang, boot_entry_wanted):
+def install(a, password):
+    disk_path, yes, lang, boot_entry_wanted = a.disk, a.yes, a.lang, not a.no_boot_entry
+    validate("/", a, password)
+    pwhash = hash_password(password) if a.user else None
     info, disks = checks()
     name = os.path.basename(os.path.realpath(disk_path))
     disk = next((d for d in disks if d["name"] == name), None)
@@ -842,14 +1160,18 @@ def install(disk_path, yes, lang, boot_entry_wanted):
             p = os.path.join(target, d)
             os.makedirs(p, exist_ok=True)
             os.chmod(p, mode)
-        make_fresh(target, lang)
+        make_fresh(target)
         write_fstab(target, root_guid, esp_guid)
+        # The person's answers, into the copy. What was not asked here
+        # (a scripted install with no --user) the first boot asks.
+        done = configure(target, a, pwhash)
+        write_firstboot(target, lang, done)
         progress(89, "copy")
 
         # 4. The recovery system.
         say("STEP", "recovery", "Setting up recovery")
         mount(p_rec, rec_mnt)
-        has_recovery = fill_recovery(p_rec, rec_mnt)
+        has_recovery = fill_recovery(p_rec, rec_mnt, pwhash)
         progress(94, "recovery")
 
         # 5. Boot.
@@ -880,6 +1202,27 @@ def install(disk_path, yes, lang, boot_entry_wanted):
 
 # ── the command line ──────────────────────────────────────────────────
 
+def read_password(a):
+    """The password, from stdin - never argv, which /proc shows to all."""
+    if not getattr(a, "password_stdin", False):
+        return None
+    pw = sys.stdin.readline()
+    return pw[:-1] if pw.endswith("\n") else pw
+
+
+def add_answers(p):
+    """The options install and configure share."""
+    p.add_argument("--lang", default=None,
+                   help="en_US.UTF-8 (the default) or ko_KR.UTF-8")
+    p.add_argument("--user", help="the login name of the person's account")
+    p.add_argument("--fullname", default="", help="their name as they write it")
+    p.add_argument("--password-stdin", action="store_true",
+                   help="read the account's password from the first line of stdin")
+    p.add_argument("--hostname", help="the computer's name")
+    p.add_argument("--timezone", help="e.g. Asia/Seoul")
+    p.add_argument("--keyboard", choices=sorted(KEYBOARDS))
+
+
 def main():
     global PROGRESS
     ap = argparse.ArgumentParser(prog="lp-install",
@@ -894,10 +1237,16 @@ def main():
     a.add_argument("--yes", action="store_true", help="do not ask; for scripts")
     a.add_argument("--progress", action="store_true",
                    help="machine-readable progress lines (for lp-installer)")
-    a.add_argument("--lang", default="en_US.UTF-8",
-                   help="language the first-boot setup starts in")
     a.add_argument("--no-boot-entry", action="store_true",
                    help="leave the firmware's boot list alone")
+    add_answers(a)
+    a = sub.add_parser("configure",
+                       help="apply account, language, time zone, name to a system"
+                            " (the first-boot setup's backend)")
+    a.add_argument("--root", default="/")
+    a.add_argument("--finish", action="store_true",
+                   help="the first-boot setup is over: remove /etc/lp/firstboot")
+    add_answers(a)
     args = ap.parse_args()
 
     if args.cmd == "list":
@@ -923,11 +1272,32 @@ def main():
         return 1 if info["problems"] else 0
 
     if os.geteuid() != 0:
-        print("lp-install: installing needs root (sudo lp-install ...)", file=sys.stderr)
+        print("lp-install: this needs root (sudo lp-install ...)", file=sys.stderr)
         return 1
-    PROGRESS = args.progress
+    PROGRESS = getattr(args, "progress", False)
     try:
-        install(args.disk, args.yes, args.lang, not args.no_boot_entry)
+        password = read_password(args)
+        if args.cmd == "configure":
+            root = os.path.realpath(args.root)
+            validate(root, args, password)
+            done = configure(root, args, hash_password(password) if args.user else None)
+            if args.finish:
+                try:
+                    os.unlink(os.path.join(root, FIRSTBOOT))
+                except FileNotFoundError:
+                    pass
+                fd = os.open(os.path.join(root, "etc/lp"), os.O_RDONLY | os.O_DIRECTORY)
+                os.fsync(fd)
+                os.close(fd)
+            elif os.path.exists(os.path.join(root, FIRSTBOOT)):
+                lang = args.lang or next((ln[5:] for ln in read(os.path.join(
+                    root, FIRSTBOOT)).splitlines() if ln.startswith("lang=")), "")
+                write_firstboot(root, lang, done)
+            say("DONE", "configured=%s" % ",".join(sorted(done)))
+            return 0
+        if args.lang is None:
+            args.lang = "en_US.UTF-8"
+        install(args, password)
     except Refused as e:
         say("ERROR", e.key, str(e)) if PROGRESS else print("lp-install: %s" % e, file=sys.stderr)
         return 2

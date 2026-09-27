@@ -10,28 +10,35 @@
 #
 # It is the wrong answer for a machine somebody sits in front of. This
 # script builds the other kind, on a GPT disk because that is what a
-# UEFI PC boots:
+# UEFI PC boots, in the layout every LP disk has (COMMON.md, "Disk
+# layout and recovery" - the contract with the boot-recovery and disks
+# tracks):
 #
-#   p1  FAT32, 256MB, the EFI system partition - the kernel as
-#       \EFI\BOOT\BOOTX64.EFI, and the files a person edits from
-#       another computer
-#   p2  ext4, everything else, labelled LPROOT and typed "Linux root
-#       (x86-64)" - the actual root
+#   p1  LP-ESP       FAT32  512 MiB  the EFI system partition:
+#                                    \EFI\BOOT\BOOTX64.EFI  the boot menu
+#                                    (lpboot.efi) or, until there is one,
+#                                    the kernel itself;
+#                                    \EFI\LP\vmlinuz.efi, cmdline.txt,
+#                                    lpboot.efi; the files a person edits
+#                                    from another computer
+#   p2  LP-RECOVERY  ext4     6 GiB  the recovery system
+#                                    (tools/mkrecovery.sh fills it)
+#   p3  LP-ROOT      ext4     rest   the root, typed "Linux root (x86-64)"
 #
-# Both partitions get fresh random GUIDs on every build (write-gpt.py),
+# Every partition gets a fresh random GUID on every build (write-gpt.py),
 # and lp-install gives the disk it installs to fresh ones again. That is
 # what lets preinit tell this disk's root from another LP disk's when
 # both are plugged in - the USB stick an installation was made from is
-# usually still in the laptop at the first reboot.
+# usually still in the laptop at the first reboot. \EFI\LP\cmdline.txt
+# names the root by that PARTUUID.
 #
 # The kernel it builds carries a tiny initramfs holding one program,
-# preinit, whose only job is to find p2, mount it and switch_root into
-# it. Everything after that runs from disk: /etc survives, packages
-# install into /usr rather than an overlay, and the root can be bigger
-# than the RAM.
+# preinit, whose only job is to find p3, check it, mount it and
+# switch_root into it. Everything after that runs from disk: /etc
+# survives, packages install into /usr rather than an overlay, and the
+# root can be bigger than the RAM.
 #
-#   ./tools/mkdisk.sh                 the console image, 1GB
-#   SIZE_GB=16 ./tools/mkdisk.sh      bigger
+#   ./tools/mkdisk.sh                 the console image (our userland only)
 #   tools/mkdesktop.sh                the desktop image (it calls this)
 #
 # The result is written with dd, the same as the other images:
@@ -41,32 +48,28 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 source "${REPO_ROOT}/tools/common.sh"
 
-# 1GB, not 4.
+# Sizes. The ESP and the recovery partition are fixed by the layout;
+# the root is what goes in it plus room, and nothing more - the image is
+# built sparse and compressed, but it is still what somebody downloads
+# and dd's onto a stick, and an installed system gets a root partition
+# the size of its whole disk from lp-install anyway.
 #
-# The console root filesystem that goes in it is nine megabytes, so the
-# image only has to be big enough to hold what it ships with. (expandfs,
-# which grows the root to the end of the disk on the first boot, reads
-# an MBR; on this GPT disk it stops without writing anything. The
-# desktop image is sized with room to spare for that reason, and an
-# installed system gets a root partition the size of its whole disk
-# from lp-install.)
-#
-# Getting this wrong is paid for twice at build time: the intermediate
-# filesystem is built beside the image at full size, so a 4GB image
-# means writing eight gigabytes to package nine megabytes, and it is
-# also four gigabytes for somebody to download.
-#
-#   SIZE_GB=8 ./tools/mkdisk.sh    if a big one is wanted anyway
-SIZE_GB="${SIZE_GB:-1}"
-# The merged desktop root is about 3GB, so the console default of 1GB
-# does not fit it. mkdesktop.sh sets this.
+#   LP_ROOT_MB=6000 ./tools/mkdisk.sh    a root partition of this size
+#                                        (mkdesktop.sh sets it)
 SECTOR=512
-ESP_MB=256
-ESP_START=8192                          # 4MiB in, as the other images do
+ESP_MB=512
+RECOVERY_MB="${LP_RECOVERY_MB:-6144}"
+ESP_START=2048                          # 1MiB in, where every tool aligns
 ESP_SECTORS=$(( ESP_MB * 1024 * 1024 / SECTOR ))
-ROOT_START=$(( ESP_START + ESP_SECTORS ))
+REC_START=$(( ESP_START + ESP_SECTORS ))
+REC_SECTORS=$(( RECOVERY_MB * 1024 * 1024 / SECTOR ))
+ROOT_START=$(( REC_START + REC_SECTORS ))
 
-ROOT_LABEL="LPROOT"
+# The filesystem label and the GPT names are the layout contract's. The
+# root answered to LPROOT before the recovery partition existed; preinit
+# accepts both spellings, so older disks and kernels still meet.
+ROOT_LABEL="LP-ROOT"
+REC_LABEL="LP-RECOVERY"
 
 # The kernel command line, in one place: it is compiled into the kernel
 # and a copy goes onto the FAT partition, and two spellings of it were
@@ -103,8 +106,16 @@ ROOT_LABEL="LPROOT"
 # Not here, on purpose: i915.fastboot (6.12 has no such parameter - it
 # always reads back the firmware's mode), preempt=full (the kernel is
 # built with PREEMPT and boots in full mode already), i915.enable_guc
-# (Skylake loads neither GuC nor HuC unless told to, and nothing here
-# needs them).
+# (Skylake loads neither GuC nor HuC unless told to; setting it taints
+# the kernel, and HuC only serves video encoding - the blobs are in the
+# initramfs for whoever wants it anyway, see tools/fetch-pc-fw.sh).
+#
+# A boot menu that starts the kernel as an EFI application adds to this
+# line rather than replacing it: x86 puts the compiled-in line first and
+# the loader's options after it (CMDLINE_OVERRIDE is off), and for root=,
+# loglevel= and the rest the last one given wins. So the recovery entry
+# passes root=PARTLABEL=LP-RECOVERY lp.mode=recovery and gets exactly
+# that, and initrd=\EFI\LP\initrd.img there is read by the EFI stub.
 KERNEL_CMDLINE="root=LABEL=${ROOT_LABEL} rw console=tty0 console=ttyS0,115200 quiet loglevel=3 vt.global_cursor_default=0 fbcon=font:TER16x32"
 
 # The same label the RAM-live images use, because /etc/rc mounts /boot by
@@ -213,16 +224,10 @@ log "$(stat -c%s "$BZIMAGE") bytes"
 # ── 3. the root filesystem ───────────────────────────────────────
 #
 # Built from the same rootfs directory the RAM-live image uses, so there
-# is one userland and not two. What differs is where it ends up and what
-# /etc/rc does when it finds itself on a writable root.
-step "루트 파일시스템 (ext4, ${ROOT_LABEL})"
-[[ -d "$ROOTFS" ]] || die "${ROOTFS} 가 없습니다. mkrootfs.sh 를 먼저."
-
-TOTAL_SECTORS=$(( SIZE_GB * 1024 * 1024 * 1024 / SECTOR ))
-# GPT keeps a backup of its table in the last 33 sectors of the disk, so
-# the root stops short of them; rounded down to a whole MiB, which is
-# what every partitioning tool aligns to and costs under a megabyte.
-ROOT_SECTORS=$(( (TOTAL_SECTORS - 34 - ROOT_START + 1) / 2048 * 2048 ))
+# is one userland and not two - or from the merged desktop root that
+# mkdesktop.sh assembles (LP_ROOTFS_OVERRIDE).
+step "root filesystem (ext4, ${ROOT_LABEL})"
+[[ -d "$ROOTFS" ]] || die "${ROOTFS} is missing - userland/mkrootfs.sh first"
 
 # 들어갈 것이 자리보다 크면 여기서 멈춘다.
 #
@@ -230,14 +235,17 @@ ROOT_SECTORS=$(( (TOTAL_SECTORS - 34 - ROOT_START + 1) / 2048 * 2048 ))
 # writing file <아무 파일 이름>" 이라고만 말한다. 그 이름은 마침 마지막
 # 으로 쓰려던 파일일 뿐이라, 읽는 사람은 그 파일이 잘못된 줄 알고 한참
 # 을 엉뚱한 데서 찾는다. 무엇이 부족한지는 여기서 이미 알 수 있다.
-NEED_KB=$(du -sk "$ROOTFS" | cut -f1)
-HAVE_KB=$(( ROOT_SECTORS * SECTOR / 1024 ))
+NEED_KB=$(du -skx "$ROOTFS" | cut -f1)
+ROOT_MB="${LP_ROOT_MB:-$(( NEED_KB * 5 / 4 / 1024 + 256 ))}"
+ROOT_SECTORS=$(( ROOT_MB * 1024 * 1024 / SECTOR ))
 # ext4 자체의 메타데이터에 5% 쯤. 여유가 없으면 마지막에 가서 터진다.
-if (( NEED_KB * 105 / 100 > HAVE_KB )); then
-    want=$(( (NEED_KB * 105 / 100 + ESP_MB * 1024) / 1024 / 1024 + 1 ))
-    die "루트가 파티션보다 큽니다: $(( NEED_KB / 1024 ))MiB 를 $(( HAVE_KB / 1024 ))MiB 에 넣을 수 없습니다.
-       SIZE_GB=${want} ./tools/mkdisk.sh"
+if (( NEED_KB * 105 / 100 > ROOT_MB * 1024 )); then
+    die "the root does not fit: $(( NEED_KB / 1024 ))MiB into ${ROOT_MB}MiB.
+       LP_ROOT_MB=$(( NEED_KB * 5 / 4 / 1024 + 256 )) ./tools/mkdisk.sh"
 fi
+# The backup GPT sits in the last 33 sectors; a MiB of tail keeps the
+# root aligned and clear of it.
+TOTAL_SECTORS=$(( ROOT_START + ROOT_SECTORS + 2048 ))
 
 mkdir -p "$OUT_DIR"
 rm -f "$IMAGE"
@@ -247,32 +255,107 @@ truncate -s $(( TOTAL_SECTORS * SECTOR )) "$IMAGE"
 # intermediate file.
 #
 # The obvious way is to mkfs a separate file and dd it in, and it costs
-# twice the disk and twice the time: a 1GB image needs a 1GB filesystem
-# beside it, and then every block is read and written again. mke2fs
-# takes -E offset= precisely so that this is unnecessary. On a machine
-# with room to spare that is merely wasteful; on one without, it is the
+# twice the disk and twice the time: mke2fs takes -E offset= precisely so
+# that this is unnecessary. On a machine without room to spare it is the
 # difference between a build that finishes and one that fills the disk
 # at 90% and leaves a corrupt image behind.
 #
-# -d takes the directory straight in, which keeps ownership and modes
-# without a loop mount - and a loop mount needs privileges a build
-# should not assume it has.
+# -d takes the directory straight in, which keeps ownership, modes, hard
+# links and extended attributes (file capabilities: ping's right to open
+# a raw socket lives there) without a loop mount - and a loop mount needs
+# privileges a build should not assume it has.
 mkfs.ext4 -q -F -L "$ROOT_LABEL" -m 1 \
     -E offset=$(( ROOT_START * SECTOR )) \
     -d "$ROOTFS" \
     "$IMAGE" $(( ROOT_SECTORS * SECTOR / 1024 ))k
-log "$(( ROOT_SECTORS * SECTOR / 1024 / 1024 ))MiB  (이미지 안에 직접)"
+log "${ROOT_MB}MiB, $(( NEED_KB / 1024 ))MiB in it"
 
-# ── 4. the EFI system partition ──────────────────────────────────
-step "EFI 시스템 파티션 (FAT32, ${ESP_LABEL})"
+# ── 4. the recovery partition ────────────────────────────────────
+#
+# tools/mkrecovery.sh (boot-recovery track) builds its tree from the
+# root that was just packed: a small recovery system of our userland and
+# the disk tools, and /reinstall with this very system as a payload.
+# Until that script exists the partition is made empty, with a note, so
+# the layout - and everything that finds partitions by it - is already
+# the final one.
+step "recovery partition (ext4, ${REC_LABEL})"
+REC_TREE="${LPZERO_WORK}/recovery-tree"
+rm -rf "$REC_TREE"
+mkdir -p "$REC_TREE"
+MKREC="${REPO_ROOT}/tools/mkrecovery.sh"
+if [[ -x "$MKREC" ]]; then
+    "$MKREC" --root "$ROOTFS" --out "$REC_TREE" --kernel "${KERNEL_OUT}/bzImage" ||
+        die "tools/mkrecovery.sh failed"
+    log "tools/mkrecovery.sh: $(du -sh "$REC_TREE" | cut -f1)"
+else
+    printf 'LP recovery partition.\n\nThis image was built before tools/mkrecovery.sh existed, so the\nrecovery system is not here yet. The partition is in its place so the\ndisk layout is already the final one.\n' \
+        > "$REC_TREE/README.txt"
+    log "no tools/mkrecovery.sh yet - empty, with a README"
+fi
+mkfs.ext4 -q -F -L "$REC_LABEL" -m 0 \
+    -E offset=$(( REC_START * SECTOR )) \
+    -d "$REC_TREE" \
+    "$IMAGE" $(( REC_SECTORS * SECTOR / 1024 ))k
+rm -rf "$REC_TREE"
+
+# ── 5. the partition table ───────────────────────────────────────
+#
+# GPT, not MBR: the partition types say what each one is, and each
+# partition gets a GUID of its own that preinit, the boot menu and the
+# installed system's boot entry can name. Written before the ESP is
+# filled, because the ESP's cmdline.txt names the root by its PARTUUID.
+# The recovery partition is typed "Linux filesystem", not "Linux root":
+# preinit takes the partition typed root on the boot disk as the root.
+step "GPT"
+PARTUUIDS="$(python3 "${REPO_ROOT}/tools/write-gpt.py" "$IMAGE" \
+    "${ESP_START}:${ESP_SECTORS}:esp:LP-ESP" \
+    "${REC_START}:${REC_SECTORS}:linux:${REC_LABEL}" \
+    "${ROOT_START}:${ROOT_SECTORS}:root:${ROOT_LABEL}")"
+while read -r n u; do log "p${n} PARTUUID=${u}"; done <<< "$PARTUUIDS"
+ROOT_PARTUUID="$(awk '$1 == 3 { print $2 }' <<< "$PARTUUIDS")"
+
+# ── 6. the EFI system partition ──────────────────────────────────
+step "EFI system partition (FAT32, ${ESP_LABEL})"
 ESP_IMG="${OUT_DIR}/.esp.img"
 rm -f "$ESP_IMG"
 truncate -s $(( ESP_SECTORS * SECTOR )) "$ESP_IMG"
 mkfs.vfat -F 32 -n "$ESP_LABEL" "$ESP_IMG" >/dev/null
+esp_put() { mcopy -o -i "$ESP_IMG" "$1" "::$2"; }
+esp_text() {  # esp_text <path on the ESP>  (stdin, CRLF for other OSes)
+    local t="${OUT_DIR}/.esp-text"
+    sed 's/$/\r/' > "$t"
+    esp_put "$t" "$1"
+    rm -f "$t"
+}
 
-mmd -i "$ESP_IMG" ::EFI ::EFI/BOOT
-mcopy -o -i "$ESP_IMG" "$BZIMAGE" ::EFI/BOOT/BOOTX64.EFI
-log "EFI/BOOT/BOOTX64.EFI"
+mmd -i "$ESP_IMG" ::EFI ::EFI/BOOT ::EFI/LP
+esp_put "$BZIMAGE" EFI/LP/vmlinuz.efi
+
+# The boot menu (boot-recovery track, boot/efi/): "LP" and "LP
+# Recovery", a timeout, the bootcount fallback. It reads
+# \EFI\LP\cmdline.txt for a normal boot. Until it is built, the kernel
+# is its own loader at the fallback path and boots with its built-in
+# command line - which finds this disk's root through the firmware's
+# BootCurrent (preinit, rule 3).
+LPBOOT="${LP_BOOT_EFI:-${REPO_ROOT}/boot/efi/lpboot.efi}"
+if [[ -f "$LPBOOT" ]]; then
+    esp_put "$LPBOOT" EFI/LP/lpboot.efi
+    esp_put "$LPBOOT" EFI/BOOT/BOOTX64.EFI
+    log "EFI/BOOT/BOOTX64.EFI = lpboot.efi (the boot menu)"
+else
+    esp_put "$BZIMAGE" EFI/BOOT/BOOTX64.EFI
+    log "EFI/BOOT/BOOTX64.EFI = the kernel (no boot/efi/lpboot.efi yet)"
+fi
+
+# The normal boot's command line: the compiled-in one with its root=
+# replaced by this disk's PARTUUID. The menu passes it as the kernel's
+# load options; x86 appends them to the built-in line and the last
+# root= wins. lp-install writes the installed disk's own.
+CMDLINE_FILE="root=PARTUUID=${ROOT_PARTUUID} ${KERNEL_CMDLINE#root=* }"
+printf '%s\n' "$CMDLINE_FILE" | esp_text EFI/LP/cmdline.txt
+# A copy at the top, for a person with a card reader; the same line.
+printf '%s\n' "$CMDLINE_FILE" | esp_text cmdline.txt
+log "EFI/LP/cmdline.txt: root=PARTUUID=${ROOT_PARTUUID}"
 
 # startup.nsh, and it is not belt and braces.
 #
@@ -281,29 +364,29 @@ log "EFI/BOOT/BOOTX64.EFI"
 # NVRAM: OVMF with fresh variables walks its own boot list, finds
 # nothing it put there itself, and falls through to the EFI shell -
 # which leaves a machine sitting at a Shell> prompt that most people
-# will read as "it does not boot".
-#
-# The shell runs startup.nsh without being asked. So the one firmware
-# path that looks like a dead end becomes the one that boots.
-printf 'fs0:\r\nEFI\\BOOT\\BOOTX64.EFI\r\n' > "${OUT_DIR}/.startup.nsh"
-mcopy -o -i "$ESP_IMG" "${OUT_DIR}/.startup.nsh" ::startup.nsh
-rm -f "${OUT_DIR}/.startup.nsh"
-log "startup.nsh (NVRAM 이 비어 있을 때의 길)"
+# will read as "it does not boot". The shell runs startup.nsh without
+# being asked, so the one firmware path that looks like a dead end
+# becomes the one that boots.
+printf 'fs0:\nEFI\\BOOT\\BOOTX64.EFI\n' | esp_text startup.nsh
 
 # README.txt: what a person looking at this partition from Windows or a
 # Mac needs to know, and the two firmware settings that stop the XPS
-# from booting this at all. Both are things nothing on the stick can
-# fix or even detect before the kernel is running - with Secure Boot on
-# the firmware refuses the unsigned kernel before it starts, and with
-# the SATA controller in RAID mode the NVMe disk is invisible to Linux.
-# lp-install says the same on screen when it detects either.
-cat > "${OUT_DIR}/.readme.txt" <<'README'
+# from booting or installing this at all. Neither can be fixed from the
+# stick, and one cannot even be detected before the kernel is running:
+# with Secure Boot on the firmware refuses the unsigned kernel before it
+# starts, and with the SATA controller in RAID mode the NVMe disk is
+# invisible to Linux. lp-install says the same on screen when it
+# detects either.
+esp_text README.txt <<'README'
 linux-LP - EFI system partition
 ===============================
 
-EFI/BOOT/BOOTX64.EFI   the kernel (it is its own UEFI boot loader)
-cmdline.txt            the kernel command line compiled into it, for reference
-startup.nsh            makes the UEFI shell boot the kernel too
+EFI/BOOT/BOOTX64.EFI   what the firmware starts: the LP boot menu, or the
+                       kernel itself on a build without the menu
+EFI/LP/vmlinuz.efi     the kernel (it is its own UEFI boot loader)
+EFI/LP/cmdline.txt     the kernel command line for a normal boot
+EFI/LP/lpboot.efi      the boot menu: LP, and LP Recovery
+startup.nsh            makes the UEFI shell boot too
 
 Before booting this stick on a Dell XPS 15 9550 (F2 opens the BIOS setup):
 
@@ -317,7 +400,7 @@ Before booting this stick on a Dell XPS 15 9550 (F2 opens the BIOS setup):
     nowhere to install to. If Windows is still on the disk, switch it to
     safe mode once before changing this, or it will not boot afterwards.
 
-Then F12 at power-on -> the USB stick.
+Then F12 at power-on -> the USB stick. The installer starts by itself.
 
 -----------------------------------------------------------------------
 
@@ -332,48 +415,29 @@ Then F12 at power-on -> the USB stick.
     숨어 리눅스가 볼 수 없고, 설치할 곳이 없습니다. 디스크에 Windows 가
     남아 있다면 바꾸기 전에 한 번 안전 모드로 부팅해 두어야 합니다.
 
-그 다음 전원을 켤 때 F12 -> USB.
+그 다음 전원을 켤 때 F12 -> USB. 설치 프로그램이 저절로 시작됩니다.
 README
-sed -i 's/$/\r/' "${OUT_DIR}/.readme.txt"
-mcopy -o -i "$ESP_IMG" "${OUT_DIR}/.readme.txt" ::README.txt
-rm -f "${OUT_DIR}/.readme.txt"
 log "README.txt (Secure Boot, AHCI)"
 
 for f in authorized_keys wpa_supplicant.conf firewall.conf beacon.conf; do
     src="${REPO_ROOT}/boot/rootfs-overlay/etc/${f}"
-    [[ -f "$src" ]] && mcopy -o -i "$ESP_IMG" "$src" "::${f}" && log "$f"
+    [[ -f "$src" ]] && esp_put "$src" "${f}" && log "$f"
 done
 
-# The command line is compiled into the kernel, but a copy here means a
-# person with a card reader can see what it is, and a real bootloader
-# would read it.
-printf '%s\n' "$KERNEL_CMDLINE" > "${OUT_DIR}/.cmdline.txt"
-mcopy -o -i "$ESP_IMG" "${OUT_DIR}/.cmdline.txt" ::cmdline.txt
-rm -f "${OUT_DIR}/.cmdline.txt"
-
-# ── 5. assemble ──────────────────────────────────────────────────
-step "이미지 조립"
-dd if="$ESP_IMG"  of="$IMAGE" bs=1M seek=$(( ESP_START / 2048 )) conv=notrunc,sparse status=none
-
-# GPT, not MBR: the partition types say what each one is ("EFI system",
-# "Linux root (x86-64)"), and each partition gets a GUID of its own that
-# preinit and the installed system's boot entry can name.
-PARTUUIDS="$(python3 "${REPO_ROOT}/tools/write-gpt.py" "$IMAGE" \
-    "${ESP_START}:${ESP_SECTORS}:esp:EFI system" \
-    "${ROOT_START}:${ROOT_SECTORS}:root:${ROOT_LABEL}")"
-while read -r n u; do log "p${n} PARTUUID=${u}"; done <<< "$PARTUUIDS"
-
+dd if="$ESP_IMG" of="$IMAGE" bs=1M seek=$(( ESP_START / 2048 )) conv=notrunc,sparse status=none
 rm -f "$ESP_IMG"
 
-step "결과"
-log "$(stat -c%s "$IMAGE") bytes  ${IMAGE}"
+step "result"
+log "$(( $(stat -c%s "$IMAGE") / 1024 / 1024 ))MiB (sparse; $(du -m "$IMAGE" | cut -f1)MiB on disk)  ${IMAGE}"
 log ""
 log "  GPT"
-log "  p1  ${ESP_MB}MiB  FAT32  ${ESP_LABEL}   커널과 설정 (EFI 시스템 파티션)"
-log "  p2  나머지  ext4   ${ROOT_LABEL}    루트 파일시스템 (Linux root x86-64)"
+log "  p1  LP-ESP       ${ESP_MB}MiB  FAT32 ${ESP_LABEL}  boot menu, kernel, command line"
+log "  p2  LP-RECOVERY  ${RECOVERY_MB}MiB  ext4  the recovery system"
+log "  p3  LP-ROOT      ${ROOT_MB}MiB  ext4  the root (Linux root x86-64)"
 log ""
-log "굽기:  sudo dd if=${IMAGE} of=/dev/sdX bs=4M conv=fsync status=progress"
-log "QEMU:  qemu-system-x86_64 -m 4096 -smp 4 \\"
-log "         -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \\"
-log "         -drive if=pflash,format=raw,file=vars.fd \\"
-log "         -drive file=${IMAGE},format=raw,if=virtio"
+log "write:  sudo dd if=${IMAGE} of=/dev/sdX bs=4M conv=fsync status=progress"
+log "QEMU:   qemu-system-x86_64 -machine q35 -m 4096 -smp 4 \\"
+log "          -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \\"
+log "          -drive if=pflash,format=raw,file=vars.fd \\"
+log "          -device qemu-xhci -drive if=none,id=stick,file=${IMAGE},format=raw \\"
+log "          -device usb-storage,drive=stick"

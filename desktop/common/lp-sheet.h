@@ -22,8 +22,20 @@
  * caught half-open on its way out turns round from where it is, and
  * flingable, so a finger that lets go with speed carries it. When the
  * spring settles closed the window is hidden, so a shut sheet costs no
- * input capture and no wakeups. Under reduced motion the travel becomes a
- * short opacity crossfade with no movement (lp_motion_reduced()).
+ * input capture and no wakeups. The content also fades with the travel
+ * (opacity = open fraction), which is the "slide + fade" of COMMON.md's
+ * Motion table. Under reduced motion the travel is dropped and only the
+ * fade remains, over lp-motion's ~90 ms (lp_motion_reduced()).
+ *
+ * ── closing by touching somewhere else ──
+ *
+ * A layer-shell surface is never told that a finger landed outside it.
+ * lp_sheet_set_dismiss() adds a second, transparent surface that covers
+ * the whole output underneath the sheet while it is open; a touch on it
+ * closes the sheet and goes nowhere else, the way a tap outside a
+ * popover does. It lives on the TOP layer and the sheet on OVERLAY, so
+ * the order of the two is decided by the layers and not by which of two
+ * frame clocks happened to commit first.
  */
 #ifndef LP_SHEET_H
 #define LP_SHEET_H
@@ -44,6 +56,18 @@ LpSheet   *lp_sheet_new(const char *ns, int edge, GtkWidget *content);
  * wants to set once at creation (never per frame). */
 GtkWindow *lp_sheet_window(LpSheet *sh);
 
+/* How far the content travels, in logical pixels: its size along the
+ * slide axis. Valid before the first show (the preferred size), so a
+ * drag that starts on another surface can be turned into a fraction. */
+int        lp_sheet_extent(LpSheet *sh);
+
+/* Close when a finger lands anywhere outside the sheet (see above). */
+void       lp_sheet_set_dismiss(LpSheet *sh, gboolean on);
+
+/* Put the sheet (and its scrim) on this output. Takes effect at the next
+ * show; a mapped layer surface cannot move between outputs. */
+void       lp_sheet_set_monitor(LpSheet *sh, GdkMonitor *mon);
+
 void       lp_sheet_show(LpSheet *sh);    /* slide in  (entrance timing) */
 void       lp_sheet_hide(LpSheet *sh);    /* slide out (0.7x the time)   */
 void       lp_sheet_toggle(LpSheet *sh);
@@ -62,6 +86,11 @@ void       lp_sheet_release(LpSheet *sh, double velocity);
  * window has been hidden - the moment to drop a scrim or exit. */
 typedef void (*LpSheetClosed)(LpSheet *sh, gpointer data);
 void       lp_sheet_on_closed(LpSheet *sh, LpSheetClosed cb, gpointer data);
+
+/* The content changed in a way worth showing mid-slide (a value that
+ * arrived from a command while the sheet was opening): retake the
+ * picture it slides as. Costs one full draw of the content. */
+void       lp_sheet_invalidate(LpSheet *sh);
 
 void       lp_sheet_free(LpSheet *sh);
 

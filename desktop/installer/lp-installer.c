@@ -17,6 +17,11 @@
  *   problem    Secure Boot on, or the SATA controller in RAID mode with
  *              no disk visible: what to change in the BIOS, and Check
  *              again. Neither can be fixed from here.
+ *   account    name, user name, password twice (setup-pages.c). Asked
+ *              here and not at first boot because the password is also
+ *              the recovery password, and that goes onto LP-RECOVERY
+ *              with the copy - the page says so.
+ *   region     time zone and computer name.
  *   disks      one large row per disk; the stick we run from and disks
  *              with mounted partitions are shown, greyed, with the reason.
  *   confirm    what will be erased, and a tick box before the red button.
@@ -35,6 +40,7 @@
  *   LP_INSTALL=/path/to/lp-install   another backend (tests, screenshots)
  */
 #include "setup-ui.h"
+#include "setup-pages.h"
 #include "lp-json.h"
 #include "lp-motion.h"
 
@@ -73,6 +79,15 @@ typedef struct {
     char        last_error[1024];
     /* failed */
     GtkWidget  *fail_text;
+    /* account, region; confirm's summary; done's sign-in line */
+    SuAccount   acct;
+    SuRegion    region;
+    GtkWidget  *confirm_who;
+    GtkWidget  *done_text;
+    /* the card's entrance */
+    GtkWidget  *card;
+    LpSpring    card_in;
+    LpMotion   *card_m;
 } App;
 
 static App A;
@@ -91,9 +106,9 @@ static void on_language(GtkToggleButton *b, gpointer data)
     if (!gtk_toggle_button_get_active(b))
         return;
     su_set_korean(GTK_WIDGET(b) == A.ko);
+    su_region_language_changed(&A.region);
 }
 
-static void show_disks(void);
 
 static void on_continue(GtkButton *b, gpointer d)
 {
@@ -116,8 +131,7 @@ static void on_continue(GtkButton *b, gpointer d)
         g_string_free(ko, TRUE);
         su_go(A.stack, "problem", TRUE);
     } else {
-        show_disks();
-        su_go(A.stack, "disks", TRUE);
+        su_go(A.stack, "account", TRUE);
     }
     if (j)
         lp_json_free(j);
@@ -166,7 +180,10 @@ static void page_welcome(void)
 
 static void power(const char *word)
 {
-    const char *argv[] = { "/bin/lp-power", word, NULL };
+    /* In the kiosk LP_POWER is the setup gate's relay; elsewhere the
+     * setuid lp-power that the desktop's own power menu uses. */
+    const char *p = g_getenv("LP_POWER");
+    const char *argv[] = { p && *p ? p : "/bin/lp-power", word, NULL };
     g_free(su_run(argv, NULL));
 }
 
@@ -201,6 +218,58 @@ static void page_problem(void)
     g_signal_connect(rs, "clicked", G_CALLBACK(on_restart), NULL);
     gtk_box_append(GTK_BOX(p.right), rs);
     gtk_stack_add_named(GTK_STACK(A.stack), p.root, "problem");
+}
+
+/* ── account and region (setup-pages.c) ──────────────────────────── */
+
+static void on_back_region(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    su_go(A.stack, "region", FALSE);
+}
+
+static void on_account_back(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    su_go(A.stack, "welcome", FALSE);
+}
+
+static void on_account_next(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    su_region_suggest_host(&A.region, su_account_login(&A.acct));
+    su_go(A.stack, "region", TRUE);
+}
+
+static void on_region_back(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    su_go(A.stack, "account", FALSE);
+}
+
+static void show_disks(void);
+
+static void on_region_next(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    show_disks();
+    su_go(A.stack, "disks", TRUE);
+}
+
+static void page_account(void)
+{
+    su_account_build(&A.acct, TRUE);
+    g_signal_connect(A.acct.back, "clicked", G_CALLBACK(on_account_back), NULL);
+    g_signal_connect(A.acct.next, "clicked", G_CALLBACK(on_account_next), NULL);
+    gtk_stack_add_named(GTK_STACK(A.stack), A.acct.page.root, "account");
+}
+
+static void page_region(void)
+{
+    su_region_build(&A.region);
+    g_signal_connect(A.region.back, "clicked", G_CALLBACK(on_region_back), NULL);
+    g_signal_connect(A.region.next, "clicked", G_CALLBACK(on_region_next), NULL);
+    gtk_stack_add_named(GTK_STACK(A.stack), A.region.page.root, "region");
 }
 
 /* ── disks ─────────────────────────────────────────────────────────── */
@@ -331,6 +400,14 @@ static void on_disk_next(GtkButton *b, gpointer d)
         A.disk_parts ? " (지금 있는 파티션 포함)" : "");
     su_retext(A.confirm_warn, wen, wko);
     g_free(wen); g_free(wko);
+    char *sen = g_strdup_printf("Account %s  ·  %s  ·  computer name %s",
+                                su_account_login(&A.acct), su_region_timezone(&A.region),
+                                su_region_hostname(&A.region));
+    char *sko = g_strdup_printf("계정 %s  ·  %s  ·  컴퓨터 이름 %s",
+                                su_account_login(&A.acct), su_region_timezone(&A.region),
+                                su_region_hostname(&A.region));
+    su_retext(A.confirm_who, sen, sko);
+    g_free(sen); g_free(sko);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(A.confirm_check), FALSE);
     gtk_widget_set_sensitive(A.confirm_go, FALSE);
     su_go(A.stack, "confirm", TRUE);
@@ -354,7 +431,7 @@ static void page_disks(void)
     gtk_box_append(GTK_BOX(p.body), sw);
 
     GtkWidget *back = su_button("Back", "뒤로", "su-secondary");
-    g_signal_connect(back, "clicked", G_CALLBACK(on_back_welcome), NULL);
+    g_signal_connect(back, "clicked", G_CALLBACK(on_back_region), NULL);
     gtk_box_append(GTK_BOX(p.left), back);
     A.disk_next = su_button("Next", "다음", "su-primary");
     g_signal_connect(A.disk_next, "clicked", G_CALLBACK(on_disk_next), NULL);
@@ -393,6 +470,8 @@ static void page_confirm(void)
     gtk_box_append(GTK_BOX(p.body), A.confirm_what);
     A.confirm_warn = su_label("", "", "su-warn");
     gtk_box_append(GTK_BOX(p.body), A.confirm_warn);
+    A.confirm_who = su_label("", "", "su-note");
+    gtk_box_append(GTK_BOX(p.body), A.confirm_who);
     gtk_box_append(GTK_BOX(p.body), su_label(
         "LP uses the whole disk: 512 MB to start up, 6 GB for the recovery "
         "system, and the rest for LP and your files.",
@@ -437,6 +516,14 @@ static void finished(gboolean ok)
     if (A.lines)
         g_clear_object(&A.lines);
     if (ok) {
+        char *en = g_strdup_printf(
+            "After the restart LP asks once for a keyboard and Wi-Fi, and then "
+            "it is yours. Your account is %s.", su_account_login(&A.acct));
+        char *ko = g_strdup_printf(
+            "다시 시작하면 LP 가 키보드와 Wi-Fi 를 한 번 묻고, 그 다음부터는 바로 쓸 수 "
+            "있습니다. 계정은 %s 입니다.", su_account_login(&A.acct));
+        su_retext(A.done_text, en, ko);
+        g_free(en); g_free(ko);
         su_go(A.stack, "done", TRUE);
     } else {
         char *en = g_strdup_printf("lp-install said: %s", A.last_error[0] ? A.last_error
@@ -492,11 +579,27 @@ static void start_install(void)
     su_go(A.stack, "progress", TRUE);
 
     GError *err = NULL;
-    A.proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+    /* The answers as options, the password on stdin: an argument is
+     * readable by every process on the machine through /proc. */
+    A.proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDIN_PIPE |
+                              G_SUBPROCESS_FLAGS_STDOUT_PIPE |
                               G_SUBPROCESS_FLAGS_STDERR_MERGE, &err,
                               backend(), "install", "--disk", A.disk, "--yes",
                               "--progress", "--lang",
-                              su_korean ? "ko_KR.UTF-8" : "en_US.UTF-8", NULL);
+                              su_korean ? "ko_KR.UTF-8" : "en_US.UTF-8",
+                              "--user", su_account_login(&A.acct),
+                              "--fullname", su_account_fullname(&A.acct),
+                              "--password-stdin",
+                              "--hostname", su_region_hostname(&A.region),
+                              "--timezone", su_region_timezone(&A.region),
+                              NULL);
+    if (A.proc) {
+        GOutputStream *in = g_subprocess_get_stdin_pipe(A.proc);
+        const char *pw = su_account_password(&A.acct);
+        g_output_stream_write_all(in, pw, strlen(pw), NULL, NULL, NULL);
+        g_output_stream_write_all(in, "\n", 1, NULL, NULL, NULL);
+        g_output_stream_close(in, NULL, NULL);
+    }
     if (!A.proc) {
         g_strlcpy(A.last_error, err ? err->message : "could not start", sizeof A.last_error);
         g_clear_error(&err);
@@ -532,11 +635,8 @@ static void page_done(void)
     su_page(&p, "LP is installed", "LP 설치를 마쳤습니다",
             "Remove the USB stick, then restart.",
             "USB 를 뽑은 뒤 다시 시작하세요.");
-    gtk_box_append(GTK_BOX(p.body), su_label(
-        "After the restart LP asks for your name, a password and a few "
-        "settings, and then it is yours.",
-        "다시 시작하면 LP 가 이름과 암호, 그리고 몇 가지 설정을 묻고, 그 다음부터는 "
-        "바로 쓸 수 있습니다.", "su-body"));
+    A.done_text = su_label("", "", "su-body");
+    gtk_box_append(GTK_BOX(p.body), A.done_text);
     GtkWidget *off = su_button("Power off", "전원 끄기", "su-secondary");
     g_signal_connect(off, "clicked", G_CALLBACK(on_poweroff), NULL);
     gtk_box_append(GTK_BOX(p.left), off);
@@ -573,6 +673,32 @@ static void page_failed(void)
 
 /* ── the window ────────────────────────────────────────────────────── */
 
+/* LP_SETUP_NEXT=<page>@<ms>: slide to a page after a delay, so a test
+ * can photograph the transition in flight (there is no input device in
+ * the headless rig to press the button with). */
+static gboolean auto_next(gpointer data)
+{
+    su_go(A.stack, data, TRUE);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean card_start(GtkWidget *w, GdkFrameClock *fc, gpointer d)
+{
+    static int frames;
+    (void)w; (void)fc; (void)d;
+    if (++frames < 3)
+        return G_SOURCE_CONTINUE;
+    lp_spring_set_target(&A.card_in, 1.0);
+    lp_motion_kick(A.card_m);
+    return G_SOURCE_REMOVE;
+}
+
+static void card_frame(GtkWidget *w, gpointer d)
+{
+    (void)d;
+    gtk_widget_set_opacity(w, CLAMP(A.card_in.x, 0.0, 1.0));
+}
+
 static gboolean on_close(GtkWindow *w, gpointer d)
 {
     (void)w; (void)d;
@@ -591,7 +717,7 @@ static void activate(GtkApplication *app, gpointer d)
     gtk_window_set_default_size(GTK_WINDOW(A.win), 1100, 760);
     g_signal_connect(A.win, "close-request", G_CALLBACK(on_close), NULL);
 
-    GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *card = A.card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(card, "su-card");
     gtk_widget_set_size_request(card, 760, 560);
     gtk_widget_set_halign(card, GTK_ALIGN_CENTER);
@@ -603,6 +729,8 @@ static void activate(GtkApplication *app, gpointer d)
 
     page_welcome();
     page_problem();
+    page_account();
+    page_region();
     page_disks();
     page_confirm();
     page_progress();
@@ -615,11 +743,39 @@ static void activate(GtkApplication *app, gpointer d)
         gtk_window_fullscreen(GTK_WINDOW(A.win));
     gtk_window_present(GTK_WINDOW(A.win));
 
+    /* The card fades in on the window spring (340 ms, no overshoot)
+     * over the gate's plain background, which is the colour the boot
+     * splash ends on: firmware logo, splash, then the card appearing on
+     * the same dark ground, with no frame of anything else between. */
+    lp_spring_init(&A.card_in, LP_SPRING_WINDOW, lp_motion_reduced() ? 1.0 : 0.0);
+    gtk_widget_set_opacity(card, A.card_in.x);
+    A.card_m = lp_motion_new(card, card_frame, NULL);
+    lp_motion_add(A.card_m, &A.card_in);
+    /* Started from the third frame, not the first: the first frames of a
+     * new window at 3840x2160 are its layout and its fonts loading, and
+     * an animation that begins then loses its first 300 ms to them. */
+    gtk_widget_add_tick_callback(A.card, card_start, NULL, NULL);
+
+    const char *next = g_getenv("LP_SETUP_NEXT");
+    if (next && strchr(next, '@')) {
+        char *to = g_strndup(next, strchr(next, '@') - next);
+        g_timeout_add(atoi(strchr(next, '@') + 1), auto_next, to);
+    }
+
     /* For screenshots and tests: start on a page. */
     const char *page = g_getenv("LP_SETUP_PAGE");
     if (page && *page) {
-        if (!strcmp(page, "disks") || !strcmp(page, "confirm"))
+        if (!strcmp(page, "disks") || !strcmp(page, "confirm") ||
+            !strcmp(page, "progress")) {
+            /* Filled in as a person would have, for the screenshots. */
+            gtk_editable_set_text(GTK_EDITABLE(A.acct.fullname), "Vivian Kim");
+            gtk_editable_set_text(GTK_EDITABLE(A.acct.pw1), "example");
+            gtk_editable_set_text(GTK_EDITABLE(A.acct.pw2), "example");
+            su_region_suggest_host(&A.region, su_account_login(&A.acct));
             show_disks();
+        }
+        if (!strcmp(page, "region"))
+            su_region_suggest_host(&A.region, "vivian");
         if (!strcmp(page, "confirm") && A.disk[0])
             on_disk_next(NULL, NULL);
         else

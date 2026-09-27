@@ -48,6 +48,8 @@
 #include "types.h"
 #include "string.h"
 #include "stdio.h"
+#include "unistd.h"
+#include "net.h"
 
 #define WPA_SOCK_PATH     "/run/lp-net.sock"
 /* The same state as `status`, rewritten on every change, for anything
@@ -55,6 +57,66 @@
  * status bar). Same records as the status answer, minus the "ok". */
 #define WPA_STATUS_PATH   "/run/lp-net.status"
 #define WPA_REQ_MAX       512
+
+/* ── The fallback switch ──────────────────────────────────────────────
+ *
+ * wpa_supplicant stays installed as the way back if this stack ever
+ * fails on some card. The switch is the existence of a file, because a
+ * file can be made by anyone who can reach the machine in any way:
+ *
+ *   /boot/wpa-supplicant     on the Pi's FAT partition, from any PC -
+ *                            the only switch that works when the
+ *                            wireless is the only way in
+ *   <settings>/fallback      `wifi fallback on`, where <settings> is
+ *                            lp_setting_path("lp-net"): /etc/lp-net on
+ *                            the desktop, /data/lp-net on a board
+ *
+ * `wpa -d` looks at it once, at start, and when it is on it becomes
+ * wpa_supplicant (exec), so the service keeps its name and init keeps
+ * supervising the same line. lp-net and wifi look at it too, to say
+ * "the fallback is running" instead of "the service is not running". */
+#define WPA_FALLBACK_CARD "/boot/wpa-supplicant"
+
+/* Both settings places are looked at, not lp_setting_path()'s choice:
+ * that choice depends on whether the CALLER can write /data, so an
+ * lp-net run by uid 1000 on a board would look in /etc and miss the
+ * switch root made in /data. */
+static const char *const WPA_FALLBACK_FILES[] = {
+    WPA_FALLBACK_CARD, "/data/lp-net/fallback", "/etc/lp-net/fallback", NULL
+};
+
+static inline bool wpa_fallback_on(char *which, size_t n)
+{
+    const char *c = NULL;
+    for (int i = 0; WPA_FALLBACK_FILES[i] && !c; i++)
+        if (lp_exists(WPA_FALLBACK_FILES[i]))
+            c = WPA_FALLBACK_FILES[i];
+    if (which && n)
+        snprintf(which, n, "%s", c ? c : "");
+    return c != NULL;
+}
+
+/* Is wpa_supplicant running in our place right now? `wpa -d` writes
+ * WPA_FALLBACK_RUN (0644, in /run) just before it execs wpa_supplicant,
+ * and removes it when it starts as itself. A client asks this rather
+ * than wpa_fallback_on(), because the settings switch lives in a 0700
+ * root directory that uid 1000 cannot look into - and because what is
+ * running is the thing worth reporting. `which` gets the switch. */
+#define WPA_FALLBACK_RUN "/run/lp-net.fallback"
+
+static inline bool wpa_fallback_running(char *which, size_t n)
+{
+    char buf[128];
+    long r = proc_read(WPA_FALLBACK_RUN, buf, sizeof buf - 1);
+    if (r <= 0)
+        return wpa_fallback_on(which, n);
+    buf[r] = '\0';
+    for (long i = 0; i < r; i++)
+        if (buf[i] == '\n') { buf[i] = '\0'; break; }
+    if (which && n)
+        snprintf(which, n, "%s", buf);
+    return true;
+}
 
 /* ── The catalog ──────────────────────────────────────────────────────
  *
@@ -158,6 +220,9 @@ static const wpa_msg_t WPA_MSGS[] = {
     { "set_key",
       "could not install the %1 key: %2",
       "%1 키를 설치하지 못했습니다: %2" },
+    { "authorize",
+      "the handshake with \"%1\" worked, but the kernel would not open the connection for data: %2",
+      "\"%1\" 네트워크와의 핸드셰이크는 성공했지만 커널이 데이터 연결을 열지 않았습니다: %2" },
     { "ap_left",
       "\"%1\" ended the connection: %2",
       "\"%1\" 네트워크가 연결을 끊었습니다: %2" },
@@ -265,6 +330,53 @@ static inline bool wpa_hex_decode(const char *s, u8 *out, size_t cap,
     }
     *outlen = n / 2;
     return true;
+}
+
+/* ── Asking the daemon (the client side, for lp-net and wifi) ────────
+ *
+ * One request line out, the whole answer in, NUL-terminated. false when
+ * the daemon is not there to ask (reply is then ""); a timeout returns
+ * what arrived, which the caller then finds incomplete or not "ok". */
+static inline bool wpa_ask(const char *line, char *reply, size_t cap,
+                           int timeout_ms)
+{
+    size_t len = 0;
+    reply[0] = '\0';
+
+    struct { u16 family; char path[108]; } sa;
+    memset(&sa, 0, sizeof sa);
+    sa.family = 1;                              /* AF_UNIX */
+    strlcpy(sa.path, WPA_SOCK_PATH, sizeof sa.path);
+
+    long fd = lp_socket(1, SOCK_STREAM | LP_SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return false;
+    if (lp_connect((int)fd, &sa, sizeof sa) < 0) {
+        lp_close((int)fd);
+        return false;
+    }
+    size_t n = strlen(line);
+    if (lp_sendto((int)fd, line, n, 0x4000 /* NOSIGNAL */, NULL, 0) != (long)n ||
+        lp_sendto((int)fd, "\n", 1, 0x4000, NULL, 0) != 1) {
+        lp_close((int)fd);
+        return false;
+    }
+    s64 deadline = lp_monotonic_ms() + timeout_ms;
+    while (len + 1 < cap) {
+        int left = (int)(deadline - lp_monotonic_ms());
+        if (left <= 0)
+            break;
+        lp_pollfd_t p = { (int)fd, LP_POLLIN, 0 };
+        if (lp_poll(&p, 1, left) <= 0)
+            break;
+        long got = lp_read((int)fd, reply + len, cap - 1 - len);
+        if (got <= 0)
+            break;
+        len += (size_t)got;
+    }
+    reply[len] = '\0';
+    lp_close((int)fd);
+    return len > 0;
 }
 
 /* Signal strength as a percentage, the mapping NetworkManager uses:

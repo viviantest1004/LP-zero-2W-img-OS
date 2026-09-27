@@ -1,4 +1,5 @@
-/* splash - the boot screen, drawn on the framebuffer.
+/* splash - the boot screen, drawn on the framebuffer, until the desktop
+ * is ready to take it over.
  *
  * The bare-metal firmware used to draw this: it asked the GPU for a
  * framebuffer over the mailbox and wrote pixels into it. That firmware
@@ -14,50 +15,80 @@
  * ── What it draws ──
  *
  * The LP mark and the system's name, on the desktop's own aubergine
- * gradient. The gradient is the dark wallpaper exactly - same focus, same
- * colours (logo.h carries them) - so on the desktop machine the screen
- * goes from boot to desktop without the colour changing under the user.
+ * gradient (scene.h has the picture; this file has the screen and the
+ * clock). The logo fades in over 400ms. Then, on a machine that has a
+ * desktop to wait for, a small spinner comes up under it after a second
+ * and turns until the desktop says it is ready.
  *
- * ── Why it computes shapes instead of copying a picture ──
+ *     splash                  fade the logo in and exit - or hold, with
+ *                             the spinner, when the kernel command line
+ *                             has the word `splash` (as Ubuntu's does)
+ *     splash --hold           hold whatever the command line says
+ *     splash stop             tell a running splash the desktop is here:
+ *                             it fades the spinner out, leaves the logo on
+ *                             the screen, and exits; returns once it has
+ *     splash stop --console   the same, but hand the screen back to the
+ *                             text console (a text login follows, not a
+ *                             desktop)
  *
- * The same program draws a 640x480 VM window, a 1080p television and the
- * XPS's 3840x2160 panel. A bitmap logo is soft at one end of that range or
- * several megabytes at the other, and there is no image decoder here to
- * unpack a compressed one. But the mark and the letters are built from
- * two shapes only - a straight stroke with round ends, and a circular
- * stroke over whole quarter-circles (desktop/branding/src/geom.py) - and
- * the distance from a pixel to either is a few integer multiplies and a
- * square root. So for every pixel near the logo we measure how far it is
- * from the nearest edge and turn that into coverage: half a pixel inside
- * is solid, half a pixel outside is clear, and in between is the
- * anti-aliased edge. That is exact enough that the result is
- * indistinguishable from the SVG rendered by librsvg, at any size.
+ * Holding is opt-in because a machine that boots to a text console (the
+ * Pi images, recovery) has nobody to say "stop", and a splash that sat
+ * on the console for its whole timeout would hide the login prompt.
  *
- * All of it is integer arithmetic, because this libc has no floating
- * point: positions are in 1/32nds of a pixel, colours in 8.8 fixed point.
+ * ── The hand-off ──
  *
- * ── Why it dithers ──
+ * `splash stop` is sent by the desktop's start script just before the
+ * compositor starts. The splash does not clear the screen on the way
+ * out: the frame it leaves - gradient and logo, no spinner - is exactly
+ * what desktop/branding/lp-splash-fade draws as the session's first
+ * frame (both are drawn by scene.h), and that one then fades into the
+ * desktop. So the screen goes firmware logo -> splash -> desktop without
+ * a black frame or a line of console text in between. It also leaves the
+ * VT in graphics mode (KD_GRAPHICS, set when holding starts), so the
+ * console cannot draw its text over the logo while the compositor is
+ * starting; the compositor's seat takes the VT from there. With
+ * --console, or when nothing has said stop after 90 seconds, the console
+ * is given back (KD_TEXT) and whatever it holds appears.
  *
- * A dark gradient across 3840 pixels spends only a few dozen 8-bit steps,
- * so rounding each pixel paints contour lines - and on a 16-bit (565)
- * framebuffer, which the Pi can hand us, there are eight times fewer
- * steps and the bands are unmissable. Each pixel is rounded against an
- * 8x8 ordered-dither threshold instead, so every 8x8 block averages to
- * the true colour and the steps dissolve, at whatever depth the
- * framebuffer has.
+ * ── Why it redraws so little ──
  *
- * ── Why a row at a time ──
+ * The XPS panel is 3840x2160. Redrawing that at 60 frames a second is a
+ * full core, and during boot that core belongs to everything else. So
+ * after the first frame only what changes is drawn: the logo's box while
+ * it fades in, and then only the spinner's box - about 60x60 pixels on
+ * the 4K panel - with one write() per row of it.
  *
- * A 4K screen is 33MB and this runs during boot, on a board with 512MB,
- * so asking for a whole-screen buffer here would be taking it from
- * everything else at exactly the wrong moment. One row is at most 32KB.
+ * write() rather than mmap(), deliberately. On simpledrm and the other
+ * DRM drivers' fbdev emulation, a write() is flushed to the screen at
+ * once, and only the rows (and, for a one-row write, the columns) it
+ * covered; a store through mmap() is caught by page faults and flushed
+ * by deferred I/O at most 20 times a second. On efifb both are direct.
+ *
+ * ── Why a spring and not a curve ──
+ *
+ * The fades are the design system's springs (design/feel.md §2), done in
+ * fixed point because this libc has no floating point. A spring can be
+ * turned round half way - the spinner told to go while it is still
+ * arriving leaves from where it is, at the speed it has - where a timed
+ * curve would jump.
+ *
+ * ── Reduced motion ──
+ *
+ * When /etc/lp/reduce-motion exists, or the first account has asked for
+ * it (~/.config/lp/reduce-motion, what Settings writes), the fades take
+ * 100ms and the spinner does not turn: its ring breathes, slowly
+ * brightening and dimming, so the screen still says "working".
+ *
+ * All arithmetic is integer: positions in 1/32 pixel, colours in 8.8
+ * fixed point, alpha in 0..256, springs in 1/2^24.
  */
 #include "types.h"
 #include "osname.h"
 #include "string.h"
 #include "stdio.h"
 #include "unistd.h"
-#include "logo.h"
+#include "syscall.h"
+#include "scene.h"
 
 /* ── The framebuffer ──────────────────────────────────────────────────
  * Two ioctls describe it. Rather than declare the kernel's structures -
@@ -72,6 +103,8 @@
 #define VAR_SIZE        160
 #define VAR_XRES          0
 #define VAR_YRES          4
+#define VAR_XOFFSET      16
+#define VAR_YOFFSET      20
 #define VAR_BPP          24
 #define VAR_RED_OFF      32     /* struct fb_bitfield: offset, length, msb */
 #define VAR_GREEN_OFF    44
@@ -82,10 +115,19 @@
 
 /* 8192 pixels across at 32 bits is the widest row we take. */
 #define MAX_ROW_BYTES    32768
-#define MAX_WIDTH        8192
+
+/* The VT's mode. In KD_GRAPHICS the console stops drawing text and its
+ * cursor on the framebuffer, which is what keeps boot messages off the
+ * logo. */
+#define KDSETMODE        0x4B3A
+#define KD_TEXT          0
+#define KD_GRAPHICS      1
+#define SPL_O_NOCTTY     0400
+
+#define SPL_CLOCK_MONOTONIC 1
 
 typedef struct {
-    u32 xres, yres, bpp, line_length;
+    u32 xres, yres, xoff, yoff, bpp, line_length;
     u32 off[3], len[3];             /* red, green, blue */
 } fb_t;
 
@@ -100,6 +142,8 @@ static bool fb_query(int fd, fb_t *fb)
 
     fb->xres        = *(u32 *)(var + VAR_XRES);
     fb->yres        = *(u32 *)(var + VAR_YRES);
+    fb->xoff        = *(u32 *)(var + VAR_XOFFSET);
+    fb->yoff        = *(u32 *)(var + VAR_YOFFSET);
     fb->bpp         = *(u32 *)(var + VAR_BPP);
     fb->off[0]      = *(u32 *)(var + VAR_RED_OFF);
     fb->len[0]      = *(u32 *)(var + VAR_RED_OFF + 4);
@@ -111,7 +155,7 @@ static bool fb_query(int fd, fb_t *fb)
 
     if (fb->xres == 0 || fb->yres == 0 || fb->line_length == 0)
         return false;
-    if (fb->xres > MAX_WIDTH || fb->line_length > MAX_ROW_BYTES)
+    if (fb->xres > SCENE_MAX_W || fb->line_length > MAX_ROW_BYTES)
         return false;               /* wider than we are prepared for */
     if (fb->bpp != 16 && fb->bpp != 24 && fb->bpp != 32)
         return false;               /* 8-bit palettes need a colour map */
@@ -121,184 +165,115 @@ static bool fb_query(int fd, fb_t *fb)
     return true;
 }
 
-/* ── Integer helpers ──────────────────────────────────────────────── */
+/* ── State ────────────────────────────────────────────────────────── */
 
-static u32 isqrt32(u32 v)
+static scene_t  scene;
+static fb_t     fb;
+static long     fbfd = -1;
+static bool     fb_lost;            /* a write failed: the device went away */
+static const char *fbdev = "/dev/fb0";
+static u8       row[MAX_ROW_BYTES] __attribute__((aligned(8)));
+
+/* The logo's colour at full strength, per pixel of its box, made once so
+ * each frame of the fade is a blend rather than a distance field. 1M
+ * pixels is a 4K logo box four times over; the pages are only touched
+ * as far as the box needs. */
+#define LOGO_MAX (1u << 20)
+static u16      logo_full[LOGO_MAX][3];
+static bool     logo_cached;
+
+/* Set from signal handlers, read by the frame loop. */
+static volatile int stop_req;       /* 0, STOP_DESKTOP or STOP_CONSOLE */
+#define STOP_DESKTOP 1
+#define STOP_CONSOLE 2
+
+static void on_term(int sig) { (void)sig; if (!stop_req) stop_req = STOP_DESKTOP; }
+static void on_usr1(int sig) { (void)sig; stop_req = STOP_CONSOLE; }
+
+static bool trace;
+
+/* ── Time ─────────────────────────────────────────────────────────── */
+
+static s64 now_us(void)
 {
-    u32 r = 0, b = 1u << 30;
-    while (b > v)
-        b >>= 2;
-    while (b) {
-        if (v >= r + b) {
-            v -= r + b;
-            r = (r >> 1) + b;
-        } else
-            r >>= 1;
-        b >>= 2;
-    }
-    return r;
+    s64 ts[2] = { 0, 0 };           /* { tv_sec, tv_nsec }, 64-bit on all three */
+    sys_call2(SYS_clock_gettime, SPL_CLOCK_MONOTONIC, (long)ts);
+    return ts[0] * 1000000 + ts[1] / 1000;
 }
 
-static s32 iabs(s32 v) { return v < 0 ? -v : v; }
+static void sleep_us(s64 us)
+{
+    if (us <= 0)
+        return;
+    long ts[2] = { (long)(us / 1000000), (long)(us % 1000000) * 1000L };
+    sys_call2(SYS_nanosleep, (long)ts, 0);   /* a signal ends it early: fine */
+}
 
-/* ── The shapes, placed on this screen ────────────────────────────────
- * logo.h has them in design units; place() turns each into 1/32-pixel
- * coordinates for this screen once, with its pixel bounding box, so the
- * per-pixel work is only the distance itself. */
-#define SUB      32                 /* sub-pixel units per pixel */
-#define MAXPRIM  96
-
-enum { G_RING, G_ELL, G_WORD, G_DOT, G_COUNT };
+/* ── Springs, in fixed point ──────────────────────────────────────────
+ * x'' = -w^2 (x - target) - 2 w x', critically damped, stepped once a
+ * millisecond (w dt is at most 0.1, where this is indistinguishable from
+ * the closed form). "At rest" is within 0.5% of the distance and slower
+ * than 5% of it a second - lp-motion.c's rule - and logo.h's LP_W16_*
+ * are the w that reach it in the published time, so a 260ms spring here
+ * is a 260ms spring on the desktop. */
+#define ONE (1 << 24)
 
 typedef struct {
-    u8  kind, quads, group;
-    s32 ax, ay, bx, by;             /* SEG: the ends. ARC: centre in a, b unused */
-    s32 r, hw;                      /* ARC radius; half the stroke width */
-    s32 len;                        /* SEG: length of b - a */
-    s32 e0x, e0y, e1x, e1y;         /* ARC: where an open arc ends */
-    s32 x0, y0, x1, y1;             /* pixels this can touch, inclusive */
-} placed_t;
+    s64 x, v, target;               /* 1/2^24; v per second */
+    s64 w;                          /* rad/s in 1/16 */
+} spring_t;
 
-static placed_t prims[MAXPRIM];
-static int      nprims;
-
-/* Where the start of an arc's run of quadrants is: the quadrant whose
- * clockwise neighbour is not in the run. */
-static void arc_ends(placed_t *p)
+/* Head for target, keeping the current velocity: a spring turned round
+ * half way leaves from where it is, at the speed it has. */
+static void spring_go(spring_t *s, s64 target, s64 w16)
 {
-    int start = 0, count = 0;
-    for (int q = 0; q < 4; q++)
-        if (p->quads & (1u << q)) {
-            count++;
-            if (!(p->quads & (1u << ((q + 3) & 3))))
-                start = q;
-        }
-    /* quadrant q starts at angle 90*q: east, north, west, south */
-    static const s8 dx[4] = { 1, 0, -1, 0 }, dy[4] = { 0, -1, 0, 1 };
-    int end = (start + count) & 3;
-    p->e0x = p->ax + dx[start] * p->r;
-    p->e0y = p->ay + dy[start] * p->r;
-    p->e1x = p->ax + dx[end] * p->r;
-    p->e1y = p->ay + dy[end] * p->r;
+    s->target = target;
+    s->w = w16;
 }
 
-/* Add one primitive: design coordinates (1/LP_UNIT units) scaled by
- * num/den into sub-pixels and moved to (ox, oy) sub-pixels. */
-static void place(const lp_prim_t *s, int group, s32 ox, s32 oy, s32 num, s32 den)
+static bool spring_rest(const spring_t *s)
 {
-    if (nprims >= MAXPRIM)
-        return;
-    placed_t *p = &prims[nprims++];
-    p->kind  = s->kind;
-    p->quads = s->quads;
-    p->group = (u8)group;
-    p->ax = ox + s->a * num / den;
-    p->ay = oy + s->b * num / den;
-    p->hw = s->w * num / den / 2;
+    s64 d = s->x - s->target, v = s->v;
+    return (d < 0 ? -d : d) < ONE / 200 && (v < 0 ? -v : v) < ONE / 20;
+}
 
-    s32 lo_x, lo_y, hi_x, hi_y;
-    if (s->kind == LP_SEG) {
-        p->bx = ox + s->c * num / den;
-        p->by = oy + s->d * num / den;
-        s32 dx = p->bx - p->ax, dy = p->by - p->ay;
-        p->len = (s32)isqrt32((u32)(dx * dx + dy * dy));
-        lo_x = p->ax < p->bx ? p->ax : p->bx;
-        hi_x = p->ax < p->bx ? p->bx : p->ax;
-        lo_y = p->ay < p->by ? p->ay : p->by;
-        hi_y = p->ay < p->by ? p->by : p->ay;
-        lo_x -= p->hw; hi_x += p->hw; lo_y -= p->hw; hi_y += p->hw;
-    } else {
-        p->r = s->c * num / den;
-        arc_ends(p);
-        lo_x = p->ax - p->r - p->hw; hi_x = p->ax + p->r + p->hw;
-        lo_y = p->ay - p->r - p->hw; hi_y = p->ay + p->r + p->hw;
+/* Advance by ms; true while it is still moving. */
+static bool spring_step(spring_t *s, s64 ms)
+{
+    if (spring_rest(s)) {
+        s->x = s->target;
+        s->v = 0;
+        return false;
     }
-    /* one pixel of margin for the anti-aliased fringe */
-    p->x0 = lo_x / SUB - 1; p->x1 = hi_x / SUB + 1;
-    p->y0 = lo_y / SUB - 1; p->y1 = hi_y / SUB + 1;
-}
-
-/* Distance from (px, py) to the primitive's centreline, in sub-pixels. */
-static s32 distance(const placed_t *p, s32 px, s32 py)
-{
-    if (p->kind == LP_SEG) {
-        s32 dx = p->bx - p->ax, dy = p->by - p->ay;
-        s32 qx = px - p->ax, qy = py - p->ay;
-        s32 dot = qx * dx + qy * dy;
-        if (p->len > 0 && dot > 0 && dot < p->len * p->len)
-            return iabs(qx * dy - qy * dx) / p->len;     /* beside it */
-        if (p->len > 0 && dot >= p->len * p->len) {      /* past the far end */
-            qx = px - p->bx;
-            qy = py - p->by;
-        }
-        return (s32)isqrt32((u32)(qx * qx + qy * qy));   /* round end */
-    }
-
-    s32 dx = px - p->ax, dy = py - p->ay;
-    int q = dy <= 0 ? (dx >= 0 ? 0 : 1) : (dx <= 0 ? 2 : 3);
-    if (p->quads & (1u << q))
-        return iabs((s32)isqrt32((u32)(dx * dx + dy * dy)) - p->r);
-    /* outside the swept quadrants: the nearest point is a round end */
-    s32 ax = px - p->e0x, ay = py - p->e0y, bx = px - p->e1x, by = py - p->e1y;
-    u32 da = (u32)(ax * ax + ay * ay), db = (u32)(bx * bx + by * by);
-    return (s32)isqrt32(da < db ? da : db);
-}
-
-/* ── The background ───────────────────────────────────────────────────
- * The colour depends only on the distance from the focus, so it is
- * looked up rather than computed: the table is indexed by the squared
- * distance (no square root per pixel) and each entry holds the colour at
- * the square root of its index, interpolated from logo.h's 65 samples. */
-#define LUT_N 4096
-static u16 lut[LUT_N][3];
-static u32 colsq[MAX_WIDTH];
-
-static void build_lut(void)
-{
-    for (u32 i = 0; i < LUT_N; i++) {
-        /* t = sqrt(i / (LUT_N-1)) in 0.16 fixed point: the square root of
-         * the ratio scaled by 2^32, which for the last entry is exactly
-         * 2^32 and has to be held just under it to fit. */
-        u64 ratio = ((u64)i << 32) / (LUT_N - 1);
-        if (ratio > 0xFFFFFFFFull)
-            ratio = 0xFFFFFFFFull;
-        u32 t = isqrt32((u32)ratio);
-        u32 pos = t * (LP_GRAD_N - 1);          /* 16.16, 0 .. 64.0 */
-        u32 k = pos >> 16, f = pos & 0xFFFF;
-        if (k >= LP_GRAD_N - 1) { k = LP_GRAD_N - 2; f = 0xFFFF; }
-        for (int c = 0; c < 3; c++) {
-            s32 a = LP_GRAD[k][c], b = LP_GRAD[k + 1][c];
-            lut[i][c] = (u16)(a + (s32)(((s64)(b - a) * f) >> 16));
+    for (s64 i = 0; i < ms; i++) {
+        s64 a = -((s->w * s->w * (s->x - s->target)) >> 8) - ((2 * s->w * s->v) >> 4);
+        s->v += a / 1000;
+        s->x += s->v / 1000;
+        if (spring_rest(s)) {
+            s->x = s->target;
+            s->v = 0;
+            return false;
         }
     }
+    return true;
 }
 
-static const u8 BAYER[8][8] = {
-    {  0, 32,  8, 40,  2, 34, 10, 42 }, { 48, 16, 56, 24, 50, 18, 58, 26 },
-    { 12, 44,  4, 36, 14, 46,  6, 38 }, { 60, 28, 52, 20, 62, 30, 54, 22 },
-    {  3, 35, 11, 43,  1, 33,  9, 41 }, { 51, 19, 59, 27, 49, 17, 57, 25 },
-    { 15, 47,  7, 39, 13, 45,  5, 37 }, { 63, 31, 55, 23, 61, 29, 53, 21 },
-};
-
-/* One 8.8 channel value to `len` bits, rounded against the dither
- * threshold (0..255, as a fraction of one output step). */
-static u32 quantise(u32 c, u32 len, u32 thr)
+static u32 alpha_of(const spring_t *s)
 {
-    if (len >= 8) {
-        u32 v = (c + thr) >> 8;
-        if (v > 255) v = 255;
-        return v << (len - 8);
-    }
-    u32 max = (1u << len) - 1;
-    u32 v = (((c * max * 257) >> 16) + thr) >> 8;  /* c * max / 255, 8.8 */
-    return v > max ? max : v;
+    s64 a = s->x >> 16;             /* 0..256 */
+    return (u32)(a < 0 ? 0 : a > 256 ? 256 : a);
 }
 
-static void put_pixel(u8 *row, const fb_t *fb, u32 x, u32 v)
+/* ── Drawing ──────────────────────────────────────────────────────── */
+
+static void put_pixel(u32 x, const u32 c[3], u32 px, u32 py)
 {
-    if (fb->bpp == 32)
+    u32 v = 0;
+    for (int k = 0; k < 3; k++)
+        v |= scene_quantise(c[k], fb.len[k], px, py, k) << fb.off[k];
+    if (fb.bpp == 32)
         *(u32 *)(row + x * 4) = v;
-    else if (fb->bpp == 24) {
+    else if (fb.bpp == 24) {
         row[x * 3]     = (u8)v;
         row[x * 3 + 1] = (u8)(v >> 8);
         row[x * 3 + 2] = (u8)(v >> 16);
@@ -306,170 +281,424 @@ static void put_pixel(u8 *row, const fb_t *fb, u32 x, u32 v)
         *(u16 *)(row + x * 2) = (u16)v;
 }
 
+/* Put n pixels of `row` on the screen at (x0, y). */
+static void write_span(u32 y, u32 x0, u32 n)
+{
+    if (fb_lost)
+        return;
+    u32 bpp = fb.bpp / 8;
+    s64 off = (s64)(fb.yoff + y) * fb.line_length + (s64)(fb.xoff + x0) * bpp;
+    if (lp_lseek((int)fbfd, off, SEEK_SET) != off ||
+        lp_write((int)fbfd, row, n * bpp) != (long)(n * bpp))
+        fb_lost = true;             /* the device went away (see reopen) */
+}
+
+/* The whole screen: the gradient, and the logo at `logo` (0..256). */
+static void draw_full(u32 logo)
+{
+    for (u32 y = 0; y < fb.yres && !fb_lost; y++) {
+        bool in_box = (s32)y >= scene.by0 && (s32)y <= scene.by1;
+        u32 rsq = scene_rowsq(&scene, y);
+        for (u32 x = 0; x < fb.xres; x++) {
+            u32 c[3];
+            scene_bg_row(&scene, x, rsq, c);
+            if (logo && in_box && (s32)x >= scene.bx0 && (s32)x <= scene.bx1) {
+                u32 bg[3] = { c[0], c[1], c[2] }, fg[3] = { c[0], c[1], c[2] };
+                scene_logo(&scene, x, y, fg);
+                scene_mix(c, bg, fg, logo);
+            }
+            put_pixel(x, c, x, y);
+        }
+        write_span(y, 0, fb.xres);
+    }
+}
+
+static void cache_logo(void)
+{
+    u32 w = (u32)(scene.bx1 - scene.bx0 + 1), h = (u32)(scene.by1 - scene.by0 + 1);
+    logo_cached = scene.bx1 >= scene.bx0 && scene.by1 >= scene.by0 && w * h <= LOGO_MAX;
+    if (!logo_cached)
+        return;
+    u32 i = 0;
+    for (u32 y = (u32)scene.by0; y <= (u32)scene.by1; y++)
+        for (u32 x = (u32)scene.bx0; x <= (u32)scene.bx1; x++, i++) {
+            u32 c[3];
+            scene_bg(&scene, x, y, c);
+            scene_logo(&scene, x, y, c);
+            logo_full[i][0] = (u16)c[0];
+            logo_full[i][1] = (u16)c[1];
+            logo_full[i][2] = (u16)c[2];
+        }
+}
+
+/* Only the logo's box, at `alpha`. */
+static void draw_logo(u32 alpha)
+{
+    if (!logo_cached) {             /* a box too big to keep: skip the fade */
+        if (alpha == 256)
+            draw_full(256);
+        return;
+    }
+    u32 w = (u32)(scene.bx1 - scene.bx0 + 1), i = 0;
+    for (u32 y = (u32)scene.by0; y <= (u32)scene.by1; y++) {
+        u32 rsq = scene_rowsq(&scene, y);
+        for (u32 x = 0; x < w; x++, i++) {
+            u32 bg[3], fg[3] = { logo_full[i][0], logo_full[i][1], logo_full[i][2] }, c[3];
+            scene_bg_row(&scene, x + (u32)scene.bx0, rsq, bg);
+            scene_mix(c, bg, fg, alpha);
+            put_pixel(x, c, x + (u32)scene.bx0, y);
+        }
+        write_span(y, (u32)scene.bx0, w);
+    }
+}
+
+/* Only the spinner's box: the stroke pointing at `head`, at `alpha`
+ * overall (0 draws the background back). */
+static void draw_spinner(u32 alpha, u32 head, bool ring)
+{
+    static const u8 rgb[3] = LP_RGB_WORD;
+    u32 ink[3] = { (u32)rgb[0] << 8, (u32)rgb[1] << 8, (u32)rgb[2] << 8 };
+    s32 hx, hy;
+    scene_spin_head(&scene, head, &hx, &hy);
+    u32 w = (u32)(scene.sx1 - scene.sx0 + 1);
+    for (u32 y = (u32)scene.sy0; y <= (u32)scene.sy1; y++) {
+        u32 rsq = scene_rowsq(&scene, y);
+        for (u32 x = 0; x < w; x++) {
+            u32 px = x + (u32)scene.sx0, bg[3], c[3];
+            scene_bg_row(&scene, px, rsq, bg);
+            scene_logo(&scene, px, y, bg);  /* nothing, unless a tiny screen overlaps them */
+            u32 a = alpha ? scene_spin(&scene, px, y, head, hx, hy, ring) * alpha / 256 : 0;
+            scene_mix(c, bg, ink, a);
+            put_pixel(x, c, px, y);
+        }
+        write_span(y, (u32)scene.sx0, w);
+    }
+}
+
+/* ── The screen ───────────────────────────────────────────────────── */
+
+/* Wait for the framebuffer, and describe it.
+ *
+ * The graphics hardware is found by probing a bus, and that finishes
+ * some time after init starts - so at the moment we are run there is
+ * often no /dev/fb0 yet, and being early is not a reason to give up.
+ * On a PC it can also be replaced under us: the firmware's framebuffer
+ * (simpledrm or efifb) is removed when the real graphics driver loads,
+ * and a new /dev/fb0 appears a moment later. Either way we wait, up to
+ * `wait_ms`, and stop waiting if we are told to stop. */
+static bool open_fb(int wait_ms)
+{
+    for (int waited = 0; waited <= wait_ms && !stop_req; waited += 50) {
+        fbfd = lp_open(fbdev, O_WRONLY, 0);
+        if (fbfd >= 0) {
+            if (fb_query((int)fbfd, &fb)) {
+                fb_lost = false;
+                scene_init(&scene, fb.xres, fb.yres, LP_OS_NAME);
+                return true;
+            }
+            lp_close((int)fbfd);
+            fbfd = -1;
+        }
+        lp_sleep_ms(50);
+    }
+    return false;
+}
+
+static long vtfd = -1;
+
+static void vt_mode(int mode)
+{
+    if (vtfd < 0)
+        vtfd = lp_open("/dev/tty0", O_RDWR | SPL_O_NOCTTY, 0);
+    if (vtfd >= 0)
+        lp_ioctl((int)vtfd, KDSETMODE, (void *)(long)mode);
+}
+
+/* `splash` as a word of the kernel command line. */
+static bool cmdline_says_hold(void)
+{
+    char buf[1024];
+    long n = proc_read("/proc/cmdline", buf, sizeof buf - 1);
+    if (n <= 0)
+        return false;
+    buf[n] = 0;
+    for (char *p = buf; *p; ) {
+        while (*p == ' ' || *p == '\n')
+            p++;
+        char *w = p;
+        while (*p && *p != ' ' && *p != '\n')
+            p++;
+        if (p - w == 6 && memcmp(w, "splash", 6) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool motion_reduced(void)
+{
+    if (lp_exists("/etc/lp/reduce-motion"))
+        return true;
+    lp_user_t u;
+    char path[128];
+    if (lp_user_by_uid(1000, &u)) {
+        snprintf(path, sizeof path, "%s/.config/lp/reduce-motion", u.home);
+        if (lp_exists(path))
+            return true;
+    }
+    return false;
+}
+
+/* ── splash stop ──────────────────────────────────────────────────────
+ * Find the running splash by its name in /proc - no pid file, so there
+ * is nothing to go stale if the machine lost power mid-boot - signal
+ * it, and wait until it has gone, so the caller knows nothing will be
+ * written to the screen after this returns. "Gone" includes a zombie:
+ * init reaps its children on its own schedule, and the splash has
+ * finished drawing the moment it exits. */
+#define DIRENT_RECLEN 16
+#define DIRENT_NAME   19
+
+static bool comm_of(long pid, char *out, size_t cap)
+{
+    char path[48];
+    snprintf(path, sizeof path, "/proc/%ld/comm", pid);
+    long n = proc_read(path, out, cap - 1);
+    if (n <= 0)
+        return false;
+    out[n] = 0;
+    char *nl = strchr(out, '\n');
+    if (nl) *nl = 0;
+    return true;
+}
+
+static bool still_running(long pid)
+{
+    char path[48], buf[256];
+    snprintf(path, sizeof path, "/proc/%ld/stat", pid);
+    long n = proc_read(path, buf, sizeof buf - 1);
+    if (n <= 0)
+        return false;
+    buf[n] = 0;
+    char *p = strrchr(buf, ')');
+    return p && p[1] == ' ' && p[2] != 'Z' && p[2] != 'X';
+}
+
+static int stop_running(bool console)
+{
+    char me[64];
+    if (!comm_of(lp_getpid(), me, sizeof me))
+        strlcpy(me, "splash", sizeof me);
+
+    long pids[16];
+    int  n = 0;
+    long fd = lp_open("/proc", O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0)
+        return 0;
+    char buf[4096];
+    for (;;) {
+        long got = sys_getdents((int)fd, buf, sizeof buf);
+        if (got <= 0)
+            break;
+        for (long off = 0; off < got && n < 16; ) {
+            char *rec = buf + off;
+            u16 len = *(u16 *)(rec + DIRENT_RECLEN);
+            char *name = rec + DIRENT_NAME;
+            if (len == 0)
+                break;
+            off += len;
+            if (name[0] < '1' || name[0] > '9')
+                continue;
+            long pid = strtol(name, NULL, 10);
+            char comm[64];
+            if (pid != lp_getpid() && comm_of(pid, comm, sizeof comm) &&
+                strcmp(comm, me) == 0 && still_running(pid))
+                pids[n++] = pid;
+        }
+    }
+    lp_close((int)fd);
+
+    for (int i = 0; i < n; i++)
+        lp_kill((pid_t)pids[i], console ? SIGUSR1 : SIGTERM);
+    /* The spinner's exit is 182ms; the logo, if it was still arriving,
+     * up to 400. Two seconds is a ceiling for a machine under load. */
+    for (int waited = 0; waited < 2000; waited += 10) {
+        bool any = false;
+        for (int i = 0; i < n; i++)
+            any |= still_running(pids[i]);
+        if (!any)
+            return 0;
+        lp_sleep_ms(10);
+    }
+    return 1;
+}
+
+static void usage(void)
+{
+    printf("usage: splash [--hold] [device]   draw the boot screen (default /dev/fb0)\n");
+    printf("       splash stop [--console]   end it: the desktop, or the console, takes over\n");
+    printf("  --reduced  as if motion were reduced   --trace  a line per frame on stderr\n\n");
+    printf("It holds the screen, with a spinner, until `splash stop` when the kernel\n");
+    printf("command line has the word `splash` or --hold is given; otherwise it fades\n");
+    printf("the logo in and exits.\n");
+}
+
 int main(int argc, char **argv)
 {
-    const char *dev = "/dev/fb0";
-    if (argc > 1 && strcmp(argv[1], "-h") == 0) {
-        printf("usage: splash [device]\n");
-        printf("  draws the boot screen on the framebuffer (default %s)\n", dev);
-        return 0;
+    bool hold = false, hold_flag = false, force_reduced = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage();
+            return 0;
+        } else if (strcmp(argv[i], "stop") == 0) {
+            bool console = i + 1 < argc && strcmp(argv[i + 1], "--console") == 0;
+            return stop_running(console);
+        } else if (strcmp(argv[i], "--hold") == 0)
+            hold_flag = true;
+        else if (strcmp(argv[i], "--trace") == 0)
+            trace = true;
+        else if (strcmp(argv[i], "--reduced") == 0)
+            force_reduced = true;
+        else
+            fbdev = argv[i];
     }
-    if (argc > 1)
-        dev = argv[1];
+    hold = hold_flag || cmdline_says_hold();
 
-    /* Wait a little for the device to appear.
-     *
-     * The graphics hardware is found by probing a bus, and that finishes
-     * some time after init starts - so at the moment we are run there is
-     * often no /dev/fb0 yet, and being early is not a reason to give up.
-     * Eight seconds covers a slow probe on a cold board without holding
+    lp_signal_handler(SIGTERM, on_term);
+    lp_signal_handler(SIGUSR1, on_usr1);
+
+    /* Eight seconds covers a slow probe on a cold board without holding
      * anything up: init starts this and carries straight on, and a
      * machine with no screen simply has a process asleep for a moment. */
-    long fd = -1;
-    for (int waited = 0; waited <= 8000; waited += 100) {
-        fd = lp_open(dev, O_WRONLY, 0);
-        if (fd >= 0)
-            break;
-        lp_sleep_ms(100);
-    }
-    if (fd < 0)
+    if (!open_fb(8000))
         return 1;                   /* no screen attached - not an error */
 
-    fb_t fb;
-    if (!fb_query((int)fd, &fb)) {
-        lp_close((int)fd);
-        return 1;
-    }
-    u32 W = fb.xres, H = fb.yres;
+    if (hold)
+        vt_mode(KD_GRAPHICS);
 
-    /* ── Layout ──
-     * The mark is 15% of the screen's height, so it is the same size to
-     * the eye on every screen, but never more than 22% of the width, for
-     * a portrait panel. Its centre sits a little above the middle - a
-     * shape placed dead centre reads as slightly low - and the name hangs
-     * under it at a quarter of its height. */
-    s32 mark_h = (s32)(H * 15 / 100);
-    if (mark_h > (s32)(W * 22 / 100)) mark_h = (s32)(W * 22 / 100);
-    if (mark_h < 24) mark_h = 24;
-    s32 cx = (s32)W * SUB / 2, cy = (s32)H * SUB * 44 / 100;
+    bool reduced = force_reduced || motion_reduced();
+    s64 logo_w = reduced ? LP_W16_REDUCED : LP_W16_LOGO_IN;
+    s64 in_w   = reduced ? LP_W16_REDUCED : LP_W16_SPIN_IN;
+    s64 out_w  = reduced ? LP_W16_REDUCED : LP_W16_SPIN_OUT;
 
-    s32 m_num = mark_h * SUB, m_den = LP_MARK_Y1 - LP_MARK_Y0;
-    s32 m_ox = cx - (LP_MARK_X0 + LP_MARK_X1) * m_num / m_den / 2;
-    s32 m_oy = cy - (LP_MARK_Y0 + LP_MARK_Y1) * m_num / m_den / 2;
-    for (u32 i = 0; i < sizeof(LP_MARK) / sizeof(LP_MARK[0]); i++)
-        place(&LP_MARK[i], LP_MARK[i].accent ? G_RING : G_ELL, m_ox, m_oy, m_num, m_den);
+    s64 t_draw = now_us();
+    draw_full(0);
+    cache_logo();
+    if (trace)
+        dprintf(2, "splash: %ux%u@%u, first frame %ld us, logo box %dx%d, spinner box %dx%d\n",
+                fb.xres, fb.yres, fb.bpp, (long)(now_us() - t_draw),
+                scene.bx1 - scene.bx0 + 1, scene.by1 - scene.by0 + 1,
+                scene.sx1 - scene.sx0 + 1, scene.sy1 - scene.sy0 + 1);
 
-    /* The name, in the wordmark's letters: first measured, then placed
-     * centred. A letter the wordmark does not have is left as a gap the
-     * width of an n rather than guessed at. */
-    const char *name = LP_OS_NAME;
-    s32 w_num = mark_h * SUB * 27 / 100, w_den = LP_CAP;
-    const lp_glyph_t *gl[64];
-    int n = 0;
-    s32 width = 0;
-    for (const char *s = name; *s && n < 64; s++, n++) {
-        gl[n] = NULL;
-        for (u32 k = 0; k < sizeof(LP_LETTERS) / sizeof(LP_LETTERS[0]); k++)
-            if (LP_LETTERS[k].ch == *s)
-                gl[n] = &LP_LETTERS[k];
-        if (n && gl[n]) width += gl[n]->kern;
-        width += (gl[n] ? gl[n]->adv : 4 * LP_UNIT) + LP_TRACK;
-    }
-    if (n)
-        width -= LP_TRACK;
-    s32 pen = cx - width * w_num / w_den / 2;
-    s32 base = cy + mark_h * SUB / 2 + mark_h * SUB * 62 / 100;
-    s32 x_units = 0;
-    for (int i = 0; i < n; i++) {
-        if (i && gl[i]) x_units += gl[i]->kern;
-        if (gl[i])
-            for (int k = 0; k < gl[i]->count; k++) {
-                const lp_prim_t *p = &LP_LETTER_PRIMS[gl[i]->first + k];
-                place(p, p->accent ? G_DOT : G_WORD,
-                      pen + x_units * w_num / w_den, base, w_num, w_den);
-            }
-        x_units += (gl[i] ? gl[i]->adv : 4 * LP_UNIT) + LP_TRACK;
-    }
+    spring_t logo = { 0, 0, 0, 0 }, spin = { 0, 0, 0, 0 };
+    spring_go(&logo, ONE, logo_w);
 
-    /* the box every shape lives in: nothing outside it needs a look */
-    s32 bx0 = (s32)W, by0 = (s32)H, bx1 = -1, by1 = -1;
-    for (int i = 0; i < nprims; i++) {
-        if (prims[i].x0 < bx0) bx0 = prims[i].x0;
-        if (prims[i].y0 < by0) by0 = prims[i].y0;
-        if (prims[i].x1 > bx1) bx1 = prims[i].x1;
-        if (prims[i].y1 > by1) by1 = prims[i].y1;
-    }
+    enum { LOGO_IN, HOLDING, LEAVING } phase = LOGO_IN;
+    s64 start = now_us(), last = start, logo_done = 0;
+    s64 next = start, carry = 0;
+    const s64 period = 16667;       /* 60 frames a second */
+    bool spin_shown = false;
+    int  frames = 0;
+    s64  max_gap = 0, max_draw = 0, prev_frame = 0;
 
-    static const u8 colour[G_COUNT][3] = {
-        LP_RGB_ACCENT, LP_RGB_INK, LP_RGB_WORD, LP_RGB_ACCENT,
-    };
+    for (;;) {
+        s64 now = now_us();
+        s64 ms = (now - last + carry) / 1000;
+        carry = (now - last + carry) % 1000;
+        last = now;
 
-    /* ── The gradient's geometry ──
-     * Positions in 1/4096ths of the width and height, measured from the
-     * focus, so the light stretches to the screen's shape. The index into
-     * the table is the squared distance over the squared distance to the
-     * farthest corner, taken by multiplying with a reciprocal made once. */
-    build_lut();
-    for (u32 x = 0; x < W; x++) {
-        s32 ux = (s32)((2 * x + 1) * 2048 / W) - LP_FOCUS_X;
-        colsq[x] = (u32)(ux * ux);
-    }
-    u32 fx = 4096 - LP_FOCUS_X, fy = 4096 - LP_FOCUS_Y;
-    u64 recip = ((u64)(LUT_N - 1) << 32) / (u64)(fx * fx + fy * fy);
-
-    static u8 row[MAX_ROW_BYTES] __attribute__((aligned(8)));
-
-    for (u32 y = 0; y < H; y++) {
-        s32 uy = (s32)((2 * y + 1) * 2048 / H) - LP_FOCUS_Y;
-        u32 rowsq = (u32)(uy * uy);
-        bool logo_row = (s32)y >= by0 && (s32)y <= by1;
-
-        for (u32 x = 0; x < W; x++) {
-            u32 idx = (u32)(((u64)(colsq[x] + rowsq) * recip) >> 32);
-            if (idx >= LUT_N) idx = LUT_N - 1;
-            u32 c[3] = { lut[idx][0], lut[idx][1], lut[idx][2] };
-
-            if (logo_row && (s32)x >= bx0 && (s32)x <= bx1) {
-                s32 px = (s32)x * SUB + SUB / 2, py = (s32)y * SUB + SUB / 2;
-                s32 best[G_COUNT];
-                for (int g = 0; g < G_COUNT; g++)
-                    best[g] = 1 << 30;
-                for (int i = 0; i < nprims; i++) {
-                    const placed_t *p = &prims[i];
-                    if ((s32)x < p->x0 || (s32)x > p->x1 || (s32)y < p->y0 || (s32)y > p->y1)
-                        continue;
-                    s32 sd = distance(p, px, py) - p->hw;
-                    if (sd < best[p->group])
-                        best[p->group] = sd;
-                }
-                /* each colour's shapes are one union (the nearest edge
-                 * wins), laid over the background in drawing order */
-                for (int g = 0; g < G_COUNT; g++) {
-                    s32 cov = SUB / 2 - best[g];      /* 0..SUB across the edge */
-                    if (cov <= 0)
-                        continue;
-                    if (cov > SUB) cov = SUB;
-                    for (int k = 0; k < 3; k++) {
-                        s32 fg = (s32)colour[g][k] << 8;
-                        c[k] = (u32)((s32)c[k] + (fg - (s32)c[k]) * cov / SUB);
-                    }
-                }
-            }
-
-            u32 v = 0;
-            for (int k = 0; k < 3; k++) {
-                /* the channels read the pattern at different offsets so
-                 * the dither does not line up into a grey grid */
-                u32 thr = BAYER[(y + 3 * k) & 7][(x + 5 * k) & 7] * 4u + 2u;
-                v |= quantise(c[k], fb.len[k], thr) << fb.off[k];
-            }
-            put_pixel(row, &fb, x, v);
+        if (fb_lost) {
+            /* The graphics driver replaced the firmware's framebuffer.
+             * Draw the whole picture again on the new one, logo and all -
+             * there is nothing to fade in on a screen that was just lit. */
+            lp_close((int)fbfd);
+            if (!open_fb(3000))
+                break;
+            draw_full(256);
+            cache_logo();
+            logo.x = logo.target = ONE;
+            logo.v = 0;
+            if (hold)
+                vt_mode(KD_GRAPHICS);
         }
 
-        if (lp_write((int)fd, row, fb.line_length) != (long)fb.line_length)
-            break;                  /* short write: stop rather than tear */
+        bool moving = false;
+        if (phase == LOGO_IN) {
+            moving = spring_step(&logo, ms);
+            draw_logo(moving ? alpha_of(&logo) : 256);
+            if (!moving) {
+                logo_done = now;
+                phase = hold ? HOLDING : LEAVING;
+            }
+        } else {
+            if (phase == HOLDING && (stop_req || now - start > (s64)LP_MOTION_HOLD_MS * 1000)) {
+                if (!stop_req)
+                    stop_req = STOP_CONSOLE;    /* nobody came: give the console back */
+                phase = LEAVING;
+                spring_go(&spin, 0, out_w);
+            }
+            if (phase == HOLDING && !spin_shown &&
+                now - logo_done >= (s64)LP_MOTION_SPIN_DELAY_MS * 1000) {
+                spin_shown = true;
+                spring_go(&spin, ONE, in_w);
+            }
+            moving = spring_step(&spin, ms);
+            if (spin_shown) {
+                s64 t = now - logo_done;
+                u32 head = (u32)((t / 1000) % LP_MOTION_SPIN_TURN_MS * 65536 / LP_MOTION_SPIN_TURN_MS);
+                u32 a = alpha_of(&spin);
+                if (reduced) {
+                    /* breathe: 35% to 100% and back over PULSE_MS */
+                    u32 p = (u32)((t / 1000) % LP_MOTION_PULSE_MS);
+                    u32 half = LP_MOTION_PULSE_MS / 2;
+                    u32 u = p < half ? p * 64 / half : (LP_MOTION_PULSE_MS - p) * 64 / half;
+                    u32 wave = LP_WAVE[u > 64 ? 64 : u];
+                    a = a * (90 + (u32)((166 * (u64)wave) >> 16)) / 256;
+                }
+                draw_spinner(a, head, reduced);
+            }
+            if (phase == LEAVING && !moving)
+                break;
+        }
+
+        if (trace) {
+            /* one line a frame: when it started (ms since the first
+             * frame), the gap since the one before, and how long the
+             * drawing took - the numbers the frame-gap reports quote */
+            s64 end = now_us();
+            dprintf(2, "splash: frame t_ms=%ld dt_us=%ld draw_us=%ld\n", (long)((now - start) / 1000),
+                    prev_frame ? (long)(now - prev_frame) : 0L, (long)(end - now));
+            if (prev_frame && now - prev_frame > max_gap)
+                max_gap = now - prev_frame;
+            if (end - now > max_draw)
+                max_draw = end - now;
+            prev_frame = now;
+            frames++;
+        }
+
+        /* Nothing to draw until the spinner is due: sleep until then
+         * (a signal cuts the sleep short). Otherwise, the next frame. */
+        if (phase == HOLDING && !spin_shown) {
+            s64 due = logo_done + (s64)LP_MOTION_SPIN_DELAY_MS * 1000 - now_us();
+            sleep_us(due > 100000 ? 100000 : due);
+            next = now_us();
+            prev_frame = 0;
+            continue;
+        }
+        next += period;
+        s64 slack = next - now_us();
+        if (slack < -period)
+            next = now_us();        /* fell behind: do not try to catch up */
+        else
+            sleep_us(slack);
     }
 
-    lp_close((int)fd);
+    if (trace)
+        dprintf(2, "splash: %d frames, max frame gap %ld us, max draw %ld us, stop=%d\n",
+                frames, (long)max_gap, (long)max_draw, stop_req);
+
+    if (fbfd >= 0)
+        lp_close((int)fbfd);
+    if (hold && stop_req == STOP_CONSOLE)
+        vt_mode(KD_TEXT);
     return 0;
 }

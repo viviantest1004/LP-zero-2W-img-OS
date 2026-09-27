@@ -9,6 +9,8 @@
 #   i915      i915/skl_dmc_ver1_27.bin     display power states (DC5/DC6);
 #                                          without it i915 disables
 #                                          runtime PM for good
+#             i915/skl_{guc,huc}_*.bin     only with i915.enable_guc=2
+#                                          (below)
 #   ath10k    ath10k/QCA6174/hw3.0/...     Killer 1535 WiFi
 #   brcmfmac  brcm/brcmfmac4350-pcie.bin   Dell DW1830 WiFi (the other
 #                                          card this model was sold with)
@@ -53,9 +55,17 @@
 #   tools/fetch-pc-fw.sh --check   verify what is there; no network
 #   tools/fetch-pc-fw.sh --list    print the firmware paths, one a line
 #
+# GuC and HuC are the exception to "only what it needs". i915 on Skylake
+# requests neither unless i915.enable_guc is set (the default is off
+# before Gen12), and nothing here sets it: it is a parameter i915 marks
+# unsafe, so setting it taints the kernel, and what it buys on this GPU
+# is HuC, which only VA-API video ENCODING uses. They are in the set so
+# that the person who does turn it on gets a GPU that finds its firmware
+# at probe time - i915 is built in and probes from the initramfs - and
+# not a boot that asks for a file that is not there, stalls on the
+# timeout, and carries on without it. 340KB.
+#
 # Not here, on purpose:
-#   i915 GuC/HuC  Skylake does not load them unless i915.enable_guc is
-#                 set, and nothing in this system sets it.
 #   BCM4350 Bluetooth patch (brcm/BCM4350C5-*.hcd)  linux-firmware has
 #                 none - Broadcom only ships it inside Windows drivers.
 #                 The chip runs on its ROM firmware without it.
@@ -86,6 +96,8 @@ RD_URLS=(
 #   doc  licence text, /lib/firmware only
 MANIFEST="
 fw  d3b6dc1a39bb2aeb37a1179f2b4e8145c24986da78c533571a5712dc91ec3f61 i915/skl_dmc_ver1_27.bin                        i915/skl_dmc_ver1_27.bin                        lf
+fw  ccb6e2abf19a88c1ab0fc09f5340a6ff85d52548340031c4e04088d9fc9dc2ce i915/skl_guc_70.1.1.bin                         i915/skl_guc_70.1.1.bin                         lf
+fw  c7a1dce013050f823471de2cdc5f0170b1acf8c811ca8c8da41e35f526bcb1d7 i915/skl_huc_2.0.0.bin                          i915/skl_huc_2.0.0.bin                          lf
 fw  66e83dde1c9af535df1fcd17c72971a96a263357300e921b358d35a353227d60 ath10k/QCA6174/hw3.0/board-2.bin                ath10k/QCA6174/hw3.0/board-2.bin                lf
 fw  04d3bad5efa3f9fbe3ba53fd3e25fa9b0585ed227eea8111303b4e08861f979d ath10k/QCA6174/hw3.0/firmware-6.bin             ath10k/QCA6174/hw3.0/firmware-6.bin             lf
 fw  5691d1e0ceb70baf18efb7a0ec6cb84feb9edd2d0700c525b42930c4e7e4b845 brcm/brcmfmac4350-pcie.bin                      brcm/brcmfmac4350-pcie.bin                      lf

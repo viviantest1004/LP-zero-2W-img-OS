@@ -47,6 +47,17 @@ char *lp_share_path(const char *name);
 /* ~/.config/lp/<name>, created on demand for writers. */
 char *lp_config_path(const char *name);
 
+/* Replace a file so that a power cut leaves either the old contents or
+ * the new, never a truncated mix: temp file in the same directory,
+ * fsync, rename over, fsync the directory (GLib's CONSISTENT|DURABLE).
+ * The parent directory is created if missing. COMMON.md's Persistence
+ * rule; every setting the shell remembers goes through here. */
+gboolean lp_write_atomic(const char *path, const char *data, gssize len);
+/* The same, for ~/.config/lp/<name>. */
+gboolean lp_config_write(const char *name, const char *data);
+/* ~/.config/lp/<name> with trailing whitespace removed, or NULL. */
+char *lp_config_read(const char *name);
+
 /* TRUE when the owner has turned 어두운 스타일 off. */
 gboolean lp_style_light(void);
 void lp_style_set_light(gboolean light);
@@ -116,5 +127,22 @@ GtkWidget *lp_icon(const char *name, int px);
 /* The person's name as it should be shown: the GECOS name, else the
  * login name. */
 char *lp_user_display_name(void);
+
+/* A picture of w as it is now, at the output's scale, for painting
+ * while w moves (see lp-sheet.c for why). NULL before w is allocated. */
+cairo_surface_t *lp_widget_snapshot(GtkWidget *w);
+
+/* ── measuring ───────────────────────────────────────────────────── */
+
+/* With LP_MOTION_TRACE=1 (the same switch lp-motion's frame trace
+ * uses), lp_trace_draw() prints "lp-shell: draw <what> cpu_ms=<n>" for a
+ * draw that began at lp_trace_now(). Frame gaps say how smooth a motion
+ * looked; this says how much of each gap was our own drawing, which is
+ * the part that carries over to other hardware. It is this thread's CPU
+ * time, not the wall clock, so a busy build machine preempting the
+ * process does not show up as slow drawing. */
+gboolean lp_trace_on(void);
+gint64 lp_trace_now(void);
+void lp_trace_draw(const char *what, gint64 start);
 
 #endif /* LP_SHELL_H */

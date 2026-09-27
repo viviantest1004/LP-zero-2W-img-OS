@@ -77,7 +77,10 @@ window.lp-layer.background {
   text-shadow: none;
   -gtk-icon-shadow: none;
   outline-color: transparent;
-  transition: background-color 130ms ease-out;
+  /* No transition here: motion.css (loaded just under this file) gives
+   * every button the press spring - highlight on touch-down in the same
+   * frame, a 91ms fade on release. Saying it again here, more
+   * specifically, is what used to fade the highlight IN as well. */
 }
 .lp-layer button:hover   { background-color: rgba(255, 255, 255, 0.07); }
 .lp-layer button:active,
@@ -160,26 +163,31 @@ menu.lp-menu, .lp-menu menu, .lp-menu {
 .lp-bar .lp-status .lp-bad  { color: @lp_red; }
 .lp-bar .lp-kbd image { color: @lp_t1; }
 
-/* The calendar under the clock. */
-popover.lp-cal {
+/* The calendar under the clock: a sheet (lp-sheet.c) that slides down
+ * from under the bar. The margin is room for its shadow inside the
+ * transparent surface; the sheet paints a picture of the card while it
+ * moves, so the blur below is paid once per opening, not per frame. */
+.lp-cal {
   background-color: @lp_card;
   border: 1px solid @lp_line;
-  border-radius: 12px;
-  padding: 12px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.40);
+  border-radius: 14px;
+  padding: 14px;
+  margin: 4px 24px 24px 24px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5),
+              0 10px 30px rgba(0, 0, 0, 0.40);
 }
-popover.lp-cal .lp-cal-day {
+.lp-cal .lp-cal-day {
   font-size: 13px;
   color: @lp_t2;
   margin: 2px 4px 0 4px;
 }
-popover.lp-cal .lp-cal-date {
+.lp-cal .lp-cal-date {
   font-size: 20px;
   font-weight: 600;
   letter-spacing: -0.022em;
   margin: 0 4px 10px 4px;
 }
-popover.lp-cal calendar {
+.lp-cal calendar {
   background-color: transparent;
   color: @lp_t1;
   border: none;
@@ -187,15 +195,15 @@ popover.lp-cal calendar {
   padding: 4px;
   font-feature-settings: "tnum";
 }
-popover.lp-cal calendar.header { border: none; background: transparent; }
-popover.lp-cal calendar.button { color: @lp_t2; min-width: 48px; min-height: 40px; }
-popover.lp-cal calendar:selected {
+.lp-cal calendar.header { border: none; background: transparent; }
+.lp-cal calendar.button { color: @lp_t2; min-width: 48px; min-height: 40px; }
+.lp-cal calendar:selected {
   background-color: @lp_accent;
   color: #ffffff;
   border-radius: 20px;
 }
-popover.lp-cal calendar.highlight { color: @lp_t3; font-weight: 500; }
-popover.lp-cal calendar:indeterminate { color: @lp_t4; }
+.lp-cal calendar.highlight { color: @lp_t3; font-weight: 500; }
+.lp-cal calendar:indeterminate { color: @lp_t4; }
 
 /* ── the dock ─────────────────────────────────────────────────────── */
 
@@ -253,8 +261,11 @@ popover.lp-note .lp-mono {
 
 /* ── the app grid ─────────────────────────────────────────────────── */
 
+/* The grid's backdrop (the canvas at 94%) is painted by lp-appgrid
+ * itself, at the opening spring's opacity; a background here would be
+ * painted a second time on top of it. */
 .lp-grid {
-  background-color: rgba(14, 14, 14, 0.94);
+  background-color: transparent;
 }
 
 .lp-grid entry.lp-search {

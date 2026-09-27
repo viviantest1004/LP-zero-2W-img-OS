@@ -142,18 +142,16 @@ static const u16 LP_GRAD[LP_GRAD_N][3] = {
 #define LP_MOTION_PULSE_MS         2400   /* reduced motion's stand-in for turning: a slow brightness pulse */
 #define LP_MOTION_HOLD_MS         90000   /* give up waiting for the desktop and hand the screen back */
 
-/* LP_EASE[i]: that spring's position (0..65535) at i/64 of its settle
- * time; w*T = 7.430. Interpolate between entries. */
-static const u16 LP_EASE[65] = {
-        0,   411,  1523,  3178,  5243,  7608, 10184, 12894, 15680, 18491, 21289, 24042, 26728,
-    29327, 31827, 34217, 36493, 38650, 40687, 42604, 44404, 46088, 47661, 49127, 50490, 51756,
-    52928, 54013, 55016, 55941, 56794, 57579, 58301, 58964, 59573, 60131, 60642, 61111, 61539,
-    61930, 62288, 62615, 62912, 63184, 63432, 63657, 63862, 64049, 64219, 64374, 64514, 64641,
-    64757, 64862, 64958, 65044, 65123, 65194, 65258, 65316, 65369, 65417, 65460, 65500, 65535,
-};
+/* w for each of those springs (critically damped, settled by the time
+ * above under lp-motion.c's rule), in 1/16 rad/s. */
+#define LP_W16_LOGO_IN      324   /* 400 ms */
+#define LP_W16_SPIN_IN      533   /* 260 ms */
+#define LP_W16_SPIN_OUT     802   /* 182 ms */
+#define LP_W16_REDUCED     1581   /* 100 ms */
 
 /* LP_WAVE[i]: (1 - cos(pi i/64)) / 2 in 0..65535 - a smooth rise from 0 to
- * 1, run forwards then backwards for reduced motion's pulse. */
+ * 1: reduced motion's breathing, run forwards then backwards, and the
+ * cosine the spinner's head is placed with. */
 static const u16 LP_WAVE[65] = {
         0,    39,   158,   355,   630,   982,  1411,  1915,  2494,  3146,  3869,  4662,  5522,
      6448,  7438,  8488,  9597, 10762, 11980, 13248, 14563, 15922, 17321, 18758, 20228, 21728,

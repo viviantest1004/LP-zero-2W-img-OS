@@ -145,8 +145,17 @@ typedef struct {
     char      *out, *err;
 } job_t;
 
+/* Commands started and not yet answered. `lp-settings --restore` has no
+ * window and no main loop of its own; it runs the loop until this is
+ * zero, so a restore that starts something in the background (gsettings,
+ * makoctl) is not cut off by the process exiting under it. */
+static int jobs_pending;
+
+int lp_jobs_pending(void) { return jobs_pending; }
+
 static void job_deliver(job_t *j)
 {
+    jobs_pending--;
     GObject *o = j->had_owner ? g_weak_ref_get(&j->owner) : NULL;
     if (j->done && (!j->had_owner || o))
         j->done(j->status, j->out ? j->out : "", j->err ? j->err : "",
@@ -188,6 +197,7 @@ void lp_run_async(const char *const *argv, const char *in, GtkWidget *owner,
                   lp_done_fn done, gpointer data)
 {
     job_t *j = g_new0(job_t, 1);
+    jobs_pending++;
     j->done = done;
     j->data = data;
     j->had_owner = owner != NULL;
@@ -622,6 +632,60 @@ void lp_run_latest(const char *key, const char *const *argv)
     lp_run_async(argv, NULL, NULL, latest_done, g_strdup(key));
 }
 
+/* ── after the finger stops ──────────────────────────────────────────
+ *
+ * A slider that is also a file (the touchpad speed is a line in
+ * wayfire.ini, night light's warmth a line in nightlight.conf) must not
+ * be written thirty times a second: each write is an fsync, and each one
+ * makes wayfire re-read its whole config or restarts wlsunset. So the
+ * write waits until the value has been still for a moment; a newer value
+ * for the same key replaces the waiting one. */
+
+typedef struct {
+    guint          id;
+    void         (*fn)(gpointer);
+    gpointer       data;
+    GDestroyNotify free_fn;
+} later_t;
+
+static GHashTable *laters;
+
+static void later_free(gpointer p)
+{
+    later_t *l = p;
+    if (l->id) g_source_remove(l->id);
+    if (l->free_fn) l->free_fn(l->data);
+    g_free(l);
+}
+
+static gboolean later_fire(gpointer key)
+{
+    gpointer k = NULL, v = NULL;
+    /* Out of the table before it runs, so fn may ask for another. */
+    if (g_hash_table_steal_extended(laters, key, &k, &v)) {
+        later_t *l = v;
+        l->id = 0;
+        l->fn(l->data);
+        later_free(l);
+        g_free(k);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+void lp_later(const char *key, guint ms, void (*fn)(gpointer), gpointer data,
+              GDestroyNotify free_fn)
+{
+    if (!laters)
+        laters = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, later_free);
+    later_t *l = g_new0(later_t, 1);
+    l->fn = fn;
+    l->data = data;
+    l->free_fn = free_fn;
+    char *k = g_strdup(key);
+    g_hash_table_replace(laters, k, l);
+    l->id = g_timeout_add(ms, later_fire, k);
+}
+
 /* ── files ──────────────────────────────────────────────────────────── */
 
 char *lp_slurp(const char *path)
@@ -825,6 +889,25 @@ static gboolean ini_store(const char *path, const char *body)
     return lp_write_file(path, body);
 }
 
+/* "key = value" or "key=value": whichever the file already uses more.
+ * wayfire.ini is written with spaces; mimeapps.list and GTK's
+ * settings.ini without, and xdg-mime's own reader (grep "^mime=") does
+ * not find a line written the other way. */
+static gboolean ini_compact(char **l)
+{
+    int spaced = 0, compact = 0;
+    for (int i = 0; l[i]; i++) {
+        const char *t = l[i];
+        while (*t == ' ' || *t == '\t') t++;
+        if (!*t || *t == '#' || *t == ';' || *t == '[') continue;
+        const char *eq = strchr(t, '=');
+        if (!eq) continue;
+        if (eq > t && (eq[-1] == ' ' || eq[-1] == '\t')) spaced++;
+        else compact++;
+    }
+    return compact > spaced;
+}
+
 /* value NULL removes the key. */
 static gboolean ini_edit(const char *path, const char *section,
                          const char *key, const char *value)
@@ -832,6 +915,10 @@ static gboolean ini_edit(const char *path, const char *section,
     char *body = lp_slurp(path);
     char **l = g_strsplit(body ? body : "", "\n", -1);
     int n = g_strv_length(l);
+    /* A new file follows the convention of what it is: GTK and
+     * freedesktop files are compact, wayfire's is spaced. */
+    const char *fmt = (body ? ini_compact(l) : !g_str_has_suffix(path, "wayfire.ini"))
+                    ? "%s=%s\n" : "%s = %s\n";
 
     int sec_start = -1, sec_end = -1, hit = -1;
     for (int i = 0; i < n; i++) {
@@ -855,7 +942,7 @@ static gboolean ini_edit(const char *path, const char *section,
         for (int i = 0; i < n; i++) {
             if (i == hit) {
                 if (value)
-                    g_string_append_printf(out, "%s = %s\n", key, value);
+                    g_string_append_printf(out, fmt, key, value);
             } else if (!(i == n - 1 && !*l[i])) {
                 g_string_append_printf(out, "%s\n", l[i]);
             }
@@ -878,12 +965,12 @@ static gboolean ini_edit(const char *path, const char *section,
         }
         for (int i = 0; i < n; i++) {
             if (i == at)
-                g_string_append_printf(out, "%s = %s\n", key, value);
+                g_string_append_printf(out, fmt, key, value);
             if (!(i == n - 1 && !*l[i]))
                 g_string_append_printf(out, "%s\n", l[i]);
         }
         if (at >= n)
-            g_string_append_printf(out, "%s = %s\n", key, value);
+            g_string_append_printf(out, fmt, key, value);
     } else {
         for (int i = 0; i < n; i++)
             if (!(i == n - 1 && !*l[i]))
@@ -891,7 +978,8 @@ static gboolean ini_edit(const char *path, const char *section,
         if (out->len && out->str[out->len - 1] == '\n' &&
             !(out->len > 1 && out->str[out->len - 2] == '\n'))
             g_string_append_c(out, '\n');
-        g_string_append_printf(out, "[%s]\n%s = %s\n", section, key, value);
+        g_string_append_printf(out, "[%s]\n", section);
+        g_string_append_printf(out, fmt, key, value);
     }
 
     gboolean ok = ini_store(path, out->str);

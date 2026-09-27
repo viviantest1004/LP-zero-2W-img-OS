@@ -27,7 +27,7 @@ SCANNER := $(shell $(PKG) --variable=wayland_scanner wayland-scanner)
 COMMON  := ../common
 
 CFLAGS  ?= -O2 -g
-CFLAGS  += -std=gnu11 -Wall -Wextra -Werror -I. -I$(COMMON)
+CFLAGS  += -std=gnu11 -Wall -Wextra -Werror -I. -I$(COMMON) -DG_LOG_DOMAIN=\"lp-osk\"
 CFLAGS  += $(shell $(PKG) --cflags $(PKGS))
 LDLIBS  += $(shell $(PKG) --libs $(PKGS)) -lm
 

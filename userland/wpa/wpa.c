@@ -80,6 +80,17 @@
  * not delete the password everybody else relies on
  * (design/account-permissions.md). An administrator at a terminal gets
  * there through `sudo`, which asks for their password.
+ *
+ * ── The fallback ──
+ * wpa_supplicant is kept as the way back (wpa-proto.h, "The fallback
+ * switch"). When the switch is on, `wpa -d` waits for a wireless
+ * interface and execs wpa_supplicant on it with the saved networks -
+ * this file's format is its format for exactly this reason - so init's
+ * line, the service name and `service restart wpa` stay the same either
+ * way. Waiting here rather than in wpa_supplicant matters: it exits at
+ * once without an interface, and init gives up on a service after
+ * twenty quick deaths, which on a card whose firmware loads late would
+ * be the fallback switching itself off.
  */
 #include "types.h"
 #include "string.h"
@@ -921,12 +932,40 @@ static void fail(const char *code, const char *a1, const char *a2)
 
 /* ══ The interface ═══════════════════════════════════════════════════ */
 
+/* Wireless interfaces that are not stations - hostapd's access point,
+ * a monitor interface - found when attach() asked. sysfs cannot tell a
+ * station from an AP (both are type 1 with a phy80211 link), so without
+ * this list the preferred name would be picked, refused and picked
+ * again every two seconds while a station interface next to it waited.
+ * Forgotten after a minute, because a mode is not for ever. */
+#define NOT_STA_MAX 4
+static struct { char name[16]; s64 until; } NOT_STA[NOT_STA_MAX];
+
+static void not_sta_add(const char *name)
+{
+    int k = 0;
+    for (int i = 0; i < NOT_STA_MAX; i++)
+        if (NOT_STA[i].until < NOT_STA[k].until)
+            k = i;
+    strlcpy(NOT_STA[k].name, name, sizeof NOT_STA[k].name);
+    NOT_STA[k].until = lp_monotonic_ms() + 60000;
+}
+
+static bool not_sta(const char *name)
+{
+    s64 now = lp_monotonic_ms();
+    for (int i = 0; i < NOT_STA_MAX; i++)
+        if (NOT_STA[i].until > now && strcmp(NOT_STA[i].name, name) == 0)
+            return true;
+    return false;
+}
+
 static bool pick_iface(const char *name, void *arg)
 {
     char *out = arg;
     char path[96];
     snprintf(path, sizeof path, "/sys/class/net/%s/phy80211", name);
-    if (!lp_exists(path))
+    if (!lp_exists(path) || not_sta(name))
         return true;
     /* wlan0 before anything else; otherwise the first in order. */
     if (!out[0] || strcmp(name, "wlan0") == 0 ||
@@ -967,6 +1006,7 @@ static bool attach(const char *name)
         JLOG("%s is in %s mode, not a station - leaving it alone", name,
              nl_iftype_name(info.iftype));
         nl_close(&NL);
+        not_sta_add(name);
         return false;
     }
     int err = 0;
@@ -1015,21 +1055,27 @@ static bool attach(const char *name)
 
 static void find_iface(void)
 {
-    char name[16] = "";
-    if (PIN_IF[0]) {
-        char path[64];
-        snprintf(path, sizeof path, "/sys/class/net/%s", PIN_IF);
-        if (lp_exists(path))
-            strlcpy(name, PIN_IF, sizeof name);
-    } else {
-        each_entry("/sys/class/net", pick_iface, name);
+    /* Each refusal puts that interface on the NOT_STA list, so the next
+     * round picks the one after it; a station next to an AP is found in
+     * this call rather than a sleep later. */
+    for (int round = 0; round <= NOT_STA_MAX; round++) {
+        char name[16] = "";
+        if (PIN_IF[0]) {
+            char path[64];
+            snprintf(path, sizeof path, "/sys/class/net/%s", PIN_IF);
+            if (lp_exists(path))
+                strlcpy(name, PIN_IF, sizeof name);
+        } else {
+            each_entry("/sys/class/net", pick_iface, name);
+        }
+        if (!name[0]) {
+            if (strcmp(err_code, "no_iface") != 0)
+                set_err("no_iface", NULL, NULL, false);
+            return;
+        }
+        if (attach(name) || PIN_IF[0] || !not_sta(name))
+            return;
     }
-    if (!name[0]) {
-        if (strcmp(err_code, "no_iface") != 0)
-            set_err("no_iface", NULL, NULL, false);
-        return;
-    }
-    attach(name);
 }
 
 /* ══ Scanning ════════════════════════════════════════════════════════ */
@@ -1544,6 +1590,19 @@ static void on_eapol(const u8 *frame, size_t len, const u8 from[6])
     }
     if (out.flags & WPA_DO_4WAY_DONE) {
         if (ST == ST_HANDSHAKE) {
+            /* The CONNECT asked for a closed port (nl_conn_t's
+             * control_port): open it now that the keys are in. A fullmac
+             * firmware that keeps the port itself says EOPNOTSUPP. */
+            if (!nl_authorize(&NL, C.bssid)) {
+                if (nl_errno(&NL) == 95) {
+                    JTRACE("the driver keeps the port itself (%s)", nl_error(&NL));
+                } else {
+                    char e[160];
+                    strlcpy(e, nl_error(&NL), sizeof e);
+                    fail("authorize", C.ssid, e);
+                    goto done;
+                }
+            }
             JNOTE("handshake with \"%s\" complete, keys installed%s", C.ssid,
                   C.bss.group == WLAN_CIPHER_SUITE_TKIP ? " (TKIP group key)" : "");
             joined();
@@ -1788,7 +1847,7 @@ static void request_connect(const u8 *ssid, size_t n, const char *password,
     memset(&want, 0, sizeof want);
     memcpy(want.ssid, ssid, n);
     want.ssid_len = (u8)n;
-    bool trial = false;
+    bool newpw = false;
 
     if (password && password[0]) {
         wpa_psk_err_t e = wpa_pmk_from_psk(password, ssid, n, want.pmk);
@@ -1800,7 +1859,7 @@ static void request_connect(const u8 *ssid, size_t n, const char *password,
             return;
         }
         want.have_pmk = true;
-        trial = true;
+        newpw = true;
     } else {
         net_t *s = net_find(ssid, n, false);
         if (!s || s->disabled)
@@ -1819,7 +1878,10 @@ static void request_connect(const u8 *ssid, size_t n, const char *password,
     memset(&REQ, 0, sizeof REQ);
     REQ.on = true;
     REQ.net = want;
-    REQ.trial = trial;
+    /* Whatever somebody asked for by name is saved once it works - a
+     * new password, an open network, or one forgotten here earlier and
+     * now chosen again - so it comes back by itself after a reboot. */
+    REQ.trial = true;
     REQ.hidden = want.hidden;
     REQ.uid = uid;
     wpa_wipe(&want, sizeof want);
@@ -1832,7 +1894,7 @@ static void request_connect(const u8 *ssid, size_t n, const char *password,
     char s[80];
     ssid_str(ssid, n, s, sizeof s);
     JNOTE("uid %u asked to connect to \"%s\"%s", (unsigned)uid, s,
-          trial ? " with a new password" : "");
+          newpw ? " with a new password" : "");
 
     ob_reset();
     ob_put("ok\n");
@@ -2104,6 +2166,162 @@ static bool open_socket(void)
     return true;
 }
 
+/* ══ Noticing a new interface ════════════════════════════════════════
+ *
+ * With no wireless interface (a VM, a desktop PC, a card whose firmware
+ * has not loaded yet) there is nothing to do but wait for one, and
+ * waking every second to look would be the only thing on an idle
+ * machine that never sleeps. rtnetlink's link group says when an
+ * interface appears, so the wait is a poll on that with a long timeout;
+ * the timeout stays as the guarantee (a message lost to a full buffer
+ * costs one timeout, nothing more). */
+
+#define RTMGRP_LINK          1
+#define IDLE_NO_IFACE_MS 30000
+
+static int link_fd = -1;
+static volatile int stop_sig;
+static void on_signal(int sig) { stop_sig = sig; }
+
+static void link_watch_open(void)
+{
+    long fd = lp_socket(16 /* AF_NETLINK */, SOCK_DGRAM | LP_SOCK_NONBLOCK |
+                        LP_SOCK_CLOEXEC, NETLINK_ROUTE);
+    if (fd < 0)
+        return;
+    u8 sa[12];
+    memset(sa, 0, sizeof sa);
+    u16 fam = 16;
+    u32 groups = RTMGRP_LINK;
+    memcpy(sa, &fam, 2);
+    memcpy(sa + 8, &groups, 4);
+    if (lp_bind((int)fd, sa, sizeof sa) < 0) {
+        lp_close((int)fd);
+        return;
+    }
+    link_fd = (int)fd;
+}
+
+static void link_watch_drain(void)
+{
+    u8 buf[4096];
+    while (link_fd >= 0 &&
+           lp_recvfrom(link_fd, buf, sizeof buf, MSG_DONTWAIT_, NULL, NULL) > 0)
+        ;
+}
+
+/* ══ The fallback: become wpa_supplicant ═════════════════════════════ */
+
+static const char *find_supplicant(void)
+{
+    static const char *const where[] = {
+        "/bin/wpa_supplicant", "/sbin/wpa_supplicant",
+        "/usr/sbin/wpa_supplicant", "/usr/bin/wpa_supplicant", NULL
+    };
+    for (int i = 0; where[i]; i++)
+        if (lp_exists(where[i]))
+            return where[i];
+    return NULL;
+}
+
+/* Returns only when there is no wpa_supplicant to hand over to; the
+ * caller then runs this daemon after all, because a switch that points
+ * at nothing must not leave the machine off the network. */
+static void run_fallback(const char *sw)
+{
+    const char *bin = find_supplicant();
+    if (!bin) {
+        JNOTE("the fallback switch (%s) is on, but there is no"
+              " wpa_supplicant on this machine - running wpa instead", sw);
+        return;
+    }
+    JNOTE("the fallback switch (%s) is on: handing the wireless to %s",
+          sw, bin);
+
+    char name[16] = "";
+    bool said = false;
+    for (;;) {
+        if (PIN_IF[0]) {
+            char path[64];
+            snprintf(path, sizeof path, "/sys/class/net/%s", PIN_IF);
+            if (lp_exists(path))
+                strlcpy(name, PIN_IF, sizeof name);
+        } else {
+            each_entry("/sys/class/net", pick_iface, name);
+        }
+        if (name[0] || stop_sig)
+            break;
+        if (!said)
+            JLOG("waiting for a wireless interface to appear");
+        said = true;
+        lp_pollfd_t p = { link_fd, LP_POLLIN, 0 };
+        lp_poll(&p, link_fd >= 0 ? 1 : 0, 5000);
+        link_watch_drain();
+    }
+    if (stop_sig)
+        lp_exit(0);
+
+    /* The global part: /etc/wpa.conf where the Pi's rc built one from
+     * the card (it has ctrl_interface and the card's networks), else a
+     * two-line file of our own so that wpa_cli can reach it. Our saved
+     * networks come in through -I either way. */
+    /* wpa_supplicant exits at once when it cannot make its control
+     * socket's directory, and nothing else here would make /var/run on
+     * a root that lacks it. */
+    lp_mkdir("/var", 0755);
+    lp_mkdir("/var/run", 0755);
+    const char *conf = "/etc/wpa.conf";
+    if (!lp_exists(conf)) {
+        conf = "/run/lp-net-wpa_supplicant.conf";
+        long fd = lp_open(conf, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) {
+            dprintf((int)fd, "ctrl_interface=/var/run/wpa_supplicant\n"
+                             "update_config=0\n");
+            lp_close((int)fd);
+        }
+    }
+    char logf[64];
+    snprintf(logf, sizeof logf, "%s/wpa.log",
+             lp_is_dir("/data/log") ? "/data/log" : "/var/log");
+
+    char *argv[16];
+    int a = 0;
+    argv[a++] = (char *)"wpa_supplicant";
+    if (trace) {
+        /* The card's /boot/wpa-debug, as it always was: every frame of
+         * the association and the handshake, to a file. */
+        argv[a++] = (char *)"-dd";
+        argv[a++] = (char *)"-t";
+        argv[a++] = (char *)"-f";
+        argv[a++] = logf;
+    } else {
+        argv[a++] = (char *)"-s";
+    }
+    argv[a++] = (char *)"-i";
+    argv[a++] = name;
+    argv[a++] = (char *)"-c";
+    argv[a++] = (char *)conf;
+    if (lp_exists(netfile)) {
+        argv[a++] = (char *)"-I";
+        argv[a++] = netfile;
+    }
+    argv[a] = NULL;
+
+    lp_close(listen_fd);
+    lp_unlink(WPA_SOCK_PATH);
+    long ff = lp_open(WPA_FALLBACK_RUN, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (ff >= 0) {
+        dprintf((int)ff, "%s\n%s\n", sw, bin);
+        lp_close((int)ff);
+    }
+    char *envp[] = {
+        (char *)"PATH=/bin:/sbin:/usr/bin:/usr/sbin", NULL
+    };
+    lp_execve(bin, argv, envp);
+    lp_unlink(WPA_FALLBACK_RUN);
+    JNOTE("could not run %s - running wpa instead", bin);
+}
+
 /* ══ Time ════════════════════════════════════════════════════════════ */
 
 static void tick(void)
@@ -2265,9 +2483,6 @@ static void tick(void)
 
 /* ══ Start and stop ══════════════════════════════════════════════════ */
 
-static volatile int stop_sig;
-static void on_signal(int sig) { stop_sig = sig; }
-
 static void usage(void)
 {
     printf("usage: wpa -d [-i interface] [-v]\n"
@@ -2333,6 +2548,12 @@ int main(int argc, char **argv)
     if (!radio_want)
         JLOG("the radio stays off, as it was left (%s)", radiofile);
     st_since = lp_monotonic_ms();
+    link_watch_open();
+
+    lp_unlink(WPA_FALLBACK_RUN);    /* whatever ran before, this is us */
+    char sw[96];
+    if (wpa_fallback_on(sw, sizeof sw))
+        run_fallback(sw);           /* returns only if it could not */
 
     static u8 frame[EAPOL_MAX];
     while (!stop_sig) {
@@ -2351,14 +2572,32 @@ int main(int argc, char **argv)
                 p[np].fd = EP.fd; p[np].events = LP_POLLIN; p[np++].revents = 0;
             }
         }
+        int i_lk = -1;
+        if (!IFN[0] && link_fd >= 0) {
+            i_lk = np;
+            p[np].fd = link_fd; p[np].events = LP_POLLIN; p[np++].revents = 0;
+        }
         int cmap[MAX_CLIENTS], nc = 0, cbase = np;
-        for (int i = 0; i < MAX_CLIENTS; i++)
+        bool any_client = false;
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (CL[i].fd >= 0)
+                any_client = true;
             if (CL[i].fd >= 0 && !CL[i].parked) {
                 cmap[nc++] = i;
                 p[np].fd = CL[i].fd; p[np].events = LP_POLLIN; p[np++].revents = 0;
             }
+        }
 
-        lp_poll(p, (unsigned)np, TICK_MS);
+        /* A second's tick while there is a radio to look after; with no
+         * interface, sleep until one appears (see "Noticing a new
+         * interface"), unless a client's deadline needs the tick. */
+        lp_poll(p, (unsigned)np,
+                IFN[0] || any_client || link_fd < 0 ? TICK_MS : IDLE_NO_IFACE_MS);
+
+        if (i_lk >= 0 && (p[i_lk].revents & LP_POLLIN)) {
+            link_watch_drain();
+            next_iface_check = 0;
+        }
 
         if (i_nl >= 0 && IFN[0]) {
             nl_event_t ev;

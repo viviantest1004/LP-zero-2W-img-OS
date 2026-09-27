@@ -34,17 +34,54 @@
  * minimise it if it has only one - the same button that summons a
  * window puts it away. Long press (or right click): a menu with a new
  * window, pin/unpin, and close. Every item is 64x60 logical pixels.
+ *
+ * A finger swiping up from the bottom edge of the screen, or up off the
+ * app-grid button, pulls the app grid open and it follows the finger
+ * (drag-px / release-px to lp-appgrid). The bottom-edge catcher is a
+ * separate 8 px layer surface along the bottom of the output, owned by
+ * this process because the dock is the one shell component that is
+ * always running; it takes touches only, so a mouse at the bottom of a
+ * window is not pulled into it.
+ *
+ * ── motion ──
+ *
+ *   press       the highlight is there on touch-down, in the same frame,
+ *               and fades out in 91 ms on release (motion.css; the dock
+ *               adds nothing)
+ *   launching   the icon breathes - scales to 0.92 and dims - on the
+ *               window spring until the application's first window
+ *               appears, and gives up after 8 s: a tap has to be seen to
+ *               have done something before the app draws, and a slow
+ *               app is not a tap that failed
+ *   running     the dot beside the icon grows in on the insert spring,
+ *               with its 4.5% overshoot, and stretches into the taller
+ *               accent bar when the app takes focus
+ *
+ * Each item has one tick callback for its springs, and it is removed
+ * when they rest: a still dock costs no wakeups.
+ *
+ * ── what is remembered ──
+ *
+ * The pinned list, in ~/.config/lp/dock, one desktop id per line, written
+ * atomically and durably (lp_write_atomic: temp file, fsync, rename, fsync
+ * of the directory) - a power cut leaves the old list or the new, never
+ * an empty dock. The effective list, defaults included, is also published
+ * to $XDG_RUNTIME_DIR/lp-dock-pins for the app grid's Pin/Unpin menu.
  */
 #define _GNU_SOURCE 1
 
+#include <math.h>
 #include <string.h>
 
 #include "lp-apps.h"
+#include "lp-motion.h"
 #include "lp-shell.h"
 #include "lp-toplevel.h"
 
 #define DOCK_WIDTH 72
 #define ICON_PX 48
+#define EDGE_PX 8           /* the bottom-edge catcher's height */
+#define LAUNCH_GIVE_UP 8    /* seconds */
 
 typedef struct {
     const char *ids[3];     /* .desktop ids that can fill the slot */
@@ -87,6 +124,13 @@ typedef struct {
     gboolean pinned;
     GtkWidget *button;
     GtkWidget *dot;
+    GtkWidget *img;
+    LpSpring run;           /* 0 no dot .. 1 dot (insert spring) */
+    LpSpring focus;         /* 0 round dot .. 1 tall accent bar */
+    LpSpring pulse;         /* 0 still .. 1 breathed in, while launching */
+    LpMotion *motion;
+    gboolean launching;
+    guint give_up;
 } Item;
 
 static GtkWindow *win;
@@ -150,20 +194,45 @@ static void write_pins(GPtrArray *pins)
     GString *s = g_string_new("# lp-dock: pinned applications, in dock order.\n");
     for (guint i = 0; i < pins->len; i++)
         g_string_append_printf(s, "%s\n", (char *)g_ptr_array_index(pins, i));
-    char *path = lp_config_path("dock");
-    char *dir = g_path_get_dirname(path);
-    g_mkdir_with_parents(dir, 0755);
-    g_file_set_contents(path, s->str, -1, NULL);
-    g_free(dir);
-    g_free(path);
+    lp_config_write("dock", s->str);
     g_string_free(s, TRUE);
+}
+
+/* The list as the dock is showing it - defaults included, which the file
+ * does not have until someone changes something - for the app grid. */
+static void publish_pins(void)
+{
+    GPtrArray *pins = read_pins();
+    GString *s = g_string_new(NULL);
+    for (guint i = 0; i < pins->len; i++) {
+        const char *id = g_ptr_array_index(pins, i);
+        const Slot *slot = slot_for(id);
+        g_string_append_printf(s, "%s\n", id);
+        /* Every alternative of a slot counts as pinned: pinning gedit
+         * pins the text-editor slot, whichever editor fills it. */
+        for (int k = 0; slot && k < 3 && slot->ids[k]; k++)
+            if (strcmp(slot->ids[k], id))
+                g_string_append_printf(s, "%s\n", slot->ids[k]);
+    }
+    char *p = g_build_filename(g_get_user_runtime_dir(), "lp-dock-pins", NULL);
+    g_file_set_contents(p, s->str, -1, NULL);   /* runtime: no fsync needed */
+    g_free(p);
+    g_string_free(s, TRUE);
+    g_ptr_array_unref(pins);
 }
 
 static void set_pinned(const char *id, gboolean pin)
 {
     GPtrArray *pins = read_pins();
+    /* A slot is pinned under its first id; unpinning any of its
+     * alternatives (the app grid only knows the installed one) means
+     * that entry. */
+    const Slot *slot = slot_for(id);
+    if (slot && !pin)
+        id = slot->ids[0];
     for (guint i = 0; i < pins->len; i++)
-        if (strcmp(g_ptr_array_index(pins, i), id) == 0) {
+        if (strcmp(g_ptr_array_index(pins, i), id) == 0 ||
+            (slot && slot_for(g_ptr_array_index(pins, i)) == slot)) {
             if (pin)
                 goto out;
             g_ptr_array_remove_index(pins, i);
@@ -188,6 +257,41 @@ static GList *windows_of(Item *it)
             out = g_list_append(out, t);
     }
     return out;
+}
+
+/* ── launching: the icon breathes until a window appears ───────── */
+
+static void pulse_stop(Item *it)
+{
+    if (!it->launching)
+        return;
+    it->launching = FALSE;
+    if (it->give_up)
+        g_source_remove(it->give_up);
+    it->give_up = 0;
+    lp_spring_set_target_out(&it->pulse, 0.0);
+    lp_motion_kick(it->motion);
+}
+
+static gboolean give_up(gpointer d)
+{
+    Item *it = d;
+    it->give_up = 0;
+    pulse_stop(it);
+    return G_SOURCE_REMOVE;
+}
+
+static void launch(Item *it)
+{
+    lp_app_launch(G_APP_INFO(it->info));
+    if (lp_motion_reduced())
+        return;          /* reduced motion: the dot appearing says enough */
+    it->launching = TRUE;
+    if (it->give_up)
+        g_source_remove(it->give_up);
+    it->give_up = g_timeout_add_seconds(LAUNCH_GIVE_UP, give_up, it);
+    lp_spring_set_target(&it->pulse, 1.0);
+    lp_motion_kick(it->motion);
 }
 
 /* ── tap ─────────────────────────────────────────────────────────── */
@@ -237,7 +341,7 @@ static void on_item(GtkButton *b, gpointer d)
     }
     GList *wins = windows_of(it);
     if (!wins) {
-        lp_app_launch(G_APP_INFO(it->info));
+        launch(it);
         return;
     }
     LpToplevel *front = NULL;
@@ -263,7 +367,7 @@ static void m_new_window(GtkMenuItem *m, gpointer d)
     (void)m;
     Item *it = d;
     if (it->info)
-        lp_app_launch(G_APP_INFO(it->info));
+        launch(it);
 }
 
 static void m_pin(GtkMenuItem *m, gpointer d)
@@ -340,9 +444,85 @@ static GtkWidget *app_image(Item *it)
     return img;
 }
 
+/* The breathing icon: the transform goes on before GtkImage draws and
+ * the fade is applied after, around a group. Nothing is paid for it
+ * while the icon is still. */
+static gboolean img_draw_pre(GtkWidget *w, cairo_t *cr, gpointer d)
+{
+    Item *it = d;
+    double p = it->pulse.x;
+    if (p < 0.001)
+        return FALSE;
+    double W = gtk_widget_get_allocated_width(w), H = gtk_widget_get_allocated_height(w);
+    double sc = 1.0 - 0.08 * p;
+    cairo_translate(cr, W / 2, H / 2);
+    cairo_scale(cr, sc, sc);
+    cairo_translate(cr, -W / 2, -H / 2);
+    cairo_push_group(cr);
+    g_object_set_data(G_OBJECT(w), "lp-grouped", GINT_TO_POINTER(1));
+    return FALSE;
+}
+
+static gboolean img_draw_post(GtkWidget *w, cairo_t *cr, gpointer d)
+{
+    Item *it = d;
+    if (!g_object_get_data(G_OBJECT(w), "lp-grouped"))
+        return FALSE;
+    g_object_set_data(G_OBJECT(w), "lp-grouped", NULL);
+    cairo_pop_group_to_source(cr);
+    cairo_paint_with_alpha(cr, 1.0 - 0.45 * CLAMP(it->pulse.x, 0, 1));
+    return FALSE;
+}
+
+static gboolean dot_draw(GtkWidget *w, cairo_t *cr, gpointer d)
+{
+    Item *it = d;
+    double r = it->run.x;
+    if (r < 0.01)
+        return TRUE;
+    double W = gtk_widget_get_allocated_width(w), H = gtk_widget_get_allocated_height(w);
+    GtkStyleContext *sc = gtk_widget_get_style_context(w);
+    GdkRGBA a = { 0.66, 0.66, 0.66, 1 }, b = { 0.91, 0.33, 0.13, 1 };
+    gtk_style_context_lookup_color(sc, "lp_t2", &a);
+    gtk_style_context_lookup_color(sc, "lp_accent", &b);
+    double f = CLAMP(it->focus.x, 0, 1);
+    double dw = 5.0 * r, dh = (5.0 + 9.0 * it->focus.x) * r;
+    double x = (W - dw) / 2, y = (H - dh) / 2, rad = dw / 2;
+    cairo_set_source_rgba(cr, a.red + (b.red - a.red) * f, a.green + (b.green - a.green) * f,
+                          a.blue + (b.blue - a.blue) * f, CLAMP(r, 0, 1));
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, x + rad, y + rad, rad, G_PI, 1.5 * G_PI);
+    cairo_arc(cr, x + dw - rad, y + rad, rad, 1.5 * G_PI, 2 * G_PI);
+    cairo_arc(cr, x + dw - rad, y + dh - rad, rad, 0, 0.5 * G_PI);
+    cairo_arc(cr, x + rad, y + dh - rad, rad, 0.5 * G_PI, G_PI);
+    cairo_close_path(cr);
+    cairo_fill(cr);
+    return TRUE;
+}
+
+static void item_frame(GtkWidget *w, gpointer d)
+{
+    (void)w;
+    Item *it = d;
+    /* Keep breathing: turn the pulse round a little before it settles,
+     * so the spring never comes to rest (and never drops its tick) while
+     * the app is still starting. */
+    if (it->launching && fabs(it->pulse.x - it->pulse.target) < 0.08) {
+        if (it->pulse.target > 0.5)
+            lp_spring_set_target_out(&it->pulse, 0.0);
+        else
+            lp_spring_set_target(&it->pulse, 1.0);
+    }
+    gtk_widget_queue_draw(it->dot);
+    gtk_widget_queue_draw(it->img);
+}
+
 static void item_free(gpointer p)
 {
     Item *it = p;
+    if (it->give_up)
+        g_source_remove(it->give_up);
+    lp_motion_free(it->motion);
     g_free(it->id);
     g_clear_object(&it->info);
     g_free(it);
@@ -363,14 +543,26 @@ static Item *add_item(const char *id, GDesktopAppInfo *info, const Slot *slot,
     if (!info)
         gtk_style_context_add_class(sc, "lp-missing");
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    it->dot = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    it->dot = gtk_drawing_area_new();
     gtk_style_context_add_class(gtk_widget_get_style_context(it->dot), "lp-dot");
+    gtk_widget_set_size_request(it->dot, 9, 18);
     gtk_widget_set_valign(it->dot, GTK_ALIGN_CENTER);
+    g_signal_connect(it->dot, "draw", G_CALLBACK(dot_draw), it);
     gtk_box_pack_start(GTK_BOX(row), it->dot, FALSE, FALSE, 0);
     GtkWidget *img = app_image(it);
+    it->img = img;
     gtk_widget_set_hexpand(img, TRUE);
     gtk_widget_set_margin_end(img, 8);
+    g_signal_connect(img, "draw", G_CALLBACK(img_draw_pre), it);
+    g_signal_connect_after(img, "draw", G_CALLBACK(img_draw_post), it);
     gtk_box_pack_start(GTK_BOX(row), img, TRUE, TRUE, 0);
+    lp_spring_init(&it->run, LP_SPRING_INSERT, 0.0);
+    lp_spring_init(&it->focus, LP_SPRING_EXPAND, 0.0);
+    lp_spring_init(&it->pulse, LP_SPRING_WINDOW, 0.0);
+    it->motion = lp_motion_new(it->button, item_frame, it);
+    lp_motion_add(it->motion, &it->run);
+    lp_motion_add(it->motion, &it->focus);
+    lp_motion_add(it->motion, &it->pulse);
     gtk_container_add(GTK_CONTAINER(it->button), row);
     /* The name for the touchpad user who rests the pointer; a finger
      * user gets it from the long-press menu's heading. */
@@ -383,7 +575,12 @@ static Item *add_item(const char *id, GDesktopAppInfo *info, const Slot *slot,
     return it;
 }
 
-static void paint_dots(void)
+/* Dot state carried across a rebuild, so an item that is destroyed and
+ * made again (the pin file changed, an unpinned app opened) does not
+ * grow its dot in a second time. */
+static GHashTable *dot_memory;   /* id -> packed run/focus */
+
+static void paint_dots(gboolean animate)
 {
     for (guint i = 0; i < items->len; i++) {
         Item *it = g_ptr_array_index(items, i);
@@ -392,12 +589,24 @@ static void paint_dots(void)
         for (GList *l = wins; l; l = l->next)
             if (((LpToplevel *)l->data)->activated)
                 focused = TRUE;
-        GtkStyleContext *sc = gtk_widget_get_style_context(it->dot);
-        gtk_style_context_remove_class(sc, "lp-running");
-        gtk_style_context_remove_class(sc, "lp-focused");
+        double run = wins ? 1.0 : 0.0, foc = focused ? 1.0 : 0.0;
         if (wins)
-            gtk_style_context_add_class(sc, focused ? "lp-focused" : "lp-running");
+            pulse_stop(it);        /* it has a window: it has started */
         g_list_free(wins);
+        if (!animate) {
+            lp_spring_jump(&it->run, run);
+            lp_spring_jump(&it->focus, foc);
+        } else {
+            if (run != it->run.target) {
+                if (run > 0.5) lp_spring_set_target(&it->run, run);
+                else lp_spring_set_target_out(&it->run, run);
+            }
+            if (foc != it->focus.target) {
+                if (foc > 0.5) lp_spring_set_target(&it->focus, foc);
+                else lp_spring_set_target_out(&it->focus, foc);
+            }
+        }
+        lp_motion_kick(it->motion);
     }
 }
 
@@ -413,6 +622,12 @@ static gboolean owned_by_items(const char *app_id)
 
 static void rebuild_now(void)
 {
+    g_hash_table_remove_all(dot_memory);
+    for (guint i = 0; i < items->len; i++) {
+        Item *it = g_ptr_array_index(items, i);
+        g_hash_table_insert(dot_memory, g_strdup(it->id),
+            GINT_TO_POINTER(1 + (it->run.target > 0.5) + 2 * (it->focus.target > 0.5)));
+    }
     GList *kids = gtk_container_get_children(GTK_CONTAINER(list));
     for (GList *l = kids; l; l = l->next)
         gtk_widget_destroy(l->data);
@@ -450,7 +665,18 @@ static void rebuild_now(void)
         add_item(g_app_info_get_id(G_APP_INFO(info)), info, NULL, FALSE);
     }
     gtk_widget_show_all(list);
-    paint_dots();
+    /* Items that existed before start where they were; new ones start
+     * empty, and then everything moves to where it now belongs. */
+    for (guint i = 0; i < items->len; i++) {
+        Item *it = g_ptr_array_index(items, i);
+        int m = GPOINTER_TO_INT(g_hash_table_lookup(dot_memory, it->id));
+        if (m) {
+            lp_spring_jump(&it->run, (m - 1) & 1 ? 1.0 : 0.0);
+            lp_spring_jump(&it->focus, (m - 1) & 2 ? 1.0 : 0.0);
+        }
+    }
+    paint_dots(TRUE);
+    publish_pins();
 }
 
 static gboolean rebuild_idle(gpointer d)
@@ -495,7 +721,7 @@ static void on_toplevels(gpointer d)
             return;
         }
     }
-    paint_dots();
+    paint_dots(TRUE);
 }
 
 static void on_pins_changed(GFileMonitor *m, GFile *f, GFile *o,
@@ -518,7 +744,93 @@ static void on_grid(GtkButton *b, gpointer d)
 {
     (void)b; (void)d;
     const char *a[] = { "lp-appgrid", "toggle", NULL };
-    lp_spawn(a);
+    if (!lp_send("appgrid", a))
+        lp_spawn(a);
+}
+
+/* ── pulling the app grid up ─────────────────────────────────────── */
+
+typedef struct {
+    LpVelocity v;
+    gboolean   pulling;
+} Pull;
+
+static void grid_send(const char *verb, double v)
+{
+    char num[32];
+    g_ascii_formatd(num, sizeof num, "%.1f", v);
+    const char *a[] = { "lp-appgrid", verb, num, NULL };
+    if (!lp_send("appgrid", a) && !strcmp(verb, "release-px") && v > 0) {
+        const char *s2[] = { "lp-appgrid", "show", NULL };
+        lp_spawn(s2);
+    }
+}
+
+static void on_pull_update(GtkGestureDrag *g, double dx, double dy, gpointer d)
+{
+    Pull *p = d;
+    double up = -dy;
+    if (!p->pulling) {
+        if (up < 10 || up < 1.5 * ABS(dx))
+            return;
+        p->pulling = TRUE;
+        gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
+        lp_velocity_reset(&p->v);
+    }
+    double px = MAX(0.0, up - 10);
+    lp_velocity_add(&p->v, g_get_monotonic_time(), px);
+    grid_send("drag-px", px);
+}
+
+static void on_pull_end(GtkGestureDrag *g, double dx, double dy, gpointer d)
+{
+    (void)g; (void)dx;
+    Pull *p = d;
+    if (!p->pulling)
+        return;
+    p->pulling = FALSE;
+    lp_velocity_add(&p->v, g_get_monotonic_time(), MAX(0.0, -dy - 10));
+    grid_send("release-px", lp_velocity_get(&p->v));
+}
+
+static void on_pull_cancel(GtkGesture *g, GdkEventSequence *seq, gpointer d)
+{
+    (void)g; (void)seq;
+    Pull *p = d;
+    if (p->pulling) {
+        p->pulling = FALSE;
+        grid_send("release-px", 0);
+    }
+}
+
+static void add_pull(GtkWidget *w, gboolean touch_only)
+{
+    Pull *p = g_new0(Pull, 1);
+    GtkGesture *g = gtk_gesture_drag_new(w);
+    gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(g), touch_only);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(g),
+                                               GTK_PHASE_CAPTURE);
+    g_signal_connect(g, "drag-update", G_CALLBACK(on_pull_update), p);
+    g_signal_connect(g, "drag-end", G_CALLBACK(on_pull_end), p);
+    g_signal_connect(g, "cancel", G_CALLBACK(on_pull_cancel), p);
+    g_object_set_data_full(G_OBJECT(w), "lp-pull", g, g_object_unref);
+    g_object_set_data_full(G_OBJECT(w), "lp-pull-state", p, g_free);
+}
+
+/* The bottom edge of every output: an invisible strip that only a finger
+ * can use. */
+static void edge_for(GdkMonitor *mon)
+{
+    GtkWindow *e = lp_layer_window("lp-edge", GTK_LAYER_SHELL_LAYER_TOP,
+                                   LP_EDGE_BOTTOM | LP_EDGE_LEFT | LP_EDGE_RIGHT);
+    gtk_layer_set_monitor(e, mon);
+    gtk_layer_set_exclusive_zone(e, -1);
+    gtk_widget_set_size_request(GTK_WIDGET(e), -1, EDGE_PX);
+    GtkWidget *area = gtk_event_box_new();
+    gtk_event_box_set_visible_window(GTK_EVENT_BOX(area), FALSE);
+    gtk_container_add(GTK_CONTAINER(e), area);
+    add_pull(area, TRUE);
+    gtk_widget_show_all(GTK_WIDGET(e));
 }
 
 static void on_command(int argc, char **argv, gpointer d)
@@ -526,6 +838,10 @@ static void on_command(int argc, char **argv, gpointer d)
     (void)d;
     if (argc >= 2 && strcmp(argv[1], "refresh") == 0)
         rebuild();
+    else if (argc >= 3 && strcmp(argv[1], "pin") == 0)
+        set_pinned(argv[2], TRUE);
+    else if (argc >= 3 && strcmp(argv[1], "unpin") == 0)
+        set_pinned(argv[2], FALSE);
     else if (argc >= 4 && strcmp(argv[1], "open") == 0 &&
              strcmp(argv[2], "grid") == 0) {
         GtkStyleContext *sc = gtk_widget_get_style_context(grid_button);
@@ -542,6 +858,7 @@ int main(int argc, char **argv)
         return 0;
     lp_shell_init(&argc, &argv);
     items = g_ptr_array_new_with_free_func(item_free);
+    dot_memory = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 
     win = lp_layer_window("lp-dock", GTK_LAYER_SHELL_LAYER_TOP,
                           LP_EDGE_TOP | LP_EDGE_BOTTOM | LP_EDGE_LEFT);
@@ -578,6 +895,7 @@ int main(int argc, char **argv)
                       lp_icon("view-app-grid-symbolic", 28));
     gtk_widget_set_tooltip_text(grid_button, T("Show applications", "앱 보기"));
     g_signal_connect(grid_button, "clicked", G_CALLBACK(on_grid), NULL);
+    add_pull(grid_button, FALSE);
     gtk_box_pack_start(GTK_BOX(outer), grid_button, FALSE, FALSE, 0);
 
     if (lp_toplevels_init())
@@ -595,6 +913,9 @@ int main(int argc, char **argv)
 
     rebuild_now();
     gtk_widget_show_all(GTK_WIDGET(win));
+    GdkDisplay *dpy = gdk_display_get_default();
+    for (int i = 0; i < gdk_display_get_n_monitors(dpy); i++)
+        edge_for(gdk_display_get_monitor(dpy, i));
     gtk_main();
     return 0;
 }
