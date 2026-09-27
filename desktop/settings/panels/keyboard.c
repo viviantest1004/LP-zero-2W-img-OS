@@ -394,7 +394,13 @@ static gboolean switch_keys_fcitx(unsigned k)
     }
     g_free(fc);
 
+    /* Only into a wayfire.ini that is there: made here it would hold this
+     * one key, and wayfire started on it would have no plugins at all. */
     char *wf = wayfire_ini();
+    if (!g_file_test(wf, G_FILE_TEST_EXISTS)) {
+        g_free(wf);
+        return changed;
+    }
     char *xo = ini_get(wf, "input", "xkb_options");
     GString *o = g_string_new(NULL);
     char **l = g_strsplit(xo ? xo : "", ",", -1);
@@ -880,7 +886,12 @@ static void sway_bind(GString *out, const char *binding, const char *cmd)
                 else bad = TRUE;
             }
         }
-        if (!bad && code >= 0)
+        /* sway 1.7 reads a first key code that is also a mouse button's
+         * event code (BTN_*, 0x100 and up) as that button: `bindcode 256`
+         * is BTN_0, not the mic-mute key. Those keys go by keysym. */
+        if (!bad && code == KEY_MICMUTE)
+            g_string_append_printf(out, "bindsym --no-warn %sXF86AudioMicMute %s\n", mods->str, cmd);
+        else if (!bad && code >= 0 && code + 8 < 0x100)
             g_string_append_printf(out, "bindcode --no-warn %s%d %s\n", mods->str, code + 8, cmd);
         g_string_free(mods, TRUE);
         g_strfreev(tok);
@@ -924,6 +935,12 @@ char *lp_keyboard_sway_keys(void)
 /* Write sway's file if it changed, and have a running sway read it. */
 static void sway_keys_write(void)
 {
+    /* No wayfire.ini (an account made after install): no list to write
+     * from, and an empty one would take every app key away from sway. */
+    char *wf = wayfire_ini();
+    gboolean have = g_file_test(wf, G_FILE_TEST_EXISTS);
+    g_free(wf);
+    if (!have) return;
     char *t = lp_keyboard_sway_keys();
     char *path = g_build_filename(g_get_user_config_dir(), "sway", "lp-keys.conf", NULL);
     char *old = lp_slurp(path);
