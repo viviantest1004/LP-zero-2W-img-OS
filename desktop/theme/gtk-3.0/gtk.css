@@ -296,3 +296,44 @@ headerbar:backdrop button.titlebutton {
   font-size: 10px;
   color: @lp_group;
 }
+
+/* ── window buttons: one look in every app ────────────────────────────── */
+
+/* The same compact buttons as GTK 4's (its own file), so minimise, maximise
+ * and close look alike whichever toolkit drew them - GTK 3 windows without a
+ * header bar included, now that they draw their own title bar (lp-csd). */
+headerbar button.titlebutton,
+.titlebar button.titlebutton,
+headerbar button.titlebutton:backdrop,
+.titlebar button.titlebutton:backdrop {
+  min-width: 28px;
+  min-height: 28px;
+  margin: 0 2px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  box-shadow: none;
+  background-image: none;
+  background-color: transparent;
+  color: @lp_icon;
+}
+
+headerbar button.titlebutton:hover,
+.titlebar button.titlebutton:hover {
+  background-image: none;
+  background-color: alpha(@lp_text, 0.12);
+  color: @lp_text;
+}
+
+headerbar button.titlebutton.close:hover,
+.titlebar button.titlebutton.close:hover {
+  background-image: none;
+  background-color: #f28c28;
+  color: #ffffff;
+}
+
+headerbar button.titlebutton:active,
+.titlebar button.titlebutton:active {
+  background-image: none;
+  background-color: alpha(@lp_text, 0.20);
+}

@@ -42,6 +42,13 @@ export GTK_THEME=LP
 # buttons at all and wayfire's looks different, so the buttons changed
 # from one app to the next.
 export GTK_CSD=1
+# ... which GTK 3 on Wayland ignores in favour of the compositor's say:
+# lp-csd hides the protocol that says "server" (desktop/csd/lp-csd.c).
+if [ -f /usr/local/lib/liblp-csd.so ]; then
+    export LD_PRELOAD=/usr/local/lib/liblp-csd.so
+fi
+# Qt programs on Wayland directly, X (Xwayland) only when that fails.
+export QT_QPA_PLATFORM="wayland;xcb"
 export XDG_SESSION_TYPE=wayland
 export XKB_DEFAULT_LAYOUT=us
 # Which compositor was decided by start-desktop, as root, from the

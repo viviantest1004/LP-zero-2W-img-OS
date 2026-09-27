@@ -111,6 +111,10 @@ fcitx5-hangul
 fcitx5-frontend-gtk3
 fcitx5-frontend-gtk4
 fcitx5-config-qt
+# Qt's Wayland platform: without it every Qt program (the input method's
+# settings above among them) stopped at "could not find the Qt platform
+# plugin wayland" and never opened a window.
+qtwayland5
 
 # ── type ─────────────────────────────────────────────────────────────
 fonts-dejavu-core

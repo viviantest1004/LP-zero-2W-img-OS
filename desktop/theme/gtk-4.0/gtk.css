@@ -650,3 +650,48 @@ window.lp-quick button image {
   font-size: 12px;
   font-feature-settings: "tnum";
 }
+
+/* ── window buttons: one look in every app ────────────────────────────── */
+
+/* The same compact buttons, in GTK 4 here and GTK 3 in its own file, so
+ * minimise, maximise and close look alike whichever toolkit drew them: the
+ * general button rules above made GTK 4's close a wide padded block beside
+ * GTK 3's small square. No separator bar either, in both. */
+headerbar windowcontrols.end:not(.empty),
+.titlebar windowcontrols.end:not(.empty),
+headerbar:backdrop windowcontrols.end:not(.empty),
+.titlebar:backdrop windowcontrols.end:not(.empty) {
+  padding-left: 0;
+  padding-right: 0;
+  background-image: none;
+}
+
+headerbar windowcontrols > button,
+.titlebar windowcontrols > button {
+  min-width: 28px;
+  min-height: 28px;
+  margin: 0 2px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  box-shadow: none;
+  background: transparent;
+  color: @lp_icon;
+}
+
+headerbar windowcontrols > button:hover,
+.titlebar windowcontrols > button:hover {
+  background: alpha(@lp_text, 0.12);
+  color: @lp_text;
+}
+
+headerbar windowcontrols > button.close:hover,
+.titlebar windowcontrols > button.close:hover {
+  background: #f28c28;
+  color: #ffffff;
+}
+
+headerbar windowcontrols > button:active,
+.titlebar windowcontrols > button:active {
+  background: alpha(@lp_text, 0.20);
+}

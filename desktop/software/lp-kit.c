@@ -64,6 +64,15 @@ extern const char lp_kit_motion_css[];
  * #6a6a6a, amber #f0b350, red #f08585. The accent follows the theme's
  * @accent_bg_color so a changed system accent reaches these too. */
 static const char KIT_CSS[] =
+    /* Window buttons: the one look every LP app shares (see the theme's
+     * gtk.css) - this file's own button rules would otherwise make
+     * close a wide padded block. */
+    "headerbar windowcontrols > button { min-width: 28px; min-height: 28px; margin: 0 2px;"
+    " padding: 0; border: none; border-radius: 8px; box-shadow: none;"
+    " background: transparent; color: #9fb3c4; }"
+    "headerbar windowcontrols > button:hover { background: alpha(#eaf2f8, 0.12); color: #eaf2f8; }"
+    "headerbar windowcontrols > button.close:hover { background: #f28c28; color: #ffffff; }"
+    "headerbar windowcontrols.end:not(.empty) { padding-left: 0; background-image: none; }"
     "window.lp-sheet-window { background: none; box-shadow: none; }\n"
     ".lp-sheet-card { background-color: #2c2c2c; border-radius: 14px;"
     "  padding: 26px 28px 20px 28px; margin: 36px;"

@@ -93,6 +93,12 @@ if [[ "${1:-}" != "--inside" ]]; then
     # The image is sparse, but the root inside it is not: the base, the
     # upper layer and the finished image all land on this disk.
     need_mb=$(( $(du -sxm "$DEB" | cut -f1) + 1500 ))
+    # With sdcard/ on another filesystem (a tmpfs, a second disk) the image
+    # does not land here: what stays is the upper layer and the recovery
+    # tree.
+    if [[ -d "${REPO_ROOT}/sdcard" && "$(stat -c %d "${REPO_ROOT}/sdcard")" != "$(stat -c %d "$(dirname "$WORKDIR")")" ]]; then
+        need_mb=2500
+    fi
     have_mb=$(df -Pm "$(dirname "$WORKDIR")" | awk 'NR == 2 { print $4 }')
     (( have_mb > need_mb )) || die "needs about ${need_mb}MB free, there is ${have_mb}MB"
     mkdir -p "$WORKDIR"
@@ -348,7 +354,11 @@ fi
 if [[ -d "$D/session" ]]; then
     cp -a "$D/session/start-desktop" "$ROOT/usr/lib/lp/start-desktop.session"
     cp -a "$D/session/session-run" "$ROOT/bin/session-run"
-    for s in lp-audio-start lp-idle lp-autoscale lp-shell-start lp-lock lp-logout; do
+    # Every GTK 3 window draws its own title bar (desktop/csd/lp-csd.c).
+    if [[ -f "$D/csd/liblp-csd.so" ]]; then
+        install -D -m 755 "$D/csd/liblp-csd.so" "$ROOT/usr/local/lib/liblp-csd.so"
+    fi
+    for s in lp-audio-start lp-idle lp-autoscale lp-shell-start lp-lock lp-logout lp-admin-run; do
         [[ -f "$D/session/$s" ]] && cp -a "$D/session/$s" "$ROOT/usr/local/bin/$s"
     done
     if [[ -d "$D/session/fcitx5" ]]; then
@@ -633,6 +643,31 @@ SLIM
     after=$(du -smx "$ROOT/usr/share" | cut -f1)
     log "slim: /usr/share ${before}MB -> ${after}MB"
 }
+# Launchers that open no window of their own, out of the app grid: a
+# server and its client (footclient without the server fails), the
+# input method's daemon (already running) and its one-time migrator, a
+# developer's layout viewer, and mpv beside Celluloid, which is the same
+# player with a window. Each shown one did nothing when pressed. An entry
+# of the same name in /usr/local/share comes first in XDG_DATA_DIRS, so
+# the packages' own files stay untouched.
+mkdir -p "$ROOT/usr/local/share/applications"
+for id in foot-server footclient org.fcitx.Fcitx5 org.fcitx.fcitx5-migrator \
+          kbd-layout-viewer5 mpv; do
+    printf '[Desktop Entry]\nType=Application\nName=%s\nExec=true\nNoDisplay=true\n' "$id" \
+        > "$ROOT/usr/local/share/applications/$id.desktop"
+done
+log "hidden from the app grid: launchers with no window of their own"
+# GParted runs as root, through pkexec, which needs a logind session for
+# its password window - LP has none, so pressing it did nothing. Its
+# launcher asks through lp-admin-run instead (desktop/session).
+if [[ -f "$ROOT/usr/share/applications/gparted.desktop" ]]; then
+    sed -e 's|^Exec=.*|Exec=/usr/local/bin/lp-admin-run /usr/sbin/gparted %f|' \
+        -e '/^X-KDE-SubstituteUID/d' -e '/^X-KDE-Username/d' \
+        "$ROOT/usr/share/applications/gparted.desktop" \
+        > "$ROOT/usr/local/share/applications/gparted.desktop"
+    log "GParted: asks for the password through lp-admin-run"
+fi
+
 slim
 # EC2's metadata daemon has nothing to do on a desktop: it would only
 # keep asking 169.254.169.254 on every network the laptop joins.

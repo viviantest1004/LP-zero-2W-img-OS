@@ -104,6 +104,15 @@ GtkWindow *lp_window(void) { return GTK_WINDOW(A.win); }
 /* ── stylesheet ─────────────────────────────────────────────────────── */
 
 static const char *CSS =
+    /* Window buttons: the one look every LP app shares (see the theme's
+     * gtk.css) - this file's own button rules would otherwise make
+     * close a wide padded block. */
+    ".lp-settings headerbar windowcontrols > button { min-width: 28px; min-height: 28px; margin: 0 2px;"
+    " padding: 0; border: none; border-radius: 8px; box-shadow: none;"
+    " background: transparent; color: #9fb3c4; }"
+    ".lp-settings headerbar windowcontrols > button:hover { background: alpha(#eaf2f8, 0.12); color: #eaf2f8; }"
+    ".lp-settings headerbar windowcontrols > button.close:hover { background: #f28c28; color: #ffffff; }"
+    ".lp-settings headerbar windowcontrols.end:not(.empty) { padding-left: 0; background-image: none; }"
     ".lp-settings { font-family: Pretendard, 'Nanum Gothic', sans-serif; font-size: 14px;"
     "  background-color: @lp_bg; color: @lp_fg; }\n"
     ".lp-settings headerbar { background: @lp_header; color: @lp_fg; min-height: 48px;"
