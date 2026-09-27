@@ -7,9 +7,10 @@
  * computer, the everyday apps, lock, log out, restart, shut down), then
  * the name of the application in front; the date and time in the
  * middle, which opens a calendar with a way into Date & Time settings;
- * on the right the on-screen keyboard button and the status area -
- * Wi-Fi, volume, battery, power - which is one button and opens quick
- * settings.
+ * on the right the apps running in the background (tray.c), the
+ * input language - EN or 한, which a click switches - the on-screen
+ * keyboard button, and the status area - Wi-Fi, volume, battery,
+ * power - which is one button and opens quick settings.
  *
  * The bar used to start with a text button, 현재 활동 ("Activities"),
  * which is GNOME's and Ubuntu's; the LP mark and its menu are LP's own.
@@ -32,6 +33,8 @@
  *   Wi-Fi                 `lp-net status --json`, every 10 s
  *   volume                `wpctl get-volume`, every 10 s
  *   battery               `lp-tune status --json`, every 30 s
+ *   the input language    `lp-osk watch`, pushed at every change; under
+ *                         wayfire fcitx5's State over D-Bus, every 300 ms
  *
  * and immediately on `lp-panel refresh`, which the volume keys and the
  * quick settings panel send after they change something, so the icons
@@ -58,12 +61,15 @@
 #include <string.h>
 #include <time.h>
 
+#include <gio/gunixsocketaddress.h>
+
 #include "lp-apps.h"
 #include "lp-json.h"
 #include "lp-motion.h"
 #include "lp-sheet.h"
 #include "lp-shell.h"
 #include "lp-toplevel.h"
+#include "tray.h"
 
 #define BAR_HEIGHT 36
 
@@ -75,6 +81,8 @@ typedef struct {
     GtkWidget *clock;
     GtkWidget *clock_label;
     GtkWidget *status;
+    GtkWidget *lang;
+    GtkWidget *lang_label;
     GtkGesture *pull;           /* the top-edge drag */
     LpVelocity pull_v;
     gboolean   pulling;
@@ -126,6 +134,7 @@ static void on_toplevels(gpointer data)
     }
     for (GList *b = bars; b; b = b->next)
         gtk_label_set_text(GTK_LABEL(((Bar *)b->data)->appname), name);
+    lp_tray_toplevels_changed();
 }
 
 /* ── the clock ───────────────────────────────────────────────────── */
@@ -371,6 +380,241 @@ static gboolean poll_bat(gpointer d)
     return G_SOURCE_CONTINUE;
 }
 
+/* ── the input language ──────────────────────────────────────────── */
+
+/* EN or 한, whichever typing on the keys produces now, and a click
+ * switches it - the one piece of state a person otherwise has to find
+ * out by typing a letter and deleting it.
+ *
+ * Who knows the answer depends on the compositor. Under sway the input
+ * method is lp-osk, for the laptop's keys and the on-screen keyboard
+ * alike, and `lp-osk watch` (its socket, kept open) pushes a line of
+ * JSON at every change - no polling. Under wayfire the laptop's keys go
+ * through fcitx5 (session-run says why), which has no signal for its
+ * state, so while fcitx5 is on the bus its State is asked every 300 ms:
+ * one D-Bus round trip, no process started. Its state is shared by
+ * every window (ShareInputState=All), so one answer is the answer.
+ *
+ * A click, or a choice from the right-click menu, sets both: fcitx5 for
+ * the keys and lp-osk for the on-screen keyboard, so the two never
+ * disagree about which language comes out. */
+
+static GDBusConnection *bus;
+static gboolean fcitx_up, fcitx_busy;
+static guint fcitx_timer;
+static int lang_now = -1;                   /* 0 EN, 1 한, -1 not known yet */
+static GSocketConnection *osk_conn;
+static GDataInputStream *osk_in;
+static GtkWidget *lang_menu;
+
+static void paint_lang(void)
+{
+    for (GList *l = bars; l; l = l->next) {
+        Bar *b = l->data;
+        gtk_label_set_text(GTK_LABEL(b->lang_label), lang_now == 1 ? "한" : "EN");
+        gtk_widget_set_tooltip_text(b->lang, lang_now == 1
+            ? T("Korean (click for English)", "한국어 (누르면 영어)")
+            : T("English (click for Korean)", "영어 (누르면 한국어)"));
+    }
+}
+
+static void set_lang(int ko)
+{
+    if (ko == lang_now)
+        return;
+    lang_now = ko;
+    paint_lang();
+}
+
+static void fcitx_done(GObject *src, GAsyncResult *res, gpointer d)
+{
+    (void)d;
+    fcitx_busy = FALSE;
+    GVariant *v = g_dbus_connection_call_finish(G_DBUS_CONNECTION(src), res, NULL);
+    if (!v)
+        return;
+    int st = 0;
+    g_variant_get(v, "(i)", &st);
+    g_variant_unref(v);
+    set_lang(st == 2);                      /* 1 inactive (keys as printed), 2 active */
+}
+
+static gboolean poll_fcitx(gpointer d)
+{
+    (void)d;
+    if (fcitx_up && !fcitx_busy) {
+        fcitx_busy = TRUE;
+        g_dbus_connection_call(bus, "org.fcitx.Fcitx5", "/controller",
+                               "org.fcitx.Fcitx.Controller1", "State", NULL,
+                               G_VARIANT_TYPE("(i)"), G_DBUS_CALL_FLAGS_NONE, 1000,
+                               NULL, fcitx_done, NULL);
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static void fcitx_appeared(GDBusConnection *c, const char *name, const char *owner, gpointer d)
+{
+    (void)c; (void)name; (void)owner; (void)d;
+    fcitx_up = TRUE;
+    if (!fcitx_timer)
+        fcitx_timer = g_timeout_add(300, poll_fcitx, NULL);
+    poll_fcitx(NULL);
+}
+
+static void fcitx_vanished(GDBusConnection *c, const char *name, gpointer d)
+{
+    (void)c; (void)name; (void)d;
+    fcitx_up = FALSE;
+    if (fcitx_timer) {
+        g_source_remove(fcitx_timer);
+        fcitx_timer = 0;
+    }
+}
+
+static char *osk_socket(void)
+{
+    return g_build_filename(g_get_user_runtime_dir(), "lp-osk.sock", NULL);
+}
+
+static void osk_watch(void);
+
+static gboolean osk_retry(gpointer d)
+{
+    (void)d;
+    osk_watch();
+    return G_SOURCE_REMOVE;
+}
+
+static void osk_line(GObject *src, GAsyncResult *res, gpointer d)
+{
+    (void)src; (void)d;
+    char *line = g_data_input_stream_read_line_finish_utf8(osk_in, res, NULL, NULL);
+    if (!line) {
+        /* lp-osk went away (it is kept, so it is coming back). */
+        g_clear_object(&osk_in);
+        g_clear_object(&osk_conn);
+        g_timeout_add_seconds(2, osk_retry, NULL);
+        return;
+    }
+    LpJson *j = lp_json_parse(line);
+    if (j && !fcitx_up)
+        set_lang(g_strcmp0(lp_json_str(j, "language", "en"), "ko") == 0);
+    lp_json_free(j);
+    g_free(line);
+    g_data_input_stream_read_line_async(osk_in, G_PRIORITY_DEFAULT, NULL, osk_line, NULL);
+}
+
+static void osk_connected(GObject *src, GAsyncResult *res, gpointer d)
+{
+    (void)d;
+    osk_conn = g_socket_client_connect_finish(G_SOCKET_CLIENT(src), res, NULL);
+    g_object_unref(src);
+    if (!osk_conn) {
+        g_timeout_add_seconds(2, osk_retry, NULL);
+        return;
+    }
+    GOutputStream *os = g_io_stream_get_output_stream(G_IO_STREAM(osk_conn));
+    g_output_stream_write_all(os, "watch\n", 6, NULL, NULL, NULL);
+    osk_in = g_data_input_stream_new(g_io_stream_get_input_stream(G_IO_STREAM(osk_conn)));
+    g_data_input_stream_read_line_async(osk_in, G_PRIORITY_DEFAULT, NULL, osk_line, NULL);
+}
+
+static void osk_watch(void)
+{
+    char *path = osk_socket();
+    GSocketAddress *a = g_unix_socket_address_new(path);
+    g_free(path);
+    g_socket_client_connect_async(g_socket_client_new(), G_SOCKET_CONNECTABLE(a), NULL,
+                                  osk_connected, NULL);
+    g_object_unref(a);
+}
+
+/* One request to lp-osk over its socket - a local connect, microseconds -
+ * and only if it is not running, the command as a process. */
+static void osk_tell(const char *lang)
+{
+    char *path = osk_socket();
+    GSocketAddress *a = g_unix_socket_address_new(path);
+    g_free(path);
+    GSocketClient *cl = g_socket_client_new();
+    GSocketConnection *c = g_socket_client_connect(cl, G_SOCKET_CONNECTABLE(a), NULL, NULL);
+    g_object_unref(a);
+    g_object_unref(cl);
+    if (c) {
+        char *req = g_strdup_printf("lang\t%s\n", lang);
+        g_output_stream_write_all(g_io_stream_get_output_stream(G_IO_STREAM(c)),
+                                  req, strlen(req), NULL, NULL, NULL);
+        g_free(req);
+        g_object_unref(c);
+    } else {
+        const char *argv[] = { "lp-osk", "lang", lang, NULL };
+        lp_spawn(argv);
+    }
+}
+
+static void choose_lang(int ko)
+{
+    if (fcitx_up)
+        g_dbus_connection_call(bus, "org.fcitx.Fcitx5", "/controller",
+                               "org.fcitx.Fcitx.Controller1", ko ? "Activate" : "Deactivate",
+                               NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 1000, NULL, NULL, NULL);
+    osk_tell(ko ? "ko" : "en");
+    set_lang(ko);                           /* the next report confirms it */
+}
+
+static void on_lang(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    choose_lang(lang_now == 1 ? 0 : 1);
+}
+
+static void m_lang(GtkMenuItem *m, gpointer d)
+{
+    (void)m;
+    choose_lang(GPOINTER_TO_INT(d));
+}
+
+static void m_keyboard_settings(GtkMenuItem *m, gpointer d)
+{
+    (void)m; (void)d;
+    const char *a[] = { "lp-settings", "keyboard", NULL };
+    lp_spawn(a);
+}
+
+static gboolean on_lang_press(GtkWidget *w, GdkEventButton *e, gpointer d)
+{
+    (void)d;
+    if (e->type != GDK_BUTTON_PRESS || e->button != GDK_BUTTON_SECONDARY)
+        return FALSE;
+    if (!lang_menu) {
+        lang_menu = gtk_menu_new();
+        GtkWidget *en = gtk_menu_item_new_with_label(T("English", "영어"));
+        GtkWidget *ko = gtk_menu_item_new_with_label(T("Korean (한국어)", "한국어"));
+        GtkWidget *st = gtk_menu_item_new_with_label(T("Keyboard Settings…", "키보드 설정…"));
+        g_signal_connect(en, "activate", G_CALLBACK(m_lang), GINT_TO_POINTER(0));
+        g_signal_connect(ko, "activate", G_CALLBACK(m_lang), GINT_TO_POINTER(1));
+        g_signal_connect(st, "activate", G_CALLBACK(m_keyboard_settings), NULL);
+        gtk_menu_shell_append(GTK_MENU_SHELL(lang_menu), en);
+        gtk_menu_shell_append(GTK_MENU_SHELL(lang_menu), ko);
+        gtk_menu_shell_append(GTK_MENU_SHELL(lang_menu), gtk_separator_menu_item_new());
+        gtk_menu_shell_append(GTK_MENU_SHELL(lang_menu), st);
+        gtk_style_context_add_class(gtk_widget_get_style_context(lang_menu), "lp-menu");
+        gtk_widget_show_all(lang_menu);
+    }
+    gtk_menu_popup_at_widget(GTK_MENU(lang_menu), w, GDK_GRAVITY_SOUTH_EAST,
+                             GDK_GRAVITY_NORTH_EAST, (GdkEvent *)e);
+    return TRUE;
+}
+
+static void lang_init(void)
+{
+    bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (bus)
+        g_bus_watch_name_on_connection(bus, "org.fcitx.Fcitx5", G_BUS_NAME_WATCHER_FLAGS_NONE,
+                                       fcitx_appeared, fcitx_vanished, NULL, NULL);
+    osk_watch();
+}
+
 /* ── buttons ─────────────────────────────────────────────────────── */
 
 /* Ask a running component first, over its socket; start it only if it
@@ -406,7 +650,13 @@ static void m_apps(GtkMenuItem *m, gpointer d)
 static void m_files(GtkMenuItem *m, gpointer d)
 { (void)m; (void)d; const char *a[] = { "lp-files", NULL }; run_argv(a); }
 static void m_terminal(GtkMenuItem *m, gpointer d)
-{ (void)m; (void)d; const char *a[] = { "foot", NULL }; run_argv(a); }
+{
+    (void)m; (void)d;
+    const char *kgx[] = { "kgx", NULL }, *foot[] = { "foot", NULL };
+    char *p = g_find_program_in_path("kgx");
+    run_argv(p ? kgx : foot);
+    g_free(p);
+}
 static void m_settings(GtkMenuItem *m, gpointer d)
 { (void)m; (void)d; const char *a[] = { "lp-settings", NULL }; run_argv(a); }
 static void m_software(GtkMenuItem *m, gpointer d)
@@ -569,6 +819,9 @@ static void on_command(int argc, char **argv, gpointer d)
         poll_vol(NULL);
         poll_net(NULL);
         poll_bat(NULL);
+    } else if (argc >= 2 && g_strcmp0(argv[1], "lang") == 0) {
+        /* A switch key under wayfire: show it now, not at the next poll. */
+        poll_fcitx(NULL);
     } else if (argc >= 4 && g_strcmp0(argv[1], "open") == 0) {
         set_open(argv[2], g_strcmp0(argv[3], "1") == 0);
     }
@@ -624,6 +877,16 @@ static Bar *bar_new(GdkMonitor *mon)
 
     /* right */
     GtkWidget *right = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_box_pack_start(GTK_BOX(right), lp_tray_new(), FALSE, FALSE, 0);
+
+    b->lang = gtk_button_new();
+    b->lang_label = gtk_label_new("EN");
+    gtk_container_add(GTK_CONTAINER(b->lang), b->lang_label);
+    gtk_style_context_add_class(gtk_widget_get_style_context(b->lang), "lp-lang");
+    g_signal_connect(b->lang, "clicked", G_CALLBACK(on_lang), b);
+    g_signal_connect(b->lang, "button-press-event", G_CALLBACK(on_lang_press), b);
+    gtk_box_pack_start(GTK_BOX(right), b->lang, FALSE, FALSE, 0);
+
     GtkWidget *kbd = gtk_button_new();
     gtk_container_add(GTK_CONTAINER(kbd), icon_img("input-keyboard-symbolic"));
     gtk_style_context_add_class(gtk_widget_get_style_context(kbd), "lp-kbd");
@@ -677,6 +940,7 @@ static void on_monitor_added(GdkDisplay *d, GdkMonitor *m, gpointer u)
     bar_new(m);
     set_clock();
     paint_status();
+    paint_lang();
     on_toplevels(NULL);
 }
 
@@ -700,6 +964,7 @@ int main(int argc, char **argv)
      * missing app is cached as NULL, which g_object_unref would not take. */
     app_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     cal_build();
+    lp_tray_init();
 
     GdkDisplay *dpy = gdk_display_get_default();
     for (int i = 0; i < gdk_display_get_n_monitors(dpy); i++)
@@ -710,6 +975,8 @@ int main(int argc, char **argv)
     if (lp_toplevels_init())
         lp_toplevels_watch(on_toplevels, NULL);
     on_toplevels(NULL);
+    lang_init();
+    paint_lang();
 
     clock_tick(NULL);
     paint_status();
