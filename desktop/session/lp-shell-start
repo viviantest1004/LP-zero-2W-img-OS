@@ -22,6 +22,14 @@
 LOGDIR="${XDG_RUNTIME_DIR:-/tmp}/lp-shell"
 mkdir -p "$LOGDIR"
 
+# Applications whose .desktop file says DBusActivatable=true (Text
+# Editor, Clocks, Archive Manager...) are started by the session bus, not
+# by whoever was clicked, and get the bus's environment - which has no
+# WAYLAND_DISPLAY, so they exited at once and a click on them in the dock
+# or the app grid did nothing. The session's environment goes to the bus
+# first.
+dbus-update-activation-environment --all > /dev/null 2>&1 || true
+
 # The compositor's socket. wayfire exports WAYLAND_DISPLAY to its
 # autostart children; sway does too.
 SOCK="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY:-wayland-1}"
