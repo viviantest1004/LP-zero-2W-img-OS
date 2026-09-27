@@ -1370,11 +1370,23 @@ int main(void)
         set_focus(1, true), present_all();   /* Reinstall LP, to finish it */
 
     s64 last = lp_monotonic_ms();
+    /* The whole picture again a moment after the start, and once more a
+     * little later. Right after the mode is set (screen.c) a DRM driver
+     * can still be bringing the output up, and rows written during that
+     * are flushed to a plane nobody scans out: in a VM the first menu
+     * stayed black until the first key made something redraw. Two
+     * repaints of an unchanged picture cost nothing anybody can see. */
+    s64 repaint_at[2] = { last + 400, last + 1500 };
     for (;;) {
+        for (int ri = 0; ri < 2; ri++)
+            if (repaint_at[ri] && lp_monotonic_ms() >= repaint_at[ri]) {
+                repaint_at[ri] = 0;
+                present_all();
+            }
         /* Sleep until input, the shell's output, or the next frame of
          * whatever is moving (highlight spring, keyboard slide, key
          * repeat); a still menu wakes once a second for the clock. */
-        int wait = anim ? 12 : 250;
+        int wait = anim ? 12 : (repaint_at[1] ? 100 : 250);
         int ow = osk_tick();
         if (ow >= 0 && ow < wait)
             wait = ow;

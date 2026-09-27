@@ -13,6 +13,7 @@
  */
 #include "types.h"
 #include "string.h"
+#include "stdlib.h"
 #include "stdio.h"
 #include "unistd.h"
 
@@ -28,6 +29,51 @@ static void usage(int fd, const char *base)
                 "  -u, --user      print only the effective user ID\n"
                 "  -z, --zero      delimit entries with NUL characters\n"
                 "      --help      display this help and exit\n", base);
+}
+
+/* ",27(sudo),29(audio)" for each line of /etc/group whose member list
+ * names `user`, skipping its primary group (already printed). */
+static void print_member_groups(const char *user, gid_t primary)
+{
+    static char buf[16384];
+    long fd = lp_open("/etc/group", O_RDONLY, 0);
+    if (fd < 0)
+        return;
+    long n = lp_read((int)fd, buf, sizeof buf - 1);
+    lp_close((int)fd);
+    if (n <= 0)
+        return;
+    buf[n] = '\0';
+    size_t ulen = strlen(user);
+    for (char *line = buf; *line; ) {
+        char *nl = strchr(line, '\n');
+        if (nl)
+            *nl = '\0';
+        /* name:x:gid:member,member */
+        char *f[4] = { line, 0, 0, 0 };
+        int k = 1;
+        for (char *p = line; *p && k < 4; p++)
+            if (*p == ':') {
+                *p = '\0';
+                f[k++] = p + 1;
+            }
+        if (k == 4 && f[2][0] && (gid_t)atoi(f[2]) != primary) {
+            for (char *m = f[3]; *m; ) {
+                char *c = strchr(m, ',');
+                size_t len = c ? (size_t)(c - m) : strlen(m);
+                if (len == ulen && !strncmp(m, user, len)) {
+                    printf(",%d(%s)", atoi(f[2]), f[0]);
+                    break;
+                }
+                if (!c)
+                    break;
+                m = c + 1;
+            }
+        }
+        if (!nl)
+            break;
+        line = nl + 1;
+    }
 }
 
 int main(int argc, char **argv)
@@ -115,10 +161,17 @@ int main(int argc, char **argv)
     }
 
     if (u.name[0])
-        printf("uid=%d(%s) gid=%d(%s) groups=%d(%s)\n",
+        printf("uid=%d(%s) gid=%d(%s) groups=%d(%s)",
                (int)u.uid, u.name, (int)u.gid, gname, (int)u.gid, gname);
     else
-        printf("uid=%d gid=%d(%s) groups=%d(%s)\n",
+        printf("uid=%d gid=%d(%s) groups=%d(%s)",
                (int)u.uid, (int)u.gid, gname, (int)u.gid, gname);
+    /* Then every group /etc/group lists the account in, as GNU id does.
+     * Printing the primary group alone made an administrator look as if
+     * they were in nothing - not in sudo, not in audio - and sent people
+     * looking for a fault in the session that was not there. */
+    if (u.name[0])
+        print_member_groups(u.name, u.gid);
+    printf("\n");
     return 0;
 }

@@ -48,6 +48,8 @@ u8 *logo_scratch;
 /* ── The framebuffer ──────────────────────────────────────────────── */
 #define FBIOGET_VSCREENINFO 0x4600
 #define FBIOGET_FSCREENINFO 0x4602
+#define FBIOPUT_VSCREENINFO 0x4601
+#define FB_ACTIVATE_FORCE   128
 #define KDSETMODE           0x4B3A
 #define KD_TEXT             0
 #define KD_GRAPHICS         1
@@ -82,6 +84,19 @@ bool scr_open(void)
         fb_len[c] = U32AT(var, 36 + 12 * c);
     }
     fb_line = U32AT(fix, 48);
+    /* Make the display show this framebuffer. When a DRM driver (i915 on
+     * the XPS, virtio-gpu in a VM) takes over from the firmware's
+     * framebuffer, its fbdev emulation only sets a mode when fbcon draws
+     * on it - and with a quiet boot and deferred takeover nothing ever
+     * has. The panel then keeps scanning out the boot menu's last
+     * picture while every row written here goes to a buffer nobody
+     * shows: the menu ran, and the screen stayed on the logo. Putting the
+     * same mode back with FB_ACTIVATE_FORCE makes the driver commit it
+     * (drm_fb_helper_set_par). On a plain simpledrm/efifb it is a
+     * no-op. */
+    U32AT(var, 84) = FB_ACTIVATE_FORCE;          /* activate: NOW | FORCE */
+    if (lp_ioctl((int)fd, FBIOPUT_VSCREENINFO, var) < 0)
+        rlog("screen: could not set the mode (the old picture may stay)");
     if ((fb_bpp != 32 && fb_bpp != 16 && fb_bpp != 24) || SW < 320 || SH < 200) {
         lp_close((int)fd);
         return false;
