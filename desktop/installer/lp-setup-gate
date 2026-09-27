@@ -431,6 +431,15 @@ def main():
         os.unlink(SOCK)
     except OSError:
         pass
+    # The person has just chosen the password on the screen before this
+    # one: the session that follows does not ask for it again at once
+    # (lp-shell-start). /run is gone at the next boot, and with it this.
+    if mode == "firstboot" and not os.path.exists(FIRSTBOOT):
+        try:
+            os.makedirs("/run/lp-session", exist_ok=True)
+            open("/run/lp-session/just-set-up", "w").close()
+        except OSError:
+            pass
     to_session()
 
 

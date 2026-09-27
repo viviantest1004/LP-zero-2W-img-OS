@@ -79,10 +79,37 @@ case "${XDG_CURRENT_DESKTOP:-}" in
     *wayfire*|*Wayfire*) compositor=wayfire ;;
 esac
 
-# 0. After a logout (lp-logout left the marker) the new session starts
+# 0. Who is at the keyboard.
+#
+#    After a logout (lp-logout left the marker) the new session starts
 #    locked: nobody gets back in without the password.
+#
+#    So does every start of the machine, unless Settings > Users named
+#    this account for automatic sign-in (/etc/lp/autologin; no file
+#    means ask). Nothing read that file before, and an installed machine
+#    with a password came up unlocked at every boot whatever the switch
+#    said. Not locked: an account with no usable password (Try's, which
+#    could never unlock it), and the first session after the first-boot
+#    screen, where the password was typed a moment ago. A session that
+#    starts again within the same boot (the compositor died) locks too:
+#    nobody has unlocked it since the boot.
+lp_lock_now=0
+lp_first=1
+test -e "${XDG_RUNTIME_DIR}/lp-session-started" && lp_first=0
+: > "${XDG_RUNTIME_DIR}/lp-session-started"
 if test -e "${XDG_RUNTIME_DIR}/lp-logout" ; then
     rm -f "${XDG_RUNTIME_DIR}/lp-logout"
+    lp_lock_now=1
+else
+    lp_auto=$(sed -n 1p /etc/lp/autologin 2> /dev/null)
+    lp_pw=$(/usr/bin/passwd -S "$USER" 2> /dev/null | awk '{ print $2 }')
+    if test "$lp_auto" != "$USER" && test "$lp_pw" = P ; then
+        if test $lp_first = 0 || ! test -e /run/lp-session/just-set-up ; then
+            lp_lock_now=1
+        fi
+    fi
+fi
+if test $lp_lock_now = 1 ; then
     have lp-lock && lp-lock > "$LOGDIR/lock.log" 2>&1 &
 fi
 
