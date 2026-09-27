@@ -112,7 +112,17 @@ echo 3000 > /proc/sys/kernel/threads-max || echo "[rc]   could not set threads-m
 # /tmp gets its own filesystem with a limit: a program that runs away
 # writing temporary files hits "no space left" - which it is written to
 # handle - instead of taking the machine down with it.
-mount -t tmpfs -o size=64M,nosuid,nodev tmpfs /tmp || echo "[rc]   /tmp is unbounded"
+#
+# On a disk root (the amd64 desktop) memory is not also the disk, and
+# 64MB was a desktop's /tmp: an archive unpacked, a download staged or a
+# browser's cache there ran out of room. tmpfs's own ceiling - half of
+# the memory, and only what is written is used - is the limit there.
+if grep -q " / ext4 " /proc/mounts
+then
+    mount -t tmpfs -o nosuid,nodev tmpfs /tmp || echo "[rc]   /tmp is unbounded"
+else
+    mount -t tmpfs -o size=64M,nosuid,nodev tmpfs /tmp || echo "[rc]   /tmp is unbounded"
+fi
 
 # /dev/shm, which is not optional the moment there is a graphical
 # session.
@@ -125,8 +135,17 @@ mount -t tmpfs -o size=64M,nosuid,nodev tmpfs /tmp || echo "[rc]   /tmp is unbou
 #
 # Nothing on a headless machine ever noticed, which is why it was not
 # here before.
+#
+# 64MB is not enough for that session: one frame of a 4K screen is 33MB,
+# and browsers keep their tabs' shared memory here - they crash when it
+# is full. On a disk root (the desktop) it gets tmpfs's own ceiling.
 mkdir -p /dev/shm
-mount -t tmpfs -o size=64M,nosuid,nodev tmpfs /dev/shm || echo "[rc]   no /dev/shm - a graphical session will not draw"
+if grep -q " / ext4 " /proc/mounts
+then
+    mount -t tmpfs -o nosuid,nodev tmpfs /dev/shm || echo "[rc]   no /dev/shm - a graphical session will not draw"
+else
+    mount -t tmpfs -o size=64M,nosuid,nodev tmpfs /dev/shm || echo "[rc]   no /dev/shm - a graphical session will not draw"
+fi
 
 # udev, and the reason is the keyboard.
 #
