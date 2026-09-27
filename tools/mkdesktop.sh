@@ -153,8 +153,20 @@ if [[ -n "$LPBASE" ]]; then
     USE_DEB=1
     # A package older than the userland it was made from would put last
     # week's commands on the image and say nothing.
-    if [[ -n "$(find "$OURS/bin" -newer "$LPBASE" -type f -print -quit)" ]]; then
-        warn "$(basename "$LPBASE") is older than $OURS - run tools/mkdeb.sh amd64"
+    #
+    # /etc counts as much as /bin (the package ships /etc/rc), and so do
+    # the freshly built programs in userland/bin-amd64 that mkrootfs.sh has
+    # not yet copied into $OURS. Both were missed once: an image built at
+    # 17:33 carried lp-base from 12:44, so /etc/rc still ran /data/rc.local
+    # through dash ("sh: 0: Illegal option -q") and init still left the
+    # root un-remounted at shutdown (a journal replay after every clean
+    # reboot) - fixes that were committed, and absent. A warning scrolled
+    # past, so this stops the build; LP_ALLOW_STALE_DEB=1 builds anyway.
+    stale="$(find "$OURS/bin" "$OURS/etc" "${REPO_ROOT}/userland/bin-amd64" \
+                  -newer "$LPBASE" -type f -print -quit 2>/dev/null || true)"
+    if [[ -n "$stale" ]]; then
+        msg="$(basename "$LPBASE") is older than ${stale#"${REPO_ROOT}"/} - run userland/mkrootfs.sh amd64 && tools/mkdeb.sh amd64"
+        [[ "${LP_ALLOW_STALE_DEB:-0}" == 1 ]] && warn "$msg" || die "$msg"
     fi
     # dpkg runs its maintainer scripts through /bin/sh in places; in the
     # base /bin/sh is still our old shell, so dash first, then the package

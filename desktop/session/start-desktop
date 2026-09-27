@@ -20,6 +20,16 @@ chmod 0666 /dev/dri/card0 /dev/dri/renderD128 2>/dev/null
 # video bus), and the touchscreen was often past event5 - lp-osk could
 # then not see that the last touch came from a finger, and never showed.
 chmod 0666 /dev/input/event* 2>/dev/null
+# The virtual terminals are also given to uid 1000, not only opened to
+# everyone: libseat's built-in backend opens /dev/tty1 for its VT, and a
+# mode alone does not hold. init puts a root shell on tty1 at about the
+# moment the session starts, that shell reads Debian's /root/.profile,
+# and its `mesg n` takes the write bits from group and others - tty1
+# went 0666 -> 0644 a second after the chmod below, sway (uid 1000) then
+# failed "Could not open target tty: Permission denied" three times, and
+# an installed machine came up at a root prompt instead of the desktop.
+# `mesg` never touches the owner's bits, so owning the node survives it.
+chown 1000 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
 chmod 0666 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
 
 # 소리.

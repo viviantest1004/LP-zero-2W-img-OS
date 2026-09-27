@@ -319,10 +319,16 @@ def kiosk(mode):
     # VT to switch to, and without /dev/tty* it failed "Could not open
     # target tty: Permission denied" at boot (it worked from a root shell
     # later only because the session had already opened them).
+    # The VTs are also owned by uid 1000, as in start-desktop: the root
+    # shell init puts on tty1 runs /root/.profile's `mesg n`, which takes
+    # the group and other write bits back (0666 -> 0644) and leaves only
+    # the owner's.
     for dev in ["/dev/dri/card0", "/dev/dri/renderD128",
                 "/dev/tty0", "/dev/tty1", "/dev/tty2"] + \
             ["/dev/input/event%d" % i for i in range(32)]:
         try:
+            if dev.startswith("/dev/tty"):
+                os.chown(dev, KIOSK_UID, -1)
             os.chmod(dev, 0o666)
         except OSError:
             pass
