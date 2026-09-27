@@ -103,6 +103,9 @@ fi
 #    scale it starts under, and a bar started at scale 1 on a 4K panel
 #    would be drawn at a quarter size until it restarted.
 have lp-autoscale && lp-autoscale > "$LOGDIR/autoscale.log" 2>&1
+# ... and again whenever the screen changes: a VM window resized sends a
+# new preferred mode, which neither compositor takes by itself.
+have lp-autoscale && keep autoscale lp-autoscale --watch
 
 # 2. Sound: pipewire, then wireplumber once pipewire is listening
 #    (lp-audio-start keeps the order and stays up as long as they do).

@@ -35,6 +35,13 @@ export XDG_CACHE_HOME=$LP_HOME/.cache
 export XDG_DATA_DIRS=/usr/local/share:/usr/share
 export XDG_CONFIG_DIRS=/etc/xdg
 export GTK_THEME=LP
+# Every GTK window draws its own title bar - the same minimise, maximise
+# and close buttons, in the same place, as the apps with a header bar.
+# Without it a GTK 3 window with no header bar (LibreOffice, Geany,
+# GParted) asked the compositor for a frame instead: sway's has no
+# buttons at all and wayfire's looks different, so the buttons changed
+# from one app to the next.
+export GTK_CSD=1
 export XDG_SESSION_TYPE=wayland
 export XKB_DEFAULT_LAYOUT=us
 # Which compositor was decided by start-desktop, as root, from the

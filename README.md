@@ -129,11 +129,13 @@ curl -fsSL https://raw.githubusercontent.com/viviantest1004/LP-zero-2W-img-OS/re
 ```
 
 UTM (Apple Silicon 맥 포함): Virtualize 가 아니라 **Emulate**, x86_64, 시스템 Q35,
-UEFI 켜기, 램 4GB 이상, 코어 2개 이상, 디스플레이 virtio-gpu-gl-pci 에
-"hardware OpenGL acceleration" 체크. 디스크는 `.xz` 가 아니라 풀린
+UEFI 켜기, 램 4GB 이상, 코어 2개 이상. 디스플레이는 `virtio-vga` 에
+"hardware OpenGL acceleration" **끄기** - 켜면 화면 갱신마다 UTM 이 그릴
+때까지 기다려서 마우스가 1초씩 끊깁니다. 맥에서 get.sh 를 돌리면 이 설정이
+다 들어간 `LP.utm` 이 만들어집니다. 디스크는 `.xz` 가 아니라 풀린
 `linux-LP_desktop.img` 를 가져오세요 - `.xz` 를 넣으면 파티션을 못 찾아 UEFI
-셸로 떨어집니다. 설치하려면 16GB 이상 빈 디스크를 하나 더 붙이세요. 3D 가 없는 화면에서도 돌지만 창 애니메이션과 최소화
-버튼은 GPU 가 있을 때만 나옵니다.
+셸로 떨어집니다. 설치는 16GB 이상 빈 디스크를 하나 더 붙여서 하거나, 이미지
+디스크 자체를 16GB 이상으로 늘리면 그 디스크에 지우지 않고 설치됩니다.
 
 받은 뒤에 확인하세요. 받다가 끊긴 이미지는 부팅 도중에 이상하게
 실패합니다.

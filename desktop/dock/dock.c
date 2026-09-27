@@ -890,9 +890,38 @@ static void edge_for(GdkMonitor *mon)
     gtk_widget_show_all(GTK_WIDGET(e));
 }
 
+/* The room the dock takes. The dock is anchored to a corner (see main),
+ * and the layer-shell rule is that a corner-anchored surface reserves
+ * nothing - so a maximised window went on under the dock and its bottom
+ * was hidden. This surface is anchored along the whole bottom edge, one
+ * pixel high, invisible and never clicked, and reserves the dock's
+ * height and the gap under it: windows stop above the dock. */
+static GtkWindow *spacer;
+
+static void reserve_room(void)
+{
+    if (!spacer)
+        return;
+    int h = gtk_widget_get_allocated_height(GTK_WIDGET(win));
+    if (h <= 1)
+        return;
+    int zone = h + DOCK_MARGIN;
+    if (gtk_layer_get_exclusive_zone(spacer) != zone)
+        gtk_layer_set_exclusive_zone(spacer, zone);
+}
+
+static void spacer_realized(GtkWidget *w, gpointer d)
+{
+    (void)d;
+    cairo_region_t *none = cairo_region_create();
+    gtk_widget_input_shape_combine_region(w, none);
+    cairo_region_destroy(none);
+}
+
 static gboolean recentre(gpointer d)
 {
     (void)d;
+    reserve_room();
     GdkDisplay *dpy = gdk_display_get_default();
     GdkWindow *gw = gtk_widget_get_window(GTK_WIDGET(win));
     GdkMonitor *mon = gw ? gdk_display_get_monitor_at_window(dpy, gw) : NULL;
@@ -963,7 +992,13 @@ int main(int argc, char **argv)
     win = lp_layer_window("lp-dock", GTK_LAYER_SHELL_LAYER_TOP,
                           LP_EDGE_BOTTOM | LP_EDGE_LEFT);
     gtk_layer_set_margin(win, GTK_LAYER_SHELL_EDGE_BOTTOM, DOCK_MARGIN);
-    gtk_layer_auto_exclusive_zone_enable(win);
+    /* Its own zone would be ignored (a corner); the spacer reserves it. */
+    gtk_layer_set_exclusive_zone(win, 0);
+    spacer = lp_layer_window("lp-dock-space", GTK_LAYER_SHELL_LAYER_BOTTOM,
+                             LP_EDGE_BOTTOM | LP_EDGE_LEFT | LP_EDGE_RIGHT);
+    gtk_widget_set_size_request(GTK_WIDGET(spacer), -1, 1);
+    g_signal_connect(spacer, "realize", G_CALLBACK(spacer_realized), NULL);
+    gtk_widget_show(GTK_WIDGET(spacer));
     g_signal_connect(win, "size-allocate", G_CALLBACK(on_dock_allocate), NULL);
     /* A new resolution or scale moves the middle of the screen. */
     g_signal_connect_swapped(gdk_screen_get_default(), "monitors-changed",

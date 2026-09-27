@@ -3017,6 +3017,7 @@ static GtkWidget *build_list(App *app)
 {
     GtkWidget *scroller = gtk_scrolled_window_new();
     GtkWidget *view     = gtk_column_view_new(NULL);
+    gtk_column_view_set_enable_rubberband(GTK_COLUMN_VIEW(view), TRUE);
 
     gtk_column_view_set_model(GTK_COLUMN_VIEW(view), app->selection);
     /* The mockup fixes the order of the three columns; dragging them
@@ -3074,6 +3075,8 @@ static GtkWidget *build_grid(App *app)
     /* Same selection model as the list, so switching views keeps what
      * you had picked and the status bar does not flinch. */
     GtkWidget *view = gtk_grid_view_new(g_object_ref(app->selection), factory);
+    /* Drag across empty space to select a group, as in every file manager. */
+    gtk_grid_view_set_enable_rubberband(GTK_GRID_VIEW(view), TRUE);
 
     gtk_widget_add_css_class(view, "lp-grid");
     g_signal_connect(view, "activate", G_CALLBACK(on_row_activated), app);

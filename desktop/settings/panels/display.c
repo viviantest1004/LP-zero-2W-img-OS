@@ -95,7 +95,9 @@ typedef struct {
 
 static disp_t *DP;
 
-static const double SCALES[] = { 1.0, 1.25, 1.5, 1.75, 2.0 };
+/* Smaller than 100% fits more on the screen (a VM window, a big
+ * monitor); larger makes everything bigger. */
+static const double SCALES[] = { 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0 };
 static const char *const TRANSFORMS[] = { "normal", "90", "180", "270", NULL };
 
 static void out_free(gpointer p)
@@ -909,7 +911,7 @@ static void rebuild_controls(disp_t *d)
     for (guint k = 0; k < G_N_ELEMENTS(SCALES); k++) {
         int pc = (int)lround(SCALES[k] * 100);
         g_ptr_array_add(labels, fabs(SCALES[k] - rec) < 0.01
-                                ? g_strdup_printf(T("%d%% (recommended)", "%d%% (권장)"), pc)
+                                ? g_strdup_printf(T("%d%% (default)", "%d%% (기본값)"), pc)
                                 : g_strdup_printf("%d%%", pc));
         if (fabs(SCALES[k] - o->scale) < fabs(SCALES[ssel] - o->scale)) ssel = k;
     }

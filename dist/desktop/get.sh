@@ -104,7 +104,12 @@ echo "Done: $(pwd)/$IMG  - use THIS file as the VM's disk, not the .xz"
 # "boot ISO" (it is a disk, and the firmware finds nothing on a CD),
 # the .xz given instead of the .img, IDE, no 3D. So on macOS this also
 # writes LP.utm, which UTM opens as it is: x86_64 emulated on a q35 PC,
-# UEFI, 4 cores running in parallel, 4GB, the 3D display, and two disks:
+# UEFI, 4 cores running in parallel, 4GB, and two disks. The display is
+# virtio-vga WITHOUT OpenGL: with UTM's GL display every screen update
+# waits for UTM to draw it (up to a second each), and wlroots 0.15 cannot
+# use a virtual GPU's cursor plane on this kernel, so every mouse move is
+# a screen update - the pointer moved once a second. Without GL the
+# updates are plain memory copies and the pointer keeps up.
 #
 #   NVMe  an empty 16GB disk (qcow2, grows as it fills) - LP installs here
 #   USB   the image, as the stick it would be on a real PC
@@ -144,7 +149,7 @@ if [ "$(uname -s)" = Darwin ]; then
 			<key>DynamicResolution</key>
 			<true/>
 			<key>Hardware</key>
-			<string>virtio-vga-gl</string>
+			<string>virtio-vga</string>
 			<key>NativeResolution</key>
 			<false/>
 			<key>UpscalingFilter</key>
@@ -295,5 +300,4 @@ echo
 echo "USB stick:  sudo dd if=linux-LP_desktop.img of=/dev/<stick> bs=4M conv=fsync status=progress"
 echo "QEMU:       UEFI, x86_64, q35, 2+ cores, 4GB+ RAM; the image as a USB disk and an"
 echo "            empty disk of 16GB or more (NVMe) to install LP onto."
-echo "            -device virtio-vga-gl -display gtk,gl=on gives window buttons with"
-echo "            minimise and animations; without 3D, LP runs its CPU-drawn session."
+echo "            UTM: leave \"hardware OpenGL acceleration\" OFF (display virtio-vga)."
