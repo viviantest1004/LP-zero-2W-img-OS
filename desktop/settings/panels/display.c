@@ -20,6 +20,27 @@
  * rejected by the config reader fails silently. Doing both means the
  * screen changes now and stays changed.
  *
+ * ── What was chosen, for lp-autoscale ──
+ *
+ * lp-autoscale (desktop/session) runs at login and, with --watch, on
+ * every change the graphics card reports - a VM window (UTM, QEMU)
+ * resized sends a new preferred mode - and puts each output on its
+ * preferred mode and a guessed scale. Left at that it undid every choice
+ * made here within a second, and again at the next login. So a choice is
+ * also written where it reads it, one file per output:
+ *
+ *     ~/.config/lp/mode-<output>        1920x1080@60.000Hz
+ *     ~/.config/lp/scale-<output>       1.25
+ *     ~/.config/lp/transform-<output>   90
+ *
+ * An output with a chosen mode is left on it (and at its scale); these
+ * files are also what brings the choice back at login under sway, which
+ * never reads wayfire.ini. "Automatic (fit the window)" at the top of the
+ * resolution list removes mode- and scale-, writes `mode = auto` for
+ * wayfire, and the output follows the window again. While "keep these
+ * settings?" is open, $XDG_RUNTIME_DIR/lp-display-hold-<output> tells
+ * lp-autoscale to leave that output alone.
+ *
  * ── The fifteen seconds ──
  *
  * A resolution, refresh rate or rotation that the panel cannot show
@@ -228,13 +249,69 @@ static gboolean randr(const char *const *argv)
     return st == 0;
 }
 
-/* Everything about one output into its [output:NAME] section. */
+/* ~/.config/lp/<kind>-<output>: what lp-autoscale keeps (head comment). */
+static char *pin_path(const char *kind, const char *name)
+{
+    char *f = g_strdup_printf("%s-%s", kind, name);
+    char *p = lp_config_path(f);
+    g_free(f);
+    return p;
+}
+
+static char *pin_get(const char *kind, const char *name)
+{
+    char *p = pin_path(kind, name);
+    char *v = lp_slurp(p);
+    g_free(p);
+    if (v && !*g_strstrip(v)) { g_free(v); v = NULL; }
+    return v;
+}
+
+static gboolean pinned(const char *kind, const char *name)
+{
+    char *v = pin_get(kind, name);
+    gboolean yes = v != NULL;
+    g_free(v);
+    return yes;
+}
+
+/* NULL removes it: that output is automatic again. */
+static void pin_set(const char *kind, const char *name, const char *value)
+{
+    char *p = pin_path(kind, name);
+    if (value) {
+        char *body = g_strdup_printf("%s\n", value);
+        lp_write_file(p, body);
+        g_free(body);
+    } else if (g_file_test(p, G_FILE_TEST_EXISTS)) {
+        lp_remove_file(p);
+    }
+    g_free(p);
+}
+
+/* lp-autoscale leaves an output with a hold younger than a minute alone. */
+static void hold(const char *name, gboolean on)
+{
+    char *f = g_strdup_printf("lp-display-hold-%s", name);
+    char *p = g_build_filename(g_get_user_runtime_dir(), f, NULL);
+    if (on) g_file_set_contents(p, "", 0, NULL);
+    else g_remove(p);
+    g_free(p); g_free(f);
+}
+
+/* Everything about one output into its [output:NAME] section. The mode
+ * is `auto` unless one was chosen: wayfire puts the config's mode back
+ * whenever the file is re-read, and a VM that follows its window must
+ * not be sent back to the size it had when some other setting was
+ * written. */
 static void persist(const out_t *o)
 {
     char *ini = wayfire_ini();
     char *sec = g_strdup_printf("output:%s", o->name);
     if (!o->enabled || o->cur < 0) {
         ini_set(ini, sec, "mode", "off");
+    } else if (!pinned("mode", o->name)) {
+        ini_set(ini, sec, "mode", "auto");
     } else {
         const mode_t_ *m = &g_array_index(o->modes, mode_t_, o->cur);
         char *mode = g_strdup_printf("%dx%d@%d", m->w, m->h, m->mhz);
@@ -259,6 +336,7 @@ static void reload(disp_t *d);
 typedef struct {
     char *name;
     char *old_mode, *old_transform;
+    char *new_mode, *new_transform;  /* NULL: that one did not change */
     gboolean old_enabled;
     int secs;
     guint timer;
@@ -270,7 +348,9 @@ static void confirm_free(gpointer p)
 {
     confirm_t *c = p;
     if (c->timer) g_source_remove(c->timer);
+    hold(c->name, FALSE);
     g_free(c->name); g_free(c->old_mode); g_free(c->old_transform);
+    g_free(c->new_mode); g_free(c->new_transform);
     g_free(c);
 }
 
@@ -310,6 +390,11 @@ static void confirm_keep(lp_dialog_t *dlg, gpointer p)
     confirm_t *c = lp_dialog_get_data(dlg, "lp-confirm");
     if (c->timer) { g_source_remove(c->timer); c->timer = 0; }
     lp_dialog_set_data(dlg, "lp-confirm", NULL, NULL);
+    /* Before persist(), which writes `mode = auto` for an output without
+     * a chosen mode. */
+    if (c->new_mode) pin_set("mode", c->name, c->new_mode);
+    if (c->new_transform)
+        pin_set("transform", c->name, strcmp(c->new_transform, "normal") ? c->new_transform : NULL);
     if (DP) {
         for (guint i = 0; i < DP->outs->len; i++) {
             out_t *o = g_ptr_array_index(DP->outs, i);
@@ -334,12 +419,15 @@ static void confirm_gone(gpointer p)
     confirm_free(c);
 }
 
-static void ask_keep(const out_t *before_o, const char *old_mode, const char *old_tf, gboolean old_en)
+static void ask_keep(const out_t *before_o, const char *old_mode, const char *old_tf, gboolean old_en,
+                     const char *new_mode, const char *new_tf)
 {
     confirm_t *c = g_new0(confirm_t, 1);
     c->name = g_strdup(before_o->name);
     c->old_mode = g_strdup(old_mode);
     c->old_transform = g_strdup(old_tf);
+    c->new_mode = g_strdup(new_mode);
+    c->new_transform = g_strdup(new_tf);
     c->old_enabled = old_en;
     c->secs = 15;
     c->dlg = lp_dialog_new(T("Keep these display settings?", "이 화면 설정을 유지할까요?"),
@@ -378,18 +466,53 @@ static void apply_risky(disp_t *d, int new_cur, const char *new_tf)
     char *mode = mode_arg(nm);
     const char *v[] = { "wlr-randr", "--output", o->name, "--mode", mode,
                         "--transform", new_tf, NULL };
+    /* Before the change: a VM window following the new mode is a change
+     * event lp-autoscale --watch would answer with the preferred mode. */
+    hold(o->name, TRUE);
     if (randr(v)) {
+        gboolean mode_changed = new_cur != o->cur, tf_changed = strcmp(new_tf, o->transform) != 0;
         g_array_index(o->modes, mode_t_, o->cur).current = FALSE;
         o->cur = new_cur;
         g_array_index(o->modes, mode_t_, o->cur).current = TRUE;
         g_free(o->transform);
         o->transform = g_strdup(new_tf);
-        ask_keep(o, old_mode, old_tf, TRUE);
+        ask_keep(o, old_mode, old_tf, TRUE, mode_changed ? mode : NULL, tf_changed ? new_tf : NULL);
         if (d->arrange) gtk_widget_queue_draw(d->arrange);
     } else {
+        hold(o->name, FALSE);
         rebuild_controls(d);
     }
     g_free(mode); g_free(old_mode); g_free(old_tf);
+}
+
+static void auto_done(int st, const char *out, const char *err, gpointer p)
+{
+    (void)st; (void)out; (void)err;
+    reload(p);
+}
+
+/* "Automatic (fit the window)": nothing chosen any more. lp-autoscale
+ * puts the preferred mode and its own scale back now, and follows the
+ * window from here on. wayfire.ini gets `mode = auto` and the scale
+ * lp-autoscale will pick (its guess(): 2 from 2560 pixels wide), so that
+ * wayfire re-reading the file does not undo it. */
+static void go_auto(disp_t *d, out_t *o)
+{
+    pin_set("mode", o->name, NULL);
+    pin_set("scale", o->name, NULL);
+    int w = 0;
+    for (guint k = 0; k < o->modes->len; k++) {
+        const mode_t_ *m = &g_array_index(o->modes, mode_t_, k);
+        if (m->preferred || (!w && m->current)) w = m->w;
+    }
+    char *ini = wayfire_ini();
+    char *sec = g_strdup_printf("output:%s", o->name);
+    ini_set(ini, sec, "mode", "auto");
+    ini_set(ini, sec, "scale", w >= 2560 ? "2.000000" : "1.000000");
+    g_free(sec); g_free(ini);
+    lp_toast(FALSE, T("%s follows the window size again", "%s 이(가) 다시 창 크기를 따라갑니다"), o->name);
+    static const char *const v[] = { "lp-autoscale", NULL };
+    lp_run_async(v, NULL, d->page, auto_done, d);
 }
 
 static void on_resolution(GObject *dd, GParamSpec *ps, gpointer p)
@@ -398,7 +521,13 @@ static void on_resolution(GObject *dd, GParamSpec *ps, gpointer p)
     disp_t *d = DP;
     out_t *o = d ? sel_out(d) : NULL;
     guint i = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
-    if (!o || i >= d->res_list->len) return;
+    if (!o) return;
+    if (i == 0) {
+        go_auto(d, o);
+        return;
+    }
+    i--;                             /* the list below "Automatic" */
+    if (i >= d->res_list->len) return;
     int w, h;
     sscanf(g_ptr_array_index(d->res_list, i), "%dx%d", &w, &h);
     /* The highest refresh rate this size offers: a person choosing a
@@ -453,6 +582,7 @@ static void on_scale(GObject *dd, GParamSpec *ps, gpointer p)
     const char *v[] = { "wlr-randr", "--output", o->name, "--scale", sc, NULL };
     if (randr(v)) {
         o->scale = SCALES[i];
+        pin_set("scale", o->name, sc);
         persist(o);
         lp_toast(FALSE, T("%s is now at %d%%", "%s 을(를) %d%% 로 바꿨습니다"), o->name,
                  (int)lround(SCALES[i] * 100));
@@ -862,7 +992,9 @@ static void rebuild_controls(disp_t *d)
     }
     g_ptr_array_sort(d->res_list, by_size_desc);
     GPtrArray *labels = g_ptr_array_new_with_free_func(g_free);
+    gboolean chosen = pinned("mode", o->name);
     guint rsel = 0;
+    g_ptr_array_add(labels, g_strdup(T("Automatic (fit the window)", "자동 (창 크기에 맞춤)")));
     for (guint j = 0; j < d->res_list->len; j++) {
         int w, h;
         sscanf(g_ptr_array_index(d->res_list, j), "%dx%d", &w, &h);
@@ -873,14 +1005,16 @@ static void rebuild_controls(disp_t *d)
         }
         g_ptr_array_add(labels, g_strdup_printf(pref ? T("%d × %d (recommended)", "%d × %d (권장)")
                                                      : "%d × %d", w, h));
-        if (w == cur->w && h == cur->h) rsel = j;
+        if (chosen && w == cur->w && h == cur->h) rsel = j + 1;
     }
     g_ptr_array_add(labels, NULL);
-    GtkWidget *r = row_choice(d->controls, T("Resolution", "해상도"), NULL,
+    char *now = chosen ? NULL : g_strdup_printf(T("Now %d × %d", "지금 %d × %d"), cur->w, cur->h);
+    GtkWidget *r = row_choice(d->controls, T("Resolution", "해상도"), now,
                               (const char *const *)labels->pdata, rsel,
                               G_CALLBACK(on_resolution), NULL);
     d->res_dd = row_control(r);
     g_ptr_array_free(labels, TRUE);
+    g_free(now);
 
     /* Refresh rates for the current size. */
     if (d->rate_list) g_array_free(d->rate_list, TRUE);
@@ -1139,6 +1273,10 @@ gboolean lp_display_reset(char **why)
         g_free(o->transform);
         o->transform = g_strdup("normal");
         o->scale = recommended_scale(o);
+        /* Nothing chosen any more: lp-autoscale follows the display. */
+        pin_set("mode", o->name, NULL);
+        pin_set("scale", o->name, NULL);
+        pin_set("transform", o->name, NULL);
         char sc[32];
         g_ascii_formatd(sc, sizeof sc, "%.2f", o->scale);
         char *mode = o->cur >= 0 ? mode_arg(&g_array_index(o->modes, mode_t_, o->cur)) : NULL;
