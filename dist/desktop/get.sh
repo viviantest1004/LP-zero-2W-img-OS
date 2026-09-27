@@ -72,17 +72,31 @@ echo "    $NAME  ok ($want)"
 rm -f $(grep "\.part[0-9][0-9]\$" SHA256SUMS | awk '{print $2}')
 fi
 
-if command -v xz >/dev/null 2>&1; then
-    echo "==> unpacking (about 13GB, mostly empty space)"
+# Unpacked, because a VM (UTM) or dd needs the raw disk, not the .xz: given
+# the .xz the firmware finds no partitions and drops to the UEFI shell.
+# macOS has no xz; its python3 has lzma, so that is the second way.
+IMG=linux-LP_desktop.img
+if [ -f "$IMG" ] && [ "$(wc -c < "$IMG" | tr -d ' ')" -gt 10000000000 ] && [ "$IMG" -nt "$NAME" ]; then
+    echo "==> $IMG is already unpacked"
+elif command -v xz >/dev/null 2>&1; then
+    echo "==> unpacking with xz (about 13GB, mostly empty space)"
     xz -d -k -f "$NAME"
-    echo
-    echo "Done: $(pwd)/linux-LP_desktop.img"
+elif command -v python3 >/dev/null 2>&1 && python3 -c "import lzma" 2>/dev/null; then
+    echo "==> unpacking with python3 (about 13GB, mostly empty space; a few minutes)"
+    python3 - "$NAME" "$IMG" <<'PY'
+import lzma, shutil, sys
+with lzma.open(sys.argv[1]) as src, open(sys.argv[2] + ".part", "wb") as dst:
+    shutil.copyfileobj(src, dst, 16 << 20)
+PY
+    mv -f "$IMG.part" "$IMG"
 else
     echo
-    echo "Done: $(pwd)/$NAME"
-    echo "To unpack it: install xz (macOS: brew install xz), then"
-    echo "    xz -d -k $NAME"
+    echo "Done: $(pwd)/$NAME  (still compressed)"
+    echo "Unpack it before using it: brew install xz && xz -d -k $NAME"
+    exit 0
 fi
+echo
+echo "Done: $(pwd)/$IMG  - use THIS file as the VM's disk, not the .xz"
 echo
 echo "USB stick:  sudo dd if=linux-LP_desktop.img of=/dev/<stick> bs=4M conv=fsync status=progress"
 echo "UTM/QEMU:   use linux-LP_desktop.img as a disk (UEFI, x86_64, Q35, 4GB+ RAM)."
