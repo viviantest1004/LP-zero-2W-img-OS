@@ -1,6 +1,7 @@
 /*
  * access.c - Accessibility: less motion, larger text, a larger pointer,
- * and the way to the on-screen keyboard's settings.
+ * and the way to the on-screen keyboard's settings. The text and pointer
+ * rows are also shown by Appearance and Touch & mouse (see below).
  *
  * ── Reduce motion ──
  *
@@ -142,7 +143,19 @@ static void on_reduce(GObject *sw, GParamSpec *ps, gpointer p)
         LP_QUIET(gtk_switch_set_active(GTK_SWITCH(sw), !on));
 }
 
-/* ── text and pointer ───────────────────────────────────────────────── */
+/* ── text and pointer ─────────────────────────────────────────────────
+ *
+ * One value of each, in ~/.config/lp/accessibility.conf (text_scale,
+ * cursor_size), and the rows that change them are made here for every
+ * page that shows one - this one, Appearance (text) and Touch & mouse
+ * (pointer) - so a size changed on one page is the size on the others.
+ *
+ * The pointer's theme is named, not "default": Adwaita is the one the
+ * image ships, and the session's own files name it with the same size
+ * (sway.config, wayfire.ini, settings.ini, XCURSOR_SIZE). 16 is the
+ * default there, 32 pixels at scale 2. */
+
+#define CURSOR_THEME "Adwaita"
 
 static const lp_opt_t TEXT[] = {
     { "1.00", "Default", "기본" },
@@ -153,10 +166,11 @@ static const lp_opt_t TEXT[] = {
 };
 
 static const lp_opt_t CURSOR[] = {
-    { "24", "Default", "기본" },
-    { "32", "Large",   "크게" },
-    { "48", "Larger",  "더 크게" },
-    { "64", "Largest", "가장 크게" },
+    { "16", "Small (default)", "작게 (기본)" },
+    { "24", "Medium",          "보통" },
+    { "32", "Large",           "크게" },
+    { "48", "Larger",          "더 크게" },
+    { "64", "Largest",         "가장 크게" },
     { NULL, NULL, NULL }
 };
 
@@ -176,15 +190,33 @@ static void apply_text(const char *factor, gboolean live)
         g_object_set(gtk_settings_get_default(), "gtk-xft-dpi", dpi, NULL);
 }
 
+/* Only a key that differs is written: every write makes wayfire read its
+ * whole config again, and a login that restores the same size should not. */
+static void wf_input_set(const char *wf, const char *key, const char *value)
+{
+    char *old = ini_get(wf, "input", key);
+    if (!old || strcmp(old, value))
+        ini_set(wf, "input", key, value);
+    g_free(old);
+}
+
 static void apply_cursor(const char *size)
 {
-    lp_gtk_settings_set("gtk-cursor-theme-size", size);
-    lp_gsettings_set("org.gnome.desktop.interface", "cursor-size", size);
+    gint64 n = g_ascii_strtoll(size, NULL, 10);
+    if (n < 8 || n > 256) return;       /* a hand-edited file, not ours */
+    char s[16];
+    g_snprintf(s, sizeof s, "%d", (int)n);
+    lp_gtk_settings_set("gtk-cursor-theme-size", s);
+    lp_gsettings_set("org.gnome.desktop.interface", "cursor-size", s);
+    /* Wayfire reads [input] cursor_theme and cursor_size and changes the
+     * pointer the moment the file changes; sway is told with swaymsg. */
     char *wf = wayfire_ini();
-    if (g_file_test(wf, G_FILE_TEST_EXISTS))
-        ini_set(wf, "input", "cursor_size", size);
+    if (g_file_test(wf, G_FILE_TEST_EXISTS)) {
+        wf_input_set(wf, "cursor_theme", CURSOR_THEME);
+        wf_input_set(wf, "cursor_size", s);
+    }
     g_free(wf);
-    const char *a[] = { "seat", "*", "xcursor_theme", "default", size, NULL };
+    const char *a[] = { "seat", "*", "xcursor_theme", CURSOR_THEME, s, NULL };
     lp_swaymsg(a);
 }
 
@@ -216,6 +248,29 @@ static void on_cursor(GObject *dd, GParamSpec *ps, gpointer p)
     lp_toast(FALSE, T("Pointer size %s", "포인터 크기 %s"), v);
 }
 
+GtkWidget *lp_text_size_row(GtkWidget *list)
+{
+    char *c = a11y_conf();
+    char *ts = kv_get(c, "text_scale");
+    g_free(c);
+    GtkWidget *row = row_options(list, T("Text size", "글자 크기"), NULL, TEXT, ts, 0,
+                                 G_CALLBACK(on_text), NULL);
+    g_free(ts);
+    return row;
+}
+
+/* Nothing stored is the session's own 16, the first choice. */
+GtkWidget *lp_pointer_size_row(GtkWidget *list)
+{
+    char *c = a11y_conf();
+    char *cs = kv_get(c, "cursor_size");
+    g_free(c);
+    GtkWidget *row = row_options(list, T("Pointer size", "포인터 크기"), NULL, CURSOR, cs, 0,
+                                 G_CALLBACK(on_cursor), NULL);
+    g_free(cs);
+    return row;
+}
+
 static void on_osk(GtkWidget *row, gpointer p)
 {
     (void)row; (void)p;
@@ -232,13 +287,8 @@ static GtkWidget *build(void)
                T("Windows, panels and switches fade instead of sliding or zooming",
                  "창, 패널, 스위치가 미끄러지거나 커지는 대신 서서히 바뀝니다"),
                reduced_on(), G_CALLBACK(on_reduce), NULL);
-    char *c = a11y_conf();
-    char *ts = kv_get(c, "text_scale");
-    char *cs = kv_get(c, "cursor_size");
-    g_free(c);
-    row_options(g, T("Text size", "글자 크기"), NULL, TEXT, ts, 0, G_CALLBACK(on_text), NULL);
-    row_options(g, T("Pointer size", "포인터 크기"), NULL, CURSOR, cs, 0, G_CALLBACK(on_cursor), NULL);
-    g_free(ts); g_free(cs);
+    lp_text_size_row(g);
+    lp_pointer_size_row(g);
 
     GtkWidget *t = group_new(page, T("Typing", "입력"));
     row_chevron(t, T("On-screen keyboard", "화상 키보드"),
@@ -247,6 +297,8 @@ static GtkWidget *build(void)
     return page;
 }
 
+/* At login: the stored sizes into GTK's files, gsettings, wayfire.ini
+ * and sway. Nothing stored leaves the session's own defaults alone. */
 static void restore(void)
 {
     char *c = a11y_conf();

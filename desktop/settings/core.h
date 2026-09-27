@@ -151,6 +151,13 @@ int        segmented_active(GtkWidget *seg);
  * everywhere, and says who to ask. */
 void       row_lock(GtkWidget *row);
 
+/* access.c: the Text size and Pointer size rows, for every page that
+ * shows one (Accessibility, Appearance, Touch & mouse). There is one
+ * value of each, in ~/.config/lp/accessibility.conf, and one way of
+ * applying it, so the pages cannot disagree. */
+GtkWidget *lp_text_size_row(GtkWidget *list);
+GtkWidget *lp_pointer_size_row(GtkWidget *list);
+
 /* While lp_quiet is non-zero, row handlers return at once. Code that puts
  * a control back after a failed action wraps the set in LP_QUIET(), so the
  * correction does not run the action a second time. */

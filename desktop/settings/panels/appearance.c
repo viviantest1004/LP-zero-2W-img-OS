@@ -1,6 +1,6 @@
 /*
- * appearance.c - Appearance: dark or light, the accent colour, the
- * wallpaper, and the dock.
+ * appearance.c - Appearance: dark or light, the accent colour, the text
+ * size (access.c's row, the same setting), the wallpaper, and the dock.
  *
  * ── Where each choice is kept, and who reads it ──
  *
@@ -451,6 +451,8 @@ static GtkWidget *build(void)
     g_object_set_data_full(G_OBJECT(row), "lp-title", g_strdup(T("Dark style", "어두운 스타일")), g_free);
     gtk_list_box_append(GTK_LIST_BOX(g), row);
     LP_QUIET(accent_row(g));
+    /* The same row as Accessibility's: one text size. */
+    lp_text_size_row(g);
 
     GtkWidget *mg = group_new(page, T("Windows", "창"));
     char *ac = lp_config_path("appearance.conf");
@@ -546,6 +548,8 @@ static const char *const KEYS[] = {
     "Dark style", "어두운 스타일",
     "Dark mode", "다크 모드",
     "Accent colour", "강조색",
+    "Text size", "글자 크기",
+    "Font size", "글꼴 크기",
     "Wallpaper", "배경 화면",
     "Background", "배경",
     "Dock size", "독 크기",

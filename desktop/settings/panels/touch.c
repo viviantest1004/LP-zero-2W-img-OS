@@ -1,6 +1,7 @@
 /*
- * touch.c - Touch & mouse: the touchpad, a mouse, the touchscreen, and
- * when the on-screen keyboard comes up.
+ * touch.c - Touch & mouse: the pointer's size (access.c's row, the same
+ * setting as Accessibility's), the touchpad, a mouse, the touchscreen,
+ * and when the on-screen keyboard comes up.
  *
  * ── Pointer settings are wayfire's input options ──
  *
@@ -197,6 +198,10 @@ static GtkWidget *build(void)
 {
     GtkWidget *page = page_new(T("Touch & mouse", "터치와 마우스"), NULL);
 
+    /* The same row as Accessibility's: one pointer size. */
+    GtkWidget *pg = group_new(page, T("Pointer", "포인터"));
+    lp_pointer_size_row(pg);
+
     GtkWidget *tp = group_new(page, T("Touchpad", "터치패드"));
     row_switch(tp, T("Tap to click", "탭하여 클릭"), NULL, wf_bool("tap_to_click", TRUE),
                G_CALLBACK(on_wf_switch), (gpointer)"tap_to_click|touchpad tap");
@@ -265,6 +270,8 @@ static void restore(void)
 }
 
 static const char *const KEYS[] = {
+    "Pointer size", "포인터 크기",
+    "Cursor size", "커서 크기",
     "Tap to click", "탭하여 클릭",
     "Natural scrolling", "자연스러운 스크롤",
     "Touchpad speed", "터치패드 속도",
