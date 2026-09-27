@@ -22,3 +22,11 @@ cursor-theme='Adwaita'
 # for that session.
 [org.gnome.desktop.wm.preferences]
 button-layout='appmenu:minimize,maximize,close'
+
+# gedit 43 keeps its light "tango" scheme under a dark theme: the current
+# line and the gutter came out near white behind white text, and the line
+# being typed on could not be read. oblivion is its dark scheme. (Under
+# the light style the editor then stays dark; gedit here has no scheme
+# that follows the style by itself.)
+[org.gnome.gedit.preferences.editor]
+scheme='oblivion'
