@@ -587,6 +587,16 @@ for p in lp-power sudo su passwd; do
     chmod 4755 "$ROOT/bin/$p"
 done
 
+# passwd at the prompt is Debian's here. Ours keeps the hashes in
+# /data/shadow - right on a RAM root, where /etc is unpacked afresh at
+# every boot - but on this disk root the login screen, the lock screen
+# and Settings all read /etc/shadow: a password changed in a terminal
+# changed for sudo and for nothing else, and ours, checking the real
+# uid, could not write /data for an ordinary account anyway.
+if [[ -f "$ROOT/usr/bin/passwd" && ! -L "$ROOT/usr/bin/passwd" && -u "$ROOT/usr/bin/passwd" ]]; then
+    ln -sfn /usr/bin/passwd "$ROOT/bin/passwd"
+fi
+
 # ── 8. what the image must not carry ─────────────────────────────────
 step "scrub"
 scrub() {
