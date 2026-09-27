@@ -348,3 +348,78 @@ gboolean su_write_atomic(const char *path, const char *data, int mode,
         return FALSE;
     return TRUE;
 }
+
+/* ── the on-screen keyboard ───────────────────────────────────────
+ *
+ * The keyboard normally appears on its own: a field that takes focus
+ * enables text-input-v3, the compositor activates lp-osk's input
+ * method, and lp-osk slides up. In the setup kiosk that activation was
+ * never seen - tested at 3840x2160 in QEMU, lp-osk status stayed
+ * "im":"inactive" with a field focused by touch - and a person at the
+ * installer on a touch-only laptop was left with nothing to type on.
+ *
+ * So the setup windows ask for it themselves: a tap on a field (a touch,
+ * not a click - a laptop keyboard user does not want half the screen
+ * covered) runs `lp-osk show`, and when focus has left every field for
+ * 200ms, `lp-osk hide`. The short delay is what keeps it from dropping
+ * and rising again as focus moves from one field to the next. lp-osk
+ * types through its virtual keyboard when no input method is active, so
+ * the keys reach the focused field either way. */
+static guint osk_hide_id;
+
+static void osk_run(const char *what)
+{
+    char *argv[] = { (char *)"lp-osk", (char *)what, NULL };
+    g_spawn_async(NULL, argv, NULL,
+                  G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL |
+                  G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, NULL, NULL);
+}
+
+static gboolean osk_hide_later(gpointer data)
+{
+    (void)data;
+    osk_hide_id = 0;
+    osk_run("hide");
+    return G_SOURCE_REMOVE;
+}
+
+static void osk_tapped(GtkGestureClick *g, int n, double x, double y, gpointer data)
+{
+    (void)g; (void)n; (void)x; (void)y; (void)data;
+    if (osk_hide_id) {
+        g_source_remove(osk_hide_id);
+        osk_hide_id = 0;
+    }
+    osk_run("show");
+}
+
+static void osk_focus_in(GtkEventControllerFocus *c, gpointer data)
+{
+    (void)c; (void)data;
+    if (osk_hide_id) {                 /* moved to the next field */
+        g_source_remove(osk_hide_id);
+        osk_hide_id = 0;
+    }
+}
+
+static void osk_focus_out(GtkEventControllerFocus *c, gpointer data)
+{
+    (void)c; (void)data;
+    if (!osk_hide_id)
+        osk_hide_id = g_timeout_add(200, osk_hide_later, NULL);
+}
+
+void su_osk_attach(GtkWidget *field)
+{
+    GtkGesture *tap = gtk_gesture_click_new();
+    gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(tap), TRUE);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(tap),
+                                               GTK_PHASE_CAPTURE);
+    g_signal_connect(tap, "pressed", G_CALLBACK(osk_tapped), NULL);
+    gtk_widget_add_controller(field, GTK_EVENT_CONTROLLER(tap));
+
+    GtkEventController *focus = gtk_event_controller_focus_new();
+    g_signal_connect(focus, "enter", G_CALLBACK(osk_focus_in), NULL);
+    g_signal_connect(focus, "leave", G_CALLBACK(osk_focus_out), NULL);
+    gtk_widget_add_controller(field, focus);
+}

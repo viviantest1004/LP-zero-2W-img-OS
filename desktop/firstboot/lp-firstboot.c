@@ -402,6 +402,7 @@ static void page_wifi(void)
         lp_motion_reduced() ? 90 : lp_spring_ms(LP_SPRING_EXPAND, FALSE));
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     A.wifi_pw = gtk_password_entry_new();
+    su_osk_attach(A.wifi_pw);
     gtk_password_entry_set_show_peek_icon(GTK_PASSWORD_ENTRY(A.wifi_pw), TRUE);
     gtk_widget_add_css_class(A.wifi_pw, "su-entry");
     gtk_widget_set_hexpand(A.wifi_pw, TRUE);

@@ -64,6 +64,10 @@ GtkWidget *su_choice(const char *en, const char *ko,
 /* The page stack, with the design system's page transition (260 ms
  * slide, or a 100 ms crossfade when motion is reduced). */
 GtkWidget *su_stack(void);
+/* Tapping this text field brings up the on-screen keyboard; focus leaving
+ * every such field puts it away. For the setup windows, where the input
+ * method never announces a focused field (see setup-ui.c). */
+void su_osk_attach(GtkWidget *field);
 /* Go to a page, sliding the right way: forward left, back right. */
 void       su_go(GtkWidget *stack, const char *name, gboolean forward);
 

@@ -139,6 +139,7 @@ static GtkWidget *entry(void)
     GtkWidget *e = gtk_entry_new();
     gtk_widget_add_css_class(e, "su-entry");
     gtk_entry_set_activates_default(GTK_ENTRY(e), FALSE);
+    su_osk_attach(e);
     return e;
 }
 
@@ -147,6 +148,7 @@ static GtkWidget *password(void)
     GtkWidget *e = gtk_password_entry_new();
     gtk_widget_add_css_class(e, "su-entry");
     gtk_password_entry_set_show_peek_icon(GTK_PASSWORD_ENTRY(e), TRUE);
+    su_osk_attach(e);
     return e;
 }
 

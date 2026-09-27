@@ -277,7 +277,13 @@ def kiosk(mode):
     # a private seatd for uid 1000 (it never became active without a VT
     # session), and forcing LIBSEAT_BACKEND=noop.
     seatd = None
-    for dev in ["/dev/dri/card0", "/dev/dri/renderD128"] + \
+    # Like start-desktop, open the GPU, the input devices and the first
+    # virtual terminals to uid 1000: libseat's built-in backend opens a
+    # VT to switch to, and without /dev/tty* it failed "Could not open
+    # target tty: Permission denied" at boot (it worked from a root shell
+    # later only because the session had already opened them).
+    for dev in ["/dev/dri/card0", "/dev/dri/renderD128",
+                "/dev/tty0", "/dev/tty1", "/dev/tty2"] + \
             ["/dev/input/event%d" % i for i in range(32)]:
         try:
             os.chmod(dev, 0o666)
