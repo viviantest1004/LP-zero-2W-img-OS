@@ -832,3 +832,34 @@
  
  	wl_signal_add(&keyboard_grab->events.destroy,
  		&relay->input_method_keyboard_grab_destroy);
+--- a/sway/input/text_input.c
++++ b/sway/input/text_input.c
+@@ -254,7 +254,27 @@
+ 		return;
+ 	}
+ 
+-	sway_text_input_create(relay, wlr_text_input);
++	struct sway_text_input *text_input =
++		sway_text_input_create(relay, wlr_text_input);
++	if (!text_input) {
++		return;
++	}
++	// LP: GTK creates its text input when its first text field is
++	// realized - after its window already has the keyboard. Only a focus
++	// change sent enter, so the first field of a new window (Settings'
++	// search, a new folder's name) got no input method: Korean typed there
++	// went in as latin letters until focus moved away and back. Enter it
++	// now if its client already holds the keyboard focus.
++	struct wlr_surface *focused =
++		relay->seat->wlr_seat->keyboard_state.focused_surface;
++	if (focused && wl_resource_get_client(wlr_text_input->resource)
++			== wl_resource_get_client(focused->resource)) {
++		if (relay->input_method) {
++			wlr_text_input_v3_send_enter(wlr_text_input, focused);
++		} else {
++			text_input_set_pending_focused_surface(text_input, focused);
++		}
++	}
+ }
+ 
+ static void relay_handle_input_method(struct wl_listener *listener,
