@@ -68,6 +68,8 @@ GtkWidget *su_stack(void);
  * every such field puts it away. For the setup windows, where the input
  * method never announces a focused field (see setup-ui.c). */
 void su_osk_attach(GtkWidget *field);
+/* The card that moves up while the keyboard is showing. */
+void su_osk_card(GtkWidget *card);
 /* Go to a page, sliding the right way: forward left, back right. */
 void       su_go(GtkWidget *stack, const char *name, gboolean forward);
 

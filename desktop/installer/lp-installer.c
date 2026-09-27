@@ -726,6 +726,7 @@ static void activate(GtkApplication *app, gpointer d)
     gtk_widget_set_vexpand(A.stack, TRUE);
     gtk_box_append(GTK_BOX(card), A.stack);
     gtk_window_set_child(GTK_WINDOW(A.win), card);
+    su_osk_card(card);
 
     page_welcome();
     page_problem();

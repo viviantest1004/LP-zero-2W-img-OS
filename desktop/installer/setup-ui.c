@@ -367,12 +367,110 @@ gboolean su_write_atomic(const char *path, const char *data, int mode,
  * the keys reach the focused field either way. */
 static guint osk_hide_id;
 
+/* ── the card makes room for the keyboard ──
+ *
+ * The keyboard is a third of the screen tall and slides up over the
+ * bottom of it; the card is centred on the screen, so its Back and Next
+ * buttons ended up under the keys - a person typing a password by touch
+ * then had to close the keyboard to reach Next. While the keyboard is
+ * up, the card gets a bottom margin of the keyboard's height and so is
+ * centred in the space left above it, moving on the sheet spring - the
+ * keyboard's own - so the two travel together. */
+static GtkWidget *osk_card;
+static LpSpring osk_lift;               /* the margin, in logical pixels */
+static LpMotion *osk_lift_m;
+
+static void osk_lift_frame(GtkWidget *w, gpointer data)
+{
+    (void)data;
+    gtk_widget_set_margin_bottom(w, (int)MAX(0.0, osk_lift.x + 0.5));
+}
+
+/* The keyboard's height as lp-osk draws it: the fraction in its
+ * settings file, 0.34 of the screen when there is none. */
+static double osk_height(void)
+{
+    double frac = 0.34;
+    GKeyFile *k = g_key_file_new();
+    char *path = g_build_filename(g_get_user_config_dir(), "lp", "osk.ini", NULL);
+    if (g_key_file_load_from_file(k, path, G_KEY_FILE_NONE, NULL)) {
+        double f = g_key_file_get_double(k, "keyboard", "height", NULL);
+        if (f > 0.15 && f < 0.7)
+            frac = f;
+    }
+    g_free(path);
+    g_key_file_unref(k);
+    GtkRoot *root = osk_card ? gtk_widget_get_root(osk_card) : NULL;
+    int h = root ? gtk_widget_get_height(GTK_WIDGET(root)) : 0;
+    return h > 0 ? h * frac : 0.0;
+}
+
+static void osk_make_room(gboolean up)
+{
+    if (!osk_card)
+        return;
+    double target = up ? osk_height() : 0.0;
+    if (up)
+        lp_spring_set_target(&osk_lift, target);
+    else
+        lp_spring_set_target_out(&osk_lift, target);
+    lp_motion_kick(osk_lift_m);
+}
+
+/* What the keyboard really does, from `lp-osk watch`: one JSON line per
+ * change, "visible" among them. That covers its own Close key and the
+ * 한/영 page it is on, which a show/hide from here would not know about. */
+static GSubprocess *osk_watch;
+
+static void osk_watch_line(GObject *src, GAsyncResult *res, gpointer data)
+{
+    (void)data;
+    GDataInputStream *in = G_DATA_INPUT_STREAM(src);
+    gsize n = 0;
+    char *line = g_data_input_stream_read_line_finish_utf8(in, res, &n, NULL);
+    if (!line) {                        /* lp-osk went away; the next show retries */
+        g_clear_object(&osk_watch);
+        g_object_unref(in);
+        return;
+    }
+    if (strstr(line, "\"visible\":true"))
+        osk_make_room(TRUE);
+    else if (strstr(line, "\"visible\":false"))
+        osk_make_room(FALSE);
+    g_free(line);
+    g_data_input_stream_read_line_async(in, G_PRIORITY_DEFAULT, NULL, osk_watch_line, NULL);
+}
+
+static void osk_watch_start(void)
+{
+    if (osk_watch || !osk_card)
+        return;
+    osk_watch = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                                 G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL,
+                                 "lp-osk", "watch", NULL);
+    if (!osk_watch)
+        return;
+    GDataInputStream *in =
+        g_data_input_stream_new(g_subprocess_get_stdout_pipe(osk_watch));
+    g_data_input_stream_read_line_async(in, G_PRIORITY_DEFAULT, NULL, osk_watch_line, NULL);
+}
+
+void su_osk_card(GtkWidget *card)
+{
+    osk_card = card;
+    lp_spring_init(&osk_lift, LP_SPRING_SHEET, 0.0);
+    osk_lift_m = lp_motion_new(card, osk_lift_frame, NULL);
+    lp_motion_add(osk_lift_m, &osk_lift);
+}
+
 static void osk_run(const char *what)
 {
     char *argv[] = { (char *)"lp-osk", (char *)what, NULL };
+    osk_watch_start();
     g_spawn_async(NULL, argv, NULL,
                   G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL |
                   G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, NULL, NULL);
+    osk_make_room(!strcmp(what, "show"));
 }
 
 static gboolean osk_hide_later(gpointer data)
