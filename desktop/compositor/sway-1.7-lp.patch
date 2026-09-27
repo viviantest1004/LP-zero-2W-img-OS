@@ -724,3 +724,92 @@
  	view->foreign_destroy.notify = handle_foreign_destroy;
  	wl_signal_add(&view->foreign_toplevel->events.destroy,
  			&view->foreign_destroy);
+--- a/sway/commands.c
++++ b/sway/commands.c
+@@ -120,6 +120,8 @@
+ 	{ "layout", cmd_layout },
+ 	{ "mark", cmd_mark },
+ 	{ "max_render_time", cmd_max_render_time },
++	{ "maximize", cmd_maximize }, // LP
++	{ "minimize", cmd_minimize }, // LP
+ 	{ "move", cmd_move },
+ 	{ "nop", cmd_nop },
+ 	{ "opacity", cmd_opacity },
+--- a/include/sway/commands.h
++++ b/include/sway/commands.h
+@@ -151,6 +151,8 @@
+ sway_cmd cmd_log_colors;
+ sway_cmd cmd_mark;
+ sway_cmd cmd_max_render_time;
++sway_cmd cmd_maximize; // LP
++sway_cmd cmd_minimize; // LP
+ sway_cmd cmd_mode;
+ sway_cmd cmd_mouse_warping;
+ sway_cmd cmd_move;
+--- a/sway/meson.build
++++ b/sway/meson.build
+@@ -70,6 +70,8 @@
+ 	'commands/kill.c',
+ 	'commands/mark.c',
+ 	'commands/max_render_time.c',
++	'commands/maximize.c',
++	'commands/minimize.c',
+ 	'commands/opacity.c',
+ 	'commands/include.c',
+ 	'commands/input.c',
+--- /dev/null
++++ b/sway/commands/maximize.c
+@@ -0,0 +1,30 @@
++#include <strings.h>
++#include "sway/commands.h"
++#include "sway/tree/arrange.h"
++#include "sway/tree/container.h"
++#include "util.h"
++
++// LP: maximize [enable|disable|toggle]
++//
++// What the maximize button on a window's own title bar does, from a key:
++// the window fills its output's usable area, and the same command puts it
++// back. Only floating windows are maximized this way - every window in
++// LP's session floats - so on a tiled one it does nothing, successfully.
++struct cmd_results *cmd_maximize(int argc, char **argv) {
++	struct cmd_results *error = NULL;
++	if ((error = checkarg(argc, "maximize", EXPECTED_AT_MOST, 1))) {
++		return error;
++	}
++	struct sway_container *con = config->handler_context.container;
++	if (!con || !con->view || !con->pending.workspace ||
++			!container_is_floating(con)) {
++		return cmd_results_new(CMD_SUCCESS, NULL);
++	}
++	bool enable = !con->maximized;
++	if (argc == 1) {
++		enable = parse_boolean(argv[0], con->maximized);
++	}
++	container_floating_set_maximized(con, enable);
++	arrange_workspace(con->pending.workspace);
++	return cmd_results_new(CMD_SUCCESS, NULL);
++}
+--- /dev/null
++++ b/sway/commands/minimize.c
+@@ -0,0 +1,20 @@
++#include "sway/commands.h"
++#include "sway/tree/container.h"
++#include "sway/tree/root.h"
++
++// LP: minimize
++//
++// What the minimize button on a window's own title bar does, from a key:
++// the window is hidden (in the scratchpad) and comes back from the dock.
++struct cmd_results *cmd_minimize(int argc, char **argv) {
++	struct cmd_results *error = NULL;
++	if ((error = checkarg(argc, "minimize", EXPECTED_EQUAL_TO, 0))) {
++		return error;
++	}
++	struct sway_container *con = config->handler_context.container;
++	if (!con || !con->view || !con->pending.workspace || con->minimized) {
++		return cmd_results_new(CMD_SUCCESS, NULL);
++	}
++	root_minimize_container(con);
++	return cmd_results_new(CMD_SUCCESS, NULL);
++}

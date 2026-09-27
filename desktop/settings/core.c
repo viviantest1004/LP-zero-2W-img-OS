@@ -917,6 +917,8 @@ static int command_line(GApplication *gapp, GApplicationCommandLine *cl, gpointe
  * (gsettings keys mirrored from our files, the night-light daemon) puts
  * it back. The files are the record; this makes the machine match them.
  * `--apply-night-light` does only that one, for the same reason. */
+char *lp_keyboard_sway_keys(void);     /* panels/keyboard.c */
+
 static gboolean wake(gpointer p) { (void)p; return G_SOURCE_CONTINUE; }
 
 static int restore_all(void)
@@ -945,6 +947,14 @@ int main(int argc, char **argv)
         return restore_all();
     if (argc >= 2 && !strcmp(argv[1], "--apply-night-light"))
         return lp_night_light_exec();
+    /* The shortcuts as sway bindings, from $WAYFIRE_CONFIG_FILE (or the
+     * person's wayfire.ini): how the image's default file is made. */
+    if (argc >= 2 && !strcmp(argv[1], "--sway-keys")) {
+        char *t = lp_keyboard_sway_keys();
+        fputs(t, stdout);
+        g_free(t);
+        return 0;
+    }
 
     GtkApplication *app = gtk_application_new("org.lpzero.Settings",
                                               G_APPLICATION_HANDLES_COMMAND_LINE);

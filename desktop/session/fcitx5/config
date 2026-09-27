@@ -1,5 +1,9 @@
 # fcitx5 for LP: English and 두벌식 Hangul, switched with the Hangul key
-# (Right Alt on this keyboard layout), Ctrl+Space or Shift+Space.
+# (Right Alt too, as wayfire's korean:ralt_hangul) or Shift+Space; and
+# Super+Space, which is wayfire's binding (lp-input-lang). Settings >
+# Keyboard rewrites the trigger keys below when those are changed, and
+# can add Ctrl+Space, off at first because it is also every code
+# editor's completion key.
 [Hotkey]
 # Enumerate when press trigger key repeatedly
 EnumerateWithTriggerKeys=True
@@ -7,8 +11,7 @@ EnumerateSkipFirst=False
 
 [Hotkey/TriggerKeys]
 0=Hangul
-1=Control+space
-2=Shift+space
+1=Shift+space
 
 [Behavior]
 # Active By Default

@@ -825,17 +825,31 @@ static void grab_key(void *data, struct zwp_input_method_keyboard_grab_v2 *g,
         pass_key(time, KEY_RIGHTALT, WL_KEYBOARD_KEY_STATE_PRESSED);
     }
 
-    /* 한/영: the Hangul key, or Right Alt tapped on its own (below) on a
-     * keyboard like this laptop's, which has no Hangul key. Shift+Space,
-     * which some Korean IMEs also take, is deliberately not one: English
-     * is the default here, and a capital typed a moment before a space
-     * would switch the language under an English typist's fingers. */
+    /* 한/영: the Hangul key always; and, as Settings > Keyboard chooses
+     * (all but Ctrl+Space are on at first), Right Alt tapped on its own
+     * (below) on a keyboard like this laptop's, which has no Hangul key,
+     * Shift+Space, which Korean typists have used for decades, and
+     * Ctrl+Space. Ctrl+Space starts off, because it is also the
+     * completion key in every code editor. Super+Space is the
+     * compositor's binding (lp-input-lang), not ours: a Super chord never
+     * reaches an input method's grab. */
     if (key == KEY_HANGEUL || sym == XKB_KEY_Hangul) {
         consume(key);
         type_toggle_lang();
         return;
     }
-    if (key == KEY_RIGHTALT && !(g_dep & (g_ctrl | g_logo))) {
+    if (sym == XKB_KEY_space && (cfg.layouts & LAYOUT_KO)) {
+        gboolean ctrl = (g_dep & g_ctrl) != 0;
+        gboolean others = (g_dep & (g_alt | g_logo)) != 0;
+        if (!others && ((shift && !ctrl && (cfg.switch_keys & SWITCH_SHIFTSPACE)) ||
+                        (ctrl && !shift && (cfg.switch_keys & SWITCH_CTRLSPACE)))) {
+            consume(key);
+            type_toggle_lang();
+            return;
+        }
+    }
+    if (key == KEY_RIGHTALT && (cfg.switch_keys & SWITCH_RALT) &&
+        !(g_dep & (g_ctrl | g_logo))) {
         ralt_pending = TRUE;
         ralt_time = time;
         return;

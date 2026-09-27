@@ -30,6 +30,12 @@ enum { INPUT_UNKNOWN = 0, INPUT_TOUCH, INPUT_KEY, INPUT_POINTER };
 #define LAYOUT_EN 1u
 #define LAYOUT_KO 2u
 
+/* The keys that switch 한/영 besides the Hangul key itself, which always
+ * does (osk.ini switch-keys; Settings > Keyboard turns each on or off). */
+#define SWITCH_RALT       1u   /* Right Alt tapped on its own */
+#define SWITCH_SHIFTSPACE 2u
+#define SWITCH_CTRLSPACE  4u
+
 /* Modifier bits the keys hand to type.c. type.c turns them into whatever
  * mask the keymap in use gives those modifiers. */
 #define MOD_SHIFT 1u
@@ -43,6 +49,7 @@ typedef struct {
     int     lang;          /* LANG_*, shared by screen and laptop keyboard */
     unsigned layouts;      /* LAYOUT_* */
     gboolean ime;          /* compose Hangul from the laptop keyboard too */
+    unsigned switch_keys;  /* SWITCH_* */
 } OskConfig;
 
 extern OskConfig cfg;

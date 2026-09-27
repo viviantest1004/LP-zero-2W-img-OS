@@ -168,6 +168,14 @@ menu.lp-menu, .lp-menu menu, .lp-menu {
 .lp-bar .lp-status .lp-warn { color: @lp_amber; }
 .lp-bar .lp-status .lp-bad  { color: @lp_red; }
 .lp-bar .lp-kbd image { color: @lp_t1; }
+/* The input language, EN or 한: fixed width, so switching does not move
+ * the icons beside it. */
+.lp-bar .lp-lang { min-width: 40px; padding: 0 8px; }
+.lp-bar .lp-lang label {
+  font-size: 13px;
+  font-weight: 700;
+  color: @lp_t1;
+}
 
 /* The calendar under the clock: a sheet (lp-sheet.c) that slides down
  * from under the bar. The margin is room for its shadow inside the

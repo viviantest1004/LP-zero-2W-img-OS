@@ -15,27 +15,40 @@
  * Kept in ~/.config/lp/input.conf:
  *
  *     sources=en,ko            in order; the first is what a new window starts in
- *     switch_key=hangul        hangul | shiftspace
+ *     switch_keys=hangul;ralt;shift-space
  *
  * and mirrored into the file the on-screen keyboard and the input method
  * read, ~/.config/lp/osk.ini [keyboard]: layouts=en;ko (the set 한/영
  * cycles through), physical-korean (compose Hangul from the laptop's own
- * keys too) and switch-key. Only those keys are written; lp-osk's own
- * (height, the language last in use) stay as they were.
+ * keys too) and switch-keys. Only those keys are written; lp-osk's own
+ * (height, the language last in use) stay as they were, and `lp-osk
+ * reload` puts the change in use at once.
  *
- * ── Repeat and shortcuts are wayfire's ──
+ * ── The keys that switch 한/영 ──
+ *
+ * The Hangul key always. Right Alt tapped on its own and Shift+Space are
+ * on from the start, Ctrl+Space is there to turn on (it is also every
+ * code editor's completion key), and Super+Space is a shortcut like the
+ * others below, so it can be moved. The same choice has to reach two
+ * input methods: lp-osk (sway; it reads osk.ini) and fcitx5 (wayfire's
+ * laptop keys; [Hotkey/TriggerKeys] in ~/.config/fcitx5/config, and
+ * Right Alt as a Hangul key is wayfire's xkb option korean:ralt_hangul).
+ *
+ * ── Repeat and shortcuts: one list, both compositors ──
  *
  * [input] kb_repeat_delay / kb_repeat_rate, and the bindings in the
- * sections of the plugins that own them ([command], [expo], [grid] ...).
- * Wayfire applies a changed file at once. A shortcut is changed by
- * pressing the new keys in a dialog, which catches a combination that is
- * already taken and names what has it, and offers to take it over.
- * Shortcuts people add themselves are [command] binding_lp_N /
- * command_lp_N pairs, with their names in ~/.config/lp/shortcuts.conf.
+ * sections of the plugins that own them ([command], [expo], [grid] ...),
+ * in wayfire.ini, which wayfire applies at once. That file is also the
+ * record for sway: every change writes ~/.config/sway/lp-keys.conf from
+ * it (sway's config includes it) and reloads sway, so a shortcut changed
+ * here works under whichever compositor the machine runs. The ones sway
+ * has no equivalent for (the overviews) are left out of that file.
  *
- * 한/영 itself is not a shortcut and cannot be reassigned: the input
- * method answers it before any window sees it. Its row says "fixed" and
- * why, on the row, because that never changes.
+ * A shortcut is changed by pressing the new keys in a dialog, which
+ * catches a combination that is already taken and names what has it,
+ * and offers to take it over. Shortcuts people add themselves are
+ * [command] binding_lp_N / command_lp_N pairs, with their names in
+ * ~/.config/lp/shortcuts.conf.
  */
 #include "core.h"
 
@@ -333,28 +346,118 @@ static void on_add(GtkButton *b, gpointer p)
     lp_dialog_present(d);
 }
 
-/* ── switch key, Korean on the laptop keyboard ──────────────────────── */
+/* ── the keys that switch 한/영, Korean on the laptop keyboard ─────────── */
 
-static const lp_opt_t SWITCH_KEY[] = {
-    { "hangul",     "한/영 key",   "한/영 키" },
-    { "shiftspace", "Shift+Space", "Shift+Space" },
-    { NULL, NULL, NULL }
-};
+enum { SW_RALT = 1, SW_SHIFTSPACE = 2, SW_CTRLSPACE = 4 };
+#define SW_DEFAULT (SW_RALT | SW_SHIFTSPACE)
 
-static void on_switch_key(GObject *dd, GParamSpec *ps, gpointer p)
+static unsigned switch_keys_get(void)
 {
-    (void)ps; (void)p;
-    const char *v = row_option_value(dd);
-    if (!v) return;
+    char *ini = lp_config_path("osk.ini");
+    char *v = ini_get(ini, "keyboard", "switch-keys");
+    g_free(ini);
+    if (!v) return SW_DEFAULT;
+    unsigned k = 0;
+    char **l = g_strsplit(v, ";", -1);
+    for (int i = 0; l[i]; i++) {
+        char *t = g_strstrip(l[i]);
+        k |= !strcmp(t, "ralt") ? SW_RALT : !strcmp(t, "shift-space") ? SW_SHIFTSPACE
+           : !strcmp(t, "ctrl-space") ? SW_CTRLSPACE : 0;
+    }
+    g_strfreev(l);
+    g_free(v);
+    return k;
+}
+
+/* fcitx5's trigger keys and wayfire's Right Alt, from the same choice.
+ * Returns whether anything changed on disk. */
+static gboolean switch_keys_fcitx(unsigned k)
+{
+    gboolean changed = FALSE;
+    char *fc = g_build_filename(g_get_user_config_dir(), "fcitx5", "config", NULL);
+    const char *want[4] = { "Hangul", NULL, NULL, NULL };
+    int n = 1;
+    if (k & SW_SHIFTSPACE) want[n++] = "Shift+space";
+    if (k & SW_CTRLSPACE) want[n++] = "Control+space";
+    for (int i = 0; i < 4; i++) {
+        char key[4];
+        g_snprintf(key, sizeof key, "%d", i);
+        char *old = ini_get(fc, "Hotkey/TriggerKeys", key);
+        if (i < n && g_strcmp0(old, want[i])) {
+            ini_set(fc, "Hotkey/TriggerKeys", key, want[i]);
+            changed = TRUE;
+        } else if (i >= n && old) {
+            ini_unset(fc, "Hotkey/TriggerKeys", key);
+            changed = TRUE;
+        }
+        g_free(old);
+    }
+    g_free(fc);
+
+    char *wf = wayfire_ini();
+    char *xo = ini_get(wf, "input", "xkb_options");
+    GString *o = g_string_new(NULL);
+    char **l = g_strsplit(xo ? xo : "", ",", -1);
+    for (int i = 0; l[i]; i++) {
+        char *t = g_strstrip(l[i]);
+        if (!*t || !strcmp(t, "korean:ralt_hangul")) continue;
+        if (o->len) g_string_append_c(o, ',');
+        g_string_append(o, t);
+    }
+    g_strfreev(l);
+    if (k & SW_RALT)
+        g_string_append(o, o->len ? ",korean:ralt_hangul" : "korean:ralt_hangul");
+    if (g_strcmp0(xo, o->str)) {
+        ini_set(wf, "input", "xkb_options", o->str);
+        changed = TRUE;
+    }
+    g_string_free(o, TRUE);
+    g_free(xo);
+    g_free(wf);
+    return changed;
+}
+
+/* Tell the running input methods. Both are optional: whichever is not
+ * running reads the files when it starts. */
+static void switch_keys_tell(gboolean fcitx)
+{
+    const char *osk[] = { "lp-osk", "reload", NULL };
+    lp_spawn_bg(osk);
+    if (fcitx && lp_have("fcitx5-remote")) {
+        const char *fr[] = { "fcitx5-remote", "-r", NULL };
+        lp_spawn_bg(fr);
+    }
+}
+
+static void switch_keys_set(unsigned k)
+{
+    char *list = g_strdup_printf("hangul%s%s%s", k & SW_RALT ? ";ralt" : "",
+                                 k & SW_SHIFTSPACE ? ";shift-space" : "",
+                                 k & SW_CTRLSPACE ? ";ctrl-space" : "");
     char *c = input_conf();
-    gboolean ok = kv_set(c, "switch_key", v);
+    kv_set(c, "switch_keys", list);
     g_free(c);
     char *ini = lp_config_path("osk.ini");
-    ok = ok && ini_set(ini, "keyboard", "switch-key", v);
+    ini_set(ini, "keyboard", "switch-keys", list);
     g_free(ini);
-    if (ok)
-        lp_toast(FALSE, T("%s moves to the next input source", "%s 로 다음 입력 소스로 넘어갑니다"),
-                 !strcmp(v, "hangul") ? T("The 한/영 key", "한/영 키") : "Shift+Space");
+    g_free(list);
+    switch_keys_tell(switch_keys_fcitx(k));
+}
+
+static void on_switch_key(GObject *sw, GParamSpec *ps, gpointer p)
+{
+    (void)ps;
+    unsigned bit = GPOINTER_TO_UINT(p);
+    gboolean on = gtk_switch_get_active(GTK_SWITCH(sw));
+    unsigned k = switch_keys_get();
+    k = on ? (k | bit) : (k & ~bit);
+    switch_keys_set(k);
+    const char *name = bit == SW_RALT ? T("Right Alt", "오른쪽 Alt")
+                     : bit == SW_SHIFTSPACE ? "Shift+Space" : "Ctrl+Space";
+    if (on)
+        lp_toast(FALSE, T("%s now switches 한/영", "이제 %s 로 한/영을 바꿉니다"), name);
+    else
+        lp_toast(FALSE, T("%s no longer switches 한/영", "%s 로는 한/영을 바꾸지 않습니다"), name);
 }
 
 static void on_physical(GObject *sw, GParamSpec *ps, gpointer p)
@@ -420,23 +523,44 @@ static int wf_int(const char *sec, const char *key, int dflt)
 typedef struct { const char *sec, *key, *en, *ko, *dflt; } shortcut_t;
 
 /* The shortcuts the desktop ships, with the bindings it ships them with
- * (desktop/session/wayfire.ini) - which is also what Reset puts back. */
+ * (desktop/session/wayfire.ini - change both together) - which is also
+ * what Reset puts back. The common ones from other systems are all here
+ * at once: Super+Up and Super+Down for the window, Alt+F4, Ctrl+Alt+T,
+ * Super+Shift+S, Ctrl+Shift+Esc, Super+Space. A gesture after the keys
+ * ("| pinch in 3") is kept when the keys are changed. */
 static const shortcut_t SHORTCUTS[] = {
-    { "command",    "binding_terminal", "Open a terminal", "터미널 열기", "<super> KEY_T" },
+    { "command",    "binding_inputlang", "Switch the input language (한/영)", "입력 언어 전환 (한/영)",
+      "<super> KEY_SPACE" },
+    { "command",    "binding_terminal", "Open a terminal", "터미널 열기", "<super> KEY_T | <ctrl> <alt> KEY_T" },
     { "command",    "binding_files", "Open Files", "파일 열기", "<super> KEY_E" },
+    { "command",    "binding_settings", "Open Settings", "설정 열기", "<super> KEY_I" },
+    { "command",    "binding_apps", "Show all apps", "모든 앱 보기", "<super> KEY_A" },
+    { "command",    "binding_quick", "Quick settings", "빠른 설정", "<super> KEY_N" },
+    { "command",    "binding_tasks", "Task Manager", "작업 관리자", "<ctrl> <shift> KEY_ESC" },
+    { "command",    "binding_osk", "On-screen keyboard", "화상 키보드", "<super> KEY_K" },
     { "command",    "binding_lock", "Lock the screen", "화면 잠금", "<super> KEY_L" },
-    { "command",    "binding_screenshot", "Screenshot", "스크린샷", "KEY_SYSRQ | KEY_PRINT" },
-    { "command",    "binding_screenshot_area", "Screenshot of an area", "영역 스크린샷",
-      "<shift> KEY_SYSRQ | <shift> KEY_PRINT" },
-    { "core",       "close_top_view", "Close the window", "창 닫기", "<super> KEY_Q" },
-    { "wm-actions", "toggle_maximize", "Maximize the window", "창 최대화", "<super> KEY_UP" },
+    { "command",    "binding_shot", "Screenshot", "스크린샷", "KEY_SYSRQ" },
+    { "command",    "binding_shot_area", "Screenshot of an area", "영역 스크린샷",
+      "<shift> KEY_SYSRQ | <super> <shift> KEY_S" },
+    { "command",    "binding_shot_app", "Screenshot app", "스크린샷 앱", "<ctrl> <shift> KEY_SYSRQ" },
+    { "core",       "close_top_view", "Close the window", "창 닫기", "<super> KEY_Q | <alt> KEY_F4" },
+    { "wm-actions", "toggle_maximize", "Maximize or restore the window", "창 최대화 / 복원",
+      "<super> KEY_UP | <super> KEY_M" },
+    { "wm-actions", "minimize", "Minimize the window", "창 최소화", "<super> KEY_DOWN | <super> KEY_H" },
+    { "wm-actions", "toggle_fullscreen", "Full screen", "전체 화면", "<super> KEY_F" },
     { "grid",       "slot_l", "Window to the left half", "창을 왼쪽 절반으로", "<super> KEY_LEFT" },
     { "grid",       "slot_r", "Window to the right half", "창을 오른쪽 절반으로", "<super> KEY_RIGHT" },
     { "switcher",   "next_view", "Switch windows", "창 전환", "<alt> KEY_TAB" },
-    { "expo",       "toggle", "Show all workspaces", "모든 작업공간 보기", "<super> KEY_TAB" },
-    { "vswitch",    "binding_left", "Workspace on the left", "왼쪽 작업공간", "<super> <alt> KEY_LEFT" },
-    { "vswitch",    "binding_right", "Workspace on the right", "오른쪽 작업공간", "<super> <alt> KEY_RIGHT" },
-    { "command",    "binding_restart", "Restart the desktop", "데스크탑 다시 시작", "<ctrl> <alt> KEY_BACKSPACE" },
+    { "switcher",   "prev_view", "Switch windows backwards", "창 거꾸로 전환", "<alt> <shift> KEY_TAB" },
+    { "scale",      "toggle", "Show all windows", "모든 창 보기", "<super> KEY_S | pinch in 3" },
+    { "expo",       "toggle", "Show all workspaces", "모든 작업공간 보기", "<super> KEY_TAB | pinch in 4" },
+    { "vswitch",    "binding_left", "Workspace on the left", "왼쪽 작업공간",
+      "<super> <ctrl> KEY_LEFT | swipe right 3" },
+    { "vswitch",    "binding_right", "Workspace on the right", "오른쪽 작업공간",
+      "<super> <ctrl> KEY_RIGHT | swipe left 3" },
+    { "command",    "binding_power", "Log out, restart or shut down", "로그아웃 / 다시 시작 / 끄기",
+      "<ctrl> <alt> KEY_DELETE" },
+    { "command",    "binding_logout", "End the session now", "세션 바로 끝내기", "<ctrl> <alt> KEY_BACKSPACE" },
 };
 
 #define K(x) { x, #x }
@@ -453,6 +577,7 @@ static const struct { int code; const char *name; } KEYNAMES[] = {
     K(KEY_LEFT), K(KEY_RIGHT), K(KEY_END), K(KEY_DOWN), K(KEY_PAGEDOWN), K(KEY_INSERT),
     K(KEY_DELETE), K(KEY_MUTE), K(KEY_VOLUMEDOWN), K(KEY_VOLUMEUP), K(KEY_PLAYPAUSE),
     K(KEY_NEXTSONG), K(KEY_PREVIOUSSONG), K(KEY_BRIGHTNESSDOWN), K(KEY_BRIGHTNESSUP),
+    K(KEY_MICMUTE), K(KEY_STOPCD),
     K(KEY_KP0), K(KEY_KP1), K(KEY_KP2), K(KEY_KP3), K(KEY_KP4), K(KEY_KP5), K(KEY_KP6),
     K(KEY_KP7), K(KEY_KP8), K(KEY_KP9), K(KEY_KPENTER), K(KEY_KPPLUS), K(KEY_KPMINUS),
 };
@@ -688,11 +813,152 @@ static void on_combo_text(GtkEditable *e, gpointer p)
     }
 }
 
+/* ── the same shortcuts for sway ─────────────────────────────────────── */
+
+/* A shortcut's binding: the file's, or - for a key an older wayfire.ini
+ * does not have - what the desktop ships. */
+static char *binding_of(const char *ini, const char *sec, const char *key)
+{
+    char *v = ini_get(ini, sec, key);
+    if (v) return v;
+    for (guint i = 0; i < G_N_ELEMENTS(SHORTCUTS); i++)
+        if (!strcmp(SHORTCUTS[i].sec, sec) && !strcmp(SHORTCUTS[i].key, key))
+            return g_strdup(SHORTCUTS[i].dflt);
+    return NULL;
+}
+
+/* What a wayfire plugin's binding does, as a sway command ([command]
+ * bindings are `exec` of their command). Plugins sway has nothing like
+ * - scale, expo - are missing, and so left out of sway's file. */
+static const struct { const char *sec, *key, *cmd; } SWAY_DOES[] = {
+    { "core",       "close_top_view",    "kill" },
+    { "wm-actions", "toggle_maximize",   "maximize toggle" },
+    { "wm-actions", "minimize",          "minimize" },
+    { "wm-actions", "toggle_fullscreen", "fullscreen toggle" },
+    /* sway sizes a workspace to the output less the bars, and ppt and
+     * position are relative to it: half of what is free, under the top
+     * bar and above the dock. */
+    { "grid",       "slot_l", "maximize disable, resize set width 50ppt height 100ppt, move position 0 0" },
+    { "grid",       "slot_r", "maximize disable, resize set width 50ppt height 100ppt, move position 50ppt 0" },
+    { "switcher",   "next_view", "focus next" },
+    { "switcher",   "prev_view", "focus prev" },
+    { "vswitch",    "binding_left", "workspace prev_on_output" },
+    { "vswitch",    "binding_right", "workspace next_on_output" },
+    { "vswitch",    "binding_win_left", "move container to workspace prev_on_output, workspace prev_on_output" },
+    { "vswitch",    "binding_win_right", "move container to workspace next_on_output, workspace next_on_output" },
+};
+
+static int key_code(const char *name)
+{
+    for (guint i = 0; i < G_N_ELEMENTS(KEYNAMES); i++)
+        if (!strcmp(KEYNAMES[i].name, name)) return KEYNAMES[i].code;
+    return -1;
+}
+
+/* "<super> <shift> KEY_S | pinch in 3" as sway bindings. By key code, not
+ * key name, so they are where wayfire's are whatever the layout, and a
+ * gesture or anything else sway cannot bind is skipped. */
+static void sway_bind(GString *out, const char *binding, const char *cmd)
+{
+    if (!binding) return;
+    char **alts = g_strsplit(binding, "|", -1);
+    for (int a = 0; alts[a]; a++) {
+        char **tok = g_strsplit_set(g_strstrip(alts[a]), " \t", -1);
+        GString *mods = g_string_new(NULL);
+        int code = -1;
+        gboolean bad = FALSE;
+        for (int i = 0; tok[i]; i++) {
+            const char *t = tok[i];
+            if (!*t) continue;
+            if (!strcmp(t, "<super>")) g_string_append(mods, "Mod4+");
+            else if (!strcmp(t, "<ctrl>")) g_string_append(mods, "Ctrl+");
+            else if (!strcmp(t, "<alt>")) g_string_append(mods, "Mod1+");
+            else if (!strcmp(t, "<shift>")) g_string_append(mods, "Shift+");
+            else {
+                int c = key_code(t);
+                if (c >= 0 && code < 0) code = c;
+                else bad = TRUE;
+            }
+        }
+        if (!bad && code >= 0)
+            g_string_append_printf(out, "bindcode --no-warn %s%d %s\n", mods->str, code + 8, cmd);
+        g_string_free(mods, TRUE);
+        g_strfreev(tok);
+    }
+    g_strfreev(alts);
+}
+
+char *lp_keyboard_sway_keys(void)
+{
+    GString *o = g_string_new(
+        "# Written by Settings > Keyboard from ~/.config/wayfire.ini, the one list\n"
+        "# of shortcuts for both compositors; sway's config includes it. Change the\n"
+        "# shortcuts in Settings: this file is written again at every change and\n"
+        "# at every login.\n");
+    char *ini = wayfire_ini();
+    for (guint i = 0; i < G_N_ELEMENTS(SWAY_DOES); i++) {
+        char *v = binding_of(ini, SWAY_DOES[i].sec, SWAY_DOES[i].key);
+        sway_bind(o, v, SWAY_DOES[i].cmd);
+        g_free(v);
+    }
+    char **keys = ini_keys(ini, "command");
+    for (int i = 0; keys[i]; i++) {
+        const char *name = g_str_has_prefix(keys[i], "binding_") ? keys[i] + 8
+                         : g_str_has_prefix(keys[i], "repeatable_binding_") ? keys[i] + 19 : NULL;
+        if (!name) continue;
+        char *ck = g_strdup_printf("command_%s", name);
+        char *cmd = ini_get(ini, "command", ck);
+        char *v = ini_get(ini, "command", keys[i]);
+        if (cmd && *cmd && !strchr(cmd, '\n')) {
+            char *ex = g_strdup_printf("exec %s", cmd);
+            sway_bind(o, v, ex);
+            g_free(ex);
+        }
+        g_free(v); g_free(cmd); g_free(ck);
+    }
+    g_strfreev(keys);
+    g_free(ini);
+    return g_string_free(o, FALSE);
+}
+
+/* Write sway's file if it changed, and have a running sway read it. */
+static void sway_keys_write(void)
+{
+    char *t = lp_keyboard_sway_keys();
+    char *path = g_build_filename(g_get_user_config_dir(), "sway", "lp-keys.conf", NULL);
+    char *old = lp_slurp(path);
+    char *now = g_strchomp(g_strdup(t));
+    if (g_strcmp0(old, now)) {
+        char *dir = g_path_get_dirname(path);
+        g_mkdir_with_parents(dir, 0700);
+        g_free(dir);
+        if (lp_write_file(path, t)) {
+            const char *a[] = { "reload", NULL };
+            lp_swaymsg(a);
+        }
+    }
+    g_free(now); g_free(old); g_free(path); g_free(t);
+}
+
+/* A new combination for a shipped shortcut replaces its keys; a gesture
+ * it also had (a pinch, a swipe) stays. */
 static void save_binding(const char *sec, const char *key, const char *value)
 {
     char *ini = wayfire_ini();
-    ini_set(ini, sec, key, value);
+    char *old = binding_of(ini, sec, key);
+    GString *v = g_string_new(value);
+    char **alts = g_strsplit(old ? old : "", "|", -1);
+    for (int i = 0; alts[i]; i++) {
+        char *a = g_strstrip(alts[i]);
+        if (*a && !strstr(a, "KEY_") && strcmp(a, "none"))
+            g_string_append_printf(v, " | %s", a);
+    }
+    g_strfreev(alts);
+    ini_set(ini, sec, key, v->str);
+    g_string_free(v, TRUE);
+    g_free(old);
     g_free(ini);
+    sway_keys_write();
 }
 
 static void capture_apply(lp_dialog_t *d, capture_t *c, sc_t *taken)
@@ -701,7 +967,7 @@ static void capture_apply(lp_dialog_t *d, capture_t *c, sc_t *taken)
         /* The other shortcut gives the combination up: the alternatives
          * it had besides this one stay. */
         char *ini = wayfire_ini();
-        char *old = ini_get(ini, taken->sec, taken->key);
+        char *old = binding_of(ini, taken->sec, taken->key);
         GString *keep = g_string_new(NULL);
         char **alts = g_strsplit(old ? old : "", "|", -1);
         for (int i = 0; alts[i]; i++) {
@@ -737,6 +1003,7 @@ static void capture_apply(lp_dialog_t *d, capture_t *c, sc_t *taken)
         char *names = shortcut_names();
         kv_set(names, nk, name);
         g_free(names); g_free(bk); g_free(ck); g_free(nk); g_free(ini);
+        sway_keys_write();
         char *pr = pretty(c->combo);
         lp_toast(FALSE, T("%s now runs %s", "%s 을(를) 누르면 %s"), pr, name);
         g_free(pr);
@@ -792,7 +1059,7 @@ static void capture_ok(lp_dialog_t *d, gpointer p)
     for (guint i = 0; i < all->len && !taken; i++) {
         sc_t *s = g_ptr_array_index(all, i);
         if (!c->custom_new && !strcmp(s->sec, c->sec) && !strcmp(s->key, c->key)) continue;
-        char *v = ini_get(ini, s->sec, s->key);
+        char *v = binding_of(ini, s->sec, s->key);
         if (binding_has(v, c->combo)) taken = s;
         g_free(v);
     }
@@ -877,6 +1144,7 @@ static void on_remove_custom(GtkButton *b, gpointer p)
     ini_unset(ini, "command", key);
     ini_unset(ini, "command", ck);
     g_free(ck); g_free(ini);
+    sway_keys_write();
     lp_toast(FALSE, T("Removed the shortcut", "단축키를 지웠습니다"));
     row_remove_animated(row);
 }
@@ -888,17 +1156,11 @@ static void fill_shortcuts(void)
     while ((c = gtk_widget_get_first_child(KB->shortcuts)))
         gtk_list_box_remove(GTK_LIST_BOX(KB->shortcuts), c);
 
-    /* 한/영 first, fixed. */
-    GtkWidget *hr = row_value(KB->shortcuts, T("Next input source", "다음 입력 소스"),
-                              T("Fixed: the input method answers 한/영 before any window sees it",
-                                "고정: 한/영 은 창보다 먼저 입력기가 받습니다"), "한/영");
-    gtk_widget_add_css_class(row_control(hr), "lp-warn");
-
     char *ini = wayfire_ini();
     GPtrArray *all = all_shortcuts();
     for (guint i = 0; i < all->len; i++) {
         sc_t *s = g_ptr_array_index(all, i);
-        char *v = ini_get(ini, s->sec, s->key);
+        char *v = binding_of(ini, s->sec, s->key);
         char *pr = pretty(v);
         GtkWidget *r = row_chevron(KB->shortcuts, s->name, NULL, pr, G_CALLBACK(on_shortcut_tapped), NULL);
         gtk_widget_add_css_class(row_control(r), "lp-mono");
@@ -944,14 +1206,32 @@ static GtkWidget *build(void)
     g_ptr_array_free(a, TRUE);
     refresh_positions();
 
-    GtkWidget *g = group_new(k->page, NULL);
-    char *c = input_conf();
-    char *sk = kv_get(c, "switch_key");
-    g_free(c);
-    row_options(g, T("Switch input source with", "입력 소스 바꾸기"),
-                T("Each press moves to the next source in the list", "누를 때마다 목록의 다음 입력 소스로 넘어갑니다"),
-                SWITCH_KEY, sk, 0, G_CALLBACK(on_switch_key), NULL);
-    g_free(sk);
+    GtkWidget *g = group_new(k->page, T("Switch 한/영 with", "한/영 바꾸는 키"));
+    unsigned sk = switch_keys_get();
+    GtkWidget *hk = row_value(g, T("The 한/영 key", "한/영 키"),
+                              T("Always: the input method answers it before any window sees it",
+                                "항상: 창보다 먼저 입력기가 받습니다"), T("Always", "항상"));
+    gtk_widget_add_css_class(row_control(hk), "lp-dim");
+    row_switch(g, T("Right Alt on its own", "오른쪽 Alt 단독"),
+               T("Tapped and let go; held with another key it is still Alt",
+                 "눌렀다 떼면 전환, 다른 키와 함께 누르면 그대로 Alt"),
+               (sk & SW_RALT) != 0, G_CALLBACK(on_switch_key), GUINT_TO_POINTER(SW_RALT));
+    row_switch(g, "Shift+Space", NULL,
+               (sk & SW_SHIFTSPACE) != 0, G_CALLBACK(on_switch_key), GUINT_TO_POINTER(SW_SHIFTSPACE));
+    row_switch(g, "Ctrl+Space", T("Also the completion key in code editors",
+                                  "코드 편집기의 자동 완성 키와 겹칩니다"),
+               (sk & SW_CTRLSPACE) != 0, G_CALLBACK(on_switch_key), GUINT_TO_POINTER(SW_CTRLSPACE));
+    char *wfi = wayfire_ini();
+    char *sup = binding_of(wfi, "command", "binding_inputlang");
+    g_free(wfi);
+    char *supp = pretty(sup);
+    char *supd = g_strdup_printf(T("%s, under Shortcuts below, where it can be changed",
+                                   "%s - 아래 단축키에서 바꿀 수 있습니다"), supp);
+    GtkWidget *sr = row_value(g, T("Shortcut", "단축키"), supd, supp);
+    gtk_widget_add_css_class(row_control(sr), "lp-mono");
+    g_free(supd); g_free(supp); g_free(sup);
+
+    g = group_new(k->page, NULL);
     char *ini = lp_config_path("osk.ini");
     char *pk = ini_get(ini, "keyboard", "physical-korean");
     g_free(ini);
@@ -987,7 +1267,9 @@ static GtkWidget *build(void)
 static const char *const KEYS[] = {
     "Input sources", "입력 소스",
     "Add an input source", "입력 소스 더하기",
-    "Switch input source with", "입력 소스 바꾸기",
+    "Switch 한/영 with", "한/영 바꾸는 키",
+    "Right Alt on its own", "오른쪽 Alt 단독",
+    "Switch the input language (한/영)", "입력 언어 전환 (한/영)",
     "Korean on the laptop keyboard", "노트북 키보드로 한글 입력",
     "Repeat delay", "반복 시작 지연",
     "Repeat speed", "반복 속도",
@@ -999,8 +1281,41 @@ static const char *const KEYS[] = {
     NULL
 };
 
+/* Shortcuts this desktop added after the first images shipped: an older
+ * wayfire.ini gets their commands, so the keys listed here work. */
+static const struct { const char *name, *cmd; } ADDED_COMMANDS[] = {
+    { "inputlang", "lp-input-lang toggle" },
+    { "power",     "lp-quick confirm logout" },
+};
+
+/* At login: the files are the record; make sway's file, fcitx5's keys
+ * and the added commands match them. */
+static void keyboard_restore(void)
+{
+    char *ini = wayfire_ini();
+    if (g_file_test(ini, G_FILE_TEST_EXISTS))
+        for (guint i = 0; i < G_N_ELEMENTS(ADDED_COMMANDS); i++) {
+            char *ck = g_strdup_printf("command_%s", ADDED_COMMANDS[i].name);
+            char *bk = g_strdup_printf("binding_%s", ADDED_COMMANDS[i].name);
+            char *have = ini_get(ini, "command", ck);
+            if (!have) {
+                char *b = binding_of(ini, "command", bk);
+                ini_set(ini, "command", ck, ADDED_COMMANDS[i].cmd);
+                if (b) ini_set(ini, "command", bk, b);
+                g_free(b);
+            }
+            g_free(have); g_free(ck); g_free(bk);
+        }
+    g_free(ini);
+    if (switch_keys_fcitx(switch_keys_get()) && lp_have("fcitx5-remote")) {
+        const char *fr[] = { "fcitx5-remote", "-r", NULL };
+        lp_spawn_bg(fr);
+    }
+    sway_keys_write();
+}
+
 const lp_panel_t lp_panel_keyboard = {
-    "keyboard", "Keyboard", "키보드", "input-keyboard-symbolic", build, KEYS, NULL
+    "keyboard", "Keyboard", "키보드", "input-keyboard-symbolic", build, KEYS, keyboard_restore
 };
 
 /* For the Reset panel: everything back to what the desktop ships. */
@@ -1010,19 +1325,20 @@ void lp_keyboard_reset_shortcuts(void)
     for (guint i = 0; i < G_N_ELEMENTS(SHORTCUTS); i++)
         ini_set(ini, SHORTCUTS[i].sec, SHORTCUTS[i].key, SHORTCUTS[i].dflt);
     g_free(ini);
+    sway_keys_write();
 }
 
 void lp_keyboard_reset_input(void)
 {
     char *c = input_conf();
     kv_set(c, "sources", "en,ko");
-    kv_set(c, "switch_key", "hangul");
     g_free(c);
     char *ini = lp_config_path("osk.ini");
     ini_set(ini, "keyboard", "layouts", "en;ko");
-    ini_set(ini, "keyboard", "switch-key", "hangul");
+    ini_unset(ini, "keyboard", "switch-key");
     ini_set(ini, "keyboard", "physical-korean", "true");
     g_free(ini);
+    switch_keys_set(SW_DEFAULT);
     char *wf = wayfire_ini();
     ini_unset(wf, "input", "kb_repeat_delay");
     ini_unset(wf, "input", "kb_repeat_rate");

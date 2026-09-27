@@ -50,6 +50,14 @@
  *   layouts=en;ko            the layouts 한/영 cycles through
  *   language=en              the one in use when it was last changed
  *   physical-korean=true     compose Hangul from the laptop keyboard too
+ *   switch-keys=hangul;ralt;shift-space
+ *                            what switches 한/영: the Hangul key always,
+ *                            then any of ralt, shift-space, ctrl-space
+ *
+ * Settings writes the same file and then runs `lp-osk reload`, so a
+ * change is in use at once rather than at the next login - and since
+ * this program rewrites the file whole, every key Settings owns is one
+ * this program reads and writes back too.
  */
 #include "osk.h"
 
@@ -76,6 +84,7 @@ OskConfig cfg = {
     .lang = LANG_EN,
     .layouts = LAYOUT_EN | LAYOUT_KO,
     .ime = TRUE,
+    .switch_keys = SWITCH_RALT | SWITCH_SHIFTSPACE,
 };
 
 static gboolean test_mode;
@@ -122,6 +131,15 @@ static void config_load(void)
         if (!e)
             cfg.ime = ime;
         g_clear_error(&e);
+        char **sk = g_key_file_get_string_list(kf, "keyboard", "switch-keys", NULL, NULL);
+        if (sk) {
+            cfg.switch_keys = 0;
+            for (int i = 0; sk[i]; i++)
+                cfg.switch_keys |= !strcmp(sk[i], "ralt") ? SWITCH_RALT
+                                 : !strcmp(sk[i], "shift-space") ? SWITCH_SHIFTSPACE
+                                 : !strcmp(sk[i], "ctrl-space") ? SWITCH_CTRLSPACE : 0;
+            g_strfreev(sk);
+        }
     }
     g_key_file_free(kf);
     g_free(path);
@@ -139,12 +157,16 @@ void osk_config_save(void)
         "auto-show=%s\n"
         "layouts=en%s\n"
         "language=%s\n"
-        "physical-korean=%s\n",
+        "physical-korean=%s\n"
+        "switch-keys=hangul%s%s%s\n",
         cfg.height_frac,
         cfg.auto_mode == AUTO_ALWAYS ? "always" : cfg.auto_mode == AUTO_OFF ? "off" : "touch",
         cfg.layouts & LAYOUT_KO ? ";ko" : "",
         cfg.lang == LANG_KO ? "ko" : "en",
-        cfg.ime ? "true" : "false");
+        cfg.ime ? "true" : "false",
+        cfg.switch_keys & SWITCH_RALT ? ";ralt" : "",
+        cfg.switch_keys & SWITCH_SHIFTSPACE ? ";shift-space" : "",
+        cfg.switch_keys & SWITCH_CTRLSPACE ? ";ctrl-space" : "");
     GError *e = NULL;
     if (!g_file_set_contents_full(path, body, -1,
             G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_DURABLE,
@@ -425,6 +447,16 @@ static gboolean handle(char **a, int n, GString *out, gboolean *keep,
             type_toggle_lang();
         else
             type_set_lang(!strcmp(l, "ko") ? LANG_KO : LANG_EN);
+    } else if (!strcmp(cmd, "reload")) {
+        /* Settings changed osk.ini. The language in use stays what it is
+         * (unless Korean was just removed from the list). */
+        int lang = cfg.lang;
+        config_load();
+        cfg.lang = lang;
+        if (lang == LANG_KO && !(cfg.layouts & LAYOUT_KO))
+            type_set_lang(LANG_EN);
+        ui_relabel();
+        osk_state_changed();
     } else if (!strcmp(cmd, "status")) {
         char *j = state_json();
         reply(out, "%s\n", j);
@@ -590,7 +622,7 @@ int main(int argc, char **argv)
         return 0;
     }
     static const char *const known[] = { "daemon", "show", "hide", "toggle",
-                                         "lang", "status", "watch", "test", NULL };
+                                         "lang", "reload", "status", "watch", "test", NULL };
     if (!g_strv_contains(known, cmd)) {
         fprintf(stderr, T("lp-osk: unknown command \"%s\" (try lp-osk --help)\n",
                           "lp-osk: 알 수 없는 명령 \"%s\" (lp-osk --help 참고)\n"), cmd);
@@ -604,8 +636,8 @@ int main(int argc, char **argv)
 
     /* Nobody is. Only these start one. */
     if (strcmp(cmd, "daemon") && strcmp(cmd, "show") && strcmp(cmd, "toggle")) {
-        if (!strcmp(cmd, "hide"))
-            return 0;                  /* nothing to hide */
+        if (!strcmp(cmd, "hide") || !strcmp(cmd, "reload"))
+            return 0;                  /* nothing to hide; it reads the file when it starts */
         fprintf(stderr, T("lp-osk: the keyboard is not running\n",
                           "lp-osk: 화상 키보드가 실행 중이 아닙니다\n"));
         return 1;

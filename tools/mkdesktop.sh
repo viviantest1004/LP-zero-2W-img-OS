@@ -376,7 +376,7 @@ if [[ -d "$D/session" ]]; then
     if [[ -f "$D/csd/liblp-csd.so" ]]; then
         install -D -m 755 "$D/csd/liblp-csd.so" "$ROOT/usr/local/lib/liblp-csd.so"
     fi
-    for s in lp-audio-start lp-idle lp-autoscale lp-shell-start lp-lock lp-logout lp-admin-run; do
+    for s in lp-audio-start lp-idle lp-autoscale lp-shell-start lp-lock lp-logout lp-admin-run lp-input-lang; do
         [[ -f "$D/session/$s" ]] && cp -a "$D/session/$s" "$ROOT/usr/local/bin/$s"
     done
     if [[ -d "$D/session/fcitx5" ]]; then
@@ -388,6 +388,10 @@ if [[ -d "$D/session" ]]; then
     if [[ -f "$D/session/sway.config" ]]; then
         mkdir -p "$H/.config/sway"
         cp -a "$D/session/sway.config" "$H/.config/sway/config"
+        # The shortcuts, written from wayfire.ini (lp-settings --sway-keys);
+        # Settings keeps it in step with every change after this.
+        [[ -f "$D/session/sway-keys.conf" ]] &&
+            cp -a "$D/session/sway-keys.conf" "$H/.config/sway/lp-keys.conf"
         # Settings -> Keyboard writes the layout here; sway nags about an
         # include that does not exist, so it starts out empty.
         [[ -f "$H/.config/sway/input.conf" ]] ||
