@@ -305,6 +305,47 @@ def apply():
             call(["swaymsg", "output", name, "scale", want])
 
 
+def fit_windows():
+    """Every floating window back inside its output (sway).
+
+    sway 1.7 keeps a floating window at its coordinates when the output
+    shrinks: after Settings or the VM window took the screen from 1920 to
+    1440 wide, a window placed for the old size reached past the edge,
+    its title bar buttons out of reach. A window larger than the output
+    is made to fit, then moved in by as little as it takes. wayfire keeps
+    its windows on the screen itself."""
+    if not os.environ.get("SWAYSOCK") or not shutil.which("swaymsg"):
+        return
+    time.sleep(0.3)
+    try:
+        tree = json.loads(run(["swaymsg", "-r", "-t", "get_tree"]) or "{}")
+    except ValueError:
+        return
+
+    def walk(node, out_rect):
+        if node.get("type") == "output":
+            out_rect = node.get("rect")
+        for f in node.get("floating_nodes", []):
+            yield f, out_rect
+        for n in node.get("nodes", []):
+            yield from walk(n, out_rect)
+
+    for con, o in walk(tree, None):
+        if not o or o.get("width", 0) <= 0:
+            continue
+        r = con.get("rect", {})
+        x, y, w, h = r.get("x", 0), r.get("y", 0), r.get("width", 0), r.get("height", 0)
+        ox, oy, ow, oh = o["x"], o["y"], o["width"], o["height"]
+        nw, nh = min(w, ow - 16), min(h, oh - 48)
+        cid = con.get("id")
+        if (nw, nh) != (w, h) and nw > 0 and nh > 0:
+            call(["swaymsg", "[con_id=%d] resize set %d %d" % (cid, nw, nh)])
+        nx = min(max(x, ox), ox + ow - nw)
+        ny = min(max(y, oy), oy + oh - nh)
+        if (nx, ny) != (x, y):
+            call(["swaymsg", "[con_id=%d] move absolute position %d %d" % (cid, nx, ny)])
+
+
 def compositor_socket():
     """The compositor this process talks to, as the identity of its
     Wayland socket file (device, inode), or None without one."""
@@ -345,10 +386,14 @@ def watch():
                 return
             time.sleep(0.5)
             apply()
+            fit_windows()
 
 
 if __name__ == "__main__":
-    if "--watch" in sys.argv[1:]:
+    if "--fit-windows" in sys.argv[1:]:
+        fit_windows()
+    elif "--watch" in sys.argv[1:]:
         watch()
     else:
         apply()
+        fit_windows()

@@ -253,6 +253,13 @@ static gboolean randr_q(const char *const *argv, gboolean quiet)
                              "이 화면에서는 그 설정을 쓸 수 없어 이전 설정을 그대로 둡니다. "
                              "더 낮은 해상도를 골라 주세요."));
         g_free(why);
+    } else {
+        /* sway keeps a floating window where it was when the screen
+         * shrinks: after 1920 -> 1440 this very window reached past the
+         * right edge, its close button out of reach. lp-autoscale pulls
+         * every window back inside (--fit-windows). */
+        static const char *const fit[] = { "lp-autoscale", "--fit-windows", NULL };
+        lp_spawn_bg(fit);
     }
     g_free(err); g_free(out);
     return st == 0;
