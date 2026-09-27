@@ -687,18 +687,39 @@ static void rep_start(uint32_t key, uint32_t jamo)
     rep_timer = g_timeout_add((guint)rep_delay, rep_begin, NULL);
 }
 
+/* The keymap vk_pass carries now, byte for byte. */
+static GBytes *pass_map;
+
 static void grab_keymap(void *data, struct zwp_input_method_keyboard_grab_v2 *g,
                         uint32_t format, int32_t fd, uint32_t size)
 {
     (void)data; (void)g;
+    char *map = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    GBytes *bytes = map != MAP_FAILED ? g_bytes_new(map, size) : NULL;
+    /* Forward a keymap only when it is a different one. The grab follows
+     * the seat's last-used keyboard, and when that is vk_pass itself (the
+     * last key went out through it) sway answers every keymap we give
+     * vk_pass by sending the same keymap to the grab: forwarding it again
+     * was an endless exchange, both processes busy every 3ms and every
+     * client on the seat recompiling a keymap each time. */
+    gboolean same = pass_keymap && bytes && pass_map && g_bytes_equal(bytes, pass_map);
     if (!vk_pass && vkm)
         vk_pass = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(vkm, seat);
-    if (vk_pass) {
+    if (vk_pass && !same) {
         /* The very bytes the compositor gave us; libwayland dups the fd. */
         zwp_virtual_keyboard_v1_keymap(vk_pass, format, fd, size);
         pass_keymap = TRUE;
+        if (pass_map)
+            g_bytes_unref(pass_map);
+        pass_map = bytes ? g_bytes_ref(bytes) : NULL;
     }
-    char *map = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (bytes)
+        g_bytes_unref(bytes);
+    if (same) {
+        munmap(map, size);
+        close(fd);
+        return;
+    }
     if (map != MAP_FAILED) {
         struct xkb_keymap *km = xkb_keymap_new_from_buffer(xkb, map,
             strnlen(map, size), XKB_KEYMAP_FORMAT_TEXT_V1,

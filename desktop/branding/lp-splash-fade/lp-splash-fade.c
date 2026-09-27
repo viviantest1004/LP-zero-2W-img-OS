@@ -154,8 +154,6 @@ static cairo_surface_t *render(int w, int h, int scale)
     return img;
 }
 
-/* ── the surface ──────────────────────────────────────────────────── */
-
 /* ── fading, fast ─────────────────────────────────────────────────────
  * Each frame of the fade is the picture times the fade's alpha, over
  * the whole screen. cairo does that correctly but, at 3840x2160, in
@@ -222,16 +220,20 @@ static gboolean fade_direct(cairo_t *cr, cairo_surface_t *img, double a)
     return TRUE;
 }
 
+/* ── the surface ──────────────────────────────────────────────────── */
+
 static gboolean on_draw(GtkWidget *w, cairo_t *cr, gpointer data)
 {
     Cover *c = data;
     (void)w;
     gint64 t = g_get_monotonic_time();
     double a = CLAMP(c->fade.x, 0.0, 1.0);
-    /* Clear, then OVER at the fade's alpha - not SOURCE with an alpha,
-     * which is the same pixels but has no fast path in pixman: at 4K it
-     * measured 60ms a frame against 8 for this. At full strength it is a
-     * plain copy. */
+    /* Three ways to the same pixels, fastest first. Mid-fade, the
+     * multiply above when the target is a plain image of our size (the
+     * usual case). At full strength, a plain copy. Otherwise cairo: a
+     * clear, then OVER at the fade's alpha - not SOURCE with an alpha,
+     * which is the same result but has no fast path in pixman (60ms a
+     * frame at 4K against 8 for this). */
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     if (c->img && a > 0.0 && a < 1.0 && fade_direct(cr, c->img, a)) {
         /* done above */
@@ -339,6 +341,11 @@ static Cover *cover_new(GdkMonitor *mon)
     GdkRectangle g;
     gdk_monitor_get_geometry(mon, &g);
     cover_render(c, g.width, g.height, gdk_monitor_get_scale_factor(mon));
+    /* and ask for that size from the start: without it GTK allocates its
+     * 200x200 default before the compositor's configure arrives, and the
+     * picture was drawn twice more (200x200, then full size again) -
+     * 180ms of a core at 4K, just as the session is starting. */
+    gtk_window_set_default_size(win, g.width, g.height);
 
     lp_spring_init(&c->fade, LP_SPRING_WINDOW, 1.0);
     c->motion = lp_motion_new(c->win, on_frame, c);
