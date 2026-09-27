@@ -55,13 +55,19 @@ Built by build-wlroots.sh; see README-wlroots.md.
    cursor, each pointer motion - was a full-screen TRANSFER_TO_HOST_2D +
    RESOURCE_FLUSH (8 MB at 1080p), which under TCG stalls QEMU's main
    thread. For DRM outputs on virtio_gpu, vmwgfx, qxl and cirrus (by
-   drmGetVersion name; WLR_DRM_SINGLE_BUFFER=1/0 forces it) the swapchain
+   drmGetVersion name) drawn into dumb buffers (the pixman renderer's DRM
+   dumb allocator; WLR_DRM_SINGLE_BUFFER=1/0 forces it) the swapchain
    hands out the last submitted buffer again (age 1) even while it is the
    plane's current FB, so the FB stays the same and only the damage is
    uploaded. These drivers scan out a host-side copy, refreshed from the
    dumb buffer on commit, so drawing into the committed buffer between
-   commits does not show. Real GPUs and bochs-drm (scanout from VRAM, the
-   flip is free) keep double buffering.
+   commits does not show. It needs a kernel that honours the damage clips
+   of a commit whose FB did not change: Linux 6.12 kept ignoring them
+   after the first FB change (LP's kernel/patches/0001-drm-clear-
+   ignore_damage_clips-on-duplicate.patch). GLES2 on virgl (GBM buffers:
+   the host displays the rendered resource itself, there is no copy),
+   real GPUs and bochs-drm (scanout from VRAM, the flip is free) keep
+   double buffering.
 
 ---
 diff --git a/backend/drm/atomic.c b/backend/drm/atomic.c
@@ -316,17 +322,19 @@ diff --git a/types/output/render.c b/types/output/render.c
  #include <wlr/interfaces/wlr_output.h>
  #include <wlr/render/interface.h>
  #include <wlr/util/log.h>
-@@ -37,6 +40,44 @@
+@@ -37,6 +40,51 @@
  }
  
  /**
 + * Whether the output's swapchain should keep a single buffer (see
-+ * wlr_swapchain.single_buffer). Only for DRM outputs of virtual GPUs whose
-+ * scanout is a host-side copy that the driver refreshes from the dumb buffer:
-+ * virtio-gpu (Linux 6.8+) re-uploads the whole plane when the FB changes and
-+ * ignores FB_DAMAGE_CLIPS, so double buffering costs a full-screen transfer
-+ * per frame. Drivers that scan out of VRAM (bochs-drm) flip for free and are
-+ * left alone. WLR_DRM_SINGLE_BUFFER=1/0 forces it on/off (DRM outputs only).
++ * wlr_swapchain.single_buffer). Only for DRM outputs of virtual GPUs drawn
++ * into dumb buffers (the pixman renderer), whose scanout is a host-side copy
++ * that the driver refreshes from the dumb buffer: virtio-gpu uploads the whole
++ * plane when the FB changes and only FB_DAMAGE_CLIPS when it does not, so
++ * double buffering costs a full-screen transfer per frame. GPU-rendered
++ * buffers (GBM: virgl) are what the host displays, not a copy, and are left
++ * alone, as are drivers that scan out of VRAM (bochs-drm) and flip for free.
++ * WLR_DRM_SINGLE_BUFFER=1/0 forces it on/off (DRM outputs only).
 + */
 +static bool output_want_single_buffer(struct wlr_output *output) {
 +	if (!wlr_output_is_drm(output)) {
@@ -335,6 +343,11 @@ diff --git a/types/output/render.c b/types/output/render.c
 +	const char *env = getenv("WLR_DRM_SINGLE_BUFFER");
 +	if (env != NULL && env[0] != '\0') {
 +		return strcmp(env, "1") == 0;
++	}
++	// The DRM dumb allocator is the one whose buffers the CPU maps.
++	if (output->allocator == NULL ||
++			!(output->allocator->buffer_caps & WLR_BUFFER_CAP_DATA_PTR)) {
++		return false;
 +	}
 +	int fd = wlr_backend_get_drm_fd(output->backend);
 +	if (fd < 0) {
@@ -361,7 +374,7 @@ diff --git a/types/output/render.c b/types/output/render.c
   * Ensure the output has a suitable swapchain. The swapchain is re-created if
   * necessary.
   *
-@@ -92,6 +133,12 @@
+@@ -92,6 +140,12 @@
  		return false;
  	}
  
