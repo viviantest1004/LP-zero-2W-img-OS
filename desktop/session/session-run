@@ -70,8 +70,15 @@ export GDK_BACKEND=wayland
 # The pointer's theme and size for everything that loads a cursor itself
 # (Xwayland apps, the compositors' defaults): the same 16 as GTK
 # (desktop/theme/settings.ini) and sway's seat, 32 pixels at scale 2.
+# Settings > Accessibility (or Touch & mouse) keeps the person's choice in
+# ~/.config/lp/accessibility.conf (cursor_size=N); that wins.
 export XCURSOR_THEME=Adwaita
-export XCURSOR_SIZE=16
+XCURSOR_SIZE=16
+if test -s "$LP_HOME/.config/lp/accessibility.conf" ; then
+    lp_cs=$(sed -n 's/^cursor_size=\([0-9][0-9]*\)$/\1/p' "$LP_HOME/.config/lp/accessibility.conf" | tail -n 1)
+    case $lp_cs in ''|*[!0-9]*) ;; *) XCURSOR_SIZE=$lp_cs ;; esac
+fi
+export XCURSOR_SIZE
 # The terminal's shell: the account's own (lpsh, with its line editor,
 # prompt and history), or /bin/sh if passwd names something that cannot
 # run - foot once read /bin/false there and opened nothing.
