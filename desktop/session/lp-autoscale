@@ -182,6 +182,53 @@ def find_mode(o, want):
     return best
 
 
+# Drawing in software (sway with pixman, a VM without 3D), every frame
+# costs its pixels in CPU time and, on a virtual GPU, in a copy to the
+# host: a UTM window full-screen on a 27-inch 5K monitor offers
+# 5120x2880, fifteen million pixels a frame, which no emulated CPU keeps
+# up with - the pointer is the first thing that lags. Above this many
+# pixels the largest offered mode of the same shape under it is used
+# instead (the host scales it up to the window); with a GPU (wayfire) the
+# preferred mode stands.
+SOFTWARE_MAX_PIXELS = 2560 * 1600
+
+
+def software_rendering():
+    return "sway" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower() or \
+        os.environ.get("WLR_RENDERER") == "pixman"
+
+
+def fit_mode(o):
+    pref = o["pref"]
+    if not software_rendering() or pref[0] * pref[1] <= SOFTWARE_MAX_PIXELS:
+        return pref
+    ratio = pref[0] / pref[1]
+    fits = [m for m in o["modes"] if m[0] * m[1] <= SOFTWARE_MAX_PIXELS]
+    same_shape = [m for m in fits if abs(m[0] / m[1] - ratio) < 0.02]
+    pool = same_shape or fits
+    if not pool:
+        return pref
+    best = max(pool, key=lambda m: (m[0] * m[1], m[2]))
+    log(o["name"], "preferred %dx%d is too many pixels to draw in software; %s instead"
+        % (pref[0], pref[1], best[3]))
+    return best
+
+
+def smaller_modes(o, tried):
+    """Offered modes smaller than `tried` ("WxH@HzHz"), largest first,
+    one refresh rate per size (the highest)."""
+    t = parse_mode(tried.replace("Hz", ""))
+    if t is None:
+        return []
+    by_size = {}
+    for m in o["modes"]:
+        if m[0] * m[1] < t[0] * t[1]:
+            k = (m[0], m[1])
+            if k not in by_size or m[2] > by_size[k][2]:
+                by_size[k] = m
+    return sorted(by_size.values(), key=lambda m: m[0] * m[1], reverse=True)[:8]
+
+
 def guess(o):
     return "2" if o["width"] >= 2560 else "1"
 
@@ -207,15 +254,28 @@ def apply():
                     log(name, "chosen mode %s is not offered now; left as it is" % pin)
                 else:
                     args += ["--mode", m[3]]
-        elif use_randr and o["pref"] and o["pref"] != o["cur"]:
-            args += ["--preferred"]
+        elif use_randr and o["pref"]:
+            target = fit_mode(o)
+            if target is not None and target != o["cur"]:
+                args += ["--mode", target[3]]
         tf = pinned("transform", name)
         if tf and tf != o["transform"]:
             args += ["--transform", tf]
         if not args:
             continue
         if use_randr:
-            changed |= call(["wlr-randr", "--output", name] + args)
+            ok = call(["wlr-randr", "--output", name] + args)
+            if not ok and "--mode" in args and want is None:
+                # The virtual GPU refused it (a VM window on a large
+                # monitor offers modes it cannot then allocate): the next
+                # smaller offered mode, until one takes.
+                tried = args[args.index("--mode") + 1]
+                rest = [a for a in args if a not in ("--mode", tried)]
+                for m in smaller_modes(o, tried):
+                    if call(["wlr-randr", "--output", name, "--mode", m[3]] + rest):
+                        ok = True
+                        break
+            changed |= ok
         else:
             it = iter(args)
             for k in it:

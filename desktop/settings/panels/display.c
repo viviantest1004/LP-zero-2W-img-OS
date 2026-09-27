@@ -236,17 +236,31 @@ static char *mode_arg(const mode_t_ *m)
     return g_strdup_printf("%dx%d@%.3fHz", m->w, m->h, m->mhz / 1000.0);
 }
 
-static gboolean randr(const char *const *argv)
+/* A display can list a mode it cannot then show: a VM window on a large
+ * monitor offers the monitor's 5K, which the virtual graphics card has
+ * no room for. The person is told that plainly and what to do; the
+ * program's own words go on stderr for whoever reads the log. */
+static gboolean randr_q(const char *const *argv, gboolean quiet)
 {
     char *err = NULL, *out = NULL;
     int st = lp_run_full(argv, NULL, &out, &err);
     if (st != 0) {
         char *why = lp_first_line(err, out);
-        lp_toast(TRUE, T("The display did not accept that: %s", "화면이 받아들이지 않았습니다: %s"), why);
+        g_printerr("lp-settings: wlr-randr: %s\n", why ? why : "failed");
+        if (!quiet)
+            lp_toast(TRUE, T("This display cannot use that setting, so it stays as it was. "
+                             "Choose a lower resolution.",
+                             "이 화면에서는 그 설정을 쓸 수 없어 이전 설정을 그대로 둡니다. "
+                             "더 낮은 해상도를 골라 주세요."));
         g_free(why);
     }
     g_free(err); g_free(out);
     return st == 0;
+}
+
+static gboolean randr(const char *const *argv)
+{
+    return randr_q(argv, FALSE);
 }
 
 /* ~/.config/lp/<kind>-<output>: what lp-autoscale keeps (head comment). */
@@ -1291,7 +1305,12 @@ gboolean lp_display_reset(char **why)
         g_ptr_array_add(a, "--scale");
         g_ptr_array_add(a, sc);
         g_ptr_array_add(a, NULL);
-        ok &= randr((const char *const *)a->pdata);
+        if (!randr_q((const char *const *)a->pdata, TRUE)) {
+            /* Its own preferred mode refused (see randr_q): lp-autoscale,
+             * with nothing chosen now, steps down to one that it takes. */
+            static const char *const fb[] = { "lp-autoscale", NULL };
+            ok &= lp_run_full(fb, NULL, NULL, NULL) == 0;
+        }
         g_ptr_array_free(a, TRUE);
         g_free(mode);
         persist(o);
@@ -1302,6 +1321,7 @@ gboolean lp_display_reset(char **why)
     kv_set(conf, "enabled", "no");
     g_free(conf);
     stop_wlsunset();
-    if (!ok && why) *why = g_strdup(T("A display did not accept its preferred mode", "화면 하나가 권장 모드를 받아들이지 않았습니다"));
+    if (!ok && why) *why = g_strdup(T("A display could not be set back to a mode it can show",
+                                      "화면 하나를 표시할 수 있는 모드로 되돌리지 못했습니다"));
     return ok;
 }

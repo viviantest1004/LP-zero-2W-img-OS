@@ -155,6 +155,15 @@ run_compositor() {
         if command -v fcitx5 > /dev/null 2>&1 ; then
             export GTK_IM_MODULE=fcitx QT_IM_MODULE=fcitx XMODIFIERS=@im=fcitx SDL_IM_MODULE=fcitx
         fi
+        # In a virtual machine (virgl) the 3D is the host's GL passed
+        # through - on a Mac, UTM's goes on through ANGLE to Metal - and
+        # GTK 4's GL renderer there was the one thing that did not answer
+        # clicks (Settings) while GTK 3 windows, which draw with cairo into
+        # shared memory, did. cairo draws GTK 4 the same way. A real GPU
+        # keeps GL.
+        case $(sed -n 2p /run/lp-session/compositor 2> /dev/null) in
+            *virtio*) export GSK_RENDERER=cairo ;;
+        esac
         read -r t0 _ < /proc/uptime
         XDG_CURRENT_DESKTOP=Wayfire:wlroots /usr/bin/wayfire \
             -c "$XDG_CONFIG_HOME/wayfire.ini" > "$log" 2>&1
