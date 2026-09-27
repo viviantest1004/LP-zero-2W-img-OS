@@ -1311,7 +1311,8 @@ gboolean lp_display_reset(char **why)
             /* Its own preferred mode refused (see randr_q): lp-autoscale,
              * with nothing chosen now, steps down to one that it takes. */
             static const char *const fb[] = { "lp-autoscale", NULL };
-            ok &= lp_run_full(fb, NULL, NULL, NULL) == 0;
+            /* It may try several modes, each a second or two. */
+            ok &= lp_run_full_timeout(fb, NULL, NULL, NULL, 30 * 1000) == 0;
         }
         g_ptr_array_free(a, TRUE);
         g_free(mode);

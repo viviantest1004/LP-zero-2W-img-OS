@@ -166,7 +166,7 @@ decoration:backdrop {
   margin: 0;
   padding: 4px 7px;
   border-radius: 5px;
-  font-size: 11px;
+  font-size: 8.25pt;
   color: @lp_row;
 }
 
@@ -187,7 +187,7 @@ decoration:backdrop {
  * stylesheet can find; this catches the ones that use .heading, and misses the
  * rest. The mockup gives no weight for it, so none is set. */
 .sidebar .heading {
-  font-size: 10px;
+  font-size: 7.5pt;
   color: @lp_group;
 }
 
@@ -251,14 +251,14 @@ headerbar.default-decoration:backdrop {
 }
 
 headerbar .title {
-  font-size: 13px;
+  font-size: 9.75pt;
   font-weight: 600;
   color: @lp_text;
   padding: 0 12px;
 }
 
 headerbar .subtitle {
-  font-size: 11px;
+  font-size: 8.25pt;
   color: @lp_icon;
 }
 

@@ -253,7 +253,10 @@ static gboolean step(gpointer p)
             delay = (guint)atoi(argv[1]);
         } else if (!strcmp(cmd, "run") && argc >= 2) {
             char *out = NULL, *err = NULL;
-            int st = lp_run_full((const char *const *)(argv + 1), NULL, &out, &err);
+            /* A test step may run something slow on purpose (a scan,
+             * a sync); two minutes before it counts as hung. */
+            int st = lp_run_full_timeout((const char *const *)(argv + 1), NULL, &out, &err,
+                                         120 * 1000);
             g_print("driver: run exit %d%s%s%s%s\n", st, out && *out ? " out: " : "",
                     out ? out : "", err && *err ? " err: " : "", err ? err : "");
             g_free(out); g_free(err);

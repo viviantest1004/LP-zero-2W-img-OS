@@ -93,7 +93,58 @@ static GSubprocessLauncher *launcher(void)
     return l;
 }
 
-int lp_run_full(const char *const *argv, const char *in, char **out, char **err)
+/* What the banner says when a command was stopped for taking too long. */
+static char *timeout_words(const char *const *argv, guint ms)
+{
+    char *base = g_path_get_basename(argv[0]);
+    char *w = g_strdup_printf(T("%s did not answer within %u seconds, so it was stopped",
+                                "%s 이(가) %u초 안에 답하지 않아 멈췄습니다"),
+                              base, (ms + 999) / 1000);
+    g_free(base);
+    return w;
+}
+
+/* ── synchronous, with a limit ──
+ *
+ * lp_run_full is called from button handlers and from the functions that
+ * build a page, on the one thread that also draws the window. It used to
+ * wait for as long as the command took, and a command that never answers
+ * - bluetoothctl with no bluetoothd behind it, a sound service that hangs
+ * - left the whole window frozen: no redraw, no click, no way out but
+ * killing it. Now the wait runs on a private main context (what GLib's own
+ * g_subprocess_communicate does inside) with a timer beside it, and when
+ * the timer fires first the child is killed and the caller gets
+ * LP_RUN_TIMEOUT and a sentence saying so. Commands on this path are the
+ * ones that answer at once; the few that legitimately take longer (a Wi-Fi
+ * scan, stepping through display modes) pass their own limit, and
+ * administrator jobs never come this way - they are asynchronous. */
+
+typedef struct {
+    GSubprocess  *sp;
+    GCancellable *cancel;
+    GAsyncResult *res;
+    gboolean      timed_out;
+} wait_t;
+
+static void wait_done(GObject *src, GAsyncResult *res, gpointer p)
+{
+    (void)src;
+    ((wait_t *)p)->res = g_object_ref(res);
+}
+
+static gboolean wait_expired(gpointer p)
+{
+    wait_t *w = p;
+    w->timed_out = TRUE;
+    g_subprocess_force_exit(w->sp);
+    /* Also stop reading: a child's own children can hold its pipes open
+     * after it is gone. */
+    g_cancellable_cancel(w->cancel);
+    return G_SOURCE_REMOVE;
+}
+
+int lp_run_full_timeout(const char *const *argv, const char *in,
+                        char **out, char **err, guint ms)
 {
     if (out) *out = NULL;
     if (err) *err = NULL;
@@ -108,21 +159,47 @@ int lp_run_full(const char *const *argv, const char *in, char **out, char **err)
         return -1;
     }
 
+    GMainContext *ctx = g_main_context_new();
+    g_main_context_push_thread_default(ctx);
+    wait_t w = { sp, g_cancellable_new(), NULL, FALSE };
+    g_subprocess_communicate_utf8_async(sp, in ? in : "", w.cancel, wait_done, &w);
+    GSource *timer = g_timeout_source_new(ms ? ms : LP_RUN_SYNC_MS);
+    g_source_set_callback(timer, wait_expired, &w, NULL);
+    g_source_attach(timer, ctx);
+    while (!w.res)
+        g_main_context_iteration(ctx, TRUE);
+    g_source_destroy(timer);
+    g_source_unref(timer);
+
     char *o = NULL, *r = NULL;
     int status = -1;
-    if (g_subprocess_communicate_utf8(sp, in ? in : "", NULL, &o, &r, &e)) {
+    if (g_subprocess_communicate_utf8_finish(sp, w.res, &o, &r, &e)) {
         if (g_subprocess_get_if_exited(sp))
             status = g_subprocess_get_exit_status(sp);
+    } else if (w.timed_out) {
+        status = LP_RUN_TIMEOUT;
+        r = timeout_words(argv, ms ? ms : LP_RUN_SYNC_MS);
+        g_printerr("lp-settings: %s\n", r);
+        g_error_free(e);
     } else {
         r = g_strdup(e->message);
         g_error_free(e);
     }
+    g_object_unref(w.res);
+    g_object_unref(w.cancel);
     g_object_unref(sp);
+    g_main_context_pop_thread_default(ctx);
+    g_main_context_unref(ctx);
 
     if (o) g_strchomp(o);
     if (out) *out = o; else g_free(o);
     if (err) *err = r; else g_free(r);
     return status;
+}
+
+int lp_run_full(const char *const *argv, const char *in, char **out, char **err)
+{
+    return lp_run_full_timeout(argv, in, out, err, LP_RUN_SYNC_MS);
 }
 
 char *lp_run(const char *const *argv)
@@ -143,6 +220,12 @@ typedef struct {
     gpointer   data;
     int        status;
     char      *out, *err;
+    /* Only for lp_run_async_timeout: */
+    GSubprocess  *sp;
+    GCancellable *cancel;
+    guint      timer, ms;
+    char      *what;
+    gboolean   timed_out;
 } job_t;
 
 /* Commands started and not yet answered. `lp-settings --restore` has no
@@ -164,6 +247,7 @@ static void job_deliver(job_t *j)
     g_weak_ref_clear(&j->owner);
     g_free(j->out);
     g_free(j->err);
+    g_free(j->what);
     g_free(j);
 }
 
@@ -173,28 +257,51 @@ static gboolean job_deliver_idle(gpointer p)
     return G_SOURCE_REMOVE;
 }
 
+static gboolean job_expired(gpointer p)
+{
+    job_t *j = p;
+    j->timer = 0;
+    j->timed_out = TRUE;
+    g_subprocess_force_exit(j->sp);
+    g_cancellable_cancel(j->cancel);
+    return G_SOURCE_REMOVE;
+}
+
 static void job_finished(GObject *src, GAsyncResult *res, gpointer p)
 {
     job_t *j = p;
     GSubprocess *sp = G_SUBPROCESS(src);
     GError *e = NULL;
 
+    if (j->timer) {
+        g_source_remove(j->timer);
+        j->timer = 0;
+    }
     j->status = -1;
     if (g_subprocess_communicate_utf8_finish(sp, res, &j->out, &j->err, &e)) {
         if (g_subprocess_get_if_exited(sp))
             j->status = g_subprocess_get_exit_status(sp);
+    } else if (j->timed_out) {
+        const char *v[] = { j->what, NULL };
+        j->status = LP_RUN_TIMEOUT;
+        g_free(j->err);
+        j->err = timeout_words(v, j->ms);
+        g_printerr("lp-settings: %s\n", j->err);
+        g_error_free(e);
     } else {
         g_free(j->err);
         j->err = g_strdup(e->message);
         g_error_free(e);
     }
     if (j->out) g_strchomp(j->out);
+    g_clear_object(&j->cancel);
+    j->sp = NULL;
     g_object_unref(sp);
     job_deliver(j);
 }
 
-void lp_run_async(const char *const *argv, const char *in, GtkWidget *owner,
-                  lp_done_fn done, gpointer data)
+void lp_run_async_timeout(const char *const *argv, const char *in, guint ms,
+                          GtkWidget *owner, lp_done_fn done, gpointer data)
 {
     job_t *j = g_new0(job_t, 1);
     jobs_pending++;
@@ -217,8 +324,43 @@ void lp_run_async(const char *const *argv, const char *in, GtkWidget *owner,
         g_idle_add(job_deliver_idle, j);
         return;
     }
-    g_subprocess_communicate_utf8_async(sp, in ? in : "", NULL,
+    if (ms) {
+        j->sp = sp;
+        j->cancel = g_cancellable_new();
+        j->ms = ms;
+        j->what = g_strdup(argv[0]);
+        j->timer = g_timeout_add(ms, job_expired, j);
+    }
+    g_subprocess_communicate_utf8_async(sp, in ? in : "", j->cancel,
                                         job_finished, j);
+}
+
+void lp_run_async(const char *const *argv, const char *in, GtkWidget *owner,
+                  lp_done_fn done, gpointer data)
+{
+    lp_run_async_timeout(argv, in, 0, owner, done, data);
+}
+
+/* The Debian base's program of that name, when there is one. PATH puts
+ * LP's own /bin first, and a few of its programs share a name with the
+ * base's but not its manner: /bin/lsblk has no --json, /bin/apt answers
+ * only root, and /bin/passwd keeps the hash in /data/shadow, which on
+ * the desktop nothing else reads - sudo and the lock screen check
+ * /etc/shadow, where the base's passwd writes. */
+const char *lp_base_tool(const char *name)
+{
+    static GHashTable *seen;
+    if (!seen)
+        seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    const char *hit = g_hash_table_lookup(seen, name);
+    if (hit) return hit;
+    char *p = g_build_filename("/usr/bin", name, NULL);
+    if (!g_file_test(p, G_FILE_TEST_IS_EXECUTABLE)) {
+        g_free(p);
+        p = g_strdup(name);
+    }
+    g_hash_table_insert(seen, g_strdup(name), p);
+    return p;
 }
 
 gboolean lp_spawn_bg(const char *const *argv)

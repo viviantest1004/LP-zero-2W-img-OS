@@ -410,12 +410,32 @@ static void switch_row_tapped(GtkWidget *row, gpointer d)
         gtk_switch_set_active(GTK_SWITCH(sw), !gtk_switch_get_active(GTK_SWITCH(sw)));
 }
 
+/* GtkSwitch (4.8) has two gestures: a click that toggles it and a pan
+ * that drags the knob. A press on the knob leaves the decision to the
+ * pan, and once the switch has been put back from code - an
+ * administrator password cancelled, a radio that did not come on - a tap
+ * on the knob stopped doing anything at all: the switch looked alive and
+ * ignored the finger until it was tapped beside the knob. Nobody drags a
+ * 60px switch, so the pan goes and every tap on it is a click. */
+static void switch_drop_drag(GtkWidget *sw)
+{
+    GListModel *cs = gtk_widget_observe_controllers(sw);
+    for (guint i = g_list_model_get_n_items(cs); i-- > 0;) {
+        GtkEventController *c = g_list_model_get_item(cs, i);
+        if (GTK_IS_GESTURE_PAN(c))
+            gtk_widget_remove_controller(sw, c);
+        g_object_unref(c);
+    }
+    g_object_unref(cs);
+}
+
 GtkWidget *row_switch(GtkWidget *list, const char *title, const char *detail,
                       gboolean on, GCallback cb, gpointer data)
 {
     GtkWidget *row = row_shell(title, detail);
     GtkWidget *sw = gtk_switch_new();
     gtk_switch_set_active(GTK_SWITCH(sw), on);
+    switch_drop_drag(sw);
     set_control(row, sw);
     if (cb) {
         g_object_set_data(G_OBJECT(sw), "lp-cb", (gpointer)cb);
@@ -601,6 +621,16 @@ static void scale_tramp(GtkRange *r, gpointer d)
     g_object_set_data(G_OBJECT(r), "lp-timer", GUINT_TO_POINTER(id));
 }
 
+/* A panel sets its lp-fmt after row_scale has written the first readout,
+ * and setting the same value again changes nothing - so the first
+ * number used to be the bare default ("100" beside a volume that then
+ * read "33%"). Shown means formatted. */
+static void scale_mapped(GtkWidget *w, gpointer d)
+{
+    (void)d;
+    LP_QUIET(scale_tramp(GTK_RANGE(w), NULL));
+}
+
 static void scale_gone(GtkWidget *w, gpointer d)
 {
     (void)d;
@@ -635,6 +665,7 @@ GtkWidget *row_scale(GtkWidget *list, const char *title, const char *detail,
     g_object_set_data(G_OBJECT(sc), "lp-cb-data", data);
     g_signal_connect(sc, "value-changed", G_CALLBACK(scale_tramp), NULL);
     g_signal_connect(sc, "destroy", G_CALLBACK(scale_gone), NULL);
+    g_signal_connect(sc, "map", G_CALLBACK(scale_mapped), NULL);
     LP_QUIET(scale_tramp(GTK_RANGE(sc), NULL));
     if (!cb) gtk_widget_set_sensitive(sc, FALSE);
     if (list) row_add(list, row);
@@ -892,7 +923,16 @@ lp_dialog_t *lp_dialog_new(const char *title, const char *ok, gboolean danger,
     gtk_window_set_transient_for(GTK_WINDOW(d->win), lp_window());
     gtk_window_set_default_size(GTK_WINDOW(d->win), 560, -1);
     gtk_window_set_hide_on_close(GTK_WINDOW(d->win), FALSE);
-    /* The card draws the frame; see LpSheet. */
+    /* The card draws the frame; see LpSheet. An undecorated window also
+     * has to say so to the compositor: GTK tells it "client-side" only
+     * for a window with a title bar of its own, and wayfire, whose
+     * preferred_decoration_mode is server, took the silence as a request
+     * and drew its own bar - a second title and three buttons above the
+     * card. An empty title bar, never shown (the window is undecorated),
+     * makes GTK say it. */
+    GtkWidget *nobar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_visible(nobar, FALSE);
+    gtk_window_set_titlebar(GTK_WINDOW(d->win), nobar);
     gtk_window_set_decorated(GTK_WINDOW(d->win), FALSE);
     g_object_set_data_full(G_OBJECT(d->win), "lp-dialog", d, dialog_free);
     g_signal_connect(d->win, "close-request", G_CALLBACK(dialog_close_request), d);

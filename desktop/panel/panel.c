@@ -29,7 +29,9 @@
  * ── what it asks, and how often ──
  *
  *   the focused window    wlr-foreign-toplevel events, no polling
- *   the clock             woken once a minute, on the minute
+ *   the clock             woken once a minute, on the minute, and at
+ *                         once when ~/.config/lp/clock (12 or 24 hours)
+ *                         or /etc/localtime (the zone) changes
  *   Wi-Fi                 `lp-net status --json`, every 10 s
  *   volume                `wpctl get-volume`, every 10 s
  *   battery               `lp-tune status --json`, every 30 s
@@ -139,13 +141,29 @@ static void on_toplevels(gpointer data)
 
 /* ── the clock ───────────────────────────────────────────────────── */
 
+/* Settings > Date & time's "24-hour clock" is ~/.config/lp/clock, "24" or
+ * "12" (desktop/settings/panels/datetime.c), and its row says the top
+ * bar follows it. The bar used to print %H:%M whatever the file said, so
+ * the switch moved, the file changed, and the clock on the screen - the
+ * only one most people look at - stayed where it was, restart or no
+ * restart. Read at every tick, and at once when the file changes. */
+static gboolean clock_12h(void)
+{
+    char *v = lp_config_read("clock");
+    gboolean twelve = v && strcmp(v, "12") == 0;
+    g_free(v);
+    return twelve;
+}
+
 static void set_clock(void)
 {
     GDateTime *now = g_date_time_new_now_local();
     /* The mockup's "Sat 23:47". %a is the locale's own short weekday,
      * so a Korean session reads 토 23:47 - the same shape, in its own
      * words - without a second format string to keep in step. */
-    char *s = g_date_time_format(now, T("%a %b %-d  %H:%M", "%-m월 %-d일 (%a)  %H:%M"));
+    char *s = g_date_time_format(now, clock_12h()
+                                 ? T("%a %b %-d  %-l:%M %p", "%-m월 %-d일 (%a)  %p %-l:%M")
+                                 : T("%a %b %-d  %H:%M", "%-m월 %-d일 (%a)  %H:%M"));
     for (GList *b = bars; b; b = b->next)
         gtk_label_set_text(GTK_LABEL(((Bar *)b->data)->clock_label), s);
     g_free(s);
@@ -164,6 +182,26 @@ static gboolean clock_tick(gpointer d)
     g_date_time_unref(now);
     g_timeout_add_seconds(wait > 0 ? wait : 60, clock_tick, NULL);
     return G_SOURCE_REMOVE;
+}
+
+static void on_clock_file(GFileMonitor *m, GFile *f, GFile *o,
+                          GFileMonitorEvent ev, gpointer d)
+{
+    (void)m; (void)f; (void)o; (void)ev; (void)d;
+    set_clock();
+}
+
+/* The 12/24-hour file, and the time zone: timedatectl set-timezone puts a
+ * new /etc/localtime link in place, and GLib reads the zone again for the
+ * next GDateTime - so the bar can show it now rather than at the next
+ * minute. The monitors live as long as the bar. */
+static void clock_watch(const char *path)
+{
+    GFile *f = g_file_new_for_path(path);
+    GFileMonitor *m = g_file_monitor_file(f, G_FILE_MONITOR_NONE, NULL, NULL);
+    g_object_unref(f);
+    if (m)
+        g_signal_connect(m, "changed", G_CALLBACK(on_clock_file), NULL);
 }
 
 static void fill_calendar(void)
@@ -989,6 +1027,10 @@ int main(int argc, char **argv)
     paint_lang();
 
     clock_tick(NULL);
+    char *clock_file = lp_config_path("clock");
+    clock_watch(clock_file);
+    g_free(clock_file);
+    clock_watch("/etc/localtime");
     paint_status();
     poll_net(NULL);
     poll_vol(NULL);

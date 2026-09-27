@@ -27,6 +27,16 @@
  * mistyped the password open the network and type it all again; left
  * open, the on-screen keyboard is still up and the field is still there.
  *
+ * ── No Wi-Fi adapter ──
+ *
+ * A virtual machine, or a laptop whose Wi-Fi driver or firmware is
+ * missing, has no wireless interface at all. `lp-net radio on` still
+ * answers 0 there, so the switch used to say "Wi-Fi is on" and flip back
+ * off a moment later with no reason given. The kernel is asked first
+ * (/sys/class/ieee80211, or a wireless/ directory under a network
+ * interface): with nothing there the switch is locked and says why, and
+ * no scan is started.
+ *
  * ── The list changes under the finger, gently ──
  *
  * A rescan does not clear the list and draw it again: that makes every row
@@ -57,6 +67,7 @@ typedef struct {
     int          polls;
     char        *want;           /* the SSID being connected to */
     GtkWidget   *pw_dialog;      /* the password dialog's window, while open */
+    gboolean     wifi;           /* the kernel has a Wi-Fi device */
 } net_t;
 
 static net_t *N;                 /* the page on screen, or NULL */
@@ -665,8 +676,38 @@ static void on_scan(int st, const char *out, const char *err, gpointer p)
     gtk_list_box_invalidate_sort(GTK_LIST_BOX(n->list));
 }
 
+/* Does the kernel know any Wi-Fi device? */
+static gboolean have_wifi(void)
+{
+    gboolean yes = FALSE;
+    const char *e;
+    GDir *d = g_dir_open("/sys/class/ieee80211", 0, NULL);
+    if (d) {
+        yes = g_dir_read_name(d) != NULL;
+        g_dir_close(d);
+    }
+    d = yes ? NULL : g_dir_open("/sys/class/net", 0, NULL);
+    while (d && !yes && (e = g_dir_read_name(d))) {
+        char *w = g_build_filename("/sys/class/net", e, "wireless", NULL);
+        yes = g_file_test(w, G_FILE_TEST_IS_DIR);
+        g_free(w);
+    }
+    if (d) g_dir_close(d);
+    return yes;
+}
+
 static void scan(net_t *n)
 {
+    if (!n->wifi) {
+        drop_net_rows(n, NULL);
+        set_status_row(n, T("No Wi-Fi adapter", "Wi-Fi 장치가 없습니다"),
+                       T("This machine has no Wi-Fi hardware, or its driver is not loaded. "
+                         "A network cable still works.",
+                         "이 기계에는 Wi-Fi 장치가 없거나 드라이버가 올라와 있지 않습니다. "
+                         "유선 연결은 그대로 쓸 수 있습니다."), FALSE);
+        gtk_widget_set_sensitive(n->scan_btn, FALSE);
+        return;
+    }
     if (!gtk_switch_get_active(GTK_SWITCH(n->radio_sw))) {
         drop_net_rows(n, NULL);
         set_status_row(n, T("Wi-Fi is off", "Wi-Fi 가 꺼져 있습니다"),
@@ -779,8 +820,15 @@ static GtkWidget *build(void)
     g_object_set_data_full(G_OBJECT(n->page), "lp-net", n, net_free);
 
     GtkWidget *g0 = group_new(n->page, NULL);
-    GtkWidget *r = row_switch(g0, "Wi-Fi", NULL, TRUE, G_CALLBACK(on_radio), NULL);
+    n->wifi = have_wifi();
+    GtkWidget *r = row_switch(g0, "Wi-Fi", NULL, n->wifi, G_CALLBACK(on_radio), NULL);
     n->radio_sw = row_control(r);
+    if (!n->wifi) {
+        LP_QUIET(gtk_switch_set_active(GTK_SWITCH(n->radio_sw), FALSE));
+        gtk_widget_set_sensitive(n->radio_sw, FALSE);
+        gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(r), FALSE);
+        row_set_detail(r, T("This machine has no Wi-Fi adapter", "이 기계에는 Wi-Fi 장치가 없습니다"));
+    }
     char *flag = lp_config_path("airplane");
     gboolean air = g_file_test(flag, G_FILE_TEST_EXISTS);
     g_free(flag);

@@ -365,7 +365,39 @@ int main(int argc, char **argv)
 {
     /* -r: restore the saved time without a network. Used early in boot. */
     if (argc > 1 && strcmp(argv[1], "-r") == 0) {
-        s64 saved = load_clock();
+        s64 stored = load_clock();
+        s64 saved = stored;
+        s64 built = load_epoch_file("/etc/build-epoch");
+
+        /* A battery-backed clock that reads a time after this image was
+         * built is the time, and nothing below may overrule it. It kept
+         * counting while the power was off, it is where a clock set by
+         * hand is kept (lp-time set ends with hwclock -w), and the kernel
+         * has already applied it (CONFIG_RTC_HCTOSYS).
+         *
+         * The saved time and the file dates further down are lower bounds
+         * for a machine without one, and they are only true lower bounds
+         * while the clock has never been wrong. They used to be taken over
+         * the hardware clock whenever they were later: a clock set back an
+         * hour by hand left files dated in the hour it skipped, and the
+         * next start moved the clock forward to them - "starting from the
+         * newest thing on the card" - so a time set in Settings came back
+         * wrong after every restart, on a PC with a perfectly good clock.
+         *
+         * A reading from before the build is a clock that lost its battery
+         * (firmware puts it back to 2000, or to its own release date):
+         * that one is worth less than the lower bounds, and falls through
+         * to them. */
+        s64 rtc = 0;
+        if (lp_rtc_read(&rtc) && rtc >= SANITY_MIN && rtc >= built) {
+            if (lp_time() < rtc && lp_settime(rtc) < 0) {
+                dprintf(STDERR_FILENO, "ntp: cannot set the clock (are you root?)\n");
+                return 1;
+            }
+            printf("ntp: the hardware clock has the time\n");
+            report(rtc);
+            return 0;
+        }
 
         /* When the image was built, as a floor.
          *
@@ -385,26 +417,23 @@ int main(int argc, char **argv)
          * fifty years instead of by minutes. */
         /* Every lower bound we have, best last. Each one is a moment
          * this machine cannot possibly be earlier than. */
-        s64 floor = load_epoch_file("/etc/build-epoch");   /* image built */
+        s64 floor = built;                                   /* image built */
         s64 t;
         if ((t = newest_mtime("/boot")) > floor) floor = t;  /* card written */
         if ((t = newest_mtime("/data")) > floor) floor = t;  /* last run */
         if ((t = newest_mtime("/data/log")) > floor) floor = t;
         if (floor > saved)
             saved = floor;
-        /* The hardware clock, if this machine has one, is better than
-         * the saved timestamp: it kept counting while the power was off.
-         * The kernel has usually already applied it, in which case the
-         * check below finds the clock ahead and leaves it alone. */
-        s64 rtc = 0;
-        if (lp_rtc_read(&rtc) && rtc > saved)
+        /* A hardware clock that failed the test above can still be
+         * ahead of all of that. */
+        if (rtc > saved)
             saved = rtc;
 
         if (saved < SANITY_MIN) {
             dprintf(STDERR_FILENO, "ntp: no saved time\n");
             return 1;
         }
-        bool from_floor = (floor == saved && load_clock() < floor);
+        bool from_floor = (floor == saved && stored < floor);
         /* Never move the clock backwards. */
         if (lp_time() >= saved) {
             /* Say what it was anyway. "Already ahead" on its own leaves
@@ -419,9 +448,12 @@ int main(int argc, char **argv)
             dprintf(STDERR_FILENO, "ntp: cannot set the clock (are you root?)\n");
             return 1;
         }
-        if (from_floor)
+        if (from_floor && stored == 0)
             printf("ntp: no time was saved - starting from the newest thing"
                    " on the card, which cannot be in the future\n");
+        else if (from_floor)
+            printf("ntp: the newest thing on the card is later than the saved"
+                   " time - starting from it\n");
         else
             printf("ntp: restored the saved time (not from the network)\n");
         report(saved);

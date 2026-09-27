@@ -239,7 +239,9 @@ static void on_lsblk(int st, const char *out, const char *err, gpointer p)
     int ndisks = 0;
     for (const jnode_t *d = devs ? devs->child : NULL; d; d = d->next) {
         const char *type = json_str(d, "type", "");
-        if (strcmp(type, "disk") != 0) continue;       /* loop, rom, zram */
+        if (strcmp(type, "disk") != 0) continue;       /* loop, rom */
+        /* zram is a "disk" to lsblk, but it is memory - the swap. */
+        if (g_str_has_prefix(json_str(d, "name", ""), "zram")) continue;
         const char *model = json_str(d, "model", NULL);
         gboolean removable = json_bool(d, "rm", FALSE) || json_num(d, "rm", 0) > 0;
         char *hs = lp_human((guint64)json_num(d, "size", 0));
@@ -343,7 +345,9 @@ static GtkWidget *build(void)
 
     s->disks = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_append(GTK_BOX(s->page), s->disks);
-    static const char *const v[] = { "lsblk", "--json", "--bytes", "--output",
+    /* util-linux's lsblk: /bin/lsblk, first on PATH, is LP's own and has
+     * no --json - its table came back as "Could not read the disks". */
+    const char *v[] = { lp_base_tool("lsblk"), "--json", "--bytes", "--output",
         "NAME,SIZE,TYPE,FSTYPE,LABEL,PARTLABEL,MOUNTPOINT,MODEL,RM", NULL };
     lp_run_async(v, NULL, s->page, on_lsblk, s);
     return s->page;

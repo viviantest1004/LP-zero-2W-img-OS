@@ -25,6 +25,15 @@
  * and while a search is running, rather than being told. For a settings
  * screen that people open, use and close, that is the right trade.
  *
+ * ── bluetoothctl can wait forever ──
+ *
+ * Without bluetoothd running it prints "Waiting to connect to bluetoothd"
+ * and never exits, and the page said "Reading the adapter…" for as long
+ * as it was open. So the adapter is looked for in /sys/class/bluetooth
+ * first - no hci device, no question to ask - and every bluetoothctl runs
+ * with a limit (lp_run_async_timeout): a few seconds for what answers at
+ * once, longer for pairing, which waits for a passkey to be typed.
+ *
  * Output is parsed with LC_ALL=C (sys.c sets it for every child) and only
  * from the tab-indented "Key: value" lines of `show` and `info` and the
  * "Device <mac> <name>" lines of `devices`, which have kept their shape
@@ -35,6 +44,10 @@
 
 #include <stdlib.h>
 #include <string.h>
+
+#define BT_QUICK_MS  (8 * 1000)     /* show, info, devices, power, trust… */
+#define BT_PAIR_MS   (90 * 1000)    /* pair and connect: a passkey is typed */
+#define BT_SCAN_MS   (25 * 1000)    /* `--timeout 10 scan on` */
 
 typedef struct {
     char *mac, *name, *icon;
@@ -174,7 +187,8 @@ static void run_verb(const char *verb, const char *mac, const char *name)
     a->name = g_strdup(name);
     a->verb = verb;
     const char *v[] = { "bluetoothctl", verb, mac, NULL };
-    lp_run_async(v, NULL, NULL, on_acted, a);
+    lp_run_async_timeout(v, NULL, !strcmp(verb, "connect") ? BT_PAIR_MS : BT_QUICK_MS,
+                         NULL, on_acted, a);
 }
 
 /* Pairing is three steps: pair, trust (so the device may reconnect by
@@ -188,7 +202,7 @@ static void on_trusted(int st, const char *out, const char *err, gpointer p)
     act_t *a = p;
     a->verb = "connect";
     const char *v[] = { "bluetoothctl", "connect", a->mac, NULL };
-    lp_run_async(v, NULL, NULL, on_acted, a);
+    lp_run_async_timeout(v, NULL, BT_PAIR_MS, NULL, on_acted, a);
 }
 
 static void on_paired(int st, const char *out, const char *err, gpointer p)
@@ -212,7 +226,7 @@ static void on_paired(int st, const char *out, const char *err, gpointer p)
     }
     g_free(clean);
     const char *v[] = { "bluetoothctl", "trust", a->mac, NULL };
-    lp_run_async(v, NULL, NULL, on_trusted, a);
+    lp_run_async_timeout(v, NULL, BT_QUICK_MS, NULL, on_trusted, a);
 }
 
 static void on_device_tapped(GtkWidget *row, gpointer p)
@@ -226,7 +240,7 @@ static void on_device_tapped(GtkWidget *row, gpointer p)
         a->mac = g_strdup(d->mac);
         a->name = g_strdup(d->name);
         const char *v[] = { "bluetoothctl", "pair", d->mac, NULL };
-        lp_run_async(v, NULL, NULL, on_paired, a);
+        lp_run_async_timeout(v, NULL, BT_PAIR_MS, NULL, on_paired, a);
     } else {
         run_verb(d->connected ? "disconnect" : "connect", d->mac, d->name);
     }
@@ -351,7 +365,7 @@ static void next_info(bt_t *b)
         return;
     }
     const char *v[] = { "bluetoothctl", "info", g_ptr_array_index(b->pending, 0), NULL };
-    lp_run_async(v, NULL, b->page, on_info, b);
+    lp_run_async_timeout(v, NULL, BT_QUICK_MS, b->page, on_info, b);
 }
 
 static void on_devices(int st, const char *out, const char *err, gpointer p)
@@ -386,7 +400,31 @@ static void on_devices(int st, const char *out, const char *err, gpointer p)
 static void reload_devices(bt_t *b)
 {
     static const char *const v[] = { "bluetoothctl", "devices", NULL };
-    lp_run_async(v, NULL, b->page, on_devices, b);
+    lp_run_async_timeout(v, NULL, BT_QUICK_MS, b->page, on_devices, b);
+}
+
+static void show_unavailable(bt_t *b, const char *why)
+{
+    page_set_subtitle(b->page, T("No Bluetooth adapter is available", "쓸 수 있는 블루투스 장치가 없습니다"));
+    gtk_widget_set_sensitive(b->power_sw, FALSE);
+    gtk_widget_set_sensitive(b->vis_sw, FALSE);
+    gtk_widget_set_sensitive(b->search_btn, FALSE);
+    clear(b->mine);
+    clear(b->others);
+    row_value(b->mine, T("Bluetooth is not available", "블루투스를 쓸 수 없습니다"), why, NULL);
+}
+
+/* Is there an adapter for bluetoothd to drive at all? The kernel lists
+ * each one as /sys/class/bluetooth/hciN. */
+static gboolean have_adapter(void)
+{
+    GDir *d = g_dir_open("/sys/class/bluetooth", 0, NULL);
+    gboolean yes = FALSE;
+    const char *n;
+    while (d && !yes && (n = g_dir_read_name(d)))
+        yes = g_str_has_prefix(n, "hci") && !strchr(n, ':');
+    if (d) g_dir_close(d);
+    return yes;
 }
 
 static void on_show(int st, const char *out, const char *err, gpointer p)
@@ -396,13 +434,11 @@ static void on_show(int st, const char *out, const char *err, gpointer p)
     if (st != 0 || !strstr(t, "Controller")) {
         char *why = st == -1 ? g_strdup(T("bluetoothctl is not installed (package bluez)",
                                           "bluetoothctl 이 설치되어 있지 않습니다 (bluez 패키지)"))
-                             : lp_first_line(err, t);
-        page_set_subtitle(b->page, T("No Bluetooth adapter is available", "쓸 수 있는 블루투스 장치가 없습니다"));
-        gtk_widget_set_sensitive(b->power_sw, FALSE);
-        gtk_widget_set_sensitive(b->vis_sw, FALSE);
-        gtk_widget_set_sensitive(b->search_btn, FALSE);
-        clear(b->mine);
-        row_value(b->mine, T("Bluetooth is not available", "블루투스를 쓸 수 없습니다"), why, NULL);
+                  : st == LP_RUN_TIMEOUT
+                  ? g_strdup(T("The Bluetooth service (bluetoothd) is not answering - it may not be running",
+                               "블루투스 서비스(bluetoothd)가 답하지 않습니다 - 돌고 있지 않을 수 있습니다"))
+                  : lp_first_line(err, t);
+        show_unavailable(b, why);
         g_free(why);
         g_free(t);
         return;
@@ -434,8 +470,13 @@ static void on_show(int st, const char *out, const char *err, gpointer p)
 
 static void reload(bt_t *b)
 {
+    if (!have_adapter()) {
+        show_unavailable(b, T("This machine has no Bluetooth adapter, or its driver is not loaded",
+                              "이 기계에는 블루투스 장치가 없거나 드라이버가 올라와 있지 않습니다"));
+        return;
+    }
     static const char *const v[] = { "bluetoothctl", "show", NULL };
-    lp_run_async(v, NULL, b->page, on_show, b);
+    lp_run_async_timeout(v, NULL, BT_QUICK_MS, b->page, on_show, b);
 }
 
 /* ── switches and search ────────────────────────────────────────────── */
@@ -461,7 +502,7 @@ static void on_power(GObject *sw, GParamSpec *ps, gpointer p)
     (void)ps; (void)p;
     gboolean on = gtk_switch_get_active(GTK_SWITCH(sw));
     const char *v[] = { "bluetoothctl", "power", on ? "on" : "off", NULL };
-    lp_run_async(v, NULL, NULL, on_toggled,
+    lp_run_async_timeout(v, NULL, BT_QUICK_MS, NULL, on_toggled,
                  g_strdup(on ? T("Bluetooth is on", "블루투스를 켰습니다")
                              : T("Bluetooth is off", "블루투스를 껐습니다")));
 }
@@ -471,7 +512,7 @@ static void on_visible(GObject *sw, GParamSpec *ps, gpointer p)
     (void)ps; (void)p;
     gboolean on = gtk_switch_get_active(GTK_SWITCH(sw));
     const char *v[] = { "bluetoothctl", "discoverable", on ? "on" : "off", NULL };
-    lp_run_async(v, NULL, NULL, on_toggled,
+    lp_run_async_timeout(v, NULL, BT_QUICK_MS, NULL, on_toggled,
                  g_strdup(on ? T("This computer is visible to other devices",
                                  "다른 기기에 이 컴퓨터가 보입니다")
                              : T("This computer is hidden", "이 컴퓨터를 숨겼습니다")));
@@ -508,7 +549,7 @@ static void on_search(GtkButton *btn, gpointer p)
     /* Ten seconds of discovery; the list is re-read every three seconds
      * meanwhile so devices appear as they are found. */
     static const char *const v[] = { "bluetoothctl", "--timeout", "10", "scan", "on", NULL };
-    lp_run_async(v, NULL, b->page, on_searched, b);
+    lp_run_async_timeout(v, NULL, BT_SCAN_MS, b->page, on_searched, b);
     g_timeout_add(3000, search_tick, NULL);
 }
 

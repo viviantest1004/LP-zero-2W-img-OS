@@ -89,6 +89,25 @@ fi
 [[ -e "${ROOTFS}/dev/console" ]] || \
     echo "경고: ${ROOTFS}/dev/console 이 없습니다. init 이 출력을 못 낼 수 있습니다."
 
+# ── Our patches to the source ──
+#
+# kernel/patches/*.patch, in name order: fixes the pinned commit does not
+# have yet (each one's header says what and why). They go into LINUX_SRC
+# itself, once - a patch whose reverse applies cleanly is already there -
+# so every build directory sees the same source, and make recompiles
+# only what they touch. A patch that neither applies nor is already
+# applied stops the build rather than producing a kernel without it.
+for p in "${REPO_ROOT}"/kernel/patches/*.patch; do
+    [[ -f "$p" ]] || continue
+    if patch -d "$LINUX_SRC" -p1 -R -s -f --dry-run < "$p" >/dev/null 2>&1; then
+        continue
+    fi
+    patch -d "$LINUX_SRC" -p1 -s -f --dry-run < "$p" >/dev/null \
+        || die "$(basename "$p") does not apply to ${LINUX_SRC}"
+    step "패치 $(basename "$p")"
+    patch -d "$LINUX_SRC" -p1 -s -f --no-backup-if-mismatch < "$p"
+done
+
 MAKE_ARGS=(-C "$LINUX_SRC" O="$BUILD_DIR" ARCH="$ARCH" CROSS_COMPILE="$CROSS")
 
 # CLEAN=1 이면 빌드 디렉터리를 비운다.

@@ -218,14 +218,14 @@ headerbar windowcontrols {
 }
 
 headerbar .title, .titlebar .title {
-  font-size: 13px;
+  font-size: 9.75pt;
   font-weight: 600;
   color: @lp_text;
   padding: 0 12px;
 }
 
 headerbar .subtitle, .titlebar .subtitle {
-  font-size: 11px;
+  font-size: 8.25pt;
   color: @lp_icon;
 }
 
@@ -315,7 +315,7 @@ headerbar:backdrop image, .titlebar:backdrop image {
   margin: 0;
   padding: 4px 7px;
   border-radius: 5px;
-  font-size: 11px;
+  font-size: 8.25pt;
   color: @lp_row;
 }
 
@@ -343,7 +343,7 @@ headerbar:backdrop image, .titlebar:backdrop image {
  * size and a colour and no weight, so the weight is left where the base theme
  * put it - bold - rather than invented here. */
 .sidebar .heading, .navigation-sidebar .heading {
-  font-size: 10px;
+  font-size: 7.5pt;
   color: @lp_group;
 }
 
@@ -370,8 +370,12 @@ headerbar:backdrop image, .titlebar:backdrop image {
                "NanumGothic", "Noto Sans KR", sans-serif;
 }
 
+/* In points, like every size in this file: 10.5pt is the spec's 14px at
+ * 96 dpi. Settings > Text size scales GTK's dpi (gtk-xft-dpi), which moves
+ * pt and leaves px alone - this rule in px pinned every window's text to
+ * 14 pixels, and choosing Large changed nothing anywhere. */
 window, dialog {
-  font-size: 14px;
+  font-size: 10.5pt;
 }
 
 /* 목록 행 높이 36px. row is GtkListBoxRow, and columnview and listview build
@@ -410,27 +414,27 @@ button, entry, spinbutton, .toggle, dropdown > button {
 
 /* 1-2 의 '설정 섹션 제목' 20px 600. */
 .lp-title {
-  font-size: 20px;
+  font-size: 15pt;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
 
 /* 부제. 제목 바로 아래에서 현재 상태를 말한다. */
 .lp-subtitle {
-  font-size: 13px;
+  font-size: 9.75pt;
 }
 
 /* 행의 두 번째 줄. 설명이 필요한 항목에만 붙으므로, 본문보다 작고
  * 조용해야 제목 줄이 먼저 읽힌다. */
 .lp-detail {
-  font-size: 12px;
+  font-size: 9pt;
 }
 
 /* 작업 관리자의 큰 숫자. 이 화면에서 유일하게 멀리서 읽혀야 하는
  * 값이다. tnum 은 1 과 7 의 폭을 같게 만들어, 값이 1.5초마다 바뀌어도
  * 숫자가 좌우로 흔들리지 않게 한다. */
 .lp-big {
-  font-size: 34px;
+  font-size: 25.5pt;
   font-weight: 600;
   font-feature-settings: "tnum";
 }
@@ -438,7 +442,7 @@ button, entry, spinbutton, .toggle, dropdown > button {
 /* 1-3: 앰버는 한도와 제약에만. 남은 공간 15% 미만이 그것이다. */
 .lp-warning {
   color: #f0b350;
-  font-size: 12px;
+  font-size: 9pt;
 }
 
 /* 표의 숫자 열도 tnum 이어야 한다. 작업 관리자가 라벨을 고정폭
@@ -593,7 +597,7 @@ window.lp-quick button image {
   background: rgba(255, 255, 255, 0.08);
   border-radius: 999px;
   padding: 3px 10px;
-  font-size: 12px;
+  font-size: 9pt;
   font-feature-settings: "tnum";
 }
 

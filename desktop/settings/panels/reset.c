@@ -55,7 +55,8 @@ static gboolean reset_network(char **why)
 {
     static const char *const v[] = { "lp-net", "scan", "--json", NULL };
     char *out = NULL, *err = NULL;
-    int st = lp_run_full(v, NULL, &out, &err);
+    /* A scan takes seconds by nature. */
+    int st = lp_run_full_timeout(v, NULL, &out, &err, 30 * 1000);
     if (st != 0) {
         if (why) *why = lp_first_line(err, out);
         g_free(out); g_free(err);

@@ -1290,6 +1290,32 @@ static void unmount_stack_above(const char *keep)
     }
 }
 
+/* The type of the filesystem mounted exactly at point, or "" when
+ * nothing is. The last line for it wins: that is the one on top. */
+static void mount_type(const char *point, char *out, size_t size)
+{
+    char buf[8192];
+    out[0] = '\0';
+    if (proc_read("/proc/mounts", buf, sizeof buf) <= 0)
+        return;
+    for (char *p = buf; *p; ) {
+        char *eol = strchr(p, '\n');
+        if (eol) *eol = '\0';
+        /* "<source> <point> <type> <options> 0 0" */
+        char *pt = strchr(p, ' ');
+        char *ty = pt ? strchr(pt + 1, ' ') : NULL;
+        char *end = ty ? strchr(ty + 1, ' ') : NULL;
+        if (end) {
+            *ty = '\0';
+            *end = '\0';
+            if (strcmp(pt + 1, point) == 0)
+                strlcpy(out, ty + 1, size);
+        }
+        if (!eol) break;
+        p = eol + 1;
+    }
+}
+
 static void do_shutdown(int what)
 {
     const char *word = (what == 2) ? "restarting" : "powering off";
@@ -1364,7 +1390,14 @@ static void do_shutdown(int what)
 
     unmount_stack_above("/data");
 
-    if (sys_call2(SYS_umount2, (long)"/data", 0) < 0) {
+    /* On the desktop /data is a directory on the root, not a partition:
+     * there is nothing to unmount, and "would not unmount" at every
+     * shutdown was a false alarm. The root below covers it. */
+    char fs[32];
+    mount_type("/data", fs, sizeof fs);
+    if (!fs[0]) {
+        /* nothing mounted there */
+    } else if (sys_call2(SYS_umount2, (long)"/data", 0) < 0) {
         printf("init:   /data would not unmount - remounting it"
                " read-only instead\n");
         /* Second best, and much better than nothing: nothing can write
@@ -1375,6 +1408,21 @@ static void do_shutdown(int what)
     else
         printf("init:   /data unmounted cleanly\n");
     sys_call2(SYS_umount2, (long)"/boot", 0);
+
+    /* A root on a disk - the amd64 desktop, where the home directory and
+     * every setting live on it - goes read-only last. Nothing here ever
+     * unmounted or remounted it, so the start after a clean restart
+     * began with ext4 replaying its journal ("recovery required") as if
+     * the power had been cut: the sync above had put the data down, but
+     * the filesystem was never marked clean. Everything that could write
+     * has been killed by now; should something still hold a file open
+     * for writing, the remount fails and the sync stays what there is.
+     * A root in RAM has nothing to keep and is left alone. */
+    mount_type("/", fs, sizeof fs);
+    if (strcmp(fs, "ext4") == 0 &&
+        lp_mount(NULL, "/", NULL, MS_REMOUNT | MS_RDONLY, NULL) < 0)
+        printf("init:   / would not go read-only - the sync above is all"
+               " the disk gets\n");
     lp_sync();
 
     printf("init: %s now\n\n", (what == 2) ? "restarting" : "off");

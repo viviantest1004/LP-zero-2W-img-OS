@@ -3,9 +3,8 @@
  * screen.
  *
  * mako draws the notifications, and "do not disturb" is one of mako's
- * modes: `makoctl mode -a do-not-disturb` holds new notifications back,
- * `-r` lets them through again, and `makoctl mode` says which modes are
- * on. What a mode does is in mako's config, which is the desktop-shell
+ * modes: with it in mako's list new notifications are held back, without
+ * it they come through. What a mode does is in mako's config, which is the desktop-shell
  * track's (desktop/notify) - including the rule the spec asks for, that
  * critical notifications (battery nearly empty, disk full) come through
  * even so.
@@ -15,6 +14,15 @@
  * it back at login. The switch shows what mako says when mako is running
  * - someone may have used makoctl from a terminal - and the file when it
  * is not.
+ *
+ * ── Why busctl and not makoctl ──
+ *
+ * The list is read and written over D-Bus, ListModes and SetModes on
+ * mako's own interface - exactly the calls makoctl makes. makoctl's
+ * `mode` pipes them through jq, which the base does not carry, so every
+ * `makoctl mode` failed: the page said the notification service was not
+ * running while mako was drawing on screen, and the switch changed
+ * nothing. busctl is systemd's, in the base, and needs nothing else.
  */
 #include "core.h"
 
@@ -39,7 +47,7 @@ static void dnd_done(int st, const char *out, const char *err, gpointer p)
                            : T("Do not disturb is off", "방해 금지를 껐습니다"));
     else {
         /* The file is written either way: at the next login mako gets it. */
-        char *why = st == -1 ? g_strdup(T("makoctl is not installed", "makoctl 이 설치되어 있지 않습니다"))
+        char *why = st == -1 ? g_strdup(T("busctl is not installed", "busctl 이 설치되어 있지 않습니다"))
                              : lp_first_line(err, out);
         lp_toast(TRUE, T("Saved, but the notification service did not take it now: %s",
                          "저장했지만 알림 서비스가 지금 받아들이지 않았습니다: %s"), why);
@@ -47,10 +55,71 @@ static void dnd_done(int st, const char *out, const char *err, gpointer p)
     }
 }
 
+#define MAKO "org.freedesktop.Notifications", "/fr/emersion/Mako", "fr.emersion.Mako"
+#define DND  "do-not-disturb"
+#define MAKO_MS (5 * 1000)
+
+static const char *const LIST_MODES[] = { "busctl", "--user", "call", MAKO, "ListModes", NULL };
+
+/* busctl's answer to ListModes: `as 2 "default" "do-not-disturb"`. */
+static char **parse_modes(const char *out)
+{
+    int argc = 0;
+    char **argv = NULL;
+    if (!g_shell_parse_argv(out, &argc, &argv, NULL) || argc < 2 || strcmp(argv[0], "as")) {
+        g_strfreev(argv);
+        return NULL;
+    }
+    char **m = g_strdupv(argv + 2);
+    g_strfreev(argv);
+    return m;
+}
+
+typedef struct { GWeakRef owner; gboolean on, report; } dnd_t;
+
+/* Step two: mako's list with do-not-disturb added or taken out, and
+ * every other mode left as it was. */
+static void on_modes_for_dnd(int st, const char *out, const char *err, gpointer p)
+{
+    dnd_t *d = p;
+    GObject *owner = g_weak_ref_get(&d->owner);
+    char **cur = st == 0 ? parse_modes(out) : NULL;
+    if (!cur) {
+        if (d->report && owner)
+            dnd_done(st == 0 ? 1 : st, out, err, GINT_TO_POINTER(d->on));
+    } else {
+        GPtrArray *v = g_ptr_array_new();
+        const char *head[] = { "busctl", "--user", "call", MAKO, "SetModes", "as", NULL };
+        for (int i = 0; head[i]; i++) g_ptr_array_add(v, (gpointer)head[i]);
+        GPtrArray *keep = g_ptr_array_new();
+        for (int i = 0; cur[i]; i++)
+            if (strcmp(cur[i], DND)) g_ptr_array_add(keep, cur[i]);
+        if (d->on) g_ptr_array_add(keep, DND);
+        char n[16];
+        g_snprintf(n, sizeof n, "%u", keep->len);
+        g_ptr_array_add(v, n);
+        for (guint i = 0; i < keep->len; i++) g_ptr_array_add(v, g_ptr_array_index(keep, i));
+        g_ptr_array_add(v, NULL);
+        lp_run_async_timeout((const char *const *)v->pdata, NULL, MAKO_MS, GTK_WIDGET(owner),
+                             d->report ? dnd_done : NULL, GINT_TO_POINTER(d->on));
+        g_ptr_array_free(keep, TRUE);
+        g_ptr_array_free(v, TRUE);
+    }
+    g_strfreev(cur);
+    if (owner) g_object_unref(owner);
+    g_weak_ref_clear(&d->owner);
+    g_free(d);
+}
+
 static void apply_dnd(gboolean on, GtkWidget *owner, gboolean report)
 {
-    const char *v[] = { "makoctl", "mode", on ? "-a" : "-r", "do-not-disturb", NULL };
-    lp_run_async(v, NULL, owner, report ? dnd_done : NULL, GINT_TO_POINTER(on));
+    dnd_t *d = g_new0(dnd_t, 1);
+    g_weak_ref_init(&d->owner, owner);
+    d->on = on;
+    d->report = report && owner;
+    /* No owner here: the change goes to mako even if the page is gone
+     * by the time the list comes back; only the banner needs the page. */
+    lp_run_async_timeout(LIST_MODES, NULL, MAKO_MS, NULL, on_modes_for_dnd, d);
 }
 
 static void on_dnd(GObject *sw, GParamSpec *ps, gpointer p)
@@ -66,7 +135,7 @@ static void on_dnd(GObject *sw, GParamSpec *ps, gpointer p)
 static void on_clear(GtkButton *b, gpointer p)
 {
     (void)p;
-    static const char *const v[] = { "makoctl", "dismiss", "--all", NULL };
+    static const char *const v[] = { "busctl", "--user", "call", MAKO, "DismissAllNotifications", NULL };
     char *err = NULL, *out = NULL;
     int st = lp_run_full(v, NULL, &out, &err);
     if (st == 0)
@@ -116,8 +185,7 @@ static GtkWidget *build(void)
                       "배터리 부족, 디스크 부족 같은 긴급 알림은 방해 금지 중에도 항상 "
                       "나타납니다."));
 
-    static const char *const v[] = { "makoctl", "mode", NULL };
-    lp_run_async(v, NULL, page, on_modes, page);
+    lp_run_async_timeout(LIST_MODES, NULL, MAKO_MS, page, on_modes, page);
     return page;
 }
 

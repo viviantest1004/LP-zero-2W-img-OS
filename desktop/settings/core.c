@@ -104,6 +104,12 @@ GtkWindow *lp_window(void) { return GTK_WINDOW(A.win); }
 /* ── stylesheet ─────────────────────────────────────────────────────── */
 
 static const char *CSS =
+    /* Text sizes are in points, never pixels. Settings > Text size is GTK's
+     * gtk-xft-dpi (access.c), and GTK turns pt into pixels through it while
+     * a px size stays what it says: with every size here in px, choosing
+     * Large changed nothing in this window - the window the choice is made
+     * in - nor after a restart, and the setting looked as if it had not
+     * been kept. 0.75pt is 1px at 96 dpi, so at Default nothing moves. */
     /* Window buttons: the one look every LP app shares (see the theme's
      * gtk.css) - this file's own button rules would otherwise make
      * close a wide padded block. */
@@ -113,7 +119,7 @@ static const char *CSS =
     ".lp-settings headerbar windowcontrols > button:hover { background: alpha(#eaf2f8, 0.12); color: #eaf2f8; }"
     ".lp-settings headerbar windowcontrols > button.close:hover { background: #f28c28; color: #ffffff; }"
     ".lp-settings headerbar windowcontrols.end:not(.empty) { padding-left: 0; background-image: none; }"
-    ".lp-settings { font-family: Pretendard, 'Nanum Gothic', sans-serif; font-size: 14px;"
+    ".lp-settings { font-family: Pretendard, 'Nanum Gothic', sans-serif; font-size: 10.5pt;"
     "  background-color: @lp_bg; color: @lp_fg; }\n"
     ".lp-settings headerbar { background: @lp_header; color: @lp_fg; min-height: 48px;"
     "  box-shadow: none; border-bottom: 1px solid @lp_border; }\n"
@@ -128,15 +134,15 @@ static const char *CSS =
     ".lp-settings .lp-sidebar row:selected { background: transparent; color: @lp_fg; }\n"
     ".lp-settings .lp-sidebar row:selected image { color: @lp_accent; }\n"
     ".lp-settings .lp-side-hl { color: @lp_selected; }\n"
-    ".lp-settings .lp-sidebar .lp-result-panel { font-size: 12px; color: @lp_dim; }\n"
+    ".lp-settings .lp-sidebar .lp-result-panel { font-size: 9pt; color: @lp_dim; }\n"
     ".lp-settings .lp-search { min-height: 44px; margin: 10px 8px 6px 8px; border-radius: 8px;"
     "  background: @lp_card; color: @lp_fg; border: 1px solid @lp_border; }\n"
     ".lp-settings .lp-search > text { color: @lp_fg; }\n"
     ".lp-settings .lp-search > image { margin-right: 8px; color: @lp_dim; }\n"
-    ".lp-settings .lp-title { font-size: 24px; font-weight: 700; color: @lp_fg; }\n"
-    ".lp-settings .lp-subtitle { font-size: 14px; color: @lp_dim; }\n"
-    ".lp-settings .lp-heading { font-size: 13px; font-weight: 700; color: @lp_dim; }\n"
-    ".lp-settings .lp-note { font-size: 13px; color: @lp_dim; }\n"
+    ".lp-settings .lp-title { font-size: 18pt; font-weight: 700; color: @lp_fg; }\n"
+    ".lp-settings .lp-subtitle { font-size: 10.5pt; color: @lp_dim; }\n"
+    ".lp-settings .lp-heading { font-size: 9.75pt; font-weight: 700; color: @lp_dim; }\n"
+    ".lp-settings .lp-note { font-size: 9.75pt; color: @lp_dim; }\n"
     ".lp-settings .lp-warn { color: @lp_amber; }\n"
     ".lp-settings .lp-error { color: @lp_red; }\n"
     ".lp-settings .lp-group { background: @lp_card; border-radius: 10px; border: 1px solid @lp_border; }\n"
@@ -152,7 +158,7 @@ static const char *CSS =
     ".lp-settings .lp-group > row.activatable:active { background: alpha(@lp_fg, 0.09); }\n"
     ".lp-settings .lp-group > row.lp-flash { background: alpha(@lp_accent, 0.25); }\n"
     ".lp-settings .lp-row-title { color: @lp_fg; }\n"
-    ".lp-settings .lp-detail { font-size: 12.5px; color: @lp_dim; }\n"
+    ".lp-settings .lp-detail { font-size: 9.375pt; color: @lp_dim; }\n"
     ".lp-settings .lp-value { color: @lp_dim; }\n"
     ".lp-settings .lp-readout { font-feature-settings: 'tnum'; }\n"
     ".lp-settings .lp-chevron, .lp-settings .lp-lock { color: @lp_dim; }\n"
@@ -219,7 +225,7 @@ static const char *CSS =
     ".lp-settings .lp-toast.lp-toast-error { border-color: @lp_red; }\n"
     ".lp-settings .lp-toast.lp-toast-error image { color: @lp_red; }\n"
     ".lp-settings .lp-toast image { color: @lp_accent; }\n"
-    ".lp-settings .lp-dialog-title { font-size: 18px; font-weight: 700; color: @lp_fg; }\n"
+    ".lp-settings .lp-dialog-title { font-size: 13.5pt; font-weight: 700; color: @lp_fg; }\n"
     /* Dialogs: the window is transparent and the card is the sheet
      * (ui.c, LpSheet). The margin is room for the shadow inside the
      * window's own surface. */
@@ -238,20 +244,20 @@ static const char *CSS =
     ".lp-settings .lp-group > row.activatable { transition: background-color 91ms"
     "  cubic-bezier(0.263, 0.487, 0.037, 1.137), transform 91ms cubic-bezier(0.263, 0.487, 0.037, 1.137); }\n"
     ".lp-settings .lp-group > row.activatable:active { transform: scale(0.985); transition: none; }\n"
-    ".lp-settings .lp-field-label { color: @lp_dim; font-size: 13px; }\n"
+    ".lp-settings .lp-field-label { color: @lp_dim; font-size: 9.75pt; }\n"
     ".lp-settings .lp-swatch { min-width: 44px; min-height: 44px; padding: 0; border-radius: 22px; }\n"
     ".lp-settings .lp-swatch:checked { border: 3px solid @lp_fg; }\n"
     ".lp-settings .lp-wallpaper { padding: 4px; border-radius: 10px; }\n"
     ".lp-settings .lp-wallpaper:checked { border: 3px solid @lp_accent; background: transparent; }\n"
     ".lp-settings .lp-style-card { padding: 8px; border-radius: 12px; }\n"
     ".lp-settings .lp-style-card:checked { border: 3px solid @lp_accent; background: transparent; }\n"
-    ".lp-settings .lp-big { font-size: 20px; font-weight: 700; color: @lp_fg; }\n"
+    ".lp-settings .lp-big { font-size: 15pt; font-weight: 700; color: @lp_fg; }\n"
     ".lp-settings .lp-mono { font-family: 'D2Coding', monospace; }\n"
     ".lp-settings .lp-signal { color: @lp_fg; }\n"
     ".lp-settings .lp-zone { border: 1px solid alpha(@lp_red, 0.6); border-radius: 10px; padding: 16px; }\n"
     ".lp-settings .lp-zone-title { font-weight: 700; color: @lp_red; }\n"
     ".lp-settings .lp-key { background: @lp_button; border: 1px solid @lp_border; border-radius: 6px;"
-    "  padding: 2px 8px; font-family: 'D2Coding', monospace; font-size: 13px; }\n"
+    "  padding: 2px 8px; font-family: 'D2Coding', monospace; font-size: 9.75pt; }\n"
     ".lp-settings .lp-arrange { background: @lp_field; border-radius: 10px; border: 1px solid @lp_border; }\n";
 
 typedef struct {

@@ -9,12 +9,12 @@
  *                                  (desktop/common/lp-shell.c), which the
  *                                  shell watches - so the two switches are
  *                                  one setting and cannot disagree.
- *   ~/.config/lp/appearance.conf   accent=#rrggbb, wallpaper=/path. This
- *                                  window recolours from it at once; the
- *                                  wallpaper is drawn by the desktop
- *                                  (desktop-shell track), which reads the
- *                                  same key. Under sway it is also set
- *                                  live with `swaymsg output * bg`.
+ *   ~/.config/lp/appearance.conf   accent=#rrggbb. This window recolours
+ *                                  from it at once.
+ *   ~/.config/lp/wallpaper         the picture's path, one line: the file
+ *                                  lp-desktop draws the wallpaper from and
+ *                                  watches, so a choice shows at once
+ *                                  under either compositor.
  *   ~/.config/lp/dock.conf         size=small|medium|large,
  *                                  autohide=yes|no, for lp-dock.
  *
@@ -200,14 +200,39 @@ static GtkWidget *accent_row(GtkWidget *list)
 
 /* ── wallpaper ──────────────────────────────────────────────────────── */
 
+/* The picture on the screen is lp-desktop's, and lp-desktop reads it from
+ * ~/.config/lp/wallpaper - one line, a path - and watches that file
+ * (desktop/desktop-icons/desktop.c). This page used to keep the choice
+ * as wallpaper= in appearance.conf and tell sway with `output * bg`:
+ * the button lit up and the choice was kept across restarts, but nothing
+ * read it, sway's own background is under lp-desktop's opaque surface
+ * (and switched off: swaybg_command -), and wayfire has no such command -
+ * so the wallpaper never changed, under either compositor. The key in
+ * appearance.conf is still read, once, for a choice made before. */
+static char *wallpaper_file(void) { return lp_config_path("wallpaper"); }
+
+static char *current_wallpaper(void)
+{
+    char *p = wallpaper_file();
+    char *w = lp_slurp(p);
+    g_free(p);
+    if (w) g_strstrip(w);
+    if (w && *w) return w;
+    g_free(w);
+    char *c = appearance_conf();
+    w = kv_get(c, "wallpaper");
+    g_free(c);
+    return w;
+}
+
 static void apply_wallpaper(const char *path, gboolean report)
 {
-    char *c = appearance_conf();
-    gboolean ok = kv_set(c, "wallpaper", path);
-    g_free(c);
+    char *p = wallpaper_file();
+    char *line = g_strconcat(path, "\n", NULL);
+    gboolean ok = lp_write_file(p, line);
+    g_free(line);
+    g_free(p);
     if (!ok) return;
-    const char *a[] = { "output", "*", "bg", path, "fill", NULL };
-    lp_swaymsg(a);
     if (report) {
         char *base = g_path_get_basename(path);
         lp_toast(FALSE, T("Wallpaper: %s", "배경 화면: %s"), base);
@@ -483,9 +508,7 @@ static GtkWidget *build(void)
     char *shipped = g_build_filename("/usr/local/share/lp", "wallpaper.png", NULL);
     if (g_file_test(shipped, G_FILE_TEST_EXISTS)) g_ptr_array_insert(walls, 0, shipped);
     else g_free(shipped);
-    char *c = appearance_conf();
-    char *cur = kv_get(c, "wallpaper");
-    g_free(c);
+    char *cur = current_wallpaper();
     /* The person's own picture stays in the list after it was chosen. */
     gboolean listed = FALSE;
     for (guint i = 0; cur && i < walls->len; i++)
@@ -527,7 +550,9 @@ static GtkWidget *build(void)
     return page;
 }
 
-/* At login: the mirrors of dark/light, and the wallpaper under sway. */
+/* At login: the mirrors of dark/light, and a wallpaper chosen before
+ * lp-desktop's file was the one written (see apply_wallpaper), moved
+ * there - lp-desktop is watching it and changes the picture at once. */
 static void restore(void)
 {
     char *p = lp_config_path("style");
@@ -535,13 +560,15 @@ static void restore(void)
     g_free(p);
     if (s) mirror_style(g_str_has_prefix(g_strstrip(s), "light"));
     g_free(s);
-    char *c = appearance_conf();
-    char *w = kv_get(c, "wallpaper");
-    if (w && *w) {
-        const char *a[] = { "output", "*", "bg", w, "fill", NULL };
-        lp_swaymsg(a);
+    char *wf = wallpaper_file();
+    if (!g_file_test(wf, G_FILE_TEST_EXISTS)) {
+        char *c = appearance_conf();
+        char *w = kv_get(c, "wallpaper");
+        if (w && *w && g_file_test(w, G_FILE_TEST_EXISTS))
+            apply_wallpaper(w, FALSE);
+        g_free(w); g_free(c);
     }
-    g_free(w); g_free(c);
+    g_free(wf);
 }
 
 static const char *const KEYS[] = {

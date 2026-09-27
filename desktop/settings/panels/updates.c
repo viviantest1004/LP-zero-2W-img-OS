@@ -42,6 +42,16 @@ static void on_list(int st, const char *out, const char *err, gpointer p)
         row_set_value(count_row, T("Unknown", "알 수 없음"));
         row_set_detail(count_row, st == -1 ? T("apt is not installed", "apt 가 설치되어 있지 않습니다")
                                            : T("apt could not read its lists", "apt 가 목록을 읽지 못했습니다"));
+        page_set_subtitle(page, T("Could not tell whether there are updates",
+                                  "업데이트가 있는지 알 수 없습니다"));
+        return;
+    }
+    if (g_object_get_data(G_OBJECT(page), "lp-never")) {
+        /* No lists fetched yet: apt knows of nothing newer because it has
+         * never looked, which is not the same as up to date. */
+        row_set_value(count_row, T("Not checked yet", "아직 확인 안 함"));
+        page_set_subtitle(page, T("Updates have not been checked for yet - Software checks when it opens",
+                                  "아직 업데이트를 확인하지 않았습니다 - 소프트웨어 앱이 열리면 확인합니다"));
         return;
     }
     char **l = g_strsplit(out, "\n", -1);
@@ -89,8 +99,10 @@ static GtkWidget *build(void)
     char *when;
     if (g_stat("/var/cache/apt/pkgcache.bin", &st) == 0)
         when = age_words(g_get_real_time() / G_USEC_PER_SEC - st.st_mtime);
-    else
+    else {
         when = g_strdup(T("never", "한 번도 안 함"));
+        g_object_set_data(G_OBJECT(page), "lp-never", GINT_TO_POINTER(1));
+    }
     row_value(g, T("Last checked", "마지막 확인"), NULL, when);
     g_free(when);
     GtkWidget *b = row_button(g, T("Install updates", "업데이트 설치"),
@@ -103,8 +115,9 @@ static GtkWidget *build(void)
     gtk_widget_set_visible(list, FALSE);
     gtk_widget_set_visible(gtk_widget_get_prev_sibling(list), FALSE);
     g_object_set_data(G_OBJECT(page), "lp-list", list);
-    static const char *const v[] = { "apt", "list", "--upgradable", NULL };
-    lp_run_async(v, NULL, page, on_list, page);
+    /* The base's apt: /bin/apt is LP's own and answers only root. */
+    const char *v[] = { lp_base_tool("apt"), "list", "--upgradable", NULL };
+    lp_run_async_timeout(v, NULL, 60 * 1000, page, on_list, page);
     return page;
 }
 

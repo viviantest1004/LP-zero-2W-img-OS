@@ -184,8 +184,9 @@ BZ_EXISTING="${KERNEL_OUT}/bzImage"
 # config had changed - and the command line and the firmware pin are
 # compiled in too, and the firmware sits in the initramfs beside
 # preinit. So the stamp covers all of them, and the kernel source commit
-# and the scripts that merge the config and build it. (The file keeps
-# its old name so an existing stamp is simply a mismatch, not an error.)
+# and the scripts that merge the config and build it, and the patches
+# build.sh applies to that source. (The file keeps its old name so an
+# existing stamp is simply a mismatch, not an error.)
 PREINIT="${REPO_ROOT}/userland/bin-amd64/preinit"
 STAMP="${KERNEL_OUT}/preinit.sha256"
 NOW_SUM=""
@@ -196,7 +197,8 @@ if [[ -f "$PREINIT" ]]; then
                     "${REPO_ROOT}/tools/mkamd64config.sh" \
                     "${REPO_ROOT}/kernel/linux.commit" \
                     "${REPO_ROOT}/kernel/build.sh" \
-                    "${REPO_ROOT}/tools/fetch-pc-fw.sh"
+                    "${REPO_ROOT}/tools/fetch-pc-fw.sh" \
+                    "${REPO_ROOT}"/kernel/patches/*.patch
                   printf '%s' "$KERNEL_CMDLINE"; } | sha256sum | cut -d' ' -f1)"
 fi
 OLD_SUM="$(cat "$STAMP" 2>/dev/null || true)"

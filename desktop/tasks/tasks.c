@@ -12,6 +12,12 @@
  * say whether it is good or bad (a disk under 15% free is amber and says
  * so; a battery says how long it will last at this rate).
  *
+ * Where a machine has more than one of a thing, each is shown on its
+ * own: every GPU (the XPS has two, one of them asleep most of the day),
+ * every disk with the filesystems on it, and every CPU package on a
+ * machine with more than one socket. A total of two unlike devices
+ * describes neither.
+ *
  * ── What it costs to watch ──
  *
  * A system monitor that shows up in its own CPU graph is a joke nobody
@@ -19,9 +25,12 @@
  * So the work is split by what is on screen:
  *
  *  - Once a second, always: /proc/stat, /proc/meminfo, /proc/diskstats,
- *    /proc/net/dev, one hwmon file, the battery. A few small reads; the
+ *    /proc/net/dev, one hwmon file, the battery, each GPU's power state
+ *    and the fdinfo of the few open GPU files. A few small reads; the
  *    history behind every graph has to keep coming even while its page
  *    is not shown, or switching to it would show a blank minute.
+ *  - Every 30 seconds, or 5 while the GPU page is showing: which
+ *    processes have a GPU open (every fd link in /proc; see find_gpus).
  *  - Once a second, only while Apps, Processes or Memory is showing and
  *    the window is not minimised: the walk over /proc/<pid>. That is the
  *    expensive part (hundreds of small files), and nobody reads a
@@ -67,11 +76,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+
+#include "lp-apps.h"
+#include "lp-toplevel.h"
 
 #define APP_ID      "org.lpzero.Tasks"
 #define STATE_NAME  "tasks"
@@ -154,8 +167,75 @@ typedef struct {
     char    *name;
     char    *path;       /* mount point */
     char    *dev;
+    char    *disk;       /* the whole disk it is on ("nvme0n1"), or NULL */
     guint64  size, avail;
 } Fs;
+
+/* One CPU package (socket). A laptop has one and the page is as it
+ * was; a machine with two gets a graph for each, because "the CPU is at
+ * 50%" there can mean one socket flat out and the other asleep. */
+typedef struct {
+    int      id;              /* topology/physical_package_id */
+    int      threads, cores;
+    char    *model;
+    char    *temp_path;       /* coretemp's "Package id N", or NULL */
+    guint64  busy_d, total_d; /* this second's jiffies, summed over its CPUs */
+    double   pct;
+    double   temp;            /* NAN without a sensor */
+    Series   h;
+} Pkg;
+
+/* One whole disk from /proc/diskstats. The set can change while the
+ * window is open (a USB stick), so the Drives page is rebuilt when it
+ * does. */
+typedef struct {
+    char    *name;            /* "nvme0n1" */
+    char    *model;
+    const char *kind;         /* SSD, HDD, USB, SD */
+    guint64  size;            /* bytes */
+    guint64  prev_rd, prev_wr, prev_io_ms;
+    double   rd, wr;          /* bytes/s */
+    double   active;          /* % of the second it was busy */
+    gboolean primed, seen;
+    Series   rd_h, wr_h;
+    gpointer ui;              /* DiskUi, the page's widgets for it */
+} Disk;
+
+/* One graphics device: a /sys/class/drm/cardN with a driver. How busy
+ * it is comes from the best source it has - see sample_gpus(). */
+#define GPU_ENGINES 10
+
+typedef enum { SRC_NONE, SRC_FDINFO, SRC_RC6, SRC_AMD } GpuSource;
+
+typedef struct {
+    char     *node;           /* "card0" */
+    char     *dev;            /* its device directory in sysfs, resolved */
+    char     *pci;            /* "0000:00:02.0", or NULL */
+    char     *driver;
+    char     *name;           /* "Intel HD Graphics 530" */
+    gboolean  boot_vga;       /* the one the firmware lit the screen with */
+    gboolean  asleep;         /* runtime PM has it suspended */
+    GpuSource src;
+    double    busy;           /* %, NAN when nothing says */
+    /* i915: busy is the share of time outside RC6, the sleep state */
+    gboolean  has_rc6;
+    gint64    prev_rc6, prev_rc6_t;
+    double    rc6_busy;
+    int       mhz, max_mhz;
+    /* amdgpu: the driver's own figure for the whole device */
+    double    amd_busy;
+    gint64    vram_used, vram_total;
+    /* fdinfo: engine time and memory the programs using it report */
+    gboolean  fd_engines, fd_mem;
+    int       neng;
+    char      eng[GPU_ENGINES][24];
+    double    eng_cap[GPU_ENGINES];
+    double    eng_ns[GPU_ENGINES];    /* this second's busy ns, summed */
+    double    eng_pct[GPU_ENGINES];
+    guint64   mem_fd;                 /* bytes, summed over programs */
+    Series    h;
+    gpointer  ui;
+} Gpu;
 
 typedef struct {
     /* CPU */
@@ -178,10 +258,15 @@ typedef struct {
     guint64  mem_total, mem_avail, mem_free, mem_cache, swap_total, swap_free;
     Series   mem_h;
 
-    /* Drives, bytes/s */
-    guint64  prev_rd, prev_wr;
-    double   rd, wr;
-    Series   rd_h, wr_h;
+    /* CPU packages; only filled in when there is more than one */
+    int      npkg;
+    Pkg     *pkg;
+    int     *cpu_pkg;                 /* CPU number -> index in pkg */
+
+    /* Drives */
+    GPtrArray *disks;                 /* Disk*, in /proc/diskstats order */
+    GHashTable *not_disks;            /* names that are partitions etc. */
+    gboolean disks_changed;
     GPtrArray *fs;                    /* Fs*, refreshed while shown */
 
     /* Network, bytes/s */
@@ -189,14 +274,9 @@ typedef struct {
     double   rx, tx;
     Series   rx_h, tx_h;
 
-    /* GPU (i915: busy from rc6 residency) */
-    gboolean gpu_ok;
-    gint64   prev_rc6, prev_rc6_t;
-    double   gpu;
-    int      gpu_mhz, gpu_max;
-    char    *gpu_driver;
-    char    *dgpu;                    /* discrete GPU state, or NULL */
-    Series   gpu_h;
+    /* GPUs */
+    GPtrArray *gpus;                  /* Gpu*, by card number */
+    guint    ticks;
 
     /* Battery */
     gboolean bat;
@@ -217,13 +297,56 @@ typedef struct {
 
 static Sys S;
 
+/* Which package each CPU is in, from sysfs topology (/proc/cpuinfo has
+ * no "physical id" on ARM), and what each package is. */
+static void read_packages(GHashTable *models)
+{
+    S.cpu_pkg = g_new0(int, S.ncpu);
+    GArray *ids = g_array_new(FALSE, FALSE, sizeof(int));
+    GHashTable *cores = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (int i = 0; i < S.ncpu; i++) {
+        char p[96];
+        g_snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", i);
+        int id = (int)MAX(0, read_num(p, 0));
+        g_snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/topology/core_id", i);
+        g_hash_table_add(cores, g_strdup_printf("%d/%d", id, (int)read_num(p, i)));
+        guint k;
+        for (k = 0; k < ids->len && g_array_index(ids, int, k) != id; k++)
+            ;
+        if (k == ids->len)
+            g_array_append_val(ids, id);
+        S.cpu_pkg[i] = (int)k;
+    }
+    S.npkg = (int)ids->len;
+    S.pkg = g_new0(Pkg, MAX(1, S.npkg));
+    for (int k = 0; k < S.npkg; k++) {
+        Pkg *pk = &S.pkg[k];
+        pk->id = g_array_index(ids, int, k);
+        pk->temp = NAN;
+        const char *m = g_hash_table_lookup(models, GINT_TO_POINTER(pk->id + 1));
+        pk->model = g_strdup(m ? m : S.model);
+        GHashTableIter it;
+        gpointer key;
+        g_hash_table_iter_init(&it, cores);
+        while (g_hash_table_iter_next(&it, &key, NULL))
+            if (atoi(key) == pk->id)
+                pk->cores++;
+    }
+    for (int i = 0; i < S.ncpu; i++)
+        S.pkg[S.cpu_pkg[i]].threads++;
+    g_hash_table_unref(cores);
+    g_array_unref(ids);
+}
+
 static void read_cpuinfo(void)
 {
     char *text = NULL;
+    GHashTable *models = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
     S.ncpu = 0;
     if (g_file_get_contents("/proc/cpuinfo", &text, NULL, NULL)) {
         GHashTable *phys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
         char *pid = NULL;
+        const char *cur_model = NULL;
         for (char *l = text, *n; l && *l; l = n) {
             n = strchr(l, '\n');
             if (n)
@@ -234,11 +357,16 @@ static void read_cpuinfo(void)
             char *val = g_strstrip(colon + 1);
             if (g_str_has_prefix(l, "processor"))
                 S.ncpu++;
-            else if (g_str_has_prefix(l, "model name") && !S.model)
-                S.model = g_strdup(val);
-            else if (g_str_has_prefix(l, "physical id")) {
+            else if (g_str_has_prefix(l, "model name")) {
+                cur_model = val;
+                if (!S.model)
+                    S.model = g_strdup(val);
+            } else if (g_str_has_prefix(l, "physical id")) {
                 g_free(pid);
                 pid = g_strdup(val);
+                gpointer key = GINT_TO_POINTER(atoi(val) + 1);
+                if (cur_model && !g_hash_table_contains(models, key))
+                    g_hash_table_insert(models, key, g_strdup(cur_model));
             } else if (g_str_has_prefix(l, "core id")) {
                 g_hash_table_add(phys, g_strdup_printf("%s/%s", pid ? pid : "0", val));
             } else if (g_str_has_prefix(l, "flags") && !S.virt) {
@@ -271,6 +399,8 @@ static void read_cpuinfo(void)
     S.prev_total = g_new0(guint64, S.ncpu + 1);
     S.prev_idle = g_new0(guint64, S.ncpu + 1);
     S.core = g_new0(double, S.ncpu);
+    read_packages(models);
+    g_hash_table_unref(models);
 }
 
 static void sample_cpu(void)
@@ -305,9 +435,21 @@ static void sample_cpu(void)
             S.delta_total = dt;
         } else {
             S.core[idx - 1] = pct;
+            if (S.primed) {
+                Pkg *pk = &S.pkg[S.cpu_pkg[idx - 1]];
+                pk->busy_d += dt - di;
+                pk->total_d += dt;
+            }
         }
         S.prev_total[idx] = total;
         S.prev_idle[idx] = idle;
+    }
+    /* A package's share is its CPUs' busy jiffies over their total, not
+     * a mean of percentages - an offline CPU would drag a mean down. */
+    for (int k = 0; k < S.npkg; k++) {
+        Pkg *pk = &S.pkg[k];
+        pk->pct = pk->total_d ? 100.0 * (double)pk->busy_d / (double)pk->total_d : 0.0;
+        pk->busy_d = pk->total_d = 0;
     }
     /* Mean of the cores' current clocks: what "3.84 GHz" means. */
     double sum = 0;
@@ -368,34 +510,112 @@ static gboolean whole_disk(const char *name)
     return g_file_test(p, G_FILE_TEST_IS_DIR);
 }
 
-static void sample_disk(double secs)
+static char *trimmed(char *s)
+{
+    if (s && !*g_strstrip(s))
+        g_clear_pointer(&s, g_free);
+    return s;
+}
+
+static Disk *disk_new(const char *name, guint64 size)
+{
+    Disk *d = g_new0(Disk, 1);
+    d->name = g_strdup(name);
+    d->size = size;
+    char p[160];
+    g_snprintf(p, sizeof p, "/sys/block/%s/device/model", name);
+    d->model = trimmed(read_word(p));
+    if (!d->model) {
+        g_snprintf(p, sizeof p, "/sys/block/%s/device/name", name);   /* SD cards */
+        d->model = trimmed(read_word(p));
+    }
+    g_snprintf(p, sizeof p, "/sys/block/%s", name);
+    char *real = realpath(p, NULL);
+    g_snprintf(p, sizeof p, "/sys/block/%s/removable", name);
+    gboolean removable = read_num(p, 0) == 1;
+    g_snprintf(p, sizeof p, "/sys/block/%s/queue/rotational", name);
+    if ((real && strstr(real, "/usb")) || removable)
+        d->kind = "USB";
+    else if (g_str_has_prefix(name, "mmcblk"))
+        d->kind = "SD";
+    else
+        d->kind = read_num(p, 0) == 1 ? "HDD" : "SSD";
+    free(real);
+    if (!d->model)
+        d->model = g_strdup(g_str_has_prefix(name, "vd") ? T("Virtual disk", "가상 디스크")
+                                                         : T("Disk", "디스크"));
+    return d;
+}
+
+static void disk_free(Disk *d)
+{
+    g_free(d->name);
+    g_free(d->model);
+    g_free(d);
+}
+
+/* Every whole disk's rates and busy time. A name seen once as not a
+ * disk (a partition, a loop device) is remembered, so the second-by-
+ * second cost is one read of /proc/diskstats and no sysfs lookups. */
+static void sample_disks(double secs)
 {
     char buf[16384];
     if (read_small("/proc/diskstats", buf, sizeof buf) <= 0)
         return;
-    guint64 rd = 0, wr = 0;
+    for (guint i = 0; i < S.disks->len; i++)
+        ((Disk *)g_ptr_array_index(S.disks, i))->seen = FALSE;
     for (char *l = buf, *n; l && *l; l = n) {
         n = strchr(l, '\n');
         if (n)
             *n++ = '\0';
         unsigned maj, min;
         char name[64];
-        unsigned long long f[11];
-        if (sscanf(l, " %u %u %63s %llu %llu %llu %llu %llu %llu %llu %llu",
+        unsigned long long f[10];
+        /* reads, merged, sectors read, ms, writes, merged, sectors
+         * written, ms, in flight, ms doing I/O */
+        if (sscanf(l, " %u %u %63s %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
                    &maj, &min, name, &f[0], &f[1], &f[2], &f[3], &f[4], &f[5],
-                   &f[6], &f[7]) < 10)
+                   &f[6], &f[7], &f[8], &f[9]) < 13)
             continue;
-        if (!whole_disk(name))
+        if (g_hash_table_contains(S.not_disks, name))
             continue;
-        rd += f[2] * 512;
-        wr += f[6] * 512;
+        Disk *d = NULL;
+        for (guint i = 0; i < S.disks->len && !d; i++) {
+            Disk *x = g_ptr_array_index(S.disks, i);
+            if (!strcmp(x->name, name))
+                d = x;
+        }
+        if (!d) {
+            if (!whole_disk(name)) {
+                g_hash_table_add(S.not_disks, g_strdup(name));
+                continue;
+            }
+            /* An empty card reader is a disk of size 0: not shown, and
+             * asked again next second, when a card may be in it. */
+            char p[128];
+            g_snprintf(p, sizeof p, "/sys/block/%s/size", name);
+            gint64 sectors = read_num(p, 0);
+            if (sectors <= 0)
+                continue;
+            d = disk_new(name, (guint64)sectors * 512);
+            g_ptr_array_add(S.disks, d);
+            S.disks_changed = TRUE;
+        }
+        d->seen = TRUE;
+        guint64 rd = f[2] * 512, wr = f[6] * 512, io = f[9];
+        if (d->primed && secs > 0) {
+            d->rd = (rd - d->prev_rd) / secs;
+            d->wr = (wr - d->prev_wr) / secs;
+            d->active = CLAMP((double)(io - d->prev_io_ms) / (secs * 10.0), 0.0, 100.0);
+        }
+        d->prev_rd = rd;
+        d->prev_wr = wr;
+        d->prev_io_ms = io;
+        d->primed = TRUE;
     }
-    if (S.primed && secs > 0) {
-        S.rd = (rd - S.prev_rd) / secs;
-        S.wr = (wr - S.prev_wr) / secs;
-    }
-    S.prev_rd = rd;
-    S.prev_wr = wr;
+    for (guint i = 0; i < S.disks->len; i++)
+        if (!((Disk *)g_ptr_array_index(S.disks, i))->seen)
+            S.disks_changed = TRUE;     /* unplugged; the page drops it */
 }
 
 static void sample_net(double secs)
@@ -467,83 +687,463 @@ static void find_temp(void)
     }
     if (!temp_path && g_file_test("/sys/class/thermal/thermal_zone0/temp", G_FILE_TEST_EXISTS))
         temp_path = g_strdup("/sys/class/thermal/thermal_zone0/temp");
-}
-
-static char *drm_card;   /* "/sys/class/drm/card0" for the Intel GPU */
-
-static void find_gpu(void)
-{
-    for (int i = 0; i < 4; i++) {
-        char p[96];
-        g_snprintf(p, sizeof p, "/sys/class/drm/card%d/device/driver", i);
-        char *link = g_file_read_link(p, NULL);
-        if (!link)
-            continue;
-        char *drv = g_path_get_basename(link);
-        g_free(link);
-        if (!drm_card) {
-            drm_card = g_strdup_printf("/sys/class/drm/card%d", i);
-            S.gpu_driver = g_strdup(drv);
-        }
-        g_free(drv);
-    }
-    if (drm_card) {
+    /* Each package's own sensor, where there is more than one package:
+     * coretemp has one hwmon per package, labelled "Package id N". */
+    for (int i = 0; i < 32 && S.npkg > 1; i++) {
         char p[128];
-        g_snprintf(p, sizeof p, "%s/power/rc6_residency_ms", drm_card);
-        S.gpu_ok = g_file_test(p, G_FILE_TEST_EXISTS);
-        g_snprintf(p, sizeof p, "%s/gt_max_freq_mhz", drm_card);
-        S.gpu_max = (int)read_num(p, 0);
+        g_snprintf(p, sizeof p, "/sys/class/hwmon/hwmon%d/name", i);
+        char *name = read_word(p);
+        gboolean core = name && !strcmp(name, "coretemp");
+        g_free(name);
+        for (int k = 1; k < 4 && core; k++) {
+            g_snprintf(p, sizeof p, "/sys/class/hwmon/hwmon%d/temp%d_label", i, k);
+            char *lab = read_word(p);
+            int id;
+            if (lab && sscanf(lab, "Package id %d", &id) == 1)
+                for (int j = 0; j < S.npkg; j++)
+                    if (S.pkg[j].id == id && !S.pkg[j].temp_path)
+                        S.pkg[j].temp_path = g_strdup_printf(
+                            "/sys/class/hwmon/hwmon%d/temp%d_input", i, k);
+            g_free(lab);
+        }
     }
 }
 
-/* The GTX 960M on the XPS sleeps until something asks for it (Optimus,
- * no mux): runtime PM says whether it is awake. */
-static void sample_dgpu(void)
+/* ── GPUs ──
+ *
+ * Every /sys/class/drm/cardN with a driver is one device, and each is
+ * shown on its own: the XPS has two (the Intel HD 530 that drives the
+ * screen, and the GTX 960M that nouveau keeps powered off until a program
+ * asks for it), and a sum or an average of the two would describe
+ * neither.
+ *
+ * How busy a device is comes from the best source it has, in order:
+ *
+ *  - amdgpu: gpu_busy_percent, the driver's own figure for the whole
+ *    device.
+ *  - fdinfo: /proc/<pid>/fdinfo/<fd> of an open DRM device carries, per
+ *    client, drm-engine-<name>: the nanoseconds that engine has spent on
+ *    the client's work (i915, amdgpu, xe, v3d, panfrost, msm - the
+ *    kernel's drm-usage-stats). The difference over a second, summed over
+ *    the clients, is how busy each engine was; the device is as busy as
+ *    its busiest engine. Only the person's own processes can be read,
+ *    which on this desktop includes the compositor. Two fds can be one
+ *    client (a dup, a fork), so clients are counted once by drm-client-id.
+ *  - i915 without fdinfo: the share of time outside RC6, its sleep state.
+ *  - anything else says nothing - virtio_gpu, which is what a VM has, and
+ *    nouveau - and the page says so instead of drawing a flat line at 0%.
+ *
+ * A device that runtime PM has suspended is not read at all beyond that
+ * state: several drivers wake the hardware to answer a sysfs read, and
+ * a task manager that powers up the discrete GPU to report that it is
+ * asleep would cost the battery what the sleeping saves. Reading fdinfo
+ * does not touch the device, and reading the state is a flag in the
+ * kernel.
+ *
+ * Finding which processes have a DRM device open means reading every fd
+ * link in /proc, so that is done every 5 seconds while the GPU page is
+ * showing and every 30 otherwise; each second only the few fdinfo files
+ * already found are read. A program that starts using the GPU is counted
+ * from the next of those scans. */
+
+static GHashTable *gpu_nodes;   /* "card0", "renderD128" -> Gpu* */
+
+/* The device's name from pci.ids: the part in brackets when there is
+ * one ("GM107M [GeForce GTX 960M]"), after the vendor's everyday name
+ * for the three a person knows by it. */
+static char *pci_name(const char *ids, guint vendor, guint device)
 {
-    g_clear_pointer(&S.dgpu, g_free);
-    GDir *d = g_dir_open("/sys/bus/pci/devices", 0, NULL);
+    if (!ids)
+        return NULL;
+    char key[16];
+    g_snprintf(key, sizeof key, "\n%04x  ", vendor);
+    const char *v = strstr(ids, key);
+    if (!v)
+        return NULL;
+    char dkey[16];
+    g_snprintf(dkey, sizeof dkey, "\t%04x  ", device);
+    for (const char *l = strchr(v + 1, '\n'); l && l[1]; l = strchr(l + 1, '\n')) {
+        const char *line = l + 1;
+        if (line[0] != '\t' && line[0] != '#')
+            break;                              /* the next vendor */
+        if (strncmp(line, dkey, 7) != 0)
+            continue;
+        const char *nm = line + 7, *e = strchr(nm, '\n');
+        char *full = g_strndup(nm, e ? (gsize)(e - nm) : strlen(nm));
+        char *lb = strchr(full, '['), *rb = lb ? strchr(lb, ']') : NULL;
+        char *dev = lb && rb ? g_strndup(lb + 1, (gsize)(rb - lb - 1)) : g_strdup(full);
+        g_free(full);
+        const char *vn = vendor == 0x8086 ? "Intel" : vendor == 0x10de ? "NVIDIA"
+                       : vendor == 0x1002 ? "AMD" : NULL;
+        char *out = vn && !g_str_has_prefix(dev, vn) ? g_strdup_printf("%s %s", vn, dev)
+                                                     : g_strdup(dev);
+        g_free(dev);
+        return out;
+    }
+    return NULL;
+}
+
+static gboolean is_pci_addr(const char *s)
+{
+    unsigned a, b, c, d;
+    int n = 0;
+    return sscanf(s, "%x:%x:%x.%x%n", &a, &b, &c, &d, &n) == 4 && s[n] == '\0';
+}
+
+static int card_number(const char *name)
+{
+    int n = -1, len = 0;
+    if (sscanf(name, "card%d%n", &n, &len) == 1 && name[len] == '\0')
+        return n;
+    return -1;
+}
+
+static int gpu_cmp(gconstpointer a, gconstpointer b)
+{
+    const Gpu *x = *(Gpu *const *)a, *y = *(Gpu *const *)b;
+    return card_number(x->node) - card_number(y->node);
+}
+
+static Gpu *gpu_new(const char *node, char *dev, char *driver, const char *ids)
+{
+    Gpu *g = g_new0(Gpu, 1);
+    g->node = g_strdup(node);
+    g->dev = dev;
+    g->driver = driver;
+    g->busy = NAN;
+    g->rc6_busy = NAN;
+    g->amd_busy = -1;
+    g->vram_used = g->vram_total = -1;
+    /* The PCI device is the DRM device's own directory, or (virtio_gpu,
+     * whose DRM device hangs off a virtio one) its parent. */
+    char *pdir = NULL;
+    char *base = g_path_get_basename(dev);
+    if (is_pci_addr(base)) {
+        pdir = g_strdup(dev);
+    } else {
+        char *up = g_path_get_dirname(dev), *ub = g_path_get_basename(up);
+        if (is_pci_addr(ub))
+            pdir = g_strdup(up);
+        g_free(up);
+        g_free(ub);
+    }
+    g_free(base);
+    char p[512];
+    if (pdir) {
+        g->pci = g_path_get_basename(pdir);
+        char b[32];
+        g_snprintf(p, sizeof p, "%s/vendor", pdir);
+        guint ven = read_small(p, b, sizeof b) > 0 ? (guint)g_ascii_strtoull(b, NULL, 16) : 0;
+        g_snprintf(p, sizeof p, "%s/device", pdir);
+        guint id = read_small(p, b, sizeof b) > 0 ? (guint)g_ascii_strtoull(b, NULL, 16) : 0;
+        g->name = pci_name(ids, ven, id);
+        g_snprintf(p, sizeof p, "%s/boot_vga", pdir);
+        g->boot_vga = read_num(p, 0) == 1;
+        g_free(pdir);
+    }
+    if (!g->name)
+        g->name = g_strdup_printf(T("Graphics device (%s)", "그래픽 장치 (%s)"), g->driver);
+    g_snprintf(p, sizeof p, "/sys/class/drm/%s/power/rc6_residency_ms", node);
+    g->has_rc6 = g_file_test(p, G_FILE_TEST_EXISTS);
+    g_snprintf(p, sizeof p, "/sys/class/drm/%s/gt_max_freq_mhz", node);
+    g->max_mhz = (int)read_num(p, 0);
+    return g;
+}
+
+static void find_gpus(void)
+{
+    S.gpus = g_ptr_array_new();
+    gpu_nodes = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    GDir *d = g_dir_open("/sys/class/drm", 0, NULL);
     if (!d)
         return;
+    char *ids = NULL;
+    if (!g_file_get_contents("/usr/share/misc/pci.ids", &ids, NULL, NULL))
+        g_file_get_contents("/usr/share/hwdata/pci.ids", &ids, NULL, NULL);
+    GPtrArray *render = g_ptr_array_new_with_free_func(g_free);
     const char *e;
     while ((e = g_dir_read_name(d))) {
+        if (g_str_has_prefix(e, "renderD"))
+            g_ptr_array_add(render, g_strdup(e));
+        if (card_number(e) < 0)
+            continue;
         char p[160];
-        g_snprintf(p, sizeof p, "/sys/bus/pci/devices/%s/vendor", e);
-        char *v = read_word(p);
-        g_snprintf(p, sizeof p, "/sys/bus/pci/devices/%s/class", e);
-        char *c = read_word(p);
-        if (v && c && !strcmp(v, "0x10de") && g_str_has_prefix(c, "0x03")) {
-            g_snprintf(p, sizeof p, "/sys/bus/pci/devices/%s/power/runtime_status", e);
-            char *st = read_word(p);
-            S.dgpu = g_strdup(st && !strcmp(st, "suspended")
-                ? T("NVIDIA GPU asleep - it wakes when an application asks for it",
-                    "NVIDIA GPU 휴면 중 - 앱이 요청하면 깨어납니다")
-                : T("NVIDIA GPU awake", "NVIDIA GPU 동작 중"));
-            g_free(st);
+        g_snprintf(p, sizeof p, "/sys/class/drm/%s/device", e);
+        char *real = realpath(p, NULL);
+        g_snprintf(p, sizeof p, "/sys/class/drm/%s/device/driver", e);
+        char *link = g_file_read_link(p, NULL);
+        /* virtio_gpu's DRM device is the PCI function, whose driver is
+         * virtio-pci; the GPU driver is bound to the virtio device
+         * under it. */
+        if (link && g_str_has_suffix(link, "/virtio-pci") && real) {
+            GDir *vd = g_dir_open(real, 0, NULL);
+            const char *v;
+            while (vd && (v = g_dir_read_name(vd))) {
+                g_snprintf(p, sizeof p, "%s/%s/driver", real, v);
+                char *l2 = g_str_has_prefix(v, "virtio") ? g_file_read_link(p, NULL) : NULL;
+                if (l2) {
+                    g_free(link);
+                    link = l2;
+                    break;
+                }
+            }
+            if (vd)
+                g_dir_close(vd);
         }
-        g_free(v);
-        g_free(c);
+        if (real && link) {
+            Gpu *g = gpu_new(e, g_strdup(real), g_path_get_basename(link), ids);
+            g_ptr_array_add(S.gpus, g);
+            g_hash_table_insert(gpu_nodes, g_strdup(e), g);
+        }
+        free(real);
+        g_free(link);
     }
     g_dir_close(d);
+    g_free(ids);
+    /* renderD128 is the same device as card0: the same Gpu. */
+    for (guint i = 0; i < render->len; i++) {
+        const char *r = g_ptr_array_index(render, i);
+        char p[160];
+        g_snprintf(p, sizeof p, "/sys/class/drm/%s/device", r);
+        char *real = realpath(p, NULL);
+        for (guint k = 0; real && k < S.gpus->len; k++) {
+            Gpu *g = g_ptr_array_index(S.gpus, k);
+            if (!strcmp(g->dev, real))
+                g_hash_table_insert(gpu_nodes, g_strdup(r), g);
+        }
+        free(real);
+    }
+    g_ptr_array_unref(render);
+    g_ptr_array_sort(S.gpus, gpu_cmp);
 }
 
-static void sample_gpu(void)
+typedef struct { int pid, fd; Gpu *gpu; } DrmFd;
+
+typedef struct {
+    guint   gen;             /* the sample that last saw it */
+    int     n;
+    char    eng[GPU_ENGINES][24];
+    guint64 ns[GPU_ENGINES];
+} DrmClient;
+
+static GArray *drm_fds;             /* DrmFd */
+static GHashTable *drm_clients;     /* "card0/<drm-client-id>" -> DrmClient */
+static guint drm_gen;
+
+/* Which of the person's processes have which DRM device open. Other
+ * accounts' /proc/<pid>/fd cannot be opened and are skipped at once. */
+static void scan_drm_fds(void)
 {
-    if (!drm_card)
-        return;
-    char p[128];
-    g_snprintf(p, sizeof p, "%s/gt_act_freq_mhz", drm_card);
-    S.gpu_mhz = (int)read_num(p, 0);
-    if (!S.gpu_ok)
-        return;
-    g_snprintf(p, sizeof p, "%s/power/rc6_residency_ms", drm_card);
-    gint64 rc6 = read_num(p, -1);
-    gint64 t = g_get_monotonic_time() / 1000;
-    if (rc6 >= 0 && S.prev_rc6_t) {
-        double idle = (double)(rc6 - S.prev_rc6) / (double)MAX(1, t - S.prev_rc6_t);
-        S.gpu = CLAMP(100.0 * (1.0 - idle), 0.0, 100.0);
+    if (!drm_fds) {
+        drm_fds = g_array_new(FALSE, FALSE, sizeof(DrmFd));
+        drm_clients = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     }
-    S.prev_rc6 = rc6;
-    S.prev_rc6_t = t;
+    g_array_set_size(drm_fds, 0);
+    if (!S.gpus->len)
+        return;
+    GDir *d = g_dir_open("/proc", 0, NULL);
+    const char *e;
+    while (d && (e = g_dir_read_name(d))) {
+        if (!g_ascii_isdigit(e[0]))
+            continue;
+        char p[64];
+        g_snprintf(p, sizeof p, "/proc/%s/fd", e);
+        GDir *fds = g_dir_open(p, 0, NULL);
+        const char *f;
+        while (fds && (f = g_dir_read_name(fds))) {
+            char lp[96], tgt[64];
+            g_snprintf(lp, sizeof lp, "/proc/%s/fd/%s", e, f);
+            ssize_t n = readlink(lp, tgt, sizeof tgt - 1);
+            if (n <= 9 || strncmp(tgt, "/dev/dri/", 9) != 0)
+                continue;
+            tgt[n] = '\0';
+            Gpu *g = g_hash_table_lookup(gpu_nodes, tgt + 9);
+            if (g) {
+                DrmFd x = { atoi(e), atoi(f), g };
+                g_array_append_val(drm_fds, x);
+            }
+        }
+        if (fds)
+            g_dir_close(fds);
+    }
+    if (d)
+        g_dir_close(d);
+}
+
+static int gpu_engine(Gpu *g, const char *name)
+{
+    for (int i = 0; i < g->neng; i++)
+        if (!strcmp(g->eng[i], name))
+            return i;
+    if (g->neng == GPU_ENGINES)
+        return -1;
+    g_strlcpy(g->eng[g->neng], name, sizeof g->eng[0]);
+    g->eng_cap[g->neng] = 1;
+    return g->neng++;
+}
+
+/* "1234 KiB", "12 MiB" or plain bytes (drm-usage-stats). */
+static guint64 fdinfo_bytes(const char *v)
+{
+    char *end = NULL;
+    guint64 n = g_ascii_strtoull(v, &end, 10);
+    while (end && (*end == ' ' || *end == '\t'))
+        end++;
+    if (end && g_str_has_prefix(end, "KiB"))
+        n *= 1024;
+    else if (end && g_str_has_prefix(end, "MiB"))
+        n *= 1024 * 1024;
+    return n;
+}
+
+static void sample_drm(double secs)
+{
+    for (guint i = 0; i < S.gpus->len; i++) {
+        Gpu *g = g_ptr_array_index(S.gpus, i);
+        memset(g->eng_ns, 0, sizeof g->eng_ns);
+        g->mem_fd = 0;
+    }
+    if (!drm_fds)
+        return;
+    guint gen = ++drm_gen;
+    for (guint i = drm_fds->len; i-- > 0;) {
+        DrmFd *f = &g_array_index(drm_fds, DrmFd, i);
+        char p[64], buf[4096];
+        g_snprintf(p, sizeof p, "/proc/%d/fdinfo/%d", f->pid, f->fd);
+        const char *cid = NULL;
+        if (read_small(p, buf, sizeof buf) <= 0 || !(cid = strstr(buf, "drm-client-id:"))) {
+            g_array_remove_index_fast(drm_fds, i);   /* closed, or the process ended */
+            continue;
+        }
+        Gpu *g = f->gpu;
+        char key[64];
+        g_snprintf(key, sizeof key, "%s/%" G_GUINT64_FORMAT, g->node,
+                   g_ascii_strtoull(cid + 14, NULL, 10));
+        DrmClient *c = g_hash_table_lookup(drm_clients, key);
+        if (c && c->gen == gen)
+            continue;                                /* the same client, another fd */
+        if (!c) {
+            c = g_new0(DrmClient, 1);
+            g_hash_table_insert(drm_clients, g_strdup(key), c);
+        }
+        c->gen = gen;
+        guint64 resident = 0, legacy = 0;
+        gboolean has_resident = FALSE, has_mem = FALSE;
+        for (char *l = buf, *n; l && *l; l = n) {
+            n = strchr(l, '\n');
+            if (n)
+                *n++ = '\0';
+            char *colon = strchr(l, ':');
+            if (!g_str_has_prefix(l, "drm-") || !colon)
+                continue;
+            *colon = '\0';
+            const char *k = l + 4, *v = colon + 1;
+            if (g_str_has_prefix(k, "engine-capacity-")) {
+                int e = gpu_engine(g, k + 16);
+                if (e >= 0)
+                    g->eng_cap[e] = MAX(1.0, g_ascii_strtod(v, NULL));
+            } else if (g_str_has_prefix(k, "engine-")) {
+                const char *en = k + 7;
+                guint64 ns = g_ascii_strtoull(v, NULL, 10);
+                int e = gpu_engine(g, en);
+                g->fd_engines = TRUE;
+                int j = 0;
+                while (j < c->n && strcmp(c->eng[j], en) != 0)
+                    j++;
+                if (j < c->n) {
+                    /* Its time since the last sample; a client first seen
+                     * now only sets where it starts from. */
+                    if (e >= 0 && ns >= c->ns[j])
+                        g->eng_ns[e] += (double)(ns - c->ns[j]);
+                    c->ns[j] = ns;
+                } else if (c->n < GPU_ENGINES) {
+                    g_strlcpy(c->eng[c->n], en, sizeof c->eng[0]);
+                    c->ns[c->n++] = ns;
+                }
+            } else if (g_str_has_prefix(k, "resident-")) {
+                resident += fdinfo_bytes(v);
+                has_resident = has_mem = TRUE;
+            } else if (g_str_has_prefix(k, "memory-")) {   /* amdgpu's older name */
+                legacy += fdinfo_bytes(v);
+                has_mem = TRUE;
+            }
+        }
+        g->fd_mem |= has_mem;
+        g->mem_fd += has_resident ? resident : legacy;
+    }
+    GHashTableIter it;
+    gpointer k, v;
+    g_hash_table_iter_init(&it, drm_clients);
+    while (g_hash_table_iter_next(&it, &k, &v))
+        if (((DrmClient *)v)->gen != gen)
+            g_hash_table_iter_remove(&it);
+    for (guint i = 0; i < S.gpus->len; i++) {
+        Gpu *g = g_ptr_array_index(S.gpus, i);
+        for (int e = 0; e < g->neng; e++)
+            g->eng_pct[e] = secs > 0
+                ? CLAMP(100.0 * g->eng_ns[e] / (secs * 1e9 * g->eng_cap[e]), 0.0, 100.0) : 0.0;
+    }
+}
+
+static void sample_gpus(double secs)
+{
+    for (guint i = 0; i < S.gpus->len; i++) {
+        Gpu *g = g_ptr_array_index(S.gpus, i);
+        char p[512];
+        g_snprintf(p, sizeof p, "%s/power/runtime_status", g->dev);
+        char *st = read_word(p);
+        g->asleep = st && !strcmp(st, "suspended");
+        g_free(st);
+        g->mhz = 0;
+        g->amd_busy = -1;
+        if (g->asleep) {
+            g->prev_rc6_t = 0;   /* RC6 time across a suspend means nothing */
+            continue;
+        }
+        g_snprintf(p, sizeof p, "/sys/class/drm/%s/gt_act_freq_mhz", g->node);
+        g->mhz = (int)read_num(p, 0);
+        if (g->has_rc6) {
+            g_snprintf(p, sizeof p, "/sys/class/drm/%s/power/rc6_residency_ms", g->node);
+            gint64 rc6 = read_num(p, -1), t = g_get_monotonic_time() / 1000;
+            g->rc6_busy = NAN;
+            if (rc6 >= 0 && g->prev_rc6_t) {
+                double idle = (double)(rc6 - g->prev_rc6) / (double)MAX(1, t - g->prev_rc6_t);
+                g->rc6_busy = CLAMP(100.0 * (1.0 - idle), 0.0, 100.0);
+            }
+            g->prev_rc6 = rc6;
+            g->prev_rc6_t = t;
+        }
+        if (!strcmp(g->driver, "amdgpu")) {
+            g_snprintf(p, sizeof p, "%s/gpu_busy_percent", g->dev);
+            g->amd_busy = (double)read_num(p, -1);
+            g_snprintf(p, sizeof p, "%s/mem_info_vram_used", g->dev);
+            g->vram_used = read_num(p, -1);
+            g_snprintf(p, sizeof p, "%s/mem_info_vram_total", g->dev);
+            g->vram_total = read_num(p, -1);
+        }
+    }
+    sample_drm(secs);
+    for (guint i = 0; i < S.gpus->len; i++) {
+        Gpu *g = g_ptr_array_index(S.gpus, i);
+        double top = 0;
+        for (int e = 0; e < g->neng; e++)
+            top = MAX(top, g->eng_pct[e]);
+        if (g->asleep) {
+            g->busy = 0;         /* asleep is idle, and that much is known */
+        } else if (g->amd_busy >= 0) {
+            g->src = SRC_AMD;
+            g->busy = g->amd_busy;
+        } else if (g->fd_engines) {
+            g->src = SRC_FDINFO;
+            g->busy = top;
+        } else if (g->has_rc6) {
+            g->src = SRC_RC6;
+            g->busy = isnan(g->rc6_busy) ? 0 : g->rc6_busy;
+        } else {
+            g->src = SRC_NONE;
+            g->busy = NAN;
+        }
+    }
 }
 
 static void find_battery(void)
@@ -613,6 +1213,41 @@ static void sample_battery(void)
     }
 }
 
+/* The whole disk a block device is on: /dev/nvme0n1p2 -> nvme0n1, and
+ * through device-mapper (an encrypted root) to the partition under it. */
+static char *disk_of(const char *devpath)
+{
+    char *real = realpath(devpath, NULL);
+    char *name = g_path_get_basename(real ? real : devpath);
+    free(real);
+    char p[192];
+    for (int depth = 0; depth < 4; depth++) {
+        g_snprintf(p, sizeof p, "/sys/class/block/%s/slaves", name);
+        GDir *d = g_dir_open(p, 0, NULL);
+        const char *e = d ? g_dir_read_name(d) : NULL;
+        char *next = e ? g_strdup(e) : NULL;
+        if (d)
+            g_dir_close(d);
+        if (!next)
+            break;
+        g_free(name);
+        name = next;
+    }
+    g_snprintf(p, sizeof p, "/sys/class/block/%s/partition", name);
+    if (g_file_test(p, G_FILE_TEST_EXISTS)) {
+        g_snprintf(p, sizeof p, "/sys/class/block/%s", name);
+        char *r = realpath(p, NULL);
+        g_clear_pointer(&name, g_free);
+        if (r) {
+            char *up = g_path_get_dirname(r);
+            name = g_path_get_basename(up);
+            g_free(up);
+            free(r);
+        }
+    }
+    return name;
+}
+
 /* Mounted filesystems that are real disks, for the Drives page. */
 static void sample_fs(void)
 {
@@ -623,6 +1258,7 @@ static void sample_fs(void)
         g_free(f->name);
         g_free(f->path);
         g_free(f->dev);
+        g_free(f->disk);
         g_free(f);
     }
     g_ptr_array_set_size(S.fs, 0);
@@ -655,6 +1291,7 @@ static void sample_fs(void)
                     Fs *fs = g_new0(Fs, 1);
                     fs->path = path;
                     fs->dev = g_strdup(f[dash + 2]);
+                    fs->disk = disk_of(fs->dev);
                     fs->size = (guint64)sv.f_blocks * sv.f_frsize;
                     fs->avail = (guint64)sv.f_bavail * sv.f_frsize;
                     fs->name = !strcmp(path, "/") ? g_strdup(T("System", "시스템"))
@@ -682,6 +1319,7 @@ G_DECLARE_FINAL_TYPE(LptProc, lpt_proc, LPT, PROC, GObject)
 struct _LptProc {
     GObject  parent_instance;
     int      pid;
+    int      ppid;
     guint    uid;
     char    *name;       /* argv[0]'s basename, or comm */
     char    *cmd;
@@ -775,7 +1413,7 @@ static gboolean scan_one(int pid, guint64 total_delta)
     char *comm = g_strndup(lp + 1, (gsize)(rp - lp - 1));
     char *p = rp + 2;
     unsigned long long f[20] = { 0 };
-    /* state is field 3; we want utime(14) stime(15) threads(20). */
+    /* state is field 3; we want ppid(4) utime(14) stime(15) threads(20). */
     char state = *p;
     (void)state;
     p += 2;
@@ -783,6 +1421,7 @@ static gboolean scan_one(int pid, guint64 total_delta)
         f[i - 4 < 20 ? i - 4 : 19] = g_ascii_strtoull(p, &p, 10);
     guint64 ticks = f[14 - 4] + f[15 - 4];
     int threads = (int)f[20 - 4];
+    int ppid = (int)f[4 - 4];
 
     LptProc *pr = g_hash_table_lookup(procs, GINT_TO_POINTER(pid));
     gboolean fresh = pr == NULL;
@@ -829,6 +1468,7 @@ static gboolean scan_one(int pid, guint64 total_delta)
         pr->cpu = 0;
     pr->prev_ticks = ticks;
     pr->threads = threads;
+    pr->ppid = ppid;
     g_snprintf(path, sizeof path, "/proc/%d/statm", pid);
     if (read_small(path, buf, sizeof buf) > 0) {
         char *q = buf;
@@ -952,6 +1592,7 @@ typedef struct {
     const Series  *a, *b;
     GraphFmt       fmt;
     double         fixed_max;       /* > 0: a fixed scale (percent) */
+    int            nat_h;           /* natural height; 0 for the usual */
     LpSpring       value;           /* the headline number, eased */
     LpSpring       scale;           /* auto scale, eased */
     guint          tick;
@@ -1260,9 +1901,10 @@ static void graph_unmap(GtkWidget *w)
 static void graph_measure(GtkWidget *w, GtkOrientation o, int for_size,
                           int *min, int *nat, int *mb, int *nb)
 {
-    (void)w; (void)for_size;
-    *min = o == GTK_ORIENTATION_HORIZONTAL ? 200 : 200;
-    *nat = o == GTK_ORIENTATION_HORIZONTAL ? 600 : 230;
+    (void)for_size;
+    int h = ((LptGraph *)w)->nat_h > 0 ? ((LptGraph *)w)->nat_h : 230;
+    *min = o == GTK_ORIENTATION_HORIZONTAL ? 200 : MIN(200, h);
+    *nat = o == GTK_ORIENTATION_HORIZONTAL ? 600 : h;
     *mb = *nb = -1;
 }
 
@@ -1308,6 +1950,13 @@ static LptGraph *graph_new(const Series *a, const Series *b, GraphFmt fmt,
     g->legend_b = g_strdup(legend_b);
     gtk_widget_set_hexpand(GTK_WIDGET(g), TRUE);
     return g;
+}
+
+/* A shorter graph, for a page with one per device. */
+static void graph_small(LptGraph *g, int h)
+{
+    g->nat_h = h;
+    gtk_widget_add_css_class(GTK_WIDGET(g), "small");
 }
 
 static void graph_sampled(LptGraph *g, const char *detail)
@@ -1476,6 +2125,21 @@ typedef struct {
     GtkWidget *box, *value, *unit, *key;
 } Stat;
 
+/* The widgets for one disk, one GPU, one CPU package. */
+typedef struct {
+    GtkWidget *box;
+    LptGraph  *graph;
+    Stat       st_rd, st_wr, st_active, st_size;
+    GtkWidget *fs_box;
+} DiskUi;
+
+typedef struct {
+    GtkWidget *box;
+    LptGraph  *graph;
+    Stat       st_clock, st_max, st_mem, st_state;
+    GtkWidget *note;
+} GpuUi;
+
 typedef struct {
     GtkApplication *gapp;
     GtkWidget *win, *sidebar, *stack;
@@ -1485,9 +2149,12 @@ typedef struct {
 
     /* Apps */
     GtkWidget *apps_list;
-    GHashTable *app_rows;        /* desktop id -> row widgets (AppRow*) */
+    GHashTable *app_rows;        /* desktop id or app_id -> row widgets (AppRow*) */
     GtkWidget *apps_hint;
     GtkWidget *apps_hint_label;
+    GtkWidget *apps_empty, *apps_note;
+    gboolean   windows;          /* the compositor lists windows (lp-toplevel) */
+    GHashTable *win_apps;        /* app_id -> GDesktopAppInfo, or NULL: none */
 
     /* Processes */
     GtkWidget *proc_view;
@@ -1500,18 +2167,16 @@ typedef struct {
     GtkWidget *proc_count;
 
     /* Resources */
-    LptGraph  *g_cpu, *g_mem, *g_gpu, *g_disk, *g_net, *g_bat;
+    LptGraph  *g_cpu, *g_mem, *g_net, *g_bat;
+    LptGraph **g_pkg;            /* one per CPU package, when more than one */
     LptBars   *cores, *mem_bar;
     Stat       st_procs, st_threads, st_uptime, st_temp;
     Stat       st_mem_used, st_mem_avail, st_mem_cache, st_swap;
-    Stat       st_gpu_freq, st_gpu_max, st_gpu_drv;
-    Stat       st_rd, st_wr;
     Stat       st_rx, st_tx, st_rx_tot, st_tx_tot;
     Stat       st_bat_pct, st_bat_time, st_bat_w, st_bat_health;
     GtkWidget *cpu_sub, *cpu_kv;
     GtkWidget *mem_top;
-    GtkWidget *gpu_note;
-    GtkWidget *fs_box;
+    GtkWidget *disks_box, *fs_other;
     GtkWidget *net_ifaces;
     GtkWidget *net_wifi;
     GtkWidget *bat_note, *bat_state;
@@ -1648,21 +2313,47 @@ static GtkWidget *page_box(void)
 
 /* ── Apps ─────────────────────────────────────────────────────────── */
 
+/* The Apps page lists what has a window - "the browser got slow" is
+ * what people come here for - and only the compositor knows what has a
+ * window: on Wayland a program sees its own and nobody else's. It says
+ * through wlr-foreign-toplevel-management (lp-toplevel.c, the list the
+ * dock's dots and the top bar come from), which wayfire 0.7 has in its
+ * core and sway too. The first version of this page asked swaymsg
+ * instead, which under wayfire fails, and the page then said nothing
+ * had a window open with the person's windows in front of them.
+ *
+ * A window names itself by app_id, not by process, so the processes are
+ * found the way the dock finds the application: app_id -> .desktop file
+ * (lp-apps.c) -> the program its Exec starts -> the person's processes
+ * running that program, or named like the app_id. Then everything
+ * those started goes with them - the shell in a terminal, a browser's
+ * helpers - so a build running in a terminal shows as the terminal's
+ * CPU, as it would in any task manager. End signals only the
+ * application's own processes; what they started ends with them.
+ *
+ * Where the compositor offers no window list the page falls back to
+ * every program of the person's that has an application entry, and says
+ * that is what it is showing. */
+
 typedef struct {
-    char      *id;
+    char      *id;       /* desktop id, or the window's app_id */
+    char      *exe;      /* the program its .desktop starts, lower case */
     GtkWidget *rev, *row, *icon, *name, *count, *cpu, *mem;
     double     cpu_v;
     guint64    mem_v;
-    int        n;
+    int        n, nwin;
     gboolean   leaving;
-    GPtrArray *pids;
+    GPtrArray *pids;     /* its own processes: what End signals */
+    GPtrArray *wins;     /* LpToplevel*, as of the last update */
 } AppRow;
 
 static void approw_free(gpointer d)
 {
     AppRow *r = d;
     g_free(r->id);
+    g_free(r->exe);
     g_ptr_array_unref(r->pids);
+    g_ptr_array_unref(r->wins);
     g_free(r);
 }
 
@@ -1728,8 +2419,15 @@ static void on_app_end(GtkButton *b, gpointer d)
 {
     (void)b;
     AppRow *r = d;
-    if (!r->pids->len)
+    if (!r->pids->len) {
+        /* Windows whose program could not be found: asked to close, as
+         * their close button would. Only those still open - a window
+         * that closed since the last update is gone from the list. */
+        for (guint i = 0; i < r->wins->len; i++)
+            if (g_list_find(lp_toplevels(), g_ptr_array_index(r->wins, i)))
+                lp_toplevel_close(g_ptr_array_index(r->wins, i));
         return;
+    }
     int *p = g_new(int, r->pids->len);
     for (guint i = 0; i < r->pids->len; i++)
         p[i] = GPOINTER_TO_INT(g_ptr_array_index(r->pids, i));
@@ -1737,25 +2435,34 @@ static void on_app_end(GtkButton *b, gpointer d)
     g_free(p);
 }
 
-static AppRow *approw_new(const char *id)
+static AppRow *approw_new(const char *id, GDesktopAppInfo *ai, const char *app_id)
 {
     AppRow *r = g_new0(AppRow, 1);
     r->id = g_strdup(id);
     r->pids = g_ptr_array_new();
-    GDesktopAppInfo *ai = g_desktop_app_info_new(id);
+    r->wins = g_ptr_array_new();
+    const char *ex = ai ? g_app_info_get_executable(G_APP_INFO(ai)) : NULL;
+    if (ex && *ex) {
+        char *b = g_path_get_basename(ex);
+        r->exe = g_ascii_strdown(b, -1);
+        g_free(b);
+    }
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
     gtk_widget_add_css_class(box, "lpt-app-row");
     r->icon = gtk_image_new();
     gtk_image_set_pixel_size(GTK_IMAGE(r->icon), 32);
     GIcon *ic = ai ? g_app_info_get_icon(G_APP_INFO(ai)) : NULL;
+    GtkIconTheme *th = gtk_icon_theme_get_for_display(gdk_display_get_default());
     if (ic)
         gtk_image_set_from_gicon(GTK_IMAGE(r->icon), ic);
+    else if (app_id && gtk_icon_theme_has_icon(th, app_id))
+        gtk_image_set_from_icon_name(GTK_IMAGE(r->icon), app_id);
     else
         gtk_image_set_from_icon_name(GTK_IMAGE(r->icon), "application-x-executable");
     gtk_box_append(GTK_BOX(box), r->icon);
     GtkWidget *nb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_set_hexpand(nb, TRUE);
-    r->name = label(ai ? g_app_info_get_display_name(G_APP_INFO(ai)) : id, "lpt-app-name", 0);
+    r->name = label(ai ? lp_app_name(G_APP_INFO(ai)) : id, "lpt-app-name", 0);
     gtk_label_set_ellipsize(GTK_LABEL(r->name), PANGO_ELLIPSIZE_END);
     r->count = label("", "lpt-dim", 0);
     gtk_box_append(GTK_BOX(nb), r->name);
@@ -1775,8 +2482,6 @@ static AppRow *approw_new(const char *id)
     g_signal_connect(end, "clicked", G_CALLBACK(on_app_end), r);
     gtk_box_append(GTK_BOX(box), end);
     r->row = box;
-    if (ai)
-        g_object_unref(ai);
     return r;
 }
 
@@ -1804,21 +2509,118 @@ static void approw_gone(GtkWidget *rev, gpointer d)
         gtk_list_box_remove(GTK_LIST_BOX(A->apps_list), row);
 }
 
-static void update_apps(void)
+static void unref_or_null(gpointer o)
 {
-    GHashTable *sum = g_hash_table_new(g_str_hash, g_str_equal);
+    if (o)
+        g_object_unref(o);
+}
+
+/* The application a window belongs to, remembered per app_id: past its
+ * two quick guesses lp_app_for_id reads every .desktop file. */
+static GDesktopAppInfo *app_for_window(const char *app_id)
+{
+    gpointer d;
+    if (!g_hash_table_lookup_extended(A->win_apps, app_id, NULL, &d)) {
+        d = lp_app_for_id(app_id);
+        g_hash_table_insert(A->win_apps, g_strdup(app_id), d);
+    }
+    return d;
+}
+
+static AppRow *app_row(const char *id, GDesktopAppInfo *ai, const char *app_id, gboolean first)
+{
+    AppRow *r = g_hash_table_lookup(A->app_rows, id);
+    if (r)
+        return r;
+    r = approw_new(id, ai, app_id);
+    g_hash_table_insert(A->app_rows, r->id, r);
+    r->rev = lp_kit_reveal_in(r->row, first);
+    gtk_list_box_append(GTK_LIST_BOX(A->apps_list), r->rev);
+    GtkWidget *lbr = gtk_widget_get_parent(r->rev);
+    g_object_set_data(G_OBJECT(lbr), "approw", r);
+    gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(lbr), FALSE);
+    return r;
+}
+
+static void app_add(AppRow *r, LptProc *pr)
+{
+    r->cpu_v += pr->cpu;
+    r->mem_v += pr->rss;
+    r->n++;
+}
+
+/* Rows from the windows, then their processes (see above). */
+static void apps_from_windows(GHashTable *live, gboolean first)
+{
+    GHashTable *by_name = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (GList *l = lp_toplevels(); l; l = l->next) {
+        LpToplevel *t = l->data;
+        if (!t->done)
+            continue;
+        const char *aid = t->app_id && *t->app_id ? t->app_id : NULL;
+        GDesktopAppInfo *ai = aid ? app_for_window(aid) : NULL;
+        const char *id = ai ? g_app_info_get_id(G_APP_INFO(ai))
+                       : aid ? aid : t->title && *t->title ? t->title : "?";
+        AppRow *r = app_row(id, ai, aid, first);
+        r->nwin++;
+        g_ptr_array_add(r->wins, t);
+        g_hash_table_add(live, r->id);
+        if (r->exe)
+            g_hash_table_replace(by_name, g_strdup(r->exe), r);
+        if (aid)
+            g_hash_table_replace(by_name, g_ascii_strdown(aid, -1), r);
+    }
+    guint me = getuid();
+    GHashTable *owner = g_hash_table_new(g_direct_hash, g_direct_equal);
+    GHashTableIter it;
+    gpointer k, v;
+    g_hash_table_iter_init(&it, procs);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        LptProc *pr = v;
+        if (pr->uid != me)
+            continue;
+        AppRow *r = pr->app && g_hash_table_contains(live, pr->app)
+                  ? g_hash_table_lookup(A->app_rows, pr->app) : NULL;
+        if (!r) {
+            char *low = g_ascii_strdown(pr->name, -1);
+            r = g_hash_table_lookup(by_name, low);
+            g_free(low);
+        }
+        if (r) {
+            g_hash_table_insert(owner, GINT_TO_POINTER(pr->pid), r);
+            g_ptr_array_add(r->pids, GINT_TO_POINTER(pr->pid));
+            app_add(r, pr);
+        }
+    }
+    g_hash_table_iter_init(&it, procs);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        LptProc *pr = v;
+        if (pr->uid != me || g_hash_table_contains(owner, GINT_TO_POINTER(pr->pid)))
+            continue;
+        int pp = pr->ppid;
+        for (int depth = 0; depth < 16 && pp > 1; depth++) {
+            AppRow *r = g_hash_table_lookup(owner, GINT_TO_POINTER(pp));
+            if (r) {
+                app_add(r, pr);
+                break;
+            }
+            LptProc *up = g_hash_table_lookup(procs, GINT_TO_POINTER(pp));
+            if (!up)
+                break;
+            pp = up->ppid;
+        }
+    }
+    g_hash_table_unref(owner);
+    g_hash_table_unref(by_name);
+}
+
+/* No window list: every program of the person's with an application
+ * entry. */
+static void apps_from_processes(GHashTable *live, gboolean first)
+{
     guint me = getuid();
     GHashTableIter it;
     gpointer k, v;
-    for (GHashTableIter *p = (g_hash_table_iter_init(&it, A->app_rows), &it);
-         g_hash_table_iter_next(p, &k, &v);) {
-        AppRow *r = v;
-        r->cpu_v = 0;
-        r->mem_v = 0;
-        r->n = 0;
-        g_ptr_array_set_size(r->pids, 0);
-    }
-    gboolean first = g_hash_table_size(A->app_rows) == 0;
     g_hash_table_iter_init(&it, procs);
     while (g_hash_table_iter_next(&it, &k, &v)) {
         LptProc *pr = v;
@@ -1826,26 +2628,41 @@ static void update_apps(void)
             continue;
         AppRow *r = g_hash_table_lookup(A->app_rows, pr->app);
         if (!r) {
-            r = approw_new(pr->app);
-            g_hash_table_insert(A->app_rows, r->id, r);
-            r->rev = lp_kit_reveal_in(r->row, first);
-            gtk_list_box_append(GTK_LIST_BOX(A->apps_list), r->rev);
-            GtkWidget *lbr = gtk_widget_get_parent(r->rev);
-            g_object_set_data(G_OBJECT(lbr), "approw", r);
-            gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(lbr), FALSE);
+            GDesktopAppInfo *ai = g_desktop_app_info_new(pr->app);
+            r = app_row(pr->app, ai, NULL, first);
+            g_clear_object(&ai);
         }
-        r->cpu_v += pr->cpu;
-        r->mem_v += pr->rss;
-        r->n++;
+        app_add(r, pr);
         g_ptr_array_add(r->pids, GINT_TO_POINTER(pr->pid));
-        g_hash_table_add(sum, r->id);
+        g_hash_table_add(live, r->id);
     }
+}
+
+static void update_apps(void)
+{
+    GHashTable *live = g_hash_table_new(g_str_hash, g_str_equal);
+    GHashTableIter it;
+    gpointer k, v;
+    g_hash_table_iter_init(&it, A->app_rows);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        AppRow *r = v;
+        r->cpu_v = 0;
+        r->mem_v = 0;
+        r->n = r->nwin = 0;
+        g_ptr_array_set_size(r->pids, 0);
+        g_ptr_array_set_size(r->wins, 0);
+    }
+    gboolean first = g_hash_table_size(A->app_rows) == 0;
+    if (A->windows)
+        apps_from_windows(live, first);
+    else
+        apps_from_processes(live, first);
     AppRow *top = NULL;
     GPtrArray *gone = g_ptr_array_new();
     g_hash_table_iter_init(&it, A->app_rows);
     while (g_hash_table_iter_next(&it, &k, &v)) {
         AppRow *r = v;
-        if (!g_hash_table_contains(sum, r->id)) {
+        if (!g_hash_table_contains(live, r->id)) {
             if (!r->leaving) {
                 r->leaving = TRUE;
                 g_ptr_array_add(gone, r);
@@ -1853,16 +2670,27 @@ static void update_apps(void)
             continue;
         }
         char t[64];
-        g_snprintf(t, sizeof t, "%.1f%%", r->cpu_v);
-        gtk_label_set_text(GTK_LABEL(r->cpu), t);
+        if (r->n) {
+            g_snprintf(t, sizeof t, "%.1f%%", r->cpu_v);
+            char *m = fmt_bytes((double)r->mem_v);
+            gtk_label_set_text(GTK_LABEL(r->cpu), t);
+            gtk_label_set_text(GTK_LABEL(r->mem), m);
+            g_free(m);
+        } else {
+            /* A window whose program was not found (yet - a process is
+             * picked up on the next second's walk). */
+            gtk_label_set_text(GTK_LABEL(r->cpu), "—");
+            gtk_label_set_text(GTK_LABEL(r->mem), "—");
+        }
         if (r->cpu_v >= 25)
             gtk_widget_add_css_class(r->cpu, "hot");
         else
             gtk_widget_remove_css_class(r->cpu, "hot");
-        char *m = fmt_bytes((double)r->mem_v);
-        gtk_label_set_text(GTK_LABEL(r->mem), m);
-        g_free(m);
-        char *c = r->n > 1 ? g_strdup_printf(T("%d processes", "프로세스 %d개"), r->n) : g_strdup("");
+        char *c = r->nwin > 1 && r->n > 1
+            ? g_strdup_printf(T("%d windows · %d processes", "창 %d개 · 프로세스 %d개"), r->nwin, r->n)
+            : r->nwin > 1 ? g_strdup_printf(T("%d windows", "창 %d개"), r->nwin)
+            : r->n > 1 ? g_strdup_printf(T("%d processes", "프로세스 %d개"), r->n)
+            : g_strdup("");
         gtk_label_set_text(GTK_LABEL(r->count), c);
         g_free(c);
         if (!top || r->cpu_v > top->cpu_v)
@@ -1875,7 +2703,8 @@ static void update_apps(void)
         g_object_set_data_full(G_OBJECT(r->rev), "approw-free", r, approw_free);
     }
     g_ptr_array_unref(gone);
-    g_hash_table_unref(sum);
+    gtk_widget_set_visible(A->apps_empty, g_hash_table_size(live) == 0);
+    g_hash_table_unref(live);
     gtk_list_box_invalidate_sort(GTK_LIST_BOX(A->apps_list));
     /* The spec's "a sentence next to the number". */
     if (top && top->cpu_v >= 25) {
@@ -1889,11 +2718,22 @@ static void update_apps(void)
     }
 }
 
+/* A window opened or closed: the list follows at once rather than at the
+ * next second. The processes are last second's; a new application's
+ * are counted from the next walk. */
+static void on_windows(gpointer d)
+{
+    (void)d;
+    if (page_is("apps") && !window_minimised())
+        update_apps();
+}
+
 static GtkWidget *build_apps(void)
 {
     GtkWidget *b = page_box();
     gtk_box_append(GTK_BOX(b), page_head(T("Apps", "앱"),
-        T("Applications you are running", "지금 실행 중인 프로그램입니다"), NULL));
+        A->windows ? T("Programs with a window open", "창이 열려 있는 프로그램입니다")
+                   : T("Applications you are running", "지금 실행 중인 프로그램입니다"), NULL));
     GtkWidget *hdr = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
     gtk_widget_add_css_class(hdr, "lpt-colhead");
     GtkWidget *hn = label(T("Name", "이름"), NULL, 0);
@@ -1915,6 +2755,12 @@ static GtkWidget *build_apps(void)
     gtk_widget_add_css_class(A->apps_list, "lpt-list");
     gtk_list_box_set_sort_func(GTK_LIST_BOX(A->apps_list), apps_sort, NULL, NULL);
     gtk_box_append(GTK_BOX(b), A->apps_list);
+    A->apps_empty = label(T("Nothing has a window open.", "창이 열려 있는 프로그램이 없습니다."),
+                          "lpt-note", 0);
+    gtk_widget_set_margin_top(A->apps_empty, 14);
+    gtk_widget_set_margin_start(A->apps_empty, 12);
+    gtk_widget_set_visible(A->apps_empty, FALSE);
+    gtk_box_append(GTK_BOX(b), A->apps_empty);
     A->apps_hint_label = label("", "lpt-hint", 0);
     A->apps_hint = gtk_revealer_new();
     gtk_revealer_set_transition_duration(GTK_REVEALER(A->apps_hint),
@@ -1925,13 +2771,18 @@ static GtkWidget *build_apps(void)
     gtk_box_append(GTK_BOX(hb), A->apps_hint_label);
     gtk_revealer_set_child(GTK_REVEALER(A->apps_hint), hb);
     gtk_box_append(GTK_BOX(b), A->apps_hint);
-    GtkWidget *note = label(T("Only programs with an application entry are listed here. "
-                              "Everything else is under Processes.",
-                              "앱 탭에는 앱 항목이 있는 프로그램만 보입니다. 나머지는 "
-                              "프로세스 탭에 있습니다."), "lpt-note", 0);
-    gtk_label_set_wrap(GTK_LABEL(note), TRUE);
-    gtk_widget_set_margin_top(note, 14);
-    gtk_box_append(GTK_BOX(b), note);
+    A->apps_note = label(A->windows
+        ? T("A program's CPU and memory include what it started, such as the shell in a "
+            "terminal. Programs without a window are under Processes.",
+            "프로그램이 띄운 것(터미널 속 셸 등)의 CPU와 메모리도 함께 셉니다. 창이 없는 "
+            "프로그램은 프로세스 탭에 있습니다.")
+        : T("This compositor does not say which windows are open, so every program with "
+            "an application entry is listed. Everything else is under Processes.",
+            "이 컴포지터는 어떤 창이 열려 있는지 알려 주지 않아, 앱 항목이 있는 프로그램을 "
+            "모두 보여 줍니다. 나머지는 프로세스 탭에 있습니다."), "lpt-note", 0);
+    gtk_label_set_wrap(GTK_LABEL(A->apps_note), TRUE);
+    gtk_widget_set_margin_top(A->apps_note, 14);
+    gtk_box_append(GTK_BOX(b), A->apps_note);
     return lp_kit_scroller(b, FALSE);
 }
 
@@ -2127,20 +2978,32 @@ static void act_proc(GSimpleAction *a, GVariant *p, gpointer d)
     on_proc_end(NULL, d);
 }
 
+/* The column the list is sorted by, kept for next time. GTK 4.8 - the
+ * base's - has no way to ask which column that is (GtkColumnViewSorter
+ * became public in 4.10), so there the list opens sorted by CPU every
+ * time. The sorter also says "changed" once a second, when the numbers
+ * move, so the file is written only when the choice itself changed. */
 static void on_sort_changed(GtkSorter *s, GtkSorterChange c, gpointer d)
 {
-    (void)c; (void)d;
+    (void)s; (void)c; (void)d;
+#if GTK_CHECK_VERSION(4, 10, 0)
     GtkColumnViewColumn *col = gtk_column_view_sorter_get_primary_sort_column(
         GTK_COLUMN_VIEW_SORTER(s));
     if (!col)
         return;
-    g_key_file_set_string(A->state, "tasks", "sort",
-                          gtk_column_view_column_get_id(col) ?
-                          gtk_column_view_column_get_id(col) : "cpu");
-    g_key_file_set_boolean(A->state, "tasks", "sort-desc",
-        gtk_column_view_sorter_get_primary_sort_order(GTK_COLUMN_VIEW_SORTER(s)) ==
-        GTK_SORT_DESCENDING);
+    const char *id = gtk_column_view_column_get_id(col) ? gtk_column_view_column_get_id(col) : "cpu";
+    gboolean desc = gtk_column_view_sorter_get_primary_sort_order(GTK_COLUMN_VIEW_SORTER(s)) ==
+                    GTK_SORT_DESCENDING;
+    char *was = g_key_file_get_string(A->state, "tasks", "sort", NULL);
+    gboolean same = was && !strcmp(was, id) &&
+                    g_key_file_get_boolean(A->state, "tasks", "sort-desc", NULL) == desc;
+    g_free(was);
+    if (same)
+        return;
+    g_key_file_set_string(A->state, "tasks", "sort", id);
+    g_key_file_set_boolean(A->state, "tasks", "sort-desc", desc);
     lp_kit_state_save(A->state, STATE_NAME);
+#endif
 }
 
 static GtkWidget *build_processes(void)
@@ -2207,7 +3070,9 @@ static GtkWidget *build_processes(void)
         g_signal_connect(f, "bind", G_CALLBACK(cell_bind), GINT_TO_POINTER(i));
         g_signal_connect(f, "unbind", G_CALLBACK(cell_unbind), GINT_TO_POINTER(i));
         GtkColumnViewColumn *c = gtk_column_view_column_new(T(COLS[i].en, COLS[i].ko), f);
+#if GTK_CHECK_VERSION(4, 10, 0)
         gtk_column_view_column_set_id(c, COLS[i].id);
+#endif
         gtk_column_view_column_set_sorter(c,
             GTK_SORTER(gtk_custom_sorter_new(COLS[i].cmp, NULL, NULL)));
         if (COLS[i].w)
@@ -2241,8 +3106,11 @@ static GtkWidget *build_processes(void)
 static GtkWidget *build_cpu(void)
 {
     GtkWidget *b = page_box();
-    char *sub = g_strdup_printf(T("%s · %d cores, %d threads", "%s · %d코어 %d스레드"),
-                                S.model, S.cores, S.ncpu);
+    char *sub = S.npkg > 1
+        ? g_strdup_printf(T("%d processors · %d cores, %d threads", "프로세서 %d개 · %d코어 %d스레드"),
+                          S.npkg, S.cores, S.ncpu)
+        : g_strdup_printf(T("%s · %d cores, %d threads", "%s · %d코어 %d스레드"),
+                          S.model, S.cores, S.ncpu);
     gtk_box_append(GTK_BOX(b), page_head("CPU", sub, &A->cpu_sub));
     g_free(sub);
     A->g_cpu = graph_new(&S.cpu_h, NULL, FMT_PERCENT, NULL, NULL);
@@ -2255,6 +3123,26 @@ static GtkWidget *build_cpu(void)
     gtk_box_append(GTK_BOX(b), section(T("Usage per core", "코어별 사용률")));
     A->cores = bars_new(S.ncpu, FALSE);
     gtk_box_append(GTK_BOX(b), GTK_WIDGET(A->cores));
+    /* More than one package (socket): each its own graph, named. */
+    if (S.npkg > 1) {
+        gtk_box_append(GTK_BOX(b), section(T("Usage per processor", "프로세서별 사용률")));
+        A->g_pkg = g_new0(LptGraph *, S.npkg);
+        for (int k = 0; k < S.npkg; k++) {
+            Pkg *pk = &S.pkg[k];
+            char *h = g_strdup_printf(T("Processor %d · %s · %d cores, %d threads",
+                                        "프로세서 %d · %s · %d코어 %d스레드"),
+                                      pk->id, pk->model, pk->cores, pk->threads);
+            GtkWidget *hl = label(h, "lpt-dev", 0);
+            gtk_label_set_ellipsize(GTK_LABEL(hl), PANGO_ELLIPSIZE_END);
+            gtk_widget_set_margin_top(hl, k ? 14 : 2);
+            gtk_widget_set_margin_bottom(hl, 6);
+            gtk_box_append(GTK_BOX(b), hl);
+            g_free(h);
+            A->g_pkg[k] = graph_new(&pk->h, NULL, FMT_PERCENT, NULL, NULL);
+            graph_small(A->g_pkg[k], 150);
+            gtk_box_append(GTK_BOX(b), GTK_WIDGET(A->g_pkg[k]));
+        }
+    }
     A->cpu_kv = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_margin_top(A->cpu_kv, 10);
     char t[64];
@@ -2354,27 +3242,137 @@ static void update_mem_top(void)
 
 /* ── GPU ──────────────────────────────────────────────────────────── */
 
+static const char *engine_label(const char *e)
+{
+    static const struct { const char *id, *en, *ko; } E[] = {
+        { "render", "3D", "3D" }, { "gfx", "3D", "3D" },
+        { "copy", "Copy", "복사" }, { "dma", "Copy", "복사" },
+        { "video", "Video", "비디오" }, { "video-enhance", "Video enhance", "영상 보정" },
+        { "compute", "Compute", "계산" },
+        { "dec", "Video decode", "영상 디코드" }, { "enc", "Video encode", "영상 인코드" },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(E); i++)
+        if (!strcmp(E[i].id, e))
+            return T(E[i].en, E[i].ko);
+    return e;
+}
+
+static GtkWidget *gpu_block(Gpu *g, int index, gboolean many)
+{
+    GpuUi *u = g_new0(GpuUi, 1);
+    g->ui = u;
+    u->box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    if (many) {
+        char *h = g_strdup_printf("GPU %d · %s", index, g->name);
+        GtkWidget *hl = label(h, "lpt-dev", 0);
+        gtk_label_set_ellipsize(GTK_LABEL(hl), PANGO_ELLIPSIZE_END);
+        gtk_widget_set_margin_top(hl, index ? 26 : 0);
+        gtk_box_append(GTK_BOX(u->box), hl);
+        g_free(h);
+    }
+    GString *sub = g_string_new(g->driver);
+    if (g->pci)
+        g_string_append_printf(sub, " · %s", g->pci);
+    if (g->boot_vga)
+        g_string_append_printf(sub, " · %s", T("drives the screen", "화면에 연결됨"));
+    GtkWidget *sl = label(sub->str, "lpt-dim", 0);
+    gtk_widget_set_margin_bottom(sl, 8);
+    gtk_box_append(GTK_BOX(u->box), sl);
+    g_string_free(sub, TRUE);
+    u->graph = graph_new(&g->h, NULL, FMT_PERCENT, NULL, NULL);
+    if (many)
+        graph_small(u->graph, 170);
+    gtk_box_append(GTK_BOX(u->box), GTK_WIDGET(u->graph));
+    gtk_box_append(GTK_BOX(u->box), stats_row(
+        stat_new(&u->st_clock, T("Clock now", "현재 클럭")),
+        stat_new(&u->st_max, T("Maximum", "최대 클럭")),
+        stat_new(&u->st_mem, T("Memory", "메모리")),
+        stat_new(&u->st_state, T("State", "상태"))));
+    u->note = label("", "lpt-note", 0);
+    gtk_label_set_wrap(GTK_LABEL(u->note), TRUE);
+    gtk_widget_set_margin_top(u->note, 10);
+    gtk_box_append(GTK_BOX(u->box), u->note);
+    return u->box;
+}
+
 static GtkWidget *build_gpu(void)
 {
     GtkWidget *b = page_box();
-    gtk_box_append(GTK_BOX(b), page_head("GPU",
-        S.gpu_driver ? (strcmp(S.gpu_driver, "i915") == 0
-                        ? T("Intel graphics (i915) - the one the screen is wired to",
-                            "인텔 그래픽 (i915) - 화면이 연결된 GPU")
-                        : S.gpu_driver)
-                     : T("No graphics driver readings on this computer",
-                         "이 컴퓨터에서 그래픽 드라이버 정보를 읽을 수 없습니다"), NULL));
-    A->g_gpu = graph_new(&S.gpu_h, NULL, FMT_PERCENT, NULL, NULL);
-    gtk_box_append(GTK_BOX(b), GTK_WIDGET(A->g_gpu));
-    gtk_box_append(GTK_BOX(b), stats_row(
-        stat_new(&A->st_gpu_freq, T("Clock now", "현재 클럭")),
-        stat_new(&A->st_gpu_max, T("Maximum", "최대 클럭")),
-        stat_new(&A->st_gpu_drv, T("Driver", "드라이버")), NULL));
-    A->gpu_note = label("", "lpt-note", 0);
-    gtk_label_set_wrap(GTK_LABEL(A->gpu_note), TRUE);
-    gtk_widget_set_margin_top(A->gpu_note, 14);
-    gtk_box_append(GTK_BOX(b), A->gpu_note);
+    int n = (int)S.gpus->len;
+    char *sub = n == 1 ? g_strdup(((Gpu *)g_ptr_array_index(S.gpus, 0))->name)
+              : n > 1 ? g_strdup_printf(T("%d graphics devices", "그래픽 장치 %d개"), n)
+              : g_strdup(T("No graphics device with a driver was found on this computer.",
+                           "이 컴퓨터에서 드라이버가 붙은 그래픽 장치를 찾지 못했습니다."));
+    gtk_box_append(GTK_BOX(b), page_head("GPU", sub, NULL));
+    g_free(sub);
+    for (int i = 0; i < n; i++)
+        gtk_box_append(GTK_BOX(b), gpu_block(g_ptr_array_index(S.gpus, i), i, n > 1));
     return lp_kit_scroller(b, FALSE);
+}
+
+static void update_gpu(Gpu *g)
+{
+    GpuUi *u = g->ui;
+    char t[160];
+    gboolean known = g->asleep || !isnan(g->busy);
+    gtk_widget_set_visible(GTK_WIDGET(u->graph), known);
+    if (g->asleep) {
+        graph_sampled(u->graph, T("asleep", "절전 중"));
+    } else if (g->src == SRC_FDINFO && g->neng) {
+        /* Each engine by name, in the order the driver lists them. */
+        GString *d = g_string_new(NULL);
+        for (int e = 0; e < g->neng && e < 4; e++)
+            g_string_append_printf(d, "%s%s %.0f%%", e ? " · " : "",
+                                   engine_label(g->eng[e]), g->eng_pct[e]);
+        graph_sampled(u->graph, d->str);
+        g_string_free(d, TRUE);
+    } else if (g->mhz) {
+        g_snprintf(t, sizeof t, "%d MHz", g->mhz);
+        graph_sampled(u->graph, t);
+    } else {
+        graph_sampled(u->graph, NULL);
+    }
+    g_snprintf(t, sizeof t, "%d", g->mhz);
+    stat_set(&u->st_clock, g->mhz ? t : "—", g->mhz ? "MHz" : "", FALSE);
+    g_snprintf(t, sizeof t, "%d", g->max_mhz);
+    stat_set(&u->st_max, g->max_mhz ? t : "—", g->max_mhz ? "MHz" : "", FALSE);
+    if (!g->asleep && g->vram_total > 0 && g->vram_used >= 0) {
+        char *tot = fmt_bytes((double)g->vram_total);
+        char *un = g_strdup_printf(T("of %s", "/ %s"), tot);
+        stat_bytes(&u->st_mem, (double)g->vram_used, FALSE);
+        char *withun = g_strdup_printf("%s %s", gtk_label_get_text(GTK_LABEL(u->st_mem.unit)), un);
+        gtk_label_set_text(GTK_LABEL(u->st_mem.unit), withun);
+        g_free(withun);
+        g_free(un);
+        g_free(tot);
+    } else if (g->fd_mem) {
+        stat_bytes(&u->st_mem, (double)g->mem_fd, FALSE);
+    } else {
+        stat_set(&u->st_mem, "—", "", FALSE);
+    }
+    stat_set(&u->st_state, g->asleep ? T("Asleep", "절전 중") : T("Awake", "동작 중"), "", FALSE);
+    const char *note;
+    if (g->asleep)
+        note = T("Asleep, drawing no power. It wakes when a program asks for it; this page "
+                 "only reads that it is asleep and does not wake it.",
+                 "절전 중이라 전력을 쓰지 않습니다. 프로그램이 요청하면 깨어나며, 이 화면은 "
+                 "절전 상태만 읽고 깨우지 않습니다.");
+    else if (g->src == SRC_AMD)
+        note = T("Busy is the driver's own figure for the whole device.",
+                 "사용률은 드라이버가 장치 전체에 대해 알려 준 값입니다.");
+    else if (g->src == SRC_FDINFO)
+        note = T("Busy is the time its busiest engine spent on the programs using it, as the "
+                 "kernel counts it for each program (your own programs; another account's cannot "
+                 "be read). Memory is what those programs have placed on it.",
+                 "사용률은 커널이 프로그램마다 센, 가장 바쁜 엔진이 일한 시간의 비율입니다 (내 "
+                 "프로그램만 읽을 수 있습니다). 메모리는 그 프로그램들이 이 장치에 올린 양입니다.");
+    else if (g->src == SRC_RC6)
+        note = T("Busy is how much of the time the GPU was not in its sleep state (RC6).",
+                 "사용률은 GPU가 절전 상태(RC6)가 아니었던 시간의 비율입니다.");
+    else
+        note = T("This device does not report how busy it is, so there is no graph to draw.",
+                 "이 장치는 사용률을 알려 주지 않습니다. 그래서 그래프를 그리지 않습니다.");
+    gtk_label_set_text(GTK_LABEL(u->note), note);
 }
 
 /* ── Drives ───────────────────────────────────────────────────────── */
@@ -2383,16 +3381,13 @@ static GtkWidget *build_drives(void)
 {
     GtkWidget *b = page_box();
     gtk_box_append(GTK_BOX(b), page_head(T("Drives", "드라이브"),
-        T("How fast the disks are being read and written, and how full they are",
-          "디스크를 읽고 쓰는 속도와 남은 공간"), NULL));
-    A->g_disk = graph_new(&S.rd_h, &S.wr_h, FMT_RATE, T("Read", "읽기"), T("Write", "쓰기"));
-    gtk_box_append(GTK_BOX(b), GTK_WIDGET(A->g_disk));
-    gtk_box_append(GTK_BOX(b), stats_row(
-        stat_new(&A->st_rd, T("Reading", "읽기")),
-        stat_new(&A->st_wr, T("Writing", "쓰기")), NULL, NULL));
-    gtk_box_append(GTK_BOX(b), section(T("Space", "공간")));
-    A->fs_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_box_append(GTK_BOX(b), A->fs_box);
+        T("How fast each disk is being read and written, and how full it is",
+          "디스크마다 읽고 쓰는 속도와 남은 공간"), NULL));
+    A->disks_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_append(GTK_BOX(b), A->disks_box);
+    /* Filesystems on something that is not one of the disks above. */
+    A->fs_other = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_box_append(GTK_BOX(b), A->fs_other);
     GtkWidget *n = label(T("Drive health (SMART) is in Disks.", "드라이브 상태(SMART)는 디스크 앱에 있습니다."),
                          "lpt-note", 0);
     gtk_widget_set_margin_top(n, 14);
@@ -2400,47 +3395,122 @@ static GtkWidget *build_drives(void)
     return lp_kit_scroller(b, FALSE);
 }
 
+static GtkWidget *disk_block(Disk *d, int index)
+{
+    DiskUi *u = g_new0(DiskUi, 1);
+    d->ui = u;
+    u->box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    char *h = g_strdup_printf(T("Disk %d · %s", "디스크 %d · %s"), index, d->model);
+    GtkWidget *hl = label(h, "lpt-dev", 0);
+    gtk_label_set_ellipsize(GTK_LABEL(hl), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_margin_top(hl, index ? 26 : 0);
+    gtk_box_append(GTK_BOX(u->box), hl);
+    g_free(h);
+    char *sz = fmt_bytes((double)d->size);
+    char *sub = g_strdup_printf("%s · %s · %s", d->name, d->kind, sz);
+    GtkWidget *sl = label(sub, "lpt-dim", 0);
+    gtk_widget_set_margin_bottom(sl, 8);
+    gtk_box_append(GTK_BOX(u->box), sl);
+    g_free(sub);
+    g_free(sz);
+    u->graph = graph_new(&d->rd_h, &d->wr_h, FMT_RATE, T("Read", "읽기"), T("Write", "쓰기"));
+    graph_small(u->graph, 170);
+    gtk_box_append(GTK_BOX(u->box), GTK_WIDGET(u->graph));
+    gtk_box_append(GTK_BOX(u->box), stats_row(
+        stat_new(&u->st_rd, T("Reading", "읽기")),
+        stat_new(&u->st_wr, T("Writing", "쓰기")),
+        stat_new(&u->st_active, T("Active time", "활성 시간")),
+        stat_new(&u->st_size, T("Capacity", "용량"))));
+    stat_bytes(&u->st_size, (double)d->size, FALSE);
+    u->fs_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_widget_set_margin_top(u->fs_box, 12);
+    gtk_box_append(GTK_BOX(u->box), u->fs_box);
+    return u->box;
+}
+
+static GtkWidget *fs_card(Fs *f)
+{
+    GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_add_css_class(card, "lpt-fs");
+    GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *n = label(f->name, "lpt-app-name", 0);
+    gtk_box_append(GTK_BOX(top), n);
+    gtk_box_append(GTK_BOX(top), label(f->dev, "lpt-dim", 0));
+    GtkWidget *sp = label("", NULL, 0);
+    gtk_widget_set_hexpand(sp, TRUE);
+    gtk_box_append(GTK_BOX(top), sp);
+    char *av = fmt_bytes((double)f->avail), *sz = fmt_bytes((double)f->size);
+    char *t = g_strdup_printf(T("%s free of %s", "%s 중 %s 남음"),
+                              lp_korean() ? sz : av, lp_korean() ? av : sz);
+    gboolean low = f->size && (double)f->avail / (double)f->size < LOW_FREE;
+    GtkWidget *tl = label(t, low ? "lpt-warn" : "lpt-num", 1);
+    gtk_box_append(GTK_BOX(top), tl);
+    g_free(t);
+    g_free(av);
+    g_free(sz);
+    gtk_box_append(GTK_BOX(card), top);
+    LptBars *m = bars_new(1, TRUE);
+    m->colors[0] = low ? C_AMBER : C_LINE_A;
+    lp_spring_jump(&m->s[0], f->size ? 1.0 - (double)f->avail / (double)f->size : 0);
+    gtk_box_append(GTK_BOX(card), GTK_WIDGET(m));
+    if (low) {
+        GtkWidget *w = label(T("Less than 15% left. Empty the trash or move big files "
+                               "to another drive before it fills up.",
+                               "15% 미만 남았습니다. 가득 차기 전에 휴지통을 비우거나 "
+                               "큰 파일을 다른 드라이브로 옮기세요."), "lpt-warn", 0);
+        gtk_label_set_wrap(GTK_LABEL(w), TRUE);
+        gtk_box_append(GTK_BOX(card), w);
+    }
+    return card;
+}
+
+static void clear_box(GtkWidget *box)
+{
+    GtkWidget *c;
+    while ((c = gtk_widget_get_first_child(box)))
+        gtk_box_remove(GTK_BOX(box), c);
+}
+
+/* Each filesystem under the disk it is on. */
 static void update_fs(void)
 {
     sample_fs();
-    GtkWidget *c;
-    while ((c = gtk_widget_get_first_child(A->fs_box)))
-        gtk_box_remove(GTK_BOX(A->fs_box), c);
+    for (guint i = 0; i < S.disks->len; i++)
+        clear_box(((DiskUi *)((Disk *)g_ptr_array_index(S.disks, i))->ui)->fs_box);
+    clear_box(A->fs_other);
     for (guint i = 0; i < S.fs->len; i++) {
         Fs *f = g_ptr_array_index(S.fs, i);
-        GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
-        gtk_widget_add_css_class(card, "lpt-fs");
-        GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-        GtkWidget *n = label(f->name, "lpt-app-name", 0);
-        gtk_box_append(GTK_BOX(top), n);
-        gtk_box_append(GTK_BOX(top), label(f->dev, "lpt-dim", 0));
-        GtkWidget *sp = label("", NULL, 0);
-        gtk_widget_set_hexpand(sp, TRUE);
-        gtk_box_append(GTK_BOX(top), sp);
-        char *av = fmt_bytes((double)f->avail), *sz = fmt_bytes((double)f->size);
-        char *t = g_strdup_printf(T("%s free of %s", "%s 중 %s 남음"),
-                                  lp_korean() ? sz : av, lp_korean() ? av : sz);
-        gboolean low = f->size && (double)f->avail / (double)f->size < LOW_FREE;
-        GtkWidget *tl = label(t, low ? "lpt-warn" : "lpt-num", 1);
-        gtk_box_append(GTK_BOX(top), tl);
-        g_free(t);
-        g_free(av);
-        g_free(sz);
-        gtk_box_append(GTK_BOX(card), top);
-        LptBars *m = bars_new(1, TRUE);
-        m->colors[0] = low ? C_AMBER : C_LINE_A;
-        lp_spring_jump(&m->s[0], f->size ? 1.0 - (double)f->avail / (double)f->size : 0);
-        gtk_box_append(GTK_BOX(card), GTK_WIDGET(m));
-        if (low) {
-            GtkWidget *w = label(T("Less than 15% left. Empty the trash or move big files "
-                                   "to another drive before it fills up.",
-                                   "15% 미만 남았습니다. 가득 차기 전에 휴지통을 비우거나 "
-                                   "큰 파일을 다른 드라이브로 옮기세요."), "lpt-warn", 0);
-            gtk_label_set_wrap(GTK_LABEL(w), TRUE);
-            gtk_box_append(GTK_BOX(card), w);
+        GtkWidget *into = A->fs_other;
+        for (guint k = 0; k < S.disks->len; k++) {
+            Disk *d = g_ptr_array_index(S.disks, k);
+            if (f->disk && !strcmp(f->disk, d->name))
+                into = ((DiskUi *)d->ui)->fs_box;
         }
-        gtk_box_append(GTK_BOX(A->fs_box), card);
+        gtk_box_append(GTK_BOX(into), fs_card(f));
     }
+    gtk_widget_set_margin_top(A->fs_other, gtk_widget_get_first_child(A->fs_other) ? 18 : 0);
+}
+
+/* A disk came or went: the page is laid out again, and only then is an
+ * unplugged disk's data freed - its graph drew from it until now. */
+static void rebuild_disks(void)
+{
+    S.disks_changed = FALSE;
+    clear_box(A->disks_box);
+    for (guint i = S.disks->len; i-- > 0;) {
+        Disk *d = g_ptr_array_index(S.disks, i);
+        g_clear_pointer(&d->ui, g_free);
+        if (!d->seen) {
+            g_ptr_array_remove_index(S.disks, i);
+            disk_free(d);
+        }
+    }
+    for (guint i = 0; i < S.disks->len; i++)
+        gtk_box_append(GTK_BOX(A->disks_box), disk_block(g_ptr_array_index(S.disks, i), (int)i));
+    if (!S.disks->len)
+        gtk_box_append(GTK_BOX(A->disks_box), label(T("No disks found.", "디스크를 찾지 못했습니다."),
+                                                     "lpt-note", 0));
+    update_fs();
 }
 
 /* ── Network ──────────────────────────────────────────────────────── */
@@ -2628,38 +3698,31 @@ static void update_pages(void)
     else
         stat_set(&A->st_swap, "—", T("no swap", "스왑 없음"), FALSE);
 
+    /* CPU packages */
+    for (int k = 0; A->g_pkg && k < S.npkg; k++) {
+        char *pd = isnan(S.pkg[k].temp) ? NULL : g_strdup_printf("%.0f °C", S.pkg[k].temp);
+        graph_sampled(A->g_pkg[k], pd);
+        g_free(pd);
+    }
+
     /* GPU */
-    if (S.gpu_ok) {
-        g_snprintf(t, sizeof t, "%d MHz", S.gpu_mhz);
-        graph_sampled(A->g_gpu, t);
-    } else {
-        graph_sampled(A->g_gpu, T("no load reading", "부하 정보 없음"));
-    }
-    g_snprintf(t, sizeof t, "%d", S.gpu_mhz);
-    stat_set(&A->st_gpu_freq, S.gpu_mhz ? t : "—", S.gpu_mhz ? "MHz" : "", FALSE);
-    g_snprintf(t, sizeof t, "%d", S.gpu_max);
-    stat_set(&A->st_gpu_max, S.gpu_max ? t : "—", S.gpu_max ? "MHz" : "", FALSE);
-    stat_set(&A->st_gpu_drv, S.gpu_driver ? S.gpu_driver : "—", "", FALSE);
-    GString *gn = g_string_new(S.gpu_ok
-        ? T("Load is how much of the time the GPU was not in its sleep state (RC6).",
-            "부하는 GPU가 절전 상태(RC6)가 아니었던 시간의 비율입니다.")
-        : T("This GPU does not report how busy it is.", "이 GPU는 얼마나 바쁜지 알려 주지 않습니다."));
-    if (S.dgpu) {
-        g_string_append(gn, "\n");
-        g_string_append(gn, S.dgpu);
-    }
-    gtk_label_set_text(GTK_LABEL(A->gpu_note), gn->str);
-    g_string_free(gn, TRUE);
+    for (guint i = 0; i < S.gpus->len; i++)
+        update_gpu(g_ptr_array_index(S.gpus, i));
 
     /* Drives */
-    graph_sampled(A->g_disk, NULL);
-    char *wr = fmt_rate(S.wr);
-    char *dd = g_strdup_printf(T("write %s", "쓰기 %s"), wr);
-    g_free(A->g_disk->detail);
-    A->g_disk->detail = dd;
-    g_free(wr);
-    stat_bytes(&A->st_rd, S.rd, TRUE);
-    stat_bytes(&A->st_wr, S.wr, TRUE);
+    for (guint i = 0; i < S.disks->len; i++) {
+        Disk *d = g_ptr_array_index(S.disks, i);
+        DiskUi *u = d->ui;
+        char *wr = fmt_rate(d->wr);
+        char *dd = g_strdup_printf(T("write %s", "쓰기 %s"), wr);
+        graph_sampled(u->graph, dd);
+        g_free(dd);
+        g_free(wr);
+        stat_bytes(&u->st_rd, d->rd, TRUE);
+        stat_bytes(&u->st_wr, d->wr, TRUE);
+        g_snprintf(t, sizeof t, "%.0f", d->active);
+        stat_set(&u->st_active, t, "%", d->active >= 90);
+    }
 
     /* Network */
     graph_sampled(A->g_net, NULL);
@@ -2736,29 +3799,50 @@ static gboolean sample_tick(gpointer d)
     S.now = now;
     sample_cpu();
     sample_mem();
-    sample_disk(secs);
+    sample_disks(secs);
     sample_net(secs);
-    sample_gpu();
+    /* The walk for who has a GPU open: see the comment above find_gpus. */
+    gboolean visible = !window_minimised();
+    if (S.ticks % 30 == 0 || (visible && page_is("gpu") && S.ticks % 5 == 0))
+        scan_drm_fds();
+    S.ticks++;
+    sample_gpus(secs);
     S.temp = temp_path ? read_num(temp_path, -1000000) / 1000.0 : NAN;
     if (S.temp < -100)
         S.temp = NAN;
+    for (int k = 0; k < S.npkg; k++)
+        if (S.pkg[k].temp_path) {
+            S.pkg[k].temp = read_num(S.pkg[k].temp_path, -1000000) / 1000.0;
+            if (S.pkg[k].temp < -100)
+                S.pkg[k].temp = NAN;
+        }
     sample_battery();
+    if (S.disks_changed)
+        rebuild_disks();
     if (S.primed) {
         series_push(&S.cpu_h, now, S.cpu);
         series_push(&S.mem_h, now, S.mem_total ?
                     100.0 * (double)(S.mem_total - S.mem_avail) / (double)S.mem_total : 0);
-        series_push(&S.rd_h, now, S.rd);
-        series_push(&S.wr_h, now, S.wr);
+        for (int k = 0; k < S.npkg; k++)
+            series_push(&S.pkg[k].h, now, S.pkg[k].pct);
+        for (guint i = 0; i < S.disks->len; i++) {
+            Disk *d = g_ptr_array_index(S.disks, i);
+            series_push(&d->rd_h, now, d->rd);
+            series_push(&d->wr_h, now, d->wr);
+        }
         series_push(&S.rx_h, now, S.rx);
         series_push(&S.tx_h, now, S.tx);
-        series_push(&S.gpu_h, now, S.gpu);
+        for (guint i = 0; i < S.gpus->len; i++) {
+            Gpu *g = g_ptr_array_index(S.gpus, i);
+            if (!isnan(g->busy))
+                series_push(&g->h, now, g->busy);
+        }
         if (S.bat)
             series_push(&A->bat_series, now, S.bat_pct);
     }
     S.primed = TRUE;
 
     /* The walk over /proc only when someone can see its result. */
-    gboolean visible = !window_minimised();
     if (visible && (page_is("apps") || page_is("processes") || page_is("memory"))) {
         scan_procs();
         if (page_is("apps"))
@@ -2782,8 +3866,6 @@ static gboolean sample_tick(gpointer d)
             update_ifaces();
             query_lpnet();
         }
-        if (page_is("gpu"))
-            sample_dgpu();
     }
     if (visible)
         update_pages();
@@ -2884,6 +3966,8 @@ static const char APP_CSS[] =
     ".lpt-sub { font-size: 13px; color: #6a6a6a; }\n"
     ".lpt-sec { font-size: 12px; color: #6a6a6a; }\n"
     "lptgraph { background-color: #232323; border-radius: 10px; min-height: 230px; }\n"
+    "lptgraph.small { min-height: 150px; }\n"
+    ".lpt-dev { font-size: 15px; font-weight: 600; }\n"
     ".lpt-stat { background-color: #232323; border-radius: 8px; padding: 11px 13px; }\n"
     ".lpt-stat-k { font-size: 12px; color: #6a6a6a; }\n"
     ".lpt-stat-v { font-size: 20px; font-weight: 600; font-feature-settings: 'tnum'; }\n"
@@ -2948,6 +4032,14 @@ static void on_activate(GtkApplication *app, gpointer d)
     g_action_map_add_action_entries(G_ACTION_MAP(A->win), acts, 1, GINT_TO_POINTER(SIGTERM));
     g_action_map_add_action_entries(G_ACTION_MAP(A->win), acts + 1, 1, GINT_TO_POINTER(SIGKILL));
 
+    /* The window list, before the Apps page is built: the page says
+     * which of its two ways it is listing things. */
+    A->win_apps = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                        unref_or_null);
+    A->windows = lp_toplevels_init();
+    if (A->windows)
+        lp_toplevels_watch(on_windows, NULL);
+
     GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_box_append(GTK_BOX(outer), build_sidebar());
     A->stack = lp_kit_stack();
@@ -3006,9 +4098,11 @@ int main(int argc, char **argv)
     proc_store = g_list_store_new(LPT_TYPE_PROC);
     users = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
     S.temp = NAN;
+    S.disks = g_ptr_array_new();
+    S.not_disks = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     read_cpuinfo();
     find_temp();
-    find_gpu();
+    find_gpus();
     find_battery();
     load_exe_apps();
 

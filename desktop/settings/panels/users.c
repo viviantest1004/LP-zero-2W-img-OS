@@ -236,10 +236,13 @@ static void own_pw_ok(lp_dialog_t *d, gpointer p)
                           : password_problem(a, b);
     if (bad) { lp_dialog_error(d, bad); return; }
     if (strchr(c, '\n')) { lp_dialog_error(d, T("The current password is not right.", "현재 비밀번호가 맞지 않습니다.")); return; }
-    /* passwd asks: current, new, new again - each a line on stdin. */
+    /* passwd asks: current, new, new again - each a line on stdin. The
+     * base's passwd, not /bin's: that one keeps the hash in /data/shadow
+     * and refused ordinary accounts outright ("only root can change a
+     * password here"), while sudo and the lock screen read /etc/shadow. */
     char *in = g_strdup_printf("%s\n%s\n%s\n", c, a, b);
     lp_dialog_busy(d, TRUE);
-    static const char *const v[] = { "passwd", NULL };
+    const char *v[] = { lp_base_tool("passwd"), NULL };
     lp_run_async(v, in, lp_dialog_window(d), own_pw_done, d);
     memset(in, 0, strlen(in));
     g_free(in);
@@ -264,12 +267,17 @@ typedef struct {
     char *pw;                 /* for the chpasswd step of "add" */
     gboolean admin;
     lp_dialog_t *dlg;
+    /* The account's own dialog, under the "Remove?" one: it closes too
+     * when the account is gone, or it stays up offering to change an
+     * account that no longer exists. Weak - it may be closed first. */
+    GWeakRef parent;
 } job_t;
 
 static void job_free(job_t *j)
 {
     if (j->pw) { memset(j->pw, 0, strlen(j->pw)); g_free(j->pw); }
     g_free(j->name); g_free(j->ok);
+    g_weak_ref_clear(&j->parent);
     g_free(j);
 }
 
@@ -279,6 +287,12 @@ static void acct_done(int st, const char *out, const char *err, gpointer p)
     if (st == 0) {
         lp_toast(FALSE, "%s", j->ok);
         if (j->dlg) lp_dialog_close(j->dlg);
+        GObject *pw = g_weak_ref_get(&j->parent);
+        if (pw) {
+            lp_dialog_t *pd = g_object_get_data(pw, "lp-dialog");
+            if (pd && !g_object_get_data(pw, "lp-closing")) lp_dialog_close(pd);
+            g_object_unref(pw);
+        }
         lp_refresh();
     } else if (st == -2) {
         if (j->dlg) lp_dialog_busy(j->dlg, FALSE);
@@ -336,9 +350,11 @@ static void add_ok(lp_dialog_t *d, gpointer p)
     j->pw = g_strdup(a);
     j->dlg = d;
     j->ok = g_strdup_printf(T("Added %s", "%s 을(를) 만들었습니다"), name);
+    /* The name is the last word: without it useradd answers with its
+     * usage text, and the dialog showed that text's last line. */
     const char *v[] = { "useradd", "--create-home", "--shell", "/bin/bash", "--comment", full,
-                        admin ? "--groups" : NULL, "sudo", NULL };
-    if (!admin) v[6] = NULL;
+                        name, NULL, NULL, NULL };
+    if (admin) { v[6] = "--groups"; v[7] = "sudo"; v[8] = name; }
     lp_dialog_busy(d, TRUE);
     lp_admin_run(v, NULL, WHY_ADMIN, NULL, add_step2, j);
 }
@@ -378,6 +394,12 @@ static void set_pw_ok(lp_dialog_t *d, gpointer p)
     g_free(line);
 }
 
+static void weak_free(gpointer p)
+{
+    g_weak_ref_clear(p);
+    g_free(p);
+}
+
 static void remove_ok(lp_dialog_t *d, gpointer p)
 {
     (void)p;
@@ -388,6 +410,9 @@ static void remove_ok(lp_dialog_t *d, gpointer p)
     j->dlg = d;
     j->ok = g_strdup_printf(files ? T("Removed %s and their files", "%s 과(와) 그 파일을 지웠습니다")
                                   : T("Removed %s; their files are kept", "%s 을(를) 지웠습니다. 파일은 남겨 두었습니다"), name);
+    GObject *parent = g_weak_ref_get(lp_dialog_get_data(d, "lp-parent"));
+    g_weak_ref_set(&j->parent, parent);
+    if (parent) g_object_unref(parent);
     const char *v[] = { "userdel", files ? "--remove" : name, files ? name : NULL, NULL };
     run_acct(v, NULL, j);
 }
@@ -452,7 +477,6 @@ static void on_manage_pw(GtkButton *b, gpointer p)
 
 static void on_manage_remove(GtkButton *b, gpointer p)
 {
-    (void)b;
     manage_t *m = p;
     GPtrArray *a = accounts();
     int n = admin_count(a);
@@ -465,6 +489,9 @@ static void on_manage_remove(GtkButton *b, gpointer p)
     char *title = g_strdup_printf(T("Remove %s?", "%s 을(를) 지울까요?"), m->name);
     lp_dialog_t *d = lp_dialog_new(title, T("Remove", "지우기"), TRUE, remove_ok, NULL);
     lp_dialog_set_data(d, "lp-user", g_strdup(m->name), g_free);
+    GWeakRef *parent = g_new0(GWeakRef, 1);
+    g_weak_ref_init(parent, gtk_widget_get_root(GTK_WIDGET(b)));
+    lp_dialog_set_data(d, "lp-parent", parent, weak_free);
     g_free(title);
     lp_dialog_text(d, T("They will not be able to sign in any more.", "이 계정으로 더는 로그인할 수 없습니다."), NULL);
     GtkWidget *cb = gtk_check_button_new_with_label(T("Also delete their home folder and files",

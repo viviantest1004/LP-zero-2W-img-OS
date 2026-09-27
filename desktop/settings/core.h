@@ -197,17 +197,40 @@ gpointer     lp_dialog_get_data(lp_dialog_t *d, const char *key);
 typedef void (*lp_done_fn)(int status, const char *out, const char *err,
                            gpointer data);
 
+/* The status a command gets when it was killed for not answering in
+ * time (-1 is "could not be started", -2 "the administrator password was
+ * cancelled"); its err is a sentence that says so. */
+#define LP_RUN_TIMEOUT  (-3)
+/* How long a synchronous command may take before it is killed. The
+ * window does not redraw or take a tap while one runs, so this is the
+ * longest the app may look frozen. */
+#define LP_RUN_SYNC_MS  8000
+
 /* Synchronous, for commands that answer at once (wpctl get-volume, cat).
  * Returns stdout, chomped, or NULL on a non-zero exit. */
 char    *lp_run(const char *const *argv);
-/* The same with status and stderr. */
+/* The same with status and stderr. Both stop the command after
+ * LP_RUN_SYNC_MS; _timeout takes its own limit for the few that take
+ * seconds by nature (a Wi-Fi scan). */
 int      lp_run_full(const char *const *argv, const char *in,
                      char **out, char **err);
+int      lp_run_full_timeout(const char *const *argv, const char *in,
+                             char **out, char **err, guint ms);
 /* Asynchronous. `owner` is the widget the result is for: if it has been
  * destroyed by the time the command finishes (the person moved to another
- * panel), the callback is not called at all. owner may be NULL. */
+ * panel), the callback is not called at all. owner may be NULL. There is
+ * no limit - an administrator's job may take minutes - except with
+ * _timeout, for commands that can wait forever on a service that is not
+ * there (bluetoothctl without bluetoothd, pw-play into a dummy output):
+ * after `ms` the command is killed and done() gets LP_RUN_TIMEOUT. */
 void     lp_run_async(const char *const *argv, const char *in,
                       GtkWidget *owner, lp_done_fn done, gpointer data);
+void     lp_run_async_timeout(const char *const *argv, const char *in, guint ms,
+                              GtkWidget *owner, lp_done_fn done, gpointer data);
+/* "/usr/bin/NAME" when the Debian base has a program by that name, else
+ * NAME: for the few whose LP /bin namesake, first on PATH, behaves
+ * differently (lsblk, apt, passwd; sys.c says how). */
+const char *lp_base_tool(const char *name);
 /* How many lp_run_async commands have not answered yet. */
 int      lp_jobs_pending(void);
 /* Fire and forget - for daemons (wlsunset) and apps (lp-disks). */

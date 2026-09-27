@@ -9,10 +9,18 @@
  *
  * Changes are coalesced into one idle callback per main-loop turn: a
  * burst of twenty events when a browser opens is one redraw, not twenty.
+ *
+ * The shell builds this against GTK 3 and Task Manager (desktop/tasks)
+ * against GTK 4. Every GDK call below exists under the same name in
+ * both; only the header moved, and GTK 3 has no gdk/wayland/gdkwayland.h.
  */
 #include "lp-toplevel.h"
 
+#if __has_include(<gdk/wayland/gdkwayland.h>)
+#include <gdk/wayland/gdkwayland.h>
+#else
 #include <gdk/gdkwayland.h>
+#endif
 #include <string.h>
 
 #include "wlr-foreign-toplevel-management-unstable-v1-client-protocol.h"
