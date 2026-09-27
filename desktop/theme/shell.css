@@ -81,6 +81,10 @@ window.lp-layer.background {
   color: @lp_t1;
   text-shadow: none;
   -gtk-icon-shadow: none;
+  /* Adwaita brightens a hovered button's icon, which re-renders the icon
+   * surface at every crossing - most of the dock's CPU under the pointer
+   * on a machine drawing in software, for an effect the design never had. */
+  -gtk-icon-effect: none;
   outline-color: transparent;
   /* No transition here: motion.css (loaded just under this file) gives
    * every button the press spring - highlight on touch-down in the same

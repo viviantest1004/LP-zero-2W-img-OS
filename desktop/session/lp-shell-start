@@ -78,11 +78,15 @@ if test -e "${XDG_RUNTIME_DIR}/lp-logout" ; then
     have lp-lock && lp-lock > "$LOGDIR/lock.log" 2>&1 &
 fi
 
-# Animations: on, under either compositor - the switches, pages, menus and
-# the dock's slide move without a GPU too - unless the person turned motion
-# down in Settings (Accessibility), which is the one thing that stops them.
+# Animations: on under wayfire, where the graphics card draws them. Under
+# sway every frame is drawn by the CPU (and, in a VM, sent whole to the
+# host), and GTK's CSS transitions - a hover fade on every button the
+# pointer crosses - were most of the work behind a lagging pointer there;
+# the shell's own motion (the dock's slide) still runs, as short fades
+# (LP_REDUCE_MOTION). Settings (Accessibility) can turn motion down
+# under either.
 if have gsettings ; then
-    if test -e "$HOME/.config/lp/reduce-motion" ; then
+    if test -e "$HOME/.config/lp/reduce-motion" || test "$compositor" = sway ; then
         gsettings set org.gnome.desktop.interface enable-animations false
     else
         gsettings set org.gnome.desktop.interface enable-animations true

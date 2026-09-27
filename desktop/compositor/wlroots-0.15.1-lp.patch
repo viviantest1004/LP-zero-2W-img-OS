@@ -14,6 +14,12 @@ Built by build-wlroots.sh; see README-wlroots.md.
    formats" and every pointer motion is a software-cursor frame.
    - drm.c: set the cap right after DRM_CLIENT_CAP_ATOMIC (before the
      planes are enumerated); atomic only - the legacy path is untouched.
+     OFF unless WLR_DRM_CURSOR_HOTSPOT=1: under UTM (QEMU, x86_64
+     emulation, virtio-gpu) the host-drawn cursor came out garbled and
+     mirrored, and the host pointer it warped to follow the plane fed
+     back into the guest's absolute pointer - the pointer moved by itself
+     and clicks landed elsewhere. The software cursor is the safe default
+     in a VM; real GPUs expose their cursor plane without the cap.
      The define is missing from libdrm < 2.4.118 (bookworm has 2.4.114),
      so it is provided (value 6, include/uapi/drm/drm.h).
    - properties.[ch]: HOTSPOT_X / HOTSPOT_Y in the plane property table
@@ -148,15 +154,20 @@ index 43de54e..2ecb45d 100644
  static const uint32_t SUPPORTED_OUTPUT_STATE =
  	WLR_OUTPUT_STATE_BACKEND_OPTIONAL |
  	WLR_OUTPUT_STATE_BUFFER |
-@@ -85,6 +90,13 @@ bool check_drm_features(struct wlr_drm_backend *drm) {
+@@ -85,6 +90,18 @@ bool check_drm_features(struct wlr_drm_backend *drm) {
  		wlr_log(WLR_DEBUG, "Using atomic DRM interface");
  		drm->iface = &atomic_iface;
  	}
 +	// Virtualized drivers (virtio-gpu, vmwgfx, qxl, vboxvideo) hide their
 +	// cursor plane from atomic clients that don't promise to set the cursor
-+	// hotspot (Linux 6.8+). Must happen before the planes are enumerated.
-+	if (drm->iface == &atomic_iface && drmSetClientCap(drm->fd,
-+			DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT, 1) == 0) {
++	// hotspot (Linux 6.8+). LP asks for it only with WLR_DRM_CURSOR_HOTSPOT=1:
++	// under UTM the host drew the plane's cursor garbled, and the host
++	// pointer it moved to match fed back into the guest's, so the pointer
++	// wandered by itself and clicks missed. Without the cap the cursor is
++	// software-drawn, as before. Must happen before the planes are enumerated.
++	const char *hotspot = getenv("WLR_DRM_CURSOR_HOTSPOT");
++	if (hotspot && strcmp(hotspot, "1") == 0 && drm->iface == &atomic_iface &&
++			drmSetClientCap(drm->fd, DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT, 1) == 0) {
 +		wlr_log(WLR_INFO, "DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT supported");
 +	}
  
