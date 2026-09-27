@@ -482,6 +482,37 @@ void lp_on_hold(GtkWidget *w, LpHoldFn fn, gpointer data)
     g_object_set_data_full(G_OBJECT(w), "lp-hold-fn", h, g_free);
 }
 
+typedef struct { LpTapFn fn; gpointer data; } Tap;
+
+static void on_tap_released(GtkGestureMultiPress *g, int n, double x, double y, gpointer d)
+{
+    (void)n;
+    Tap *t = d;
+    GtkWidget *w = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+    /* Lifted inside the widget: a tap. Lifted elsewhere (a drag that
+     * wandered off, a swipe up to the app grid): nothing. */
+    if (x < 0 || y < 0 || x >= gtk_widget_get_allocated_width(w) ||
+        y >= gtk_widget_get_allocated_height(w))
+        return;
+    t->fn(w, t->data);
+}
+
+void lp_on_tap(GtkWidget *w, LpTapFn fn, gpointer data)
+{
+    Tap *t = g_new0(Tap, 1);
+    t->fn = fn;
+    t->data = data;
+    GtkGesture *g = gtk_gesture_multi_press_new(w);
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(g), GDK_BUTTON_PRIMARY);
+    gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(g), FALSE);
+    /* Capture, and never claimed: the button's own press highlight
+     * still runs underneath. */
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(g), GTK_PHASE_CAPTURE);
+    g_signal_connect(g, "released", G_CALLBACK(on_tap_released), t);
+    g_object_set_data_full(G_OBJECT(w), "lp-tap", g, g_object_unref);
+    g_object_set_data_full(G_OBJECT(w), "lp-tap-fn", t, g_free);
+}
+
 gboolean lp_hold_consumed(GtkWidget *w)
 {
     gboolean c = g_object_get_data(G_OBJECT(w), "lp-hold-consumed") != NULL;

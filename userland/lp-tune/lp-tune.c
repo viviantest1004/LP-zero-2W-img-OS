@@ -197,7 +197,13 @@ static void wr(const char *path, const char *val)
     }
     long w = lp_write((int)fd, val, strlen(val));
     lp_close((int)fd);
-    if (w < 0) {
+    if (w == -95 || w == -22) {
+        /* EOPNOTSUPP / EINVAL: the file is there but this hardware has no
+         * such setting (a VM's SATA links, a controller without DIPM) -
+         * the same as the file not being there, not a refusal worth a
+         * line on the console at every boot. */
+        n_absent++;
+    } else if (w < 0) {
         n_refused++;
         dprintf(STDERR_FILENO, "lp-tune: %s refused \"%s\" (%ld)\n",
                 path, val, -w);

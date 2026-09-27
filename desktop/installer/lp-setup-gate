@@ -34,7 +34,7 @@ Why a gate and not a line in the session:
     radio and power off|restart. Nothing else runs, and no request is a
     shell string.
 
-  - The kiosk sits on the splash's background colour (#0e0e0e) and the
+  - The kiosk sits on the theme's deep blue (#0b1722) and the
     windows fade their card in on it, so the boot reads as firmware
     logo, splash, setup - with no text console and no desktop flashing
     past in between.
@@ -237,7 +237,7 @@ def kiosk(mode):
     with open(cfg, "w") as f:
         f.write(
             "# lp-setup-gate's kiosk: one window, nothing else to press.\n"
-            "output * bg #0e0e0e solid_color\n"
+            "output * bg #0b1722 solid_color\n"
             "output * scale %d\n"
             "default_border none\n"
             "default_floating_border none\n"

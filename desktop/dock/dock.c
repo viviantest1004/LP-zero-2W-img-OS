@@ -341,10 +341,10 @@ static void show_missing(Item *it)
     gtk_popover_popup(GTK_POPOVER(pop));
 }
 
-static void on_item(GtkButton *b, gpointer d)
+static void on_item(GtkWidget *b, gpointer d)
 {
     Item *it = d;
-    if (lp_hold_consumed(GTK_WIDGET(b)))
+    if (lp_hold_consumed(b))
         return;
     if (!it->info) {
         show_missing(it);
@@ -625,7 +625,7 @@ static Item *add_item(const char *id, GDesktopAppInfo *info, const Slot *slot,
      * package happens to call itself ("Foot"). */
     gtk_widget_set_tooltip_text(it->button, slot ? T(slot->en, slot->ko)
                                                  : lp_app_name(G_APP_INFO(info)));
-    g_signal_connect(it->button, "clicked", G_CALLBACK(on_item), it);
+    lp_on_tap(it->button, (LpTapFn)on_item, it);
     lp_on_hold(it->button, on_hold, it);
     gtk_box_pack_start(GTK_BOX(list), it->button, FALSE, FALSE, 0);
     g_ptr_array_add(items, it);
@@ -797,7 +797,7 @@ static void on_apps_changed(GAppInfoMonitor *m, gpointer d)
     rebuild();
 }
 
-static void on_grid(GtkButton *b, gpointer d)
+static void on_grid(GtkWidget *b, gpointer d)
 {
     (void)b; (void)d;
     const char *a[] = { "lp-appgrid", "toggle", NULL };
@@ -890,6 +890,33 @@ static void edge_for(GdkMonitor *mon)
     gtk_widget_show_all(GTK_WIDGET(e));
 }
 
+static gboolean recentre(gpointer d)
+{
+    (void)d;
+    GdkDisplay *dpy = gdk_display_get_default();
+    GdkWindow *gw = gtk_widget_get_window(GTK_WIDGET(win));
+    GdkMonitor *mon = gw ? gdk_display_get_monitor_at_window(dpy, gw) : NULL;
+    if (!mon)
+        mon = gdk_display_get_monitor(dpy, 0);
+    if (!mon)
+        return G_SOURCE_REMOVE;
+    GdkRectangle geo;
+    gdk_monitor_get_geometry(mon, &geo);
+    int w = gtk_widget_get_allocated_width(GTK_WIDGET(win));
+    int m = MAX(0, (geo.width - w) / 2);
+    if (gtk_layer_get_margin(win, GTK_LAYER_SHELL_EDGE_LEFT) != m)
+        gtk_layer_set_margin(win, GTK_LAYER_SHELL_EDGE_LEFT, m);
+    return G_SOURCE_REMOVE;
+}
+
+static void on_dock_allocate(GtkWidget *w, GdkRectangle *a, gpointer d)
+{
+    (void)w; (void)a; (void)d;
+    /* Not from inside the allocation itself: a margin change asks the
+     * compositor for a new configure. */
+    g_idle_add(recentre, NULL);
+}
+
 static void on_conf_changed(GFileMonitor *m, GFile *f, GFile *o,
                             GFileMonitorEvent ev, gpointer d)
 {
@@ -930,9 +957,19 @@ int main(int argc, char **argv)
     /* Anchored to the bottom edge only: the compositor centres it
      * across, and it is as wide as its icons. The exclusive zone is its
      * height plus the gap under it, so windows stop above it. */
-    win = lp_layer_window("lp-dock", GTK_LAYER_SHELL_LAYER_TOP, LP_EDGE_BOTTOM);
+    /* Anchored bottom and left, and centred by a left margin worked out
+     * from its own width: wayfire 0.7 does not centre a surface anchored
+     * to one edge (sway does), and the dock came up in the corner. */
+    win = lp_layer_window("lp-dock", GTK_LAYER_SHELL_LAYER_TOP,
+                          LP_EDGE_BOTTOM | LP_EDGE_LEFT);
     gtk_layer_set_margin(win, GTK_LAYER_SHELL_EDGE_BOTTOM, DOCK_MARGIN);
     gtk_layer_auto_exclusive_zone_enable(win);
+    g_signal_connect(win, "size-allocate", G_CALLBACK(on_dock_allocate), NULL);
+    /* A new resolution or scale moves the middle of the screen. */
+    g_signal_connect_swapped(gdk_screen_get_default(), "monitors-changed",
+                             G_CALLBACK(recentre), NULL);
+    g_signal_connect_swapped(gdk_screen_get_default(), "size-changed",
+                             G_CALLBACK(recentre), NULL);
 
     GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_style_context_add_class(gtk_widget_get_style_context(outer), "lp-dock");
@@ -957,7 +994,7 @@ int main(int argc, char **argv)
     gtk_container_add(GTK_CONTAINER(grid_button),
                       lp_icon("view-app-grid-symbolic", 28));
     gtk_widget_set_tooltip_text(grid_button, T("Show applications", "앱 보기"));
-    g_signal_connect(grid_button, "clicked", G_CALLBACK(on_grid), NULL);
+    lp_on_tap(grid_button, (LpTapFn)on_grid, NULL);
     add_pull(grid_button, FALSE);
     gtk_box_pack_start(GTK_BOX(outer), grid_button, FALSE, FALSE, 0);
 

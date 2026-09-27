@@ -34,13 +34,15 @@ __asm__(".pushsection .rodata\n"
 extern const char su_motion_css[];
 
 static const char CSS[] =
-    "@define-color su_bg      #0e0e0e;\n"
-    "@define-color su_card    #232323;\n"
-    "@define-color su_edge    #3a3a3a;\n"
-    "@define-color su_text    #e8e8e8;\n"
-    "@define-color su_dim     #9a9a9a;\n"
-    "@define-color su_accent  #e95420;\n"
-    "@define-color su_accent2 #f06a38;\n"
+    /* The desktop's deep blue and orange (shell.css), so the first thing
+     * a person sees is the same system they will get. */
+    "@define-color su_bg      #0b1722;\n"
+    "@define-color su_card    #142a40;\n"
+    "@define-color su_edge    #24425f;\n"
+    "@define-color su_text    #eaf2f8;\n"
+    "@define-color su_dim     #9fb3c4;\n"
+    "@define-color su_accent  #f28c28;\n"
+    "@define-color su_accent2 #ffa24a;\n"
     "@define-color su_danger  #c01c28;\n"
     "window.su-window, window.su-window.background {\n"
     "  background-color: @su_bg; color: @su_text; border-radius: 0; }\n"

@@ -115,6 +115,16 @@ void lp_on_hold(GtkWidget *w, LpHoldFn fn, gpointer data);
  * a menu that opens and then launches the app underneath it is the
  * bug this exists for. Call it first thing in the clicked handler. */
 gboolean lp_hold_consumed(GtkWidget *w);
+/* A tap (touch) or click (mouse) that lands and lifts on `w`, delivered
+ * by a gesture of our own instead of GtkButton::clicked. Under sway a
+ * button on a layer surface missed the first touch after the finger had
+ * been elsewhere: GTK 3 delivers the touch's press before the crossing
+ * that puts the pointer "in" the button, and a GtkButton only clicks
+ * when it believes it was entered first. The second tap worked, which
+ * is exactly how it looked: the dock ignored every first tap. Connect
+ * this and not "clicked" - both would fire on the taps that did work. */
+typedef void (*LpTapFn)(GtkWidget *w, gpointer data);
+void lp_on_tap(GtkWidget *w, LpTapFn fn, gpointer data);
 
 /* A GtkMenu popped at a point inside w, from a hold. */
 void lp_menu_popup_at(GtkWidget *menu, GtkWidget *w, double x, double y);
