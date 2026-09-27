@@ -458,8 +458,13 @@ void lp_on_hold(GtkWidget *w, LpHoldFn fn, gpointer data)
      * gesture takes it. The gestures are owned by the widget: GTK 3
      * does not do that on its own, so they are tied to it with
      * set_data_full and die with it. */
+    /* Touch only. With the mouse it is a right click that asks for the
+     * menu; a held left button was read as "hold" too, and on a slow
+     * machine (a VM drawing on its CPU) an ordinary click's release
+     * arrives late enough to look held - every click became a right
+     * click. */
     GtkGesture *lp = gtk_gesture_long_press_new(w);
-    gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(lp), FALSE);
+    gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(lp), TRUE);
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(lp),
                                                GTK_PHASE_CAPTURE);
     g_signal_connect(lp, "pressed", G_CALLBACK(on_long_press), h);

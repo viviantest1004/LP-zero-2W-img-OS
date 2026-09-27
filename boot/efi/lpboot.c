@@ -150,18 +150,31 @@ static int var_str(CHAR16 *name, char *out, int cap)
 /* ── Files on our own partition ───────────────────────────────────── */
 static EFI_HANDLE dev;          /* the partition lpboot.efi was loaded from */
 
-static EFI_FILE_PROTOCOL *open_file(CHAR16 *path)
+static EFI_FILE_PROTOCOL *open_file_on(EFI_HANDLE h, CHAR16 *path)
 {
     EFI_GUID fsg = EFI_SIMPLE_FS_GUID;
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;
     EFI_FILE_PROTOCOL *root, *f;
-    if (BS->HandleProtocol(dev, &fsg, (void **)&fs) != EFI_SUCCESS)
+    if (BS->HandleProtocol(h, &fsg, (void **)&fs) != EFI_SUCCESS)
         return 0;
     if (fs->OpenVolume(fs, &root) != EFI_SUCCESS)
         return 0;
     EFI_STATUS st = root->Open(root, &f, path, EFI_FILE_MODE_READ, 0);
     root->Close(root);
     return st == EFI_SUCCESS ? f : 0;
+}
+
+static EFI_FILE_PROTOCOL *open_file(CHAR16 *path)
+{
+    return open_file_on(dev, path);
+}
+
+static bool exists_on(EFI_HANDLE h, CHAR16 *path)
+{
+    EFI_FILE_PROTOCOL *f = open_file_on(h, path);
+    if (f)
+        f->Close(f);
+    return f != 0;
 }
 
 static int read_small(CHAR16 *path, char *out, int cap)
@@ -639,6 +652,83 @@ static EFI_STATUS start_kernel(int choice)
     return st == EFI_SUCCESS ? EFI_LOAD_ERROR : st;
 }
 
+/* ── An LP already installed on this machine ──────────────────────── */
+/*
+ * The installer's own partition carries \EFI\LP\installer (mkdisk).
+ * Started from there - the stick first in the firmware's order, or a
+ * VM whose drive list puts the image above the disk LP went onto - this
+ * menu ran the installer again over a machine that already had LP:
+ * installed, restarted, "Install LP?". So first it looks at the other
+ * FAT partitions for an installed LP (a boot menu and a command line,
+ * no installer mark) and hands over to that disk's own menu, as if the
+ * firmware had started it. A key held down while the machine starts
+ * keeps the installer: that is how LP is installed again.
+ */
+static void chain_installed(void)
+{
+    if (!file_exists(L"\\EFI\\LP\\installer"))
+        return;
+    EFI_INPUT_KEY key;
+    if (ST->ConIn && ST->ConIn->ReadKeyStroke(ST->ConIn, &key) == EFI_SUCCESS) {
+        logf("a key is down: the installer, not the installed LP");
+        return;
+    }
+    EFI_GUID fsg = EFI_SIMPLE_FS_GUID, dpg = EFI_DEVICE_PATH_GUID;
+    EFI_HANDLE *hs;
+    UINTN n;
+    if (BS->LocateHandleBuffer(ByProtocol, &fsg, 0, &n, &hs) != EFI_SUCCESS)
+        return;
+    for (UINTN i = 0; i < n; i++) {
+        if (hs[i] == dev || !exists_on(hs[i], L"\\EFI\\LP\\lpboot.efi")
+            || !exists_on(hs[i], L"\\EFI\\LP\\cmdline.txt")
+            || exists_on(hs[i], L"\\EFI\\LP\\installer"))
+            continue;
+        EFI_DEVICE_PATH_PROTOCOL *dp;
+        if (BS->HandleProtocol(hs[i], &dpg, (void **)&dp) != EFI_SUCCESS)
+            continue;
+        /* That partition's device path, a file node for its menu, the end. */
+        static u8 path[512];
+        UINTN len = 0;
+        const u8 *q = (const u8 *)dp;
+        bool ok = true;
+        for (;;) {
+            u16 nl = (u16)(q[2] | (q[3] << 8));
+            if (q[0] == 0x7f && q[1] == 0xff)
+                break;
+            if (len + nl > sizeof(path) - 128 || nl < 4) {
+                ok = false;
+                break;
+            }
+            memcpy(path + len, q, nl);
+            len += nl;
+            q += nl;
+        }
+        if (!ok)
+            continue;
+        static const CHAR16 mpath[] = L"\\EFI\\LP\\lpboot.efi";
+        u8 *fp = path + len;
+        fp[0] = 4;
+        fp[1] = 4;
+        fp[2] = (u8)(4 + sizeof(mpath));
+        fp[3] = (u8)((4 + sizeof(mpath)) >> 8);
+        memcpy(fp + 4, mpath, sizeof(mpath));
+        len += 4 + sizeof(mpath);
+        path[len] = 0x7f; path[len + 1] = 0xff; path[len + 2] = 4; path[len + 3] = 0;
+        EFI_HANDLE img;
+        if (BS->LoadImage(false, self, (EFI_DEVICE_PATH_PROTOCOL *)path, 0, 0, &img)
+                != EFI_SUCCESS)
+            continue;
+        logf("LP is installed on another disk: starting its menu");
+        BS->FreePool(hs);
+        BS->StartImage(img, 0, 0);
+        /* It came back (it could not start LP either): the installer, then. */
+        BS->UnloadImage(img);
+        logf("the installed LP's menu returned; the installer after all");
+        return;
+    }
+    BS->FreePool(hs);
+}
+
 static void boot(int choice)
 {
     if (choice == CH_REC && !have_recovery) {
@@ -782,6 +872,8 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
     if (BS->HandleProtocol(image, &lig, (void **)&li) != EFI_SUCCESS)
         return EFI_LOAD_ERROR;
     dev = li->DeviceHandle;
+
+    chain_installed();
 
     char lang[16];
     var_str(L"LPLang", lang, sizeof(lang));

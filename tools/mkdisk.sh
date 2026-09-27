@@ -374,6 +374,15 @@ if [[ "$REC_HAS_SYSTEM" = 1 ]]; then
     printf 'root=PARTUUID=%s\n' "$REC_PARTUUID" | esp_text EFI/LP/recovery.ok
     log "EFI/LP/recovery.ok: root=PARTUUID=${REC_PARTUUID}"
 fi
+# The installer image says so on its EFI partition too: its boot menu
+# then hands over to an LP already installed on another disk of the
+# machine instead of offering the installer again (lpboot.c,
+# chain_installed). lp-install never copies this file to a disk it
+# installs, and removes it when it installs LP where it runs.
+if [[ -e "$ROOTFS/etc/lp/installer-medium" ]]; then
+    printf 'This partition is an LP installer.\n' | esp_text EFI/LP/installer
+    log "EFI/LP/installer (the installer medium)"
+fi
 
 # startup.nsh, and it is not belt and braces.
 #

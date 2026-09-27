@@ -68,7 +68,9 @@ typedef struct {
     char        disk_model[128];
     char        disk_size[32];
     int         disk_parts;
+    gboolean    disk_inplace;       /* the disk LP runs from, installed where it is */
     /* confirm */
+    GtkWidget  *confirm_title;
     GtkWidget  *confirm_what, *confirm_warn, *confirm_check, *confirm_go;
     /* progress */
     GtkWidget  *step;
@@ -83,7 +85,7 @@ typedef struct {
     SuAccount   acct;
     SuRegion    region;
     GtkWidget  *confirm_who;
-    GtkWidget  *done_text;
+    GtkWidget  *done_text, *done_sub;
     /* the card's entrance */
     GtkWidget  *card;
     LpSpring    card_in;
@@ -283,6 +285,7 @@ static void on_disk_toggled(GtkToggleButton *b, gpointer d)
     g_strlcpy(A.disk_model, g_object_get_data(G_OBJECT(b), "model"), sizeof A.disk_model);
     g_strlcpy(A.disk_size, g_object_get_data(G_OBJECT(b), "size"), sizeof A.disk_size);
     A.disk_parts = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "parts"));
+    A.disk_inplace = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "inplace"));
     gtk_widget_set_sensitive(A.disk_next, TRUE);
 }
 
@@ -327,12 +330,30 @@ static void show_disks(void)
         const char *reason = lp_json_str(d, "reason", "");
         int parts = (int)lp_json_num(d, "partitions", 0);
         gboolean ok = lp_json_bool(d, "usable", 0);
+        gboolean here = lp_json_bool(d, "inplace", 0);
+        const char *need = lp_json_str(d, "inplace_need_text", "");
 
         char *den = g_strdup_printf("%s  ·  %s  ·  %s", size, transport_name(tran, FALSE),
                                     lp_json_str(d, "path", ""));
         char *dko = g_strdup_printf("%s  ·  %s  ·  %s", size, transport_name(tran, TRUE),
                                     lp_json_str(d, "path", ""));
-        if (!ok) {
+        if (here) {
+            /* The disk LP runs from, big enough to stay on: nothing on it
+             * is erased, LP grows to fill it (lp-install install_inplace). */
+            char *e2 = g_strdup_printf("%s  —  LP is running from it: installs here, "
+                                       "nothing is erased", den);
+            char *k2 = g_strdup_printf("%s  —  지금 LP 가 도는 디스크: 지우지 않고 "
+                                       "여기에 설치합니다", dko);
+            g_free(den); g_free(dko);
+            den = e2; dko = k2;
+        } else if (!ok && !strcmp(reason, "running") && *need) {
+            char *e2 = g_strdup_printf("%s  —  LP is running from it; make it %s or "
+                                       "larger to install here", den, need);
+            char *k2 = g_strdup_printf("%s  —  지금 LP 가 도는 디스크입니다. %s 이상으로 "
+                                       "늘리면 여기에 설치할 수 있습니다", dko, need);
+            g_free(den); g_free(dko);
+            den = e2; dko = k2;
+        } else if (!ok) {
             const char *wen = !strcmp(reason, "running") ? "LP is running from this disk"
                             : !strcmp(reason, "mounted") ? "In use: it has mounted partitions"
                             : !strcmp(reason, "in-use")  ? "In use (encrypted or LVM)"
@@ -355,6 +376,7 @@ static void show_disks(void)
         g_object_set_data_full(G_OBJECT(b), "model", g_strdup(model), g_free);
         g_object_set_data_full(G_OBJECT(b), "size", g_strdup(size), g_free);
         g_object_set_data(G_OBJECT(b), "parts", GINT_TO_POINTER(parts));
+        g_object_set_data(G_OBJECT(b), "inplace", GINT_TO_POINTER(here));
         if (A.disk_group)
             gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(b), GTK_TOGGLE_BUTTON(A.disk_group));
         else
@@ -392,12 +414,35 @@ static void on_disk_next(GtkButton *b, gpointer d)
     char *en = g_strdup_printf("%s  (%s)", A.disk_model, A.disk_size);
     su_retext(A.confirm_what, en, en);
     g_free(en);
-    char *wen = g_strdup_printf(
-        "Everything on %s will be deleted%s. This cannot be undone.", A.disk,
-        A.disk_parts ? ", including the partitions on it now" : "");
-    char *wko = g_strdup_printf(
-        "%s 의 모든 것이 지워집니다%s. 되돌릴 수 없습니다.", A.disk,
-        A.disk_parts ? " (지금 있는 파티션 포함)" : "");
+    char *wen, *wko;
+    if (A.disk_inplace) {
+        wen = g_strdup_printf(
+            "LP is installed on %s, the disk it is running from. Nothing is "
+            "erased: LP grows to fill the disk and becomes the installed system.", A.disk);
+        wko = g_strdup_printf(
+            "지금 LP 가 도는 디스크 %s 에 설치합니다. 아무것도 지우지 않습니다: "
+            "LP 가 디스크 전체로 늘어나 설치된 시스템이 됩니다.", A.disk);
+        su_retext(A.confirm_title, "Install LP on this disk?", "이 디스크에 LP 를 설치할까요?");
+        su_retext(A.confirm_check, "I understand that LP will be installed on this disk",
+                  "이 디스크에 LP 가 설치된다는 것을 이해했습니다");
+        su_retext(A.confirm_go, "Install", "설치");
+        gtk_widget_remove_css_class(A.confirm_go, "su-danger");
+        gtk_widget_add_css_class(A.confirm_go, "su-primary");
+    } else {
+        wen = g_strdup_printf(
+            "Everything on %s will be deleted%s. This cannot be undone.", A.disk,
+            A.disk_parts ? ", including the partitions on it now" : "");
+        wko = g_strdup_printf(
+            "%s 의 모든 것이 지워집니다%s. 되돌릴 수 없습니다.", A.disk,
+            A.disk_parts ? " (지금 있는 파티션 포함)" : "");
+        su_retext(A.confirm_title, "Erase this disk and install LP?",
+                  "이 디스크를 지우고 LP 를 설치할까요?");
+        su_retext(A.confirm_check, "I understand that everything on this disk will be erased",
+                  "이 디스크의 모든 것이 지워진다는 것을 이해했습니다");
+        su_retext(A.confirm_go, "Erase and install", "지우고 설치");
+        gtk_widget_remove_css_class(A.confirm_go, "su-primary");
+        gtk_widget_add_css_class(A.confirm_go, "su-danger");
+    }
     su_retext(A.confirm_warn, wen, wko);
     g_free(wen); g_free(wko);
     char *sen = g_strdup_printf("Account %s  ·  %s  ·  computer name %s",
@@ -417,8 +462,10 @@ static void page_disks(void)
 {
     SuPage p;
     su_page(&p, "Where should LP go?", "LP 를 어디에 설치할까요?",
-            "Choose the disk. It will be erased and used for LP alone.",
-            "디스크를 고르세요. 그 디스크는 지워지고 LP 만 쓰게 됩니다.");
+            "Choose the disk. It will be erased and used for LP alone - or, when "
+            "the disk LP is running from is big enough, LP stays on it.",
+            "디스크를 고르세요. 그 디스크는 지워지고 LP 만 쓰게 됩니다. LP 가 돌고 "
+            "있는 디스크가 충분히 크면 지우지 않고 그대로 설치할 수도 있습니다.");
     GtkWidget *sw = gtk_scrolled_window_new();
     gtk_widget_add_css_class(sw, "su-list");
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_NEVER,
@@ -466,6 +513,7 @@ static void page_confirm(void)
     SuPage p;
     su_page(&p, "Erase this disk and install LP?", "이 디스크를 지우고 LP 를 설치할까요?",
             NULL, NULL);
+    A.confirm_title = p.title;
     A.confirm_what = su_label("", "", "su-choice-title");
     gtk_box_append(GTK_BOX(p.body), A.confirm_what);
     A.confirm_warn = su_label("", "", "su-warn");
@@ -473,9 +521,9 @@ static void page_confirm(void)
     A.confirm_who = su_label("", "", "su-note");
     gtk_box_append(GTK_BOX(p.body), A.confirm_who);
     gtk_box_append(GTK_BOX(p.body), su_label(
-        "LP uses the whole disk: 512 MB to start up, 6 GB for the recovery "
-        "system, and the rest for LP and your files.",
-        "LP 가 디스크 전체를 씁니다: 시작용 512MB, 복구 시스템 6GB, 나머지는 "
+        "LP uses the whole disk: 512 MB to start up, about 1.3 GB for the "
+        "recovery system, and the rest for LP and your files.",
+        "LP 가 디스크 전체를 씁니다: 시작용 512MB, 복구 시스템 약 1.3GB, 나머지는 "
         "LP 와 내 파일에 씁니다.", "su-note"));
     A.confirm_check = gtk_check_button_new();
     gtk_widget_add_css_class(A.confirm_check, "su-check");
@@ -524,6 +572,10 @@ static void finished(gboolean ok)
             "있습니다. 계정은 %s 입니다.", su_account_login(&A.acct));
         su_retext(A.done_text, en, ko);
         g_free(en); g_free(ko);
+        /* Installed where it runs: there is no stick to pull out. */
+        if (A.disk_inplace)
+            su_retext(A.done_sub, "Restart, and LP starts from this disk as installed.",
+                      "다시 시작하면 LP 가 설치된 시스템으로 시작합니다.");
         su_go(A.stack, "done", TRUE);
     } else {
         char *en = g_strdup_printf("lp-install said: %s", A.last_error[0] ? A.last_error
@@ -635,6 +687,7 @@ static void page_done(void)
     su_page(&p, "LP is installed", "LP 설치를 마쳤습니다",
             "Remove the USB stick, then restart.",
             "USB 를 뽑은 뒤 다시 시작하세요.");
+    A.done_sub = p.subtitle;
     A.done_text = su_label("", "", "su-body");
     gtk_box_append(GTK_BOX(p.body), A.done_text);
     GtkWidget *off = su_button("Power off", "전원 끄기", "su-secondary");

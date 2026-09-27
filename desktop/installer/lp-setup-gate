@@ -207,9 +207,43 @@ def prepare_devices():
             pass
 
 
+def gpu_3d():
+    """A GPU that draws in 3D: the same test start-desktop makes for the
+    session (i915 and friends, or virtio-gpu that the host gave virgl)."""
+    import glob
+    for card in glob.glob("/sys/class/drm/card[0-9]*"):
+        try:
+            drv = os.path.basename(os.path.realpath(card + "/device/driver"))
+        except OSError:
+            continue
+        if drv in ("i915", "amdgpu", "radeon", "nouveau", "vmwgfx"):
+            return True
+        if drv in ("virtio_gpu", "virtio-pci", "virtio_pci"):
+            try:
+                out = subprocess.run(["dmesg"], capture_output=True, text=True).stdout
+            except OSError:
+                out = ""
+            if "features: +virgl" in out:
+                return True
+    return False
+
+
+# The renderer the kiosk's sway draws with. pixman (the CPU) works on
+# every machine, but wlroots 0.15 gives it no hardware cursor ("Failed to
+# get cursor display formats"): every movement of the mouse is a frame
+# drawn on the CPU and sent to the screen, and in a VM that is a pointer
+# that jumps. With 3D the GL renderer puts the pointer on the cursor
+# plane, which the host (UTM) draws itself - smooth. If sway dies at the
+# start with GL anyway, the next attempt is pixman.
+RENDERER = None
+
+
 def kiosk(mode):
     """Run the setup window in a kiosk sway as uid 1000; return its
     exit status."""
+    global RENDERER
+    if RENDERER is None:
+        RENDERER = "gles2" if gpu_3d() else "pixman"
     pw = pwd.getpwuid(KIOSK_UID)
     xdg = "/run/user/%d" % KIOSK_UID
     home = RUN + "/home"
@@ -257,10 +291,11 @@ def kiosk(mode):
         "XDG_RUNTIME_DIR": xdg, "XDG_CONFIG_HOME": home + "/.config",
         "XDG_CACHE_HOME": home + "/.cache", "XDG_DATA_DIRS": "/usr/local/share:/usr/share",
         "XDG_CURRENT_DESKTOP": "sway", "XDG_SESSION_TYPE": "wayland",
-        # The same rendering choices the session makes (session-run):
-        # software rendering works on every machine this boots on.
-        "WLR_RENDERER": "pixman", "WLR_RENDERER_ALLOW_SOFTWARE": "1",
-        "LIBGL_ALWAYS_SOFTWARE": "1", "GSK_RENDERER": "cairo", "GDK_BACKEND": "wayland",
+        # The compositor draws with RENDERER (above); the window itself
+        # with cairo on the CPU either way, which is the same on every
+        # machine.
+        "WLR_RENDERER": RENDERER, "WLR_RENDERER_ALLOW_SOFTWARE": "1",
+        "GSK_RENDERER": "cairo", "GDK_BACKEND": "wayland",
         # The windows are drawn for a dark card on #0e0e0e; Adwaita's light
         # defaults under them left some text dark-on-dark.
         "GTK_THEME": "Adwaita:dark",
@@ -299,11 +334,17 @@ def kiosk(mode):
         os.setuid(KIOSK_UID)
         os.chdir(home)
 
-    log("kiosk", mode, "scale", output_scale())
+    if RENDERER == "pixman":
+        env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+    log("kiosk", mode, "scale", output_scale(), "renderer", RENDERER)
+    started = time.time()
     with open(LOG, "a") as out:
         p = subprocess.Popen(["/usr/bin/sway", "-c", cfg], env=env, preexec_fn=child,
                              stdout=out, stderr=out, stdin=subprocess.DEVNULL)
         p.wait()
+    if RENDERER != "pixman" and time.time() - started < 10 and not os.path.exists(status):
+        log("sway with", RENDERER, "stopped at once; pixman from now on")
+        RENDERER = "pixman"
     if seatd:
         seatd.terminate()
         seatd.wait()

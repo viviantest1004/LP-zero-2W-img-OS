@@ -27,7 +27,11 @@ Why it is built the way it is:
   - It refuses the disk it is running from, and any disk with anything
     mounted, swapped on or held by device-mapper. Those are the two ways
     an installer destroys the system it is running on, and both can be
-    told from /proc and /sys before a single byte is written.
+    told from /proc and /sys before a single byte is written. The one
+    exception erases nothing: when the disk LP runs from is big enough
+    (a VM's disk made bigger than the image), LP is installed where it
+    is - its table rewritten for the disk, LP-ROOT grown, the answers
+    written in (install_inplace).
 
   - The root is copied from the running system with rsync -aHAX: owners
     and modes, hard links (a Debian root has hundreds), ACLs, extended
@@ -344,8 +348,10 @@ def list_disks():
             if os.path.isdir(hp) and os.listdir(hp):
                 held = True
         reason = ""
+        need_here = inplace_need(d) if d == running else 0
+        here = bool(need_here) and size >= need_here
         if d == running:
-            reason = "running"
+            reason = "" if here else "running"
         elif busy:
             reason = "mounted"
         elif held:
@@ -365,6 +371,11 @@ def list_disks():
             "running": d == running,
             "usable": reason == "",
             "reason": reason,
+            # LP installed where it is: the disk LP runs from, grown past
+            # what the image was (a VM disk made bigger, a large stick).
+            "inplace": here,
+            "inplace_need": need_here,
+            "inplace_need_text": human(need_here) if need_here else "",
         })
     return disks
 
@@ -403,6 +414,33 @@ def needed_bytes():
     st = os.statvfs("/")
     used = (st.f_blocks - st.f_bfree) * st.f_frsize
     return (ESP_MIB + recovery_mib()) * 1024 ** 2 + used + ROOT_SLACK
+
+
+MEDIUM = "/etc/lp/installer-medium"
+
+
+def inplace_need(disk):
+    """Bytes the disk LP is running from must hold for LP to be installed
+    onto it where it is - or 0 when that cannot be done at all.
+
+    Only the image's own layout qualifies: LP-ESP, LP-RECOVERY, LP-ROOT in
+    that order, LP-ROOT being this very root, on the installer medium.
+    Then nothing needs copying: the table is rewritten for the bigger
+    disk, LP-ROOT grows to its end, and the person's answers are written
+    into the running system. What it needs is what a copy needs - the
+    root as it is and room to live in - from where LP-ROOT starts."""
+    if not os.path.exists(MEDIUM):
+        return 0
+    parts = gpt_entries(disk)
+    if (sorted(parts) != [1, 2, 3] or parts[1][0] != TYPE_ESP
+            or parts[2][2] != "LP-RECOVERY" or parts[3][2] != "LP-ROOT"):
+        return 0
+    if read("/sys/block/%s/%s/dev" % (disk, os.path.basename(part_path(disk, 3)))) != root_dev():
+        return 0
+    bs = int(read("/sys/block/%s/queue/logical_block_size" % disk, "512"))
+    st = os.statvfs("/")
+    used = (st.f_blocks - st.f_bfree) * st.f_frsize
+    return parts[3][3] * bs + used + ROOT_SLACK
 
 
 # ── firmware facts ────────────────────────────────────────────────────
@@ -950,11 +988,7 @@ def fill_recovery(rec_dev, rec_mnt, pwhash):
                     "holds only the recovery password. Installing from a newer LP\n"
                     "USB stick fills it.\n")
     if pwhash:
-        d = os.path.join(rec_mnt, "etc/lp")
-        os.makedirs(d, exist_ok=True)
-        os.chmod(d, 0o755)
-        write_atomic(os.path.join(d, "recovery-password"), pwhash + "\n", 0o600)
-        os.chown(os.path.join(d, "recovery-password"), 0, 0)
+        write_recovery_password(rec_mnt, pwhash)
     return have
 
 
@@ -1101,6 +1135,169 @@ def boot_entry(disk, esp_no, esp_guid, root_uuid, have_menu):
     return "Boot%04X" % num
 
 
+def write_recovery_password(rec_mnt, pwhash):
+    d = os.path.join(rec_mnt, "etc/lp")
+    os.makedirs(d, exist_ok=True)
+    os.chmod(d, 0o755)
+    write_atomic(os.path.join(d, "recovery-password"), pwhash + "\n", 0o600)
+    os.chown(os.path.join(d, "recovery-password"), 0, 0)
+
+
+def stamp_medium_recovery(pwhash):
+    """The stick's own recovery shell: until now it had nobody to ask for
+    - the live account has no password - so it could not open at all.
+    From here it opens for the administrator password chosen in this
+    install, like the installed disk's. Never without one (auth.c)."""
+    if not pwhash or not os.path.exists(MEDIUM):
+        return
+    dev = running_part(name_want="LP-RECOVERY")
+    if not dev:
+        return
+    mnt = os.path.join(WORK, "medium-recovery")
+    try:
+        mount(dev, mnt)
+        try:
+            write_recovery_password(mnt, pwhash)
+        finally:
+            subprocess.run([tool("umount"), mnt], stderr=subprocess.DEVNULL)
+    except (RuntimeError, OSError) as e:
+        say("NOTE", "the USB stick's recovery password was not written (%s)" % e)
+
+
+def partition_mounts(disk, n):
+    """Where partition n of disk is mounted now, if anywhere."""
+    majmin = read("/sys/block/%s/%s/dev" % (disk, os.path.basename(part_path(disk, n))))
+    return [f.split()[4] for f in read("/proc/self/mountinfo").splitlines()
+            if len(f.split()) > 4 and f.split()[2] == majmin]
+
+
+def install_inplace(a, pwhash, disk):
+    """LP installed on the disk it is running from: nothing copied, nothing
+    erased. The partition table is rewritten for the disk as it is now -
+    the backup GPT at its real end, fresh GUIDs (every copy of the image
+    shares the old ones), LP-ROOT to the last sector - LP-ROOT grows
+    while mounted (resize2fs can grow ext4 online), and then exactly what
+    a copy gets: the person's account and answers, fstab, the recovery
+    password, the boot entry, and a machine nobody has used. The
+    installer marker goes last, so a failure part way leaves an
+    installer that can simply be run again."""
+    name, dev = disk["name"], disk["path"]
+    lang = a.lang
+    t0 = time.time()
+    os.makedirs(WORK, exist_ok=True)
+    umount_all(WORK)
+
+    # 1. The table. sfdisk --dump, minus last-lba (so the end is the disk's
+    # end now), minus LP-ROOT's size (so it takes the rest), new GUIDs;
+    # written back without asking the kernel to re-read a disk in use,
+    # then the one change the kernel must know - LP-ROOT's size - told
+    # through BLKPG (partx), which works on a mounted partition.
+    say("STEP", "partition", "Growing LP to fill %s" % dev)
+    progress(2, "partition")
+    lines = []
+    for ln in run([tool("sfdisk"), "--dump", dev]).splitlines():
+        if ln.startswith("last-lba:"):
+            continue
+        if ln.startswith("label-id:"):
+            ln = "label-id: %s" % str(uuid.uuid4()).upper()
+        m = re.match(r"^(\S+)\s*:\s*(start=.*)$", ln)
+        if m:
+            num = int(re.search(r"(\d+)$", m.group(1)).group(1))
+            fields = [f.strip() for f in m.group(2).split(",")]
+            fields = [f for f in fields if not f.startswith("uuid=")
+                      and not (num == 3 and f.startswith("size="))]
+            fields.append("uuid=%s" % str(uuid.uuid4()).upper())
+            ln = "%s : %s" % (m.group(1), ", ".join(fields))
+        lines.append(ln)
+    run([tool("sfdisk"), "-q", "--no-reread", "--no-tell-kernel", dev],
+        input="\n".join(lines) + "\n")
+    run([tool("partx"), "-u", "--nr", "3", dev])
+    gpt = gpt_entries(name)
+    esp_guid, rec_guid, root_guid = gpt[1][1], gpt[2][1], gpt[3][1]
+    progress(10, "partition")
+
+    # 2. The filesystem to the new end of its partition.
+    say("STEP", "format", "Making room")
+    run([tool("resize2fs"), part_path(name, 3)])
+    progress(40, "format")
+
+    rec_mnt = os.path.join(WORK, "recovery")
+    try:
+        # 3. The system: the person's answers, into the running root.
+        say("STEP", "copy", "Setting up LP")
+        write_fstab("/", root_guid, esp_guid)
+        done = configure("/", a, pwhash)
+        write_firstboot("/", lang, done)
+        progress(70, "copy")
+
+        # 4. The recovery password, onto this disk's LP-RECOVERY.
+        say("STEP", "recovery", "Setting up recovery")
+        has_recovery = False
+        if not partition_mounts(name, 2):
+            mount(part_path(name, 2), rec_mnt)
+            has_recovery = os.path.isfile(os.path.join(rec_mnt, "reinstall/manifest"))
+            if pwhash:
+                write_recovery_password(rec_mnt, pwhash)
+        progress(80, "recovery")
+
+        # 5. Boot: the menu's command line and recovery mark name the new
+        # GUIDs; the firmware gets an entry for this disk.
+        say("STEP", "boot", "Making the disk bootable")
+        where = partition_mounts(name, 1)
+        esp_mnt = where[0] if where else os.path.join(WORK, "esp")
+        if where:
+            run([tool("mount"), "-o", "remount,rw", esp_mnt])
+        else:
+            mount(part_path(name, 1), esp_mnt)
+        try:
+            base = ""
+            for p in ("EFI/LP/cmdline.txt", "cmdline.txt"):
+                if os.path.isfile(os.path.join(esp_mnt, p)):
+                    base = read(os.path.join(esp_mnt, p))
+                    break
+            words = [w for w in base.split() if not w.startswith("root=")]
+            cmd = " ".join(["root=PARTUUID=%s" % root_guid] + words) + "\n"
+            for p in ("EFI/LP/cmdline.txt", "cmdline.txt"):
+                write_atomic(os.path.join(esp_mnt, p), cmd)
+            mark = os.path.join(esp_mnt, "EFI/LP/recovery.ok")
+            if has_recovery:
+                write_atomic(mark, "root=PARTUUID=%s\n" % rec_guid)
+            elif os.path.exists(mark):
+                os.unlink(mark)
+            # No longer the installer: its boot menu stops looking for
+            # an installed LP elsewhere (lpboot.c, chain_installed).
+            try:
+                os.unlink(os.path.join(esp_mnt, "EFI/LP/installer"))
+            except FileNotFoundError:
+                pass
+            have_menu = os.path.isfile(os.path.join(esp_mnt, "EFI/LP/lpboot.efi"))
+        finally:
+            run([tool("sync")])
+            if where:
+                subprocess.run([tool("mount"), "-o", "remount,ro", esp_mnt],
+                               stderr=subprocess.DEVNULL)
+        entry = None
+        if not a.no_boot_entry:
+            try:
+                entry = boot_entry(name, 1, esp_guid, root_guid, have_menu)
+            except OSError as e:
+                say("NOTE", "the firmware did not take a boot entry (%s);"
+                    " the disk boots through \\EFI\\BOOT\\BOOTX64.EFI" % e)
+        progress(95, "boot")
+
+        # 6. Last: a machine nobody has used, and no longer an installer.
+        say("STEP", "finish", "Finishing")
+        make_fresh("/")
+        run([tool("sync")])
+    finally:
+        umount_all(WORK)
+    progress(100, "done")
+    say("DONE", "root=PARTUUID=%s" % root_guid, "esp=PARTUUID=%s" % esp_guid,
+        "recovery=%s" % ("yes" if has_recovery else "empty"),
+        "entry=%s" % (entry or "none"), "inplace=yes",
+        "seconds=%d" % (time.time() - t0))
+
+
 # ── the install, in order ─────────────────────────────────────────────
 
 def install(a, password):
@@ -1112,6 +1309,17 @@ def install(a, password):
     disk = next((d for d in disks if d["name"] == name), None)
     if disk is None:
         raise Refused("no-such-disk", "%s is not a disk this machine has" % disk_path)
+    if disk["inplace"]:
+        for p in info["problems"]:
+            if p["key"] == "secure-boot":
+                raise Refused("secure-boot", p["en"])
+        if not yes:
+            print("LP will be installed on %s, the disk it is running from (%s, %s)."
+                  " Nothing on it is erased." % (disk["path"], disk["model"], disk["size_text"]))
+            answer = input("Type the disk's name (%s) to go ahead: " % name).strip()
+            if answer != name:
+                raise Refused("cancelled", "nothing was written")
+        return install_inplace(a, pwhash, disk)
     if not disk["usable"]:
         raise Refused(disk["reason"], {
             "running": "%s is the disk LP is running from" % disk["path"],
@@ -1205,6 +1413,7 @@ def install(a, password):
         say("STEP", "recovery", "Setting up recovery")
         mount(p_rec, rec_mnt)
         has_recovery = fill_recovery(p_rec, rec_mnt, pwhash)
+        stamp_medium_recovery(pwhash)
         progress(94, "recovery")
 
         # 5. Boot.
