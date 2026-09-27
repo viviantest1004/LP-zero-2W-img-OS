@@ -65,7 +65,27 @@ if test -s "$LP_HOME/.config/lp/compositor" ; then
     case $want in wayfire|sway) LP_COMPOSITOR=$want ;; esac
 fi
 command -v wayfire > /dev/null 2>&1 || LP_COMPOSITOR=sway
-export WLR_LIBINPUT_NO_DEVICES=1
+# The keyboard, the mouse and the touchscreen from the first moment.
+#
+# wlroots 0.15 will not start with no input device at all ("libinput
+# initialization failed, no input devices") unless WLR_LIBINPUT_NO_DEVICES
+# is 1 - and with it set, it also skips reading the devices it did find
+# at start (backend/libinput/backend.c). They wait in libinput's queue
+# until something makes its descriptor readable: the first key press or
+# mouse movement. Until then the compositor has no keyboard and no pointer
+# - in a wayfire VM the USB tablet and keyboard were attached 78 s after
+# login, and not at all until the mouse moved - so there is no pointer on
+# the screen and nothing that asks whether a keyboard is there hears yes.
+# Newer wlroots reads them at start either way.
+#
+# So the switch is set only for the case it exists for: udev knows of no
+# input device yet. Its database is what libinput reads, and it is
+# world-readable.
+if grep -qs '^E:ID_INPUT=1' /run/udev/data/c13:* ; then
+    unset WLR_LIBINPUT_NO_DEVICES
+else
+    export WLR_LIBINPUT_NO_DEVICES=1
+fi
 export GDK_BACKEND=wayland
 # The pointer's theme and size for everything that loads a cursor itself
 # (Xwayland apps, the compositors' defaults): the same 16 as GTK
