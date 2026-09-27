@@ -813,3 +813,22 @@
 +	root_minimize_container(con);
 +	return cmd_results_new(CMD_SUCCESS, NULL);
 +}
+--- a/sway/input/text_input.c
++++ b/sway/input/text_input.c
+@@ -77,8 +77,14 @@
+ 	struct wlr_keyboard *active_keyboard = wlr_seat_get_keyboard(relay->seat->wlr_seat);
+ 	wlr_input_method_keyboard_grab_v2_set_keyboard(keyboard_grab,
+ 		active_keyboard);
+-	wlr_input_method_keyboard_grab_v2_send_modifiers(keyboard_grab,
+-		&active_keyboard->modifiers);
++	// LP: no keyboard is active for a moment after the input method and
++	// the focused window go away together; &NULL->modifiers was a segfault
++	// in wlroots (send_modifiers+0xf, address 0xfc) and the whole session
++	// went with it. set_keyboard already sends the modifiers of a real one.
++	if (active_keyboard) {
++		wlr_input_method_keyboard_grab_v2_send_modifiers(keyboard_grab,
++			&active_keyboard->modifiers);
++	}
+ 
+ 	wl_signal_add(&keyboard_grab->events.destroy,
+ 		&relay->input_method_keyboard_grab_destroy);
