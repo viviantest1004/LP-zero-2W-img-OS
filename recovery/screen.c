@@ -119,7 +119,55 @@ static u32 chan(u32 v8, u32 len)
     return len >= 8 ? v8 << (len - 8) : v8 >> (8 - len);
 }
 
+static void fb_put(const lpui_canvas_t *c, int x, int y, int w, int h);
+
+/* ── Settling ──
+ *
+ * On a DRM driver's fbdev emulation a write() is shown by a flush that
+ * runs a moment later, and in a VM (virtio-gpu) that flush showed the
+ * picture as it was one write EARLIER: the last frame of anything - the
+ * keyboard closing, a screen appearing - stayed invisible until the next
+ * thing was drawn, so the keyboard seemed not to close. The rectangle
+ * drawn since the screen last settled is therefore written once more
+ * when nothing has been drawn for SETTLE_MS; on a driver that shows
+ * every write at once that costs one redundant copy of a few rows. */
+#define SETTLE_MS 90
+static const lpui_canvas_t *settle_c;
+static int sx0, sy0, sx1, sy1;          /* union of rows written, or sx1 == 0 */
+static s64 settle_at;
+
 void scr_present(const lpui_canvas_t *c, int x, int y, int w, int h)
+{
+    if (fb_fd < 0 || w <= 0 || h <= 0)
+        return;
+    fb_put(c, x, y, w, h);
+    if (settle_c != c)
+        sx1 = 0;                        /* a different picture: start over */
+    settle_c = c;
+    if (!sx1) {
+        sx0 = x; sy0 = y; sx1 = x + w; sy1 = y + h;
+    } else {
+        if (x < sx0) sx0 = x;
+        if (y < sy0) sy0 = y;
+        if (x + w > sx1) sx1 = x + w;
+        if (y + h > sy1) sy1 = y + h;
+    }
+    settle_at = lp_monotonic_ms() + SETTLE_MS;
+}
+
+int scr_settle(void)
+{
+    if (!sx1 || !settle_c)
+        return -1;
+    s64 now = lp_monotonic_ms();
+    if (now < settle_at)
+        return (int)(settle_at - now);
+    fb_put(settle_c, sx0, sy0, sx1 - sx0, sy1 - sy0);
+    sx1 = 0;
+    return -1;
+}
+
+static void fb_put(const lpui_canvas_t *c, int x, int y, int w, int h)
 {
     if (fb_fd < 0)
         return;

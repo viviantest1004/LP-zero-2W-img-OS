@@ -47,6 +47,9 @@ extern u8 *logo_scratch;
 
 bool scr_open(void);
 void scr_present(const lpui_canvas_t *c, int x, int y, int w, int h);
+/* Write the last drawn rectangle once more when drawing has paused;
+ * ms until that is due, or -1 when there is nothing to settle. */
+int  scr_settle(void);
 void scr_graphics(bool on);                 /* KD_GRAPHICS + keyboard grab */
 
 /* UEV_FD: the extra descriptor (in_watch_fd) is readable. */

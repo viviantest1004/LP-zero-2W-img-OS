@@ -1387,6 +1387,9 @@ int main(void)
          * whatever is moving (highlight spring, keyboard slide, key
          * repeat); a still menu wakes once a second for the clock. */
         int wait = anim ? 12 : (repaint_at[1] ? 100 : 250);
+        int sw = scr_settle();
+        if (sw >= 0 && sw < wait)
+            wait = sw;
         int ow = osk_tick();
         if (ow >= 0 && ow < wait)
             wait = ow;
