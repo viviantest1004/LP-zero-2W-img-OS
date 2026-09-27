@@ -858,12 +858,14 @@ static bool bring_back(void)
      * FAT has no journal, we only ever read from here, and /boot is
      * where authorized_keys and firewall.conf are read from, so a
      * stranger's FAT partition becoming /boot is not a filesystem
-     * mix-up but handing somebody the machine. */
+     * mix-up but handing somebody the machine. Root-only, as there too:
+     * the private SSH key authkey leaves here logs in as root. */
     if (!is_mountpoint(BOOT_POINT)) {
         if (find_ours(BOOT_LABEL, "vfat", dev, sizeof dev,
                       stranger, sizeof stranger)) {
             lp_mkdir(BOOT_POINT, 0755);
-            if (lp_mount(dev, BOOT_POINT, "vfat", MS_RDONLY, NULL) == 0) {
+            if (lp_mount(dev, BOOT_POINT, "vfat", MS_RDONLY,
+                         "fmask=0077,dmask=0077") == 0) {
                 snprintf(msg, sizeof msg, "  %s is back at /boot", dev);
                 say(msg);
             } else {

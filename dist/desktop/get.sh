@@ -99,7 +99,8 @@ echo
 echo "Done: $(pwd)/$IMG  - use THIS file as the VM's disk, not the .xz"
 echo
 echo "USB stick:  sudo dd if=linux-LP_desktop.img of=/dev/<stick> bs=4M conv=fsync status=progress"
-echo "UTM/QEMU:   use linux-LP_desktop.img as a disk (UEFI, x86_64, Q35, 4GB+ RAM)."
+echo "UTM/QEMU:   use linux-LP_desktop.img as a disk (UEFI, x86_64, Q35, 2+ cores, 4GB+ RAM),"
+echo "            and add a second, empty disk of 16GB or more to install LP onto."
 echo "            Display: a GPU-accelerated one (UTM: virtio-gpu-gl / \"GPU Supported\";"
 echo "            QEMU: -device virtio-vga-gl -display gtk,gl=on) gives window buttons with"
 echo "            minimise and animations; without 3D, LP runs its CPU-drawn session."

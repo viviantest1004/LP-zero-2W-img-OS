@@ -61,6 +61,11 @@ echo 16384 > /proc/sys/vm/min_free_kbytes || echo "[rc]   failed"
 echo "[rc] safety net"
 # Compressed swap inside RAM. Nothing is written to the card.
 zram on || echo "[rc]   carrying on without zram"
+# Swap is RAM here (compressed), not a disk: swapping early is cheap and
+# keeps the page cache, and reading ahead 8 pages at a time from zram
+# only decompresses pages nobody asked for.
+echo 100 > /proc/sys/vm/swappiness 2>/dev/null
+echo 0 > /proc/sys/vm/page-cluster 2>/dev/null
 
 echo "[rc] a ceiling on the number of processes"
 # guard kills a fork bomb, but cleaning one up is the second line of
@@ -210,7 +215,13 @@ echo "[rc] the boot partition"
 # checked, same as here - when the card comes back. If the options on
 # this line change, change them there too: automount.c, bring_back().
 mkdir -p /boot
-mount -L LPZERO -o ro /dev/mmcblk0p1 /boot || mount -L LPZERO -o ro /dev/vda1 /boot || mount -L LPZERO -o ro /dev/nvme0n1p1 /boot || mount -L LPZERO -w -o ro /dev/sda1 /boot || echo "[rc]   could not read the boot partition"
+# fmask/dmask: root only. FAT has no owners, so without them every file
+# here reads as 0755 to every account - and the private SSH key authkey
+# writes here logs in as root, so on a machine with more than one
+# account (the desktop) any of them could have read it and become root.
+# The owner still reads it from any PC: the masks are this mount's, not
+# the disk's.
+mount -L LPZERO -o ro,fmask=0077,dmask=0077 /dev/mmcblk0p1 /boot || mount -L LPZERO -o ro,fmask=0077,dmask=0077 /dev/vda1 /boot || mount -L LPZERO -o ro,fmask=0077,dmask=0077 /dev/nvme0n1p1 /boot || mount -L LPZERO -w -o ro,fmask=0077,dmask=0077 /dev/sda1 /boot || echo "[rc]   could not read the boot partition"
 
 echo "[rc] checking the data partition"
 # Before mounting it, and before expandfs, which mounts it to resize.

@@ -120,6 +120,20 @@ glibc 바이너리, 그래픽, 보안, 오류 경로, 리다이렉션, 로깅, �
 | `dist/linux-LP_armv6_ZeroW.img.xz` | **라즈베리파이 제로 W (1세대) 실기.** ARM1176 / ARMv6 32비트 - 제로 2 W 와 명령어 집합이 다른 기계라서 별개의 이미지입니다 |
 | `dist/linux-LP_amd64.img.xz` | **일반 PC 와 데스크톱 가상머신.** VMware, VirtualBox, QEMU/KVM, Hyper-V |
 | `dist/test_a_123_LPzero2W_linux-utm.zip` | **arm64 가상머신 전용.** 압축 풀고 더블클릭하면 UTM 이 엽니다 |
+| `dist/desktop/` (`get.sh` 로 받기) | **데스크탑 LP.** Dell XPS 15 9550 같은 x86-64 PC, 그리고 UTM/QEMU. 최소 사양: **2코어, 램 4GB, 디스크 16GB** |
+
+데스크탑 이미지는 45MB 조각으로 올라가 있습니다. 받고, 합치고, 풀기까지:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/viviantest1004/LP-zero-2W-img-OS/refs/heads/claude/hohho-xvzof5/dist/desktop/get.sh | sh
+```
+
+UTM (Apple Silicon 맥 포함): Virtualize 가 아니라 **Emulate**, x86_64, 시스템 Q35,
+UEFI 켜기, 램 4GB 이상, 코어 2개 이상, 디스플레이 virtio-gpu-gl-pci 에
+"hardware OpenGL acceleration" 체크. 디스크는 `.xz` 가 아니라 풀린
+`linux-LP_desktop.img` 를 가져오세요 - `.xz` 를 넣으면 파티션을 못 찾아 UEFI
+셸로 떨어집니다. 설치하려면 16GB 이상 빈 디스크를 하나 더 붙이세요. 3D 가 없는 화면에서도 돌지만 창 애니메이션과 최소화
+버튼은 GPU 가 있을 때만 나옵니다.
 
 받은 뒤에 확인하세요. 받다가 끊긴 이미지는 부팅 도중에 이상하게
 실패합니다.
