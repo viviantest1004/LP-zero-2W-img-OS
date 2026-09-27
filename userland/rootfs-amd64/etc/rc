@@ -10,7 +10,7 @@
 echo "[rc] naming the machine"
 # Without this the hostname is "(none)", which shows up in the shell
 # prompt and in every log line. One word, and the machine has a name.
-echo lpzero > /proc/sys/kernel/hostname || echo "[rc]   could not set it"
+echo linux-lp > /proc/sys/kernel/hostname || echo "[rc]   could not set it"
 
 echo "[rc] the root filesystem"
 # Two shapes of machine run this same script, and most of what follows
