@@ -1,28 +1,51 @@
 #!/usr/bin/python3
-"""lp-autoscale - scale 2 on high-density outputs, 1 elsewhere.
+"""lp-autoscale - scale 2 on high-density outputs, 1 elsewhere, and the
+screen someone chose in Settings put back.
 
 The XPS 15's panel is 3840x2160 on 15.6 inches: at scale 1 every button
 is a quarter of the size a finger needs. An external 1080p monitor wants
 scale 1. Neither compositor's config can say "if the mode is wider than
 2560", so this runs once the session is up (lp-shell-start) and, under
-sway, on every output change (exec_always), and asks the compositor.
-A scale someone set by hand in Settings (~/.config/lp/scale-<output>)
-wins over the guess.
+sway, again on every config reload (exec_always), and asks the compositor.
 
 --watch keeps it running and does it again whenever the graphics card
 reports a change: a VM window made bigger or smaller (UTM, QEMU) sends
 the guest a new preferred mode, and neither compositor switches to it
 by itself - the screen stayed at the size it started with. So on every
-change the output is also put on its preferred mode.
+change an output nobody chose a mode for is put on its preferred mode.
+
+What Settings > Display chose wins over all of that, per output, in
+$XDG_CONFIG_HOME/lp (the same directory lp-settings writes):
+
+  mode-<output>       1920x1080@60.000Hz   that mode, never "preferred";
+                                           and no scale guess either
+  scale-<output>      1.25                 that scale
+  transform-<output>  90                   that rotation
+
+These files are also how a chosen mode comes back at login under sway,
+which has no config file of ours to start from (wayfire has
+[output:<name>] in wayfire.ini as well). Settings > Display > Resolution
+> "Automatic" removes mode- and scale-, and the output follows the window
+again.
+
+While Settings asks "keep these display settings?" it leaves
+$XDG_RUNTIME_DIR/lp-display-hold-<output>; an output with a hold younger
+than a minute is not touched at all - the VM window following the new
+mode must not put the old one back under the question.
 
 It talks wlr-output-management through wlr-randr, which wayfire and
 sway both implement, so the same program serves the session on a GPU
 (wayfire) and the one without (sway). swaymsg is the fallback for a
 root without wlr-randr.
 """
-import json, os, re, shutil, subprocess
+import json, os, re, shutil, subprocess, sys, time
 
-CONF = os.path.expanduser("~/.config/lp")
+CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "lp")
+HOLD_SECS = 60
+
+
+def log(*a):
+    print("lp-autoscale:", *a, file=sys.stderr, flush=True)
 
 
 def run(argv):
@@ -32,35 +55,55 @@ def run(argv):
         return ""
 
 
+def call(argv):
+    log(" ".join(argv))
+    try:
+        r = subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                           text=True, timeout=10)
+        if r.returncode != 0:
+            log("  failed:", (r.stderr or "").strip())
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError) as e:
+        log("  failed:", e)
+        return False
+
+
 def outputs_wlr_randr():
-    """[{name, width, scale, current, preferred}] from wlr-randr's text
-    (0.2 has no --json).
+    """[{name, width, scale, transform, cur, pref, modes}] from wlr-randr's
+    text (0.2 has no --json). A mode is (w, h, mHz, "WxH@HzHz").
 
       Virtual-1 "Red Hat, Inc. QEMU Monitor (Virtual-1)"
         Enabled: yes
         Modes:
           1920x1080 px, 74.998001 Hz (preferred, current)
+        Transform: normal
         Scale: 1.000000
     """
     out, cur = [], None
     for line in run(["wlr-randr"]).splitlines():
         if line and not line[0].isspace():
             cur = {"name": line.split()[0], "width": 0, "scale": 1.0, "enabled": True,
-                   "current": None, "preferred": None}
+                   "transform": "normal", "cur": None, "pref": None, "modes": []}
             out.append(cur)
         elif cur is not None:
             s = line.strip()
-            m = re.match(r"(\d+)x(\d+) px", s)
-            if m and re.search(r"\bcurrent\b", s):
-                cur["width"] = int(m.group(1))
-                cur["current"] = m.group(0)
-            if m and re.search(r"\bpreferred\b", s):
-                cur["preferred"] = m.group(0)
+            m = re.match(r"(\d+)x(\d+) px, ([\d.]+) Hz", s)
+            if m:
+                mode = (int(m.group(1)), int(m.group(2)), int(round(float(m.group(3)) * 1000)),
+                        "%sx%s@%sHz" % (m.group(1), m.group(2), m.group(3)))
+                cur["modes"].append(mode)
+                if re.search(r"\bcurrent\b", s):
+                    cur["width"] = mode[0]
+                    cur["cur"] = mode
+                if re.search(r"\bpreferred\b", s):
+                    cur["pref"] = mode
             elif s.startswith("Scale:"):
                 try:
                     cur["scale"] = float(s.split()[1])
                 except (IndexError, ValueError):
                     pass
+            elif s.startswith("Transform:"):
+                cur["transform"] = s.split(":", 1)[1].strip() or "normal"
             elif s.startswith("Enabled:"):
                 cur["enabled"] = s.endswith("yes")
     return [o for o in out if o["enabled"] and o["width"]]
@@ -71,19 +114,76 @@ def outputs_sway():
         data = json.loads(run(["swaymsg", "-r", "-t", "get_outputs"]) or "[]")
     except ValueError:
         return []
-    return [{"name": o.get("name", ""),
-             "width": (o.get("current_mode") or {}).get("width", 0),
-             "scale": float(o.get("scale") or 1)} for o in data]
+    outs = []
+    for o in data:
+        if not o.get("active", True):
+            continue
+        cm = o.get("current_mode") or {}
+        modes = [(m.get("width", 0), m.get("height", 0), m.get("refresh", 0),
+                  "%dx%d@%.3fHz" % (m.get("width", 0), m.get("height", 0),
+                                    m.get("refresh", 0) / 1000.0))
+                 for m in o.get("modes") or []]
+        cur = (cm.get("width", 0), cm.get("height", 0), cm.get("refresh", 0), "")
+        outs.append({"name": o.get("name", ""), "width": cur[0],
+                     "scale": float(o.get("scale") or 1),
+                     "transform": o.get("transform") or "normal",
+                     "cur": cur, "pref": None, "modes": modes})
+    return outs
 
 
-def wanted(o):
-    want = "2" if o["width"] >= 2560 else "1"
+def pinned(kind, name):
+    """What Settings chose for this output, or None."""
     try:
-        with open(os.path.join(CONF, "scale-" + o["name"])) as f:
-            want = f.read().strip() or want
+        with open(os.path.join(CONF, "%s-%s" % (kind, name))) as f:
+            return f.read().strip() or None
     except OSError:
-        pass
-    return want
+        return None
+
+
+def held(name):
+    rt = os.environ.get("XDG_RUNTIME_DIR")
+    if not rt:
+        return False
+    try:
+        age = time.time() - os.stat(os.path.join(rt, "lp-display-hold-" + name)).st_mtime
+    except OSError:
+        return False
+    return age < HOLD_SECS
+
+
+def parse_mode(text):
+    """"1920x1080@60.000Hz" or "1920x1080" -> (w, h, mHz or None)."""
+    m = re.match(r"\s*(\d+)x(\d+)(?:@([\d.]+)(?:Hz)?)?\s*$", text or "")
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), \
+        int(round(float(m.group(3)) * 1000)) if m.group(3) else None
+
+
+def same(mode, want):
+    return mode is not None and mode[0] == want[0] and mode[1] == want[1] and \
+        (want[2] is None or abs(mode[2] - want[2]) < 500)
+
+
+def find_mode(o, want):
+    """The offered mode that is `want`: same size, nearest refresh (the
+    highest when no refresh was given)."""
+    best = None
+    for m in o["modes"]:
+        if m[0] != want[0] or m[1] != want[1]:
+            continue
+        if want[2] is None:
+            if best is None or m[2] > best[2]:
+                best = m
+        elif best is None or abs(m[2] - want[2]) < abs(best[2] - want[2]):
+            best = m
+    if best is not None and want[2] is not None and abs(best[2] - want[2]) >= 1000:
+        return None
+    return best
+
+
+def guess(o):
+    return "2" if o["width"] >= 2560 else "1"
 
 
 def apply():
@@ -91,25 +191,58 @@ def apply():
     outs = outputs_wlr_randr() if use_randr else outputs_sway()
     changed = False
     for o in outs:
-        if use_randr and o.get("preferred") and o["preferred"] != o.get("current"):
-            subprocess.run(["wlr-randr", "--output", o["name"], "--preferred"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        name = o["name"]
+        if held(name):
+            log(name, "held by Settings, left alone")
+            continue
+        args = []
+        pin = pinned("mode", name)
+        want = parse_mode(pin) if pin else None
+        if pin and want is None:
+            log(name, "ignoring unreadable mode-%s: %r" % (name, pin))
+        if want is not None:
+            if not same(o["cur"], want):
+                m = find_mode(o, want)
+                if m is None:
+                    log(name, "chosen mode %s is not offered now; left as it is" % pin)
+                else:
+                    args += ["--mode", m[3]]
+        elif use_randr and o["pref"] and o["pref"] != o["cur"]:
+            args += ["--preferred"]
+        tf = pinned("transform", name)
+        if tf and tf != o["transform"]:
+            args += ["--transform", tf]
+        if not args:
+            continue
+        if use_randr:
+            changed |= call(["wlr-randr", "--output", name] + args)
+        else:
+            it = iter(args)
+            for k in it:
+                v = next(it)
+                call(["swaymsg", "output", name, k.lstrip("-"), v])
             changed = True
     if changed:
-        outs = outputs_wlr_randr()
+        outs = outputs_wlr_randr() if use_randr else outputs_sway()
     for o in outs:
-        want = wanted(o)
+        name = o["name"]
+        if held(name):
+            continue
+        want = pinned("scale", name)
+        if want is None:
+            if pinned("mode", name):
+                continue            # a chosen mode keeps whatever scale it has
+            want = guess(o)
         try:
             if abs(float(want) - o["scale"]) < 0.01:
                 continue
         except ValueError:
+            log(name, "ignoring unreadable scale-%s: %r" % (name, want))
             continue
         if use_randr:
-            subprocess.run(["wlr-randr", "--output", o["name"], "--scale", want],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            call(["wlr-randr", "--output", name, "--scale", want])
         else:
-            subprocess.run(["swaymsg", "output", o["name"], "scale", want],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            call(["swaymsg", "output", name, "scale", want])
 
 
 def watch():
@@ -121,7 +254,6 @@ def watch():
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     except OSError:
         return
-    import time
     for line in p.stdout:
         if " change " in line:
             time.sleep(0.5)
@@ -129,7 +261,6 @@ def watch():
 
 
 if __name__ == "__main__":
-    import sys
     if "--watch" in sys.argv[1:]:
         watch()
     else:

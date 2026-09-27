@@ -58,12 +58,17 @@
  * list changes: the person's own processes, matched to an installed
  * application by the program its Exec line starts, and the windows the
  * compositor reports (wlr-foreign-toplevel, where the dock's dots come
- * from). An application with a process and no window is in the
- * background. Left out:
+ * from). An application with a process and no window, that had a
+ * window while this process ran, is in the background: it is a window
+ * that was closed, and nothing else is. Left out:
  *
+ *   - whatever never had a window the bar could match to it: daemons,
+ *     helpers, the on-screen keyboard - when in doubt, no button;
  *   - the session's own processes: lp-*, the input method,
  *     notifications, sound, portals, the compositor, the bus - and
  *     anything under the loops lp-shell-start keeps running;
+ *   - settings tools, accessibility tools, anything with a keyboard or
+ *     input-method icon, and terminals (their windows are shells);
  *   - anything under a shell in a terminal: a program started from a
  *     prompt belongs to the terminal's window, not to the tray;
  *   - a process that is a tray icon already, or is under one (the bus
@@ -172,6 +177,7 @@ static GHashTable *exe_apps;    /* program name -> GDesktopAppInfo */
 static GHashTable *id_apps;     /* window app_id -> GDesktopAppInfo, or NULL */
 static gboolean apps_stale = TRUE;
 static GHashTable *quitting;    /* key -> Quit */
+static GHashTable *had_window;  /* desktop ids seen with a window, while they run */
 
 static void boxes_sync(void);
 static void scan_later(void);
@@ -225,6 +231,7 @@ static void tables(void)
     exe_apps = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
     id_apps = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, unref0);
     quitting = g_hash_table_new(g_str_hash, g_str_equal);
+    had_window = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 }
 
 /* ── names ───────────────────────────────────────────────────────── */
@@ -240,7 +247,25 @@ static const char *const session_prefixes[] = {
 };
 static const char *const session_names[] = {
     "mako", "wireplumber", "wayfire", "Xwayland", "dconf-service",
-    "kanshi", "ssh-agent", "gpg-agent", "(sd-pam)", NULL
+    "kanshi", "ssh-agent", "gpg-agent", "(sd-pam)", "udevadm", "polkit",
+    "lxpolkit", "wl-paste", "wl-copy", "wlsunset", "gammastep", "swaync",
+    "dunst", "waybar", "onboard", "squeekboard", "florence", NULL
+};
+
+/* Categories of the session's own parts and of the tools that set it
+ * up: a settings window left running is the settings tool, not an
+ * application somebody is using. */
+static const char *const session_categories[] = {
+    "Settings", "DesktopSettings", "HardwareSettings", "Accessibility",
+    "TerminalEmulator", "X-GNOME-Settings-Panel", "X-XFCE-SettingsDialog",
+    "X-LXQt", "X-KDE-settings-hardware", NULL
+};
+
+/* Icons of keyboards and input methods: whatever draws one of these
+ * is the on-screen keyboard, the input method or its settings. */
+static const char *const session_icon_prefixes[] = {
+    "input-keyboard", "input-method", "accessories-on-screen-keyboard",
+    "preferences-", "fcitx", "ibus", "lp-", NULL
 };
 
 static const char *const shells[] = {
@@ -270,14 +295,17 @@ static const char *const launchers[] = {
     NULL
 };
 
+static gboolean has_prefix_in(const char *s, const char *const *list)
+{
+    for (; s && *list; list++)
+        if (g_str_has_prefix(s, *list))
+            return TRUE;
+    return FALSE;
+}
+
 static gboolean is_session_name(const char *n)
 {
-    if (!n)
-        return FALSE;
-    for (const char *const *p = session_prefixes; *p; p++)
-        if (g_str_has_prefix(n, *p))
-            return TRUE;
-    return in_list(n, session_names);
+    return n && (has_prefix_in(n, session_prefixes) || in_list(n, session_names));
 }
 
 static gboolean is_interpreter(const char *n)
@@ -341,6 +369,48 @@ static gboolean id_is(GDesktopAppInfo *d, const char *name)
            strcmp(id + n, ".desktop") == 0;
 }
 
+/* Whether an installed application can be one "in the background" at
+ * all. When in doubt, no: a button for a part of the session - the
+ * on-screen keyboard, the input method, a settings tool - is worse than
+ * no button for an application. */
+static gboolean app_may_background(GDesktopAppInfo *d, const char *key)
+{
+    /* A program with no entry in the app grid is a part of something
+     * else; one that runs in a terminal has the terminal's window. */
+    if (!key || is_session_name(key) || in_list(key, terminals) ||
+        in_list(key, shells) || is_interpreter(key) ||
+        g_desktop_app_info_get_nodisplay(d) ||
+        g_desktop_app_info_get_boolean(d, "Terminal"))
+        return FALSE;
+    const char *id = g_app_info_get_id(G_APP_INFO(d));
+    if (!id || g_str_has_prefix(id, "lp-") || g_str_has_prefix(id, "org.fcitx.") ||
+        g_str_has_prefix(id, "org.freedesktop.IBus"))
+        return FALSE;
+    /* Started with the session, and started again if it ends. */
+    if (g_desktop_app_info_has_key(d, "X-GNOME-Autostart-Phase") ||
+        g_desktop_app_info_has_key(d, "X-GNOME-AutoRestart") ||
+        g_desktop_app_info_has_key(d, "X-KDE-autostart-phase"))
+        return FALSE;
+    const char *cats = g_desktop_app_info_get_categories(d);
+    if (cats) {
+        char **c = g_strsplit(cats, ";", -1);
+        gboolean bad = FALSE;
+        for (char **p = c; *p && !bad; p++)
+            bad = **p && has_prefix_in(*p, session_categories);
+        g_strfreev(c);
+        if (bad)
+            return FALSE;
+    }
+    GIcon *gi = g_app_info_get_icon(G_APP_INFO(d));
+    if (G_IS_THEMED_ICON(gi)) {
+        const char *const *names = g_themed_icon_get_names(G_THEMED_ICON(gi));
+        for (; names && *names; names++)
+            if (has_prefix_in(*names, session_icon_prefixes))
+                return FALSE;
+    }
+    return TRUE;
+}
+
 static void apps_load(void)
 {
     if (!apps_stale)
@@ -353,14 +423,8 @@ static void apps_load(void)
         if (!G_IS_DESKTOP_APP_INFO(l->data))
             continue;
         GDesktopAppInfo *d = l->data;
-        /* A program with no entry in the app grid is a part of
-         * something else; one that runs in a terminal has the
-         * terminal's window. */
-        if (g_desktop_app_info_get_nodisplay(d) ||
-            g_desktop_app_info_get_boolean(d, "Terminal"))
-            continue;
         char *key = exec_key(G_APP_INFO(d));
-        if (!key || is_session_name(key)) {
+        if (!app_may_background(d, key)) {
             g_free(key);
             continue;
         }
@@ -561,8 +625,10 @@ static GHashTable *procs_read(void)
 static GDesktopAppInfo *proc_app(Proc *p)
 {
     const char *names[] = { p->exe, p->argv0, p->script };
+    /* A terminal is never "in the background": its windows are the
+     * person's shells, and what runs in them is theirs to end. */
     for (int i = 0; i < 3; i++)
-        if (is_session_name(names[i]))
+        if (is_session_name(names[i]) || in_list(names[i], terminals))
             return NULL;
     for (int i = 0; i < 3; i++) {
         GDesktopAppInfo *a = names[i] ? g_hash_table_lookup(exe_apps, names[i]) : NULL;
@@ -1942,18 +2008,39 @@ static void app_item_add(GDesktopAppInfo *app)
     item_insert(it);
 }
 
-static void scan(void)
+/* Every application that has a window now is remembered as one that
+ * had one. Only those can be "in the background": what the bar is for
+ * is the window that was closed while its program went on. A program
+ * that never showed a window - a daemon, a helper, the on-screen
+ * keyboard, an application whose window the bar could not match to it
+ * - is not a closed window, and is left alone. */
+static void windows_note(void)
 {
-    if (!can_see_windows || !toplevels_seen)
-        return;
     apps_load();
-    GHashTable *procs = procs_read();
+    GHashTableIter hi;
+    gpointer v;
+    g_hash_table_iter_init(&hi, exe_apps);
+    while (g_hash_table_iter_next(&hi, NULL, &v)) {
+        const char *id = g_app_info_get_id(G_APP_INFO(v));
+        if (id && !g_hash_table_contains(had_window, id) && app_has_window(v))
+            g_hash_table_add(had_window, g_strdup(id));
+    }
+}
+
+/* The applications in the background, desktop id -> GDesktopAppInfo
+ * (not owned; keys are the apps' own ids): a settled process, a window
+ * seen while it ran, and none now. An application whose processes are
+ * all gone is forgotten, so starting it again starts from nothing. */
+static GHashTable *background_apps(GHashTable *procs, double now, double hz)
+{
     GHashTable *by_app = candidates(procs);
-    double now = uptime_now();
-    double hz = (double)sysconf(_SC_CLK_TCK);
-    GHashTable *show = g_hash_table_new(g_str_hash, g_str_equal);  /* id -> app */
+    GHashTable *show = g_hash_table_new(g_str_hash, g_str_equal);
     GHashTableIter hi;
     gpointer k, v;
+    g_hash_table_iter_init(&hi, had_window);
+    while (g_hash_table_iter_next(&hi, &k, NULL))
+        if (!g_hash_table_contains(by_app, k))
+            g_hash_table_iter_remove(&hi);
     g_hash_table_iter_init(&hi, by_app);
     while (g_hash_table_iter_next(&hi, &k, &v)) {
         GPtrArray *a = v;
@@ -1961,9 +2048,27 @@ static void scan(void)
         for (guint i = 0; i < a->len && !settled; i++)
             settled = now - (double)((Proc *)a->pdata[i])->start / hz >= SETTLE_S;
         GDesktopAppInfo *app = proc_app(a->pdata[0]);
-        if (settled && !app_has_window(app))
-            g_hash_table_insert(show, k, app);
+        if (!app)
+            continue;
+        const char *id = g_app_info_get_id(G_APP_INFO(app));
+        if (app_has_window(app))
+            g_hash_table_add(had_window, g_strdup(id));
+        else if (settled && g_hash_table_contains(had_window, id))
+            g_hash_table_insert(show, (gpointer)id, app);
     }
+    g_hash_table_unref(by_app);
+    return show;
+}
+
+static void scan(void)
+{
+    if (!can_see_windows || !toplevels_seen)
+        return;
+    apps_load();
+    GHashTable *procs = procs_read();
+    GHashTable *show = background_apps(procs, uptime_now(), (double)sysconf(_SC_CLK_TCK));
+    GHashTableIter hi;
+    gpointer v;
     /* Gone, or back in a window; what stays is taken out of `show`,
      * which leaves the new ones. */
     for (GList *l = items, *next; l; l = next) {
@@ -1977,7 +2082,6 @@ static void scan(void)
     while (g_hash_table_iter_next(&hi, NULL, &v))
         app_item_add(v);
     g_hash_table_unref(show);
-    g_hash_table_unref(by_app);
     g_hash_table_unref(procs);
 }
 
@@ -2086,6 +2190,10 @@ GtkWidget *lp_tray_new(void)
 
 void lp_tray_toplevels_changed(void)
 {
+    tables();
     toplevels_seen = TRUE;
+    /* Now, not at the next look: a window open for less than a second
+     * is still one that was closed. */
+    windows_note();
     scan_later();
 }
