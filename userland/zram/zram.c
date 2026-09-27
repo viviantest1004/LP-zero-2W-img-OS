@@ -30,9 +30,12 @@
  * technically working, practically pointless, and misleading to anyone
  * reading `free`. Compressed swap is only ever worth a fraction of RAM,
  * so make it a fraction. */
-#define DEFAULT_FRACTION 4      /* RAM / 4 */
+/* Half of RAM since the desktop's minimum became 4GB: with Firefox and
+ * LibreOffice open a 4GB machine lives in its swap, and compressed at
+ * about 3:1 half of RAM costs a sixth of it when full. */
+#define DEFAULT_FRACTION 2      /* RAM / 2 */
 #define DEFAULT_MB_MIN   64
-#define DEFAULT_MB_MAX   2048
+#define DEFAULT_MB_MAX   8192
 #define PAGE_SIZE     4096
 
 /* Swap header v1_2 layout, inside the first page.

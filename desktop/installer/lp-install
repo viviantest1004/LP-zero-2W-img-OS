@@ -19,7 +19,7 @@ serial console, from a script in a test, or by a person at a terminal.
 What an install writes (the disk layout contract, COMMON.md):
 
     GPT   1  LP-ESP       FAT32   512 MiB   the kernel, the boot menu
-          2  LP-RECOVERY  ext4      6 GiB   the recovery system
+          2  LP-RECOVERY  ext4    ~1.3 GiB  the recovery system (sized to it)
           3  LP-ROOT      ext4      rest    this system, copied
 
 Why it is built the way it is:
@@ -91,11 +91,15 @@ import time
 import uuid
 
 ESP_MIB = 512
-RECOVERY_MIB = 6 * 1024
+# LP-RECOVERY is sized to what it will hold - the stick's own recovery
+# partition's contents plus a quarter - not a fixed 6 GiB: the recovery
+# system and its reinstall payload are about 1.3 GiB, and the other
+# 4.7 GiB was what stood between LP and a 16 GB disk.
+RECOVERY_MIB_MIN = 1024
 # Room the installed root needs beyond what is on the stick today: apt
 # downloads, a few updates, the first person's files. Below this the
 # install would succeed and the machine would be full a week later.
-ROOT_SLACK = 4 * 1024 ** 3
+ROOT_SLACK = 2 * 1024 ** 3
 
 TYPE_ESP = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 TYPE_LINUX = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
@@ -365,11 +369,40 @@ def list_disks():
     return disks
 
 
+_recovery_mib = None
+
+
+def recovery_mib():
+    """How big LP-RECOVERY is made: what the stick's own recovery
+    partition holds, plus a quarter for the filesystem and the password
+    file, rounded up to 64 MiB; at least RECOVERY_MIB_MIN."""
+    global _recovery_mib
+    if _recovery_mib is not None:
+        return _recovery_mib
+    used = 0
+    src_dev = running_part(name_want="LP-RECOVERY")
+    if src_dev:
+        src = os.path.join(WORK, "recovery-size")
+        try:
+            mount(src_dev, src, "ro")
+            try:
+                st = os.statvfs(src)
+                used = (st.f_blocks - st.f_bfree) * st.f_frsize
+            finally:
+                subprocess.run([tool("umount"), src], stderr=subprocess.DEVNULL)
+        except Exception:
+            used = 0
+    mib = (used * 5 // 4) // 1024 ** 2 + 128
+    mib = max(RECOVERY_MIB_MIN, (mib + 63) // 64 * 64)
+    _recovery_mib = mib
+    return mib
+
+
 def needed_bytes():
     """Space the new disk must have: the layout plus what / holds now."""
     st = os.statvfs("/")
     used = (st.f_blocks - st.f_bfree) * st.f_frsize
-    return (ESP_MIB + RECOVERY_MIB) * 1024 ** 2 + used + ROOT_SLACK
+    return (ESP_MIB + recovery_mib()) * 1024 ** 2 + used + ROOT_SLACK
 
 
 # ── firmware facts ────────────────────────────────────────────────────
@@ -1119,7 +1152,7 @@ def install(a, password):
               "start=%d, size=%d, type=%s, name=\"LP-ESP\"\n"
               "size=%d, type=%s, name=\"LP-RECOVERY\"\n"
               "type=%s, name=\"LP-ROOT\"\n"
-              % (mib, mib, ESP_MIB * mib, TYPE_ESP, RECOVERY_MIB * mib,
+              % (mib, mib, ESP_MIB * mib, TYPE_ESP, recovery_mib() * mib,
                  TYPE_LINUX, TYPE_ROOT_X86_64))
     run([tool("sfdisk"), "-q", "--wipe", "always", "--wipe-partitions", "always",
          dev], input=script)

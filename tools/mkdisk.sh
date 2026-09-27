@@ -58,12 +58,14 @@ source "${REPO_ROOT}/tools/common.sh"
 #                                        (mkdesktop.sh sets it)
 SECTOR=512
 ESP_MB=512
-RECOVERY_MB="${LP_RECOVERY_MB:-6144}"
+# The recovery partition is sized from the root, once the root's size is
+# known (below): it holds the root again as a zstd payload (about a fifth
+# of it) and a 30MB recovery system. It used to be a fixed 6GiB, which
+# with a 4GiB margin on the root kept LP off a 16GB disk.
+RECOVERY_MB="${LP_RECOVERY_MB:-}"
 ESP_START=2048                          # 1MiB in, where every tool aligns
 ESP_SECTORS=$(( ESP_MB * 1024 * 1024 / SECTOR ))
 REC_START=$(( ESP_START + ESP_SECTORS ))
-REC_SECTORS=$(( RECOVERY_MB * 1024 * 1024 / SECTOR ))
-ROOT_START=$(( REC_START + REC_SECTORS ))
 
 # The filesystem label and the GPT names are the layout contract's. The
 # root answered to LPROOT before the recovery partition existed; preinit
@@ -245,6 +247,12 @@ if (( NEED_KB * 105 / 100 > ROOT_MB * 1024 )); then
 fi
 # The backup GPT sits in the last 33 sectors; a MiB of tail keeps the
 # root aligned and clear of it.
+if [[ -z "$RECOVERY_MB" ]]; then
+    RECOVERY_MB=$(( NEED_KB * 3 / 10 / 1024 + 384 ))
+    RECOVERY_MB=$(( (RECOVERY_MB + 63) / 64 * 64 ))
+fi
+REC_SECTORS=$(( RECOVERY_MB * 1024 * 1024 / SECTOR ))
+ROOT_START=$(( REC_START + REC_SECTORS ))
 TOTAL_SECTORS=$(( ROOT_START + ROOT_SECTORS + 2048 ))
 
 mkdir -p "$OUT_DIR"

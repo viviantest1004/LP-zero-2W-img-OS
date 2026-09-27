@@ -61,6 +61,11 @@ echo 16384 > /proc/sys/vm/min_free_kbytes || echo "[rc]   failed"
 echo "[rc] safety net"
 # Compressed swap inside RAM. Nothing is written to the card.
 zram on || echo "[rc]   carrying on without zram"
+# Swap is RAM here (compressed), not a disk: swapping early is cheap and
+# keeps the page cache, and reading ahead 8 pages at a time from zram
+# only decompresses pages nobody asked for.
+echo 100 > /proc/sys/vm/swappiness 2>/dev/null
+echo 0 > /proc/sys/vm/page-cluster 2>/dev/null
 
 echo "[rc] a ceiling on the number of processes"
 # guard kills a fork bomb, but cleaning one up is the second line of

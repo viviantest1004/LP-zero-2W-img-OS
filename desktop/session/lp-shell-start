@@ -78,6 +78,16 @@ if test -e "${XDG_RUNTIME_DIR}/lp-logout" ; then
     have lp-lock && lp-lock > "$LOGDIR/lock.log" 2>&1 &
 fi
 
+# Animations: off in GTK apps when the CPU draws the screen (sway), on
+# with a GPU - unless the person turned motion down in Settings.
+if have gsettings ; then
+    if test "$compositor" = wayfire && ! test -e "$HOME/.config/lp/reduce-motion" ; then
+        gsettings set org.gnome.desktop.interface enable-animations true
+    elif test "$compositor" = sway ; then
+        gsettings set org.gnome.desktop.interface enable-animations false
+    fi 2> /dev/null
+fi
+
 # Header bars: minimise only where it does something. sway ignores a
 # window's request to minimise, and a button that does nothing is worse
 # than none; wayfire minimises (and the dock brings the window back).

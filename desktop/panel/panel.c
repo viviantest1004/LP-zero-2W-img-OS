@@ -716,8 +716,11 @@ int main(int argc, char **argv)
     poll_net(NULL);
     poll_vol(NULL);
     poll_bat(NULL);
-    g_timeout_add_seconds(10, poll_net, NULL);
-    g_timeout_add_seconds(10, poll_vol, NULL);
+    /* Every spawn is a process start, and on a slow or emulated machine
+     * that is not free: volume only needs a poll for changes made
+     * elsewhere (the keys and quick settings send `lp-panel refresh`). */
+    g_timeout_add_seconds(15, poll_net, NULL);
+    g_timeout_add_seconds(30, poll_vol, NULL);
     g_timeout_add_seconds(30, poll_bat, NULL);
 
     gtk_main();

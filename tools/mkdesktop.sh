@@ -595,6 +595,50 @@ leaks() {
         return 1
     fi
 }
+# ── slim ──
+# The machine speaks English and Korean; the other ninety languages'
+# translations, and the manuals, change logs and help pages nobody opens
+# from a desktop, are about 300MB of a root that has to fit, with room to
+# spare, on a 16GB disk. dpkg is told to leave them out from now on too,
+# so an apt install later does not bring them back. (Copyright files
+# stay: they are the licence, not documentation.)
+slim() {
+    local before after
+    before=$(du -smx "$ROOT/usr/share" | cut -f1)
+    mkdir -p "$ROOT/etc/dpkg/dpkg.cfg.d"
+    cat > "$ROOT/etc/dpkg/dpkg.cfg.d/50-lp-slim" <<'SLIM'
+# LP: only English and Korean translations, no manuals or change logs
+# (the copyright files stay). tools/mkdesktop.sh says why.
+path-exclude=/usr/share/locale/*
+path-include=/usr/share/locale/locale.alias
+path-include=/usr/share/locale/en*
+path-include=/usr/share/locale/ko*
+path-exclude=/usr/share/doc/*
+path-include=/usr/share/doc/*/copyright
+path-exclude=/usr/share/help/*
+path-include=/usr/share/help/C/*
+path-include=/usr/share/help/ko/*
+path-exclude=/usr/share/gtk-doc/*
+path-exclude=/usr/share/info/*
+SLIM
+    find "$ROOT/usr/share/locale" -mindepth 1 -maxdepth 1 -type d \
+        ! -name 'en*' ! -name 'ko*' -exec rm -rf {} + 2>/dev/null || true
+    find "$ROOT/usr/share/doc" -mindepth 2 ! -name copyright -type f -delete 2>/dev/null || true
+    find "$ROOT/usr/share/help" -mindepth 1 -maxdepth 1 -type d \
+        ! -name C ! -name ko -exec rm -rf {} + 2>/dev/null || true
+    rm -rf "$ROOT/usr/share/gtk-doc" "$ROOT"/usr/share/info/* 2>/dev/null || true
+    # LibreOffice's help and the other languages' UI in its own tree.
+    find "$ROOT/usr/lib/libreoffice/share/extensions" -maxdepth 1 -name 'dict-*' \
+        ! -name 'dict-en*' ! -name 'dict-ko*' -exec rm -rf {} + 2>/dev/null || true
+    after=$(du -smx "$ROOT/usr/share" | cut -f1)
+    log "slim: /usr/share ${before}MB -> ${after}MB"
+}
+slim
+# EC2's metadata daemon has nothing to do on a desktop: it would only
+# keep asking 169.254.169.254 on every network the laptop joins.
+if [[ -f "$ROOT/etc/lp/services" ]]; then
+    sed -i 's|^?/bin/ec2 ec2 -d$|# ?/bin/ec2 ec2 -d   (not on the desktop: tools/mkdesktop.sh)|' "$ROOT/etc/lp/services"
+fi
 scrub
 leaks || die "the image would carry what the build host left in it"
 log "no proxy, CA, apt lists, machine-id, host keys, histories or logs"
