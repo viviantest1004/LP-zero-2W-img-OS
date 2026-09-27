@@ -863,3 +863,54 @@
  }
  
  static void relay_handle_input_method(struct wl_listener *listener,
+--- a/sway/input/text_input.c
++++ b/sway/input/text_input.c
+@@ -26,11 +26,27 @@
+ 	return NULL;
+ }
+ 
++// LP: the input method's text goes to the focused text input that is also
++// enabled. A text input entered but never enabled (a GTK 3 window's, see
++// relay_handle_text_input) drops what it is sent: with the input method
++// still active from a field elsewhere, every key typed was lost.
++static struct sway_text_input *relay_get_enabled_text_input(
++		struct sway_input_method_relay *relay) {
++	struct sway_text_input *text_input = NULL;
++	wl_list_for_each(text_input, &relay->text_inputs, link) {
++		if (text_input->input->focused_surface &&
++				text_input->input->current_enabled) {
++			return text_input;
++		}
++	}
++	return NULL;
++}
++
+ static void handle_im_commit(struct wl_listener *listener, void *data) {
+ 	struct sway_input_method_relay *relay = wl_container_of(listener, relay,
+ 		input_method_commit);
+ 
+-	struct sway_text_input *text_input = relay_get_focused_text_input(relay);
++	struct sway_text_input *text_input = relay_get_enabled_text_input(relay);
+ 	if (!text_input) {
+ 		return;
+ 	}
+@@ -180,9 +196,18 @@
+ 		void *data) {
+ 	struct sway_text_input *text_input = wl_container_of(listener, text_input,
+ 		text_input_disable);
++	// LP: a window that closes loses its surface (wlroots clears
++	// focused_surface) before its text field sends disable, and returning
++	// here left the input method active and holding the keyboard, composing
++	// for a field that no longer existed. Deactivate then - unless another
++	// field is already focused and enabled: after an ordinary focus change
++	// set_focus has deactivated this one, and the input method now serves
++	// the new field.
+ 	if (text_input->input->focused_surface == NULL) {
+ 		sway_log(SWAY_DEBUG, "Disabling text input, but no longer focused");
+-		return;
++		if (relay_get_enabled_text_input(text_input->relay)) {
++			return;
++		}
+ 	}
+ 	relay_disable_text_input(text_input->relay, text_input);
+ }

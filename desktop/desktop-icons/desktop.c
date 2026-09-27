@@ -1995,6 +1995,19 @@ static void on_realize(GtkWidget *w, gpointer d)
     cairo_region_t *reg = cairo_region_create_rectangle(&r);
     gdk_window_set_opaque_region(gtk_widget_get_window(w), reg);
     cairo_region_destroy(reg);
+
+    /* The input method, ready before the first name field needs it. GTK 3
+     * loads its Wayland input method module - and creates its text input -
+     * on the first focus of a text field, and that first focus-in finds
+     * the text input not yet entered and never enables it: Korean typed
+     * into the first new folder's name came out as latin letters, and only
+     * the second field worked. A context reset once here loads the module
+     * now, so the text input exists before the desktop is clicked and is
+     * entered with the keyboard focus like any other. */
+    GtkIMContext *im = gtk_im_multicontext_new();
+    gtk_im_context_set_client_window(im, gtk_widget_get_window(w));
+    gtk_im_context_reset(im);
+    g_object_set_data_full(G_OBJECT(w), "lp-im-early", im, g_object_unref);
 }
 
 /* A new mode, or a new scale: the grid may have changed. Only then -
