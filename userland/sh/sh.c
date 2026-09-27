@@ -3591,7 +3591,13 @@ static int split_statements(const char *line, block_line_t *out, int max)
         p = semi + 1;
     }
 
-    return n ? n : 1;
+    /* Nothing, for a line that is only blanks or an indented comment.
+     * This said 1 there, for a statement it never wrote: the caller then
+     * counted whatever the slot held from before - the `fi` or `else` of
+     * the block above - and a script with an indented comment inside its
+     * second if block printed "fi: command not found", or ran the first
+     * block's else branch again. Every caller copes with 0. */
+    return n;
 }
 
 static void run_logical_line(char *line);
