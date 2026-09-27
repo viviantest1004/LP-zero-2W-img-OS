@@ -776,6 +776,29 @@ def airplane():
             "L8 14.2L5.2 15V13.8L7 12.4V9.2L1.5 10.8V9.2L7 6Z"]
 
 
+# Window buttons: the glyphs of minimise, maximise, restore and close in
+# every title bar. GTK 3, GTK 4, libadwaita, libhandy and Firefox all ask
+# the icon theme for these four names, so drawing them here is what makes
+# the three buttons look the same in every application. 2 wide, on whole
+# pixels so they are sharp at scale 1, on an 8-unit box in the middle of
+# the grid, so they sit centred in the round
+# buttons gtk.css draws; the strokes are separate parts because two
+# overlapping subpaths of one path can cancel where they cross.
+def window_icons():
+    w = 2
+    def ring(x, y, s, r, ri):
+        return f"evenodd:{rr(x, y, s, s, r)}{rr(x + w, y + w, s - 2 * w, s - 2 * w, ri)}"
+    return {
+        "window-minimize-symbolic": ("Minimise a window.", [seg(5, 8, 11, 8, w)]),
+        "window-maximize-symbolic": ("Maximise a window.", [ring(4, 4, 8, 2, 0.5)]),
+        "window-restore-symbolic": ("Restore a maximised window.",
+                                    [seg(7, 4, 12, 4, w), seg(12, 4, 12, 9, w),
+                                     ring(3, 6, 7, 1.5, 0.25)]),
+        "window-close-symbolic": ("Close a window.",
+                                  [seg(5, 5, 11, 11, w), seg(11, 5, 5, 11, w)]),
+    }
+
+
 def symbolic():
     s = {}
     s.update(wifi_icons())
@@ -793,6 +816,7 @@ def symbolic():
     s["view-app-grid-symbolic"] = ("All apps.", app_grid())
     s["system-lock-screen-symbolic"] = ("Lock.", lock())
     s["airplane-mode-symbolic"] = ("Airplane mode.", airplane())
+    s.update(window_icons())
     return s
 
 

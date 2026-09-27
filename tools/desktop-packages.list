@@ -27,6 +27,8 @@ xwayland
 waybar
 fuzzel
 foot
+# The terminal (kgx): GTK 4, the same title bar as every other window.
+gnome-console
 mako-notifier
 wl-clipboard
 wtype

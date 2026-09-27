@@ -886,9 +886,20 @@ static void on_run_response(GtkDialog *d, int response, gpointer data)
     RunAsk *r = data;
     if (response == 1) {
         char *dir = g_path_get_dirname(r->path);
-        const char *argv[] = { "foot", "--hold", "--working-directory", dir, r->path, NULL };
+        /* In Console, which keeps its window after the program ends only
+         * if asked: the script's last words stay until Enter. */
+        char *kgx = g_find_program_in_path("kgx");
+        char *wd = g_strconcat("--working-directory=", dir, NULL);
+        const char *argv_kgx[] = { "kgx", wd, "--", "sh", "-c",
+            "\"$0\"; printf '\\n[%s]' \"$1\"; read x", r->path,
+            T("Press Enter to close", "Enter 를 누르면 닫힙니다"), NULL };
+        const char *argv_foot[] = { "foot", "--hold", "--working-directory", dir, r->path, NULL };
+        const char **argv = kgx ? argv_kgx : argv_foot;
+        g_free(kgx);
         GError *err = NULL;
-        if (!g_spawn_async(dir, (char **)argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &err)) {
+        gboolean ok = g_spawn_async(dir, (char **)argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &err);
+        g_free(wd);
+        if (!ok) {
             say(r->app, T("could not be run", "실행하지 못했습니다"), r->path, err->message);
             g_clear_error(&err);
         }
@@ -1693,13 +1704,11 @@ static GtkWidget *build_header(App *app)
 {
     GtkWidget *header = gtk_header_bar_new();
 
-    /* The window's own controls are switched off and a close button is
-     * packed by hand. The mockup puts the 1px separator immediately
-     * before close with the header's own 8px gap around it, and
-     * GtkHeaderBar's control group has its own spacing that no
-     * stylesheet can reach. One button, drawn where the mockup draws it,
-     * is worth losing the automatic one for. */
-    gtk_header_bar_set_show_title_buttons(GTK_HEADER_BAR(header), FALSE);
+    /* The window's own controls - minimise, maximise, close - the same
+     * three, drawn the same way (theme/gtk-4.0/gtk.css), as in every other
+     * window. A close button packed by hand here was the one window on
+     * the desktop with a different set. */
+    gtk_header_bar_set_show_title_buttons(GTK_HEADER_BAR(header), TRUE);
     gtk_widget_add_css_class(header, "lp-header");
 
     GtkWidget *nav = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -1776,16 +1785,6 @@ static GtkWidget *build_header(App *app)
     gtk_widget_add_css_class(menu_button, "lp-icon");
     gtk_box_append(GTK_BOX(tools), menu_button);
     g_object_unref(menu);
-
-    GtkWidget *separator = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
-    gtk_widget_add_css_class(separator, "lp-sep");
-    gtk_box_append(GTK_BOX(tools), separator);
-
-    GtkWidget *close = icon_button("window-close-symbolic", NULL);
-    gtk_widget_add_css_class(close, "lp-close");
-    g_signal_connect_swapped(close, "clicked",
-                             G_CALLBACK(gtk_window_close), app->window);
-    gtk_box_append(GTK_BOX(tools), close);
 
     gtk_header_bar_pack_end(GTK_HEADER_BAR(header), tools);
 

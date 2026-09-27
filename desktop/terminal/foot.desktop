@@ -16,3 +16,6 @@ Terminal=false
 Categories=System;TerminalEmulator;
 Keywords=shell;prompt;command;commandline;
 StartupWMClass=foot
+# Console is the terminal now (org.gnome.Console.desktop, beside this);
+# foot stays installed for whoever runs it by name.
+NoDisplay=true

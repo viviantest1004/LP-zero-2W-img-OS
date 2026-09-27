@@ -1,10 +1,12 @@
 /* gtk.css - every application window drawn the way the owner's mockup draws it.
  *
- * Installed at ~/.config/gtk-4.0/gtk.css, which GTK loads on top of the theme
- * named in settings.ini instead of in place of it. A file that replaces the
- * theme has to restyle every widget GTK has, and every widget it forgets falls
- * back to GTK's unstyled default - so this file states the mockup and nothing
- * else, and the base theme keeps drawing the rest.
+ * Installed twice. As the LP theme (/usr/share/themes/LP/gtk-4.0/gtk.css;
+ * session-run sets GTK_THEME=LP), with GTK's own dark theme imported in
+ * front of it by mkdesktop.sh - GTK_THEME makes this file the whole theme,
+ * and without the import every widget it does not mention fell back to
+ * GTK's unstyled default. And as ~/.config/gtk-4.0/gtk.css, without the
+ * import, which GTK loads above the theme and above each application's
+ * stylesheet (libadwaita's included).
  *
  * Sitting there decides how the rules below are written, twice over.
  *
@@ -71,7 +73,7 @@
 window.background:not(.popup) {
   background-color: @lp_window;
   color: @lp_text;
-  border-radius: 10px;
+  border-radius: 12px;
 }
 
 window.background:not(.popup):backdrop {
@@ -164,27 +166,39 @@ window.csd:not(.popup).fullscreen:backdrop {
 
 /* ── the header bar ───────────────────────────────────────────────────── */
 
-/* min-height goes to zero because the mockup gives the header a padding and no
- * height. The stock theme puts a 46px floor under it, which makes the padding
- * decide nothing. */
-headerbar, .titlebar {
-  min-height: 0;
-  padding: 8px 10px;
+/* One title bar in every window: 46px, the application's buttons and the
+ * three window buttons centred in it. gtk-3.0/gtk.css draws the same bar
+ * for GTK 3 applications, to the pixel, so a GTK 3 window and a GTK 4 one
+ * side by side have the same top.
+ *
+ * .default-decoration is the plain bar GTK gives a window that brought no
+ * header of its own; the base theme draws it 28px high with tiny buttons,
+ * and a rule without that class loses to it inside the theme, so it is
+ * named with the others. */
+headerbar, .titlebar, headerbar.default-decoration {
+  min-height: 46px;
+  padding: 0 10px;
   background-color: @lp_header;
   background-image: none;
-  border-bottom: 0.5px solid @lp_edge;
+  border-bottom: 1px solid @lp_edge;
+  box-shadow: inset 0 1px alpha(@lp_text, 0.05);
 }
 
-headerbar:backdrop, .titlebar:backdrop {
+headerbar.default-decoration {
+  min-height: 40px;
+}
+
+headerbar:backdrop, .titlebar:backdrop, headerbar.default-decoration:backdrop {
   background-color: @lp_header_back;
   background-image: none;
   border-bottom-color: @lp_edge_back;
+  box-shadow: none;
 }
 
 /* Only the header that is the window's own titlebar meets the window's top
  * corners. A header bar inside the content has no corner to match. */
-.titlebar {
-  border-radius: 10px 10px 0 0;
+.titlebar, headerbar.default-decoration {
+  border-radius: 12px 12px 0 0;
 }
 
 .maximized .titlebar, .fullscreen .titlebar,
@@ -195,9 +209,7 @@ headerbar:backdrop, .titlebar:backdrop {
 }
 
 /* GTK adds CSS border-spacing to the box's own spacing property, and
- * GtkHeaderBar's boxes carry none of their own, so 8px here is 8px on screen.
- * This is the mockup's gap, and it is also what places the separator: see the
- * window controls below. */
+ * GtkHeaderBar's boxes carry none of their own, so 8px here is 8px on screen. */
 headerbar > windowhandle > box,
 headerbar > windowhandle > box > box.start,
 headerbar > windowhandle > box > box.end,
@@ -205,89 +217,35 @@ headerbar windowcontrols {
   border-spacing: 8px;
 }
 
-/* The stock theme pads the title 12px on each side, which is a second gap on
- * top of the 8px one.
- *
- * The mockup also has the title take the free space. That is hexpand on the
- * label - a widget property, set by whoever builds the header, with no CSS
- * spelling in GTK 4. GtkHeaderBar's own title stays centred and this file
- * cannot move it. The gap is real and it is recorded here so it is not read
- * as an oversight. */
 headerbar .title, .titlebar .title {
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
   color: @lp_text;
-  padding: 0;
+  padding: 0 12px;
+}
+
+headerbar .subtitle, .titlebar .subtitle {
+  font-size: 11px;
+  color: @lp_icon;
 }
 
 /* Both fades are pinned off. The stock theme dims the backdrop title with
- * `filter: opacity(0.5)`, which a colour alone does not undo - the title would
- * change colour and go half transparent, which is the one thing 뒤 창 must not
- * do. opacity is pinned alongside it for a base theme that reaches for that
- * instead. */
+ * `filter: opacity(0.5)`; a colour alone does not undo that, and 뒤 창 must
+ * not go half transparent. */
 headerbar:backdrop .title, .titlebar:backdrop .title {
   color: @lp_text_back;
   opacity: 1;
   filter: none;
 }
 
-/* Every glyph in the header, the close button's included. */
+/* The application's own header glyphs. The window buttons' are below. */
 headerbar image, .titlebar image {
-  -gtk-icon-size: 13px;
+  -gtk-icon-size: 16px;
   color: @lp_icon;
 }
 
 headerbar:backdrop image, .titlebar:backdrop image {
   color: @lp_icon_back;
-}
-
-/* ── the close button, and the separator before it ────────────────────── */
-
-/* Which buttons exist is settings.ini's answer (gtk-decoration-layout=:close),
- * not this file's - GTK CSS has no way to hide a widget. The stock 2px of side
- * margin is dropped because it would turn the mockup's 8px gap into 10px. */
-headerbar windowcontrols > button,
-.titlebar windowcontrols > button {
-  margin: 0;
-  min-width: 0;
-  min-height: 0;
-}
-
-/* The separator is 1px wide and 12px tall, which is shorter than any widget
- * GTK would give it, so it is drawn as a background on the controls box rather
- * than added as a widget: a one-colour gradient sized 1px x 12px, held against
- * the left edge. A background sits in the padding box, so the 8px of padding
- * is what stands between the bar and the close button, and the box spacing
- * above is what stands between it and the last icon - both are the mockup's
- * single gap value, so the bar sits centred in its own space.
- *
- * .empty is how GTK marks the controls box on the side that got no buttons;
- * without the guard the empty one would draw a bar of its own on the left. */
-headerbar windowcontrols.end:not(.empty),
-.titlebar windowcontrols.end:not(.empty) {
-  margin-left: 0;
-  margin-right: 0;
-  padding-left: 8px;
-  background-image: linear-gradient(to bottom, @lp_edge, @lp_edge);
-  background-size: 1px 12px;
-  background-position: left center;
-  background-repeat: no-repeat;
-}
-
-headerbar windowcontrols.end:not(.empty):dir(rtl),
-.titlebar windowcontrols.end:not(.empty):dir(rtl) {
-  padding-left: 0;
-  padding-right: 8px;
-  background-position: right center;
-}
-
-/* The mockup gives the separator one colour, #3a3a3a, which is exactly the
- * colour of the window and header borders. Under :backdrop those go to
- * #303030, so the separator follows them. The mockup states no separate value
- * for it. */
-headerbar:backdrop windowcontrols.end:not(.empty),
-.titlebar:backdrop windowcontrols.end:not(.empty) {
-  background-image: linear-gradient(to bottom, @lp_edge_back, @lp_edge_back);
 }
 
 /* ── the sidebar ──────────────────────────────────────────────────────── */
@@ -439,18 +397,6 @@ button, entry, spinbutton, .toggle, dropdown > button {
   border-radius: 8px;
 }
 
-/* The header's close button is the only window button (4-1). GTK draws
- * whatever the application asked for, so this is stated as a rule the
- * decoration honours rather than a hope. */
-windowcontrols > button:not(.close) {
-  /* min-width 0 rather than display:none - GTK CSS has no display, and a
-   * button with no size and no padding takes no room in the header. */
-  min-width: 0;
-  min-height: 0;
-  padding: 0;
-  margin: 0;
-  opacity: 0;
-}
 
 /* ── 시스템 앱이 쓰는 클래스 ──────────────────────────────────────── */
 
@@ -651,47 +597,87 @@ window.lp-quick button image {
   font-feature-settings: "tnum";
 }
 
-/* ── window buttons: one look in every app ────────────────────────────── */
+/* ── window buttons: the same three in every application ──────────────── */
 
-/* The same compact buttons, in GTK 4 here and GTK 3 in its own file, so
- * minimise, maximise and close look alike whichever toolkit drew them: the
- * general button rules above made GTK 4's close a wide padded block beside
- * GTK 3's small square. No separator bar either, in both. */
-headerbar windowcontrols.end:not(.empty),
-.titlebar windowcontrols.end:not(.empty),
-headerbar:backdrop windowcontrols.end:not(.empty),
-.titlebar:backdrop windowcontrols.end:not(.empty) {
-  padding-left: 0;
-  padding-right: 0;
-  background-image: none;
+/* Minimise, maximise, close: 26px circles 8px apart, a quiet fill so they
+ * read as buttons before the pointer reaches them, brighter under it, and
+ * close turning red. gtk-3.0/gtk.css has the same numbers for GTK 3.
+ *
+ * GTK 4's base theme and libadwaita both draw the circle on the glyph
+ * (`> image` gets a background and 2px of padding) and leave the button
+ * clear; GTK 3 draws it on the button. Here the button draws it in every
+ * toolkit and the glyph's box is cleared, so the circle is the same size
+ * whoever made it. The glyphs are the LP icon theme's window-*-symbolic,
+ * which every toolkit asks for by name. */
+headerbar windowcontrols,
+.titlebar windowcontrols {
+  margin: 0;
+  padding: 0;
+  background: none;
 }
 
 headerbar windowcontrols > button,
-.titlebar windowcontrols > button {
-  min-width: 28px;
-  min-height: 28px;
-  margin: 0 2px;
+.titlebar windowcontrols > button,
+headerbar.default-decoration windowcontrols > button {
+  min-width: 26px;
+  min-height: 26px;
+  margin: 0;
   padding: 0;
   border: none;
-  border-radius: 8px;
+  border-radius: 9999px;
+  outline-color: transparent;
+  background-image: none;
+  background-color: alpha(@lp_text, 0.10);
   box-shadow: none;
-  background: transparent;
-  color: @lp_icon;
+  color: @lp_text;
+  transition: background-color 150ms ease-out, color 150ms ease-out;
+}
+
+headerbar windowcontrols > button > image,
+.titlebar windowcontrols > button > image,
+headerbar windowcontrols > button:hover > image,
+.titlebar windowcontrols > button:hover > image,
+headerbar windowcontrols > button:active > image,
+.titlebar windowcontrols > button:active > image {
+  -gtk-icon-size: 16px;
+  margin: 0;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  color: inherit;
 }
 
 headerbar windowcontrols > button:hover,
 .titlebar windowcontrols > button:hover {
-  background: alpha(@lp_text, 0.12);
+  background-color: alpha(@lp_text, 0.18);
   color: @lp_text;
-}
-
-headerbar windowcontrols > button.close:hover,
-.titlebar windowcontrols > button.close:hover {
-  background: #f28c28;
-  color: #ffffff;
 }
 
 headerbar windowcontrols > button:active,
 .titlebar windowcontrols > button:active {
-  background: alpha(@lp_text, 0.20);
+  background-color: alpha(@lp_text, 0.26);
+}
+
+headerbar windowcontrols > button.close:hover,
+.titlebar windowcontrols > button.close:hover {
+  background-color: #e5534b;
+  color: #ffffff;
+}
+
+headerbar windowcontrols > button.close:active,
+.titlebar windowcontrols > button.close:active {
+  background-color: #c9433c;
+  color: #ffffff;
+}
+
+headerbar:backdrop windowcontrols > button,
+.titlebar:backdrop windowcontrols > button {
+  background-color: alpha(@lp_text, 0.06);
+  color: @lp_text_back;
+}
+
+headerbar:backdrop windowcontrols > button:hover,
+.titlebar:backdrop windowcontrols > button:hover {
+  background-color: alpha(@lp_text, 0.18);
+  color: @lp_text;
 }

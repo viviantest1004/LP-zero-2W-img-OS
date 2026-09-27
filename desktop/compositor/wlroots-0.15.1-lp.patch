@@ -1,0 +1,235 @@
+From: LP desktop <lp@localhost>
+Subject: [PATCH] backend/drm: virtio-gpu cursor plane (cursor hotspots), clip FB_DAMAGE_CLIPS
+
+Applies to Debian's wlroots 0.15.1-6, after debian/patches/series.
+Built by build-wlroots.sh; see README-wlroots.md.
+
+1. Cursor hotspots - backport of upstream e3bd3185 "drm/backend: add
+   support for cursor hotspots" (wlroots 0.18, Ian Forbes).
+   Linux 6.8+ hides the cursor plane of virtualized drivers (virtio-gpu,
+   vmwgfx, qxl, vboxvideo) from atomic clients that have not set
+   DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT, because the host needs the
+   hotspot to line its own pointer up with the guest's. Without the
+   plane, output_pick_cursor_format() logs "Failed to get cursor display
+   formats" and every pointer motion is a software-cursor frame.
+   - drm.c: set the cap right after DRM_CLIENT_CAP_ATOMIC (before the
+     planes are enumerated); atomic only - the legacy path is untouched.
+     The define is missing from libdrm < 2.4.118 (bookworm has 2.4.114),
+     so it is provided (value 6, include/uapi/drm/drm.h).
+   - properties.[ch]: HOTSPOT_X / HOTSPOT_Y in the plane property table
+     (the table is bsearch()ed; it stays sorted).
+   - atomic.c: when the cursor plane has both properties, set them from
+     the connector's cursor hotspot. CRTC_X/Y are unchanged: the pointer
+     position minus the hotspot, i.e. the image's top-left corner.
+
+2. FB_DAMAGE_CLIPS - 0.15.1 already sends the frame's damage (upstream
+   added it in 0.15), but unclipped. Backport of upstream 4339c37f
+   "backend/drm: clip FB damage" (0.17) and e8e76dc2 "backend/drm: check
+   whether clipped damage is empty" (0.19): the kernel rejects the whole
+   atomic commit with EINVAL ("invalid damage clip") when a clip exceeds
+   the FB, so the damage is intersected with the primary FB's bounds and
+   no blob is sent when nothing is left. The blob is still created per
+   commit (test and real) and destroyed after it.
+
+3. The pixman renderer also offers DRM_FORMAT_MOD_LINEAR (upstream does
+   from 0.16). The DRM backend gives a cursor plane of a driver without
+   modifiers LINEAR only; pixman offered INVALID only, the intersection
+   was empty, and even with the plane back the cursor stayed software
+   ("Failed to pick cursor format"). Dumb buffers are linear anyway.
+
+4. A DRM dumb buffer allocated for a LINEAR-only format reports LINEAR,
+   not INVALID: the DRM backend checks the buffer's modifier against the
+   plane's formats, and the cursor plane (LINEAR only) refused it ("cannot
+   be scanned out"), falling back to software again.
+
+---
+diff --git a/backend/drm/atomic.c b/backend/drm/atomic.c
+index 5348791..02d999f 100644
+--- a/backend/drm/atomic.c
++++ b/backend/drm/atomic.c
+@@ -103,6 +103,39 @@ static bool create_gamma_lut_blob(struct wlr_drm_backend *drm,
+ 	return true;
+ }
+ 
++static bool create_fb_damage_clips_blob(struct wlr_drm_backend *drm,
++		struct wlr_drm_fb *fb, const pixman_region32_t *damage,
++		uint32_t *blob_id) {
++	*blob_id = 0;
++	if (fb == NULL) {
++		return true;
++	}
++
++	// The kernel rejects the whole commit (EINVAL) if a clip exceeds the FB,
++	// so clip the damage (buffer-local coordinates) to the FB bounds.
++	pixman_region32_t clipped;
++	pixman_region32_init(&clipped);
++	pixman_region32_intersect_rect(&clipped, (pixman_region32_t *)damage,
++		0, 0, fb->wlr_buf->width, fb->wlr_buf->height);
++
++	int rects_len;
++	const pixman_box32_t *rects = pixman_region32_rectangles(&clipped, &rects_len);
++
++	int ret = 0;
++	if (rects_len > 0) {
++		ret = drmModeCreatePropertyBlob(drm->fd, rects,
++			sizeof(*rects) * rects_len, blob_id);
++	}
++	pixman_region32_fini(&clipped);
++	if (ret != 0) {
++		wlr_log_errno(WLR_ERROR, "Failed to create FB_DAMAGE_CLIPS property blob");
++		*blob_id = 0;
++		return false;
++	}
++
++	return true;
++}
++
+ static void commit_blob(struct wlr_drm_backend *drm,
+ 		uint32_t *current, uint32_t next) {
+ 	if (*current == next) {
+@@ -163,6 +196,10 @@ error:
+ 	atom->failed = true;
+ }
+ 
++static bool supports_cursor_hotspots(const struct wlr_drm_plane *plane) {
++	return plane->props.hotspot_x && plane->props.hotspot_y;
++}
++
+ static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
+ 		const struct wlr_drm_connector_state *state, uint32_t flags,
+ 		bool test_only) {
+@@ -201,15 +238,9 @@ static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
+ 
+ 	uint32_t fb_damage_clips = 0;
+ 	if ((state->base->committed & WLR_OUTPUT_STATE_DAMAGE) &&
+-			pixman_region32_not_empty((pixman_region32_t *)&state->base->damage) &&
+ 			crtc->primary->props.fb_damage_clips != 0) {
+-		int rects_len;
+-		const pixman_box32_t *rects = pixman_region32_rectangles(
+-			(pixman_region32_t *)&state->base->damage, &rects_len);
+-		if (drmModeCreatePropertyBlob(drm->fd, rects,
+-				sizeof(*rects) * rects_len, &fb_damage_clips) != 0) {
+-			wlr_log_errno(WLR_ERROR, "Failed to create FB_DAMAGE_CLIPS property blob");
+-		}
++		create_fb_damage_clips_blob(drm, plane_get_next_fb(crtc->primary),
++			&state->base->damage, &fb_damage_clips);
+ 	}
+ 
+ 	bool prev_vrr_enabled =
+@@ -254,6 +285,15 @@ static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
+ 			if (drm_connector_is_cursor_visible(conn)) {
+ 				set_plane_props(&atom, drm, crtc->cursor, crtc->id,
+ 					conn->cursor_x, conn->cursor_y);
++				// CRTC_X/Y stay the top-left corner of the cursor image
++				// (pointer position minus hotspot); HOTSPOT_X/Y tell a
++				// virtualized driver where the pointer is inside it.
++				if (supports_cursor_hotspots(crtc->cursor)) {
++					atomic_add(&atom, crtc->cursor->id,
++						crtc->cursor->props.hotspot_x, conn->cursor_hotspot_x);
++					atomic_add(&atom, crtc->cursor->id,
++						crtc->cursor->props.hotspot_y, conn->cursor_hotspot_y);
++				}
+ 			} else {
+ 				plane_disable(&atom, crtc->cursor);
+ 			}
+diff --git a/backend/drm/drm.c b/backend/drm/drm.c
+index 43de54e..2ecb45d 100644
+--- a/backend/drm/drm.c
++++ b/backend/drm/drm.c
+@@ -31,6 +31,11 @@
+ #include "render/wlr_renderer.h"
+ #include "util/signal.h"
+ 
++#ifndef DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT
++// Linux 6.8+ (include/uapi/drm/drm.h); libdrm < 2.4.118 lacks the define
++#define DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT 6
++#endif
++
+ static const uint32_t SUPPORTED_OUTPUT_STATE =
+ 	WLR_OUTPUT_STATE_BACKEND_OPTIONAL |
+ 	WLR_OUTPUT_STATE_BUFFER |
+@@ -85,6 +90,13 @@ bool check_drm_features(struct wlr_drm_backend *drm) {
+ 		wlr_log(WLR_DEBUG, "Using atomic DRM interface");
+ 		drm->iface = &atomic_iface;
+ 	}
++	// Virtualized drivers (virtio-gpu, vmwgfx, qxl, vboxvideo) hide their
++	// cursor plane from atomic clients that don't promise to set the cursor
++	// hotspot (Linux 6.8+). Must happen before the planes are enumerated.
++	if (drm->iface == &atomic_iface && drmSetClientCap(drm->fd,
++			DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT, 1) == 0) {
++		wlr_log(WLR_INFO, "DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT supported");
++	}
+ 
+ 	int ret = drmGetCap(drm->fd, DRM_CAP_TIMESTAMP_MONOTONIC, &cap);
+ 	drm->clock = (ret == 0 && cap == 1) ? CLOCK_MONOTONIC : CLOCK_REALTIME;
+diff --git a/backend/drm/properties.c b/backend/drm/properties.c
+index f269659..390679d 100644
+--- a/backend/drm/properties.c
++++ b/backend/drm/properties.c
+@@ -51,6 +51,8 @@ static const struct prop_info plane_info[] = {
+ 	{ "CRTC_Y", INDEX(crtc_y) },
+ 	{ "FB_DAMAGE_CLIPS", INDEX(fb_damage_clips) },
+ 	{ "FB_ID", INDEX(fb_id) },
++	{ "HOTSPOT_X", INDEX(hotspot_x) },
++	{ "HOTSPOT_Y", INDEX(hotspot_y) },
+ 	{ "IN_FORMATS", INDEX(in_formats) },
+ 	{ "SRC_H", INDEX(src_h) },
+ 	{ "SRC_W", INDEX(src_w) },
+diff --git a/include/backend/drm/properties.h b/include/backend/drm/properties.h
+index 10c1ccd..d1f4f46 100644
+--- a/include/backend/drm/properties.h
++++ b/include/backend/drm/properties.h
+@@ -62,8 +62,10 @@ union wlr_drm_plane_props {
+ 		uint32_t fb_id;
+ 		uint32_t crtc_id;
+ 		uint32_t fb_damage_clips;
++		uint32_t hotspot_x; // only on virtualized drivers' cursor planes
++		uint32_t hotspot_y;
+ 	};
+-	uint32_t props[14];
++	uint32_t props[16];
+ };
+ 
+ bool get_drm_connector_props(int fd, uint32_t id,
+diff --git a/render/pixman/renderer.c b/render/pixman/renderer.c
+--- a/render/pixman/renderer.c
++++ b/render/pixman/renderer.c
+@@ -529,6 +529,13 @@
+ 	for (size_t i = 0; i < len; ++i) {
+ 		wlr_drm_format_set_add(&renderer->drm_formats, formats[i],
+ 				DRM_FORMAT_MOD_INVALID);
++		// Everything pixman draws into is linear (dumb buffers, shm). Saying
++		// so is what lets a cursor plane that takes LINEAR only - every
++		// driver without modifiers, see backend/drm/drm.c add_plane() - get
++		// a buffer: with INVALID alone the intersection was empty, "Failed
++		// to pick cursor format", and the cursor stayed a software one.
++		wlr_drm_format_set_add(&renderer->drm_formats, formats[i],
++				DRM_FORMAT_MOD_LINEAR);
+ 	}
+ 
+ 	return &renderer->wlr_renderer;
+diff --git a/render/allocator/drm_dumb.c b/render/allocator/drm_dumb.c
+--- a/render/allocator/drm_dumb.c
++++ b/render/allocator/drm_dumb.c
+@@ -16,6 +16,7 @@
+ #include <xf86drmMode.h>
+ 
+ #include "render/allocator/drm_dumb.h"
++#include "render/drm_format_set.h"
+ #include "render/pixel_format.h"
+ 
+ static const struct wlr_buffer_impl buffer_impl;
+@@ -110,7 +111,12 @@
+ 		.width = buffer->width,
+ 		.height = buffer->height,
+ 		.format = format->format,
+-		.modifier = DRM_FORMAT_MOD_INVALID,
++		// A dumb buffer is linear. Asked for LINEAR only - a cursor plane
++		// of a driver without modifiers, the only thing it takes - it has
++		// to say so: reported as INVALID, the DRM backend refused it ("cannot
++		// be scanned out") and the cursor fell back to software.
++		.modifier = wlr_drm_format_has(format, DRM_FORMAT_MOD_INVALID) ?
++			DRM_FORMAT_MOD_INVALID : DRM_FORMAT_MOD_LINEAR,
+ 		.n_planes = 1,
+ 		.offset[0] = 0,
+ 		.stride[0] = buffer->stride,

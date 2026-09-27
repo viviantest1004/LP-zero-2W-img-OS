@@ -92,7 +92,7 @@
  * and, when the file changes, exits - lp-shell-start starts it again a
  * second later at the new size, which is simpler and surer than resizing
  * every item and the layer surface in place. */
-static int icon_px = 44;
+static int icon_px = 36;
 #define ICON_PX icon_px
 #define DOCK_MARGIN 8      /* between the dock and the screen's bottom edge */
 #define EDGE_PX 8           /* the bottom-edge catcher's height */
@@ -110,8 +110,8 @@ static const Slot slots[] = {
     { { "lp-files.desktop" }, NULL, "Files", "파일", "system-file-manager" },
     { { "firefox-esr.desktop", "firefox.desktop" }, "firefox-esr",
       "Web Browser", "웹 브라우저", "firefox-esr" },
-    { { "foot.desktop", "org.codeberg.dnkl.foot.desktop" }, "foot",
-      "Terminal", "터미널", "utilities-terminal" },
+    { { "org.gnome.Console.desktop", "foot.desktop", "org.codeberg.dnkl.foot.desktop" },
+      "gnome-console", "Terminal", "터미널", "utilities-terminal" },
     { { "org.gnome.gedit.desktop", "org.gnome.TextEditor.desktop" }, "gedit",
       "Text Editor", "텍스트 편집기", "accessories-text-editor" },
     { { "geany.desktop", "org.geany.Geany.desktop" }, "geany",
@@ -750,9 +750,12 @@ static void rebuild(void)
         rebuild_id = g_idle_add(rebuild_idle, NULL);
 }
 
+static void update_away(void);
+
 static void on_toplevels(gpointer d)
 {
     (void)d;
+    update_away();
     /* A window of an app not yet in the dock needs a new item; anything
      * else is only a dot. Rebuilding for every title change would redraw
      * the dock every time a terminal prints its working directory. */
@@ -874,6 +877,9 @@ static void add_pull(GtkWidget *w, gboolean touch_only)
     g_object_set_data_full(G_OBJECT(w), "lp-pull-state", p, g_free);
 }
 
+static gboolean on_edge_enter(GtkWidget *w, GdkEventCrossing *e, gpointer d);
+static gboolean on_edge_leave(GtkWidget *w, GdkEventCrossing *e, gpointer d);
+
 /* The bottom edge of every output: an invisible strip that only a finger
  * can use. */
 static void edge_for(GdkMonitor *mon)
@@ -887,6 +893,11 @@ static void edge_for(GdkMonitor *mon)
     gtk_event_box_set_visible_window(GTK_EVENT_BOX(area), FALSE);
     gtk_container_add(GTK_CONTAINER(e), area);
     add_pull(area, TRUE);
+    /* ... and the pointer, which brings the dock up over a maximised
+     * window (see update_away). */
+    gtk_widget_add_events(area, GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
+    g_signal_connect(area, "enter-notify-event", G_CALLBACK(on_edge_enter), NULL);
+    g_signal_connect(area, "leave-notify-event", G_CALLBACK(on_edge_leave), NULL);
     gtk_widget_show_all(GTK_WIDGET(e));
 }
 
@@ -897,6 +908,7 @@ static void edge_for(GdkMonitor *mon)
  * pixel high, invisible and never clicked, and reserves the dock's
  * height and the gap under it: windows stop above the dock. */
 static GtkWindow *spacer;
+static gboolean dock_away;      /* slid away: the focused window is maximised */
 
 static void reserve_room(void)
 {
@@ -905,7 +917,7 @@ static void reserve_room(void)
     int h = gtk_widget_get_allocated_height(GTK_WIDGET(win));
     if (h <= 1)
         return;
-    int zone = h + DOCK_MARGIN;
+    int zone = dock_away ? 0 : h + DOCK_MARGIN;
     if (gtk_layer_get_exclusive_zone(spacer) != zone)
         gtk_layer_set_exclusive_zone(spacer, zone);
 }
@@ -918,10 +930,164 @@ static void spacer_realized(GtkWidget *w, gpointer d)
     cairo_region_destroy(none);
 }
 
+/* ── out of the way of a maximised window ────────────────────────────
+ *
+ * Ordinary windows open and stop above the dock: the spacer keeps that
+ * room. A maximised or full-screen window should have the whole screen
+ * instead - with the room kept it stopped above the dock and a band of
+ * wallpaper showed round the dock, under the window. So while the focused
+ * window is maximised (or full screen) the dock slides off the bottom
+ * edge and gives its room back, and the window grows to the edge; when
+ * that window is restored, minimised, closed or loses focus to one that
+ * is not maximised, the dock comes back and takes its room again.
+ *
+ * Pushing the pointer against the bottom edge brings the dock up over
+ * the maximised window (the edge strip below catches it); it goes again
+ * a moment after the pointer leaves it. */
+#define SLIDE_MS 200
+static gboolean dock_peek;      /* up over a maximised window, for now */
+static double dock_pos;         /* 0 = in place, 1 = below the edge */
+static double slide_from, slide_to;
+static gint64 slide_start;
+static guint slide_id, leave_id;
+
+static gboolean window_wants_screen(void)
+{
+    for (GList *l = lp_toplevels(); l; l = l->next) {
+        LpToplevel *t = l->data;
+        if (t->done && t->activated && !t->minimized &&
+            (t->maximized || t->fullscreen))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* Hidden, the dock still has its top pixel row on the screen - a row of
+ * its transparent margin, which shows nothing. Fully off the screen it
+ * got no more frame callbacks from the compositor, GTK waited for one
+ * before committing the next margin, and the dock never came back. */
+static void place_dock(void)
+{
+    int h = gtk_widget_get_allocated_height(GTK_WIDGET(win));
+    int down = (int)(dock_pos * (h + DOCK_MARGIN - 1) + 0.5);
+    int m = DOCK_MARGIN - down;
+    if (gtk_layer_get_margin(win, GTK_LAYER_SHELL_EDGE_BOTTOM) != m)
+        gtk_layer_set_margin(win, GTK_LAYER_SHELL_EDGE_BOTTOM, m);
+}
+
+static gboolean slide_step(gpointer d)
+{
+    (void)d;
+    double t = (g_get_monotonic_time() - slide_start) / 1000.0 / SLIDE_MS;
+    if (t > 1)
+        t = 1;
+    double u = 1 - t;
+    dock_pos = slide_from + (slide_to - slide_from) * (1 - u * u * u);
+    place_dock();
+    if (t < 1)
+        return G_SOURCE_CONTINUE;
+    slide_id = 0;
+    return G_SOURCE_REMOVE;
+}
+
+static void slide(double to)
+{
+    if (slide_id) {
+        g_source_remove(slide_id);
+        slide_id = 0;
+    }
+    if (lp_motion_reduced() || !gtk_widget_get_mapped(GTK_WIDGET(win))) {
+        dock_pos = to;
+        place_dock();
+        return;
+    }
+    slide_from = dock_pos;
+    slide_to = to;
+    slide_start = g_get_monotonic_time();
+    slide_id = g_timeout_add(16, slide_step, NULL);
+}
+
+static void update_away(void)
+{
+    gboolean away = window_wants_screen();
+    if (away == dock_away)
+        return;
+    dock_away = away;
+    dock_peek = FALSE;
+    if (leave_id) {
+        g_source_remove(leave_id);
+        leave_id = 0;
+    }
+    reserve_room();
+    slide(away ? 1.0 : 0.0);
+}
+
+static gboolean go_again(gpointer d)
+{
+    (void)d;
+    leave_id = 0;
+    if (dock_away && dock_peek) {
+        dock_peek = FALSE;
+        slide(1.0);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean on_edge_enter(GtkWidget *w, GdkEventCrossing *e, gpointer d)
+{
+    (void)w; (void)e; (void)d;
+    if (dock_away && !dock_peek) {
+        dock_peek = TRUE;
+        slide(0.0);
+    }
+    return FALSE;
+}
+
+/* Off the edge strip and not onto the dock: gone again, as off the dock. */
+static gboolean on_edge_leave(GtkWidget *w, GdkEventCrossing *e, gpointer d)
+{
+    (void)w; (void)d;
+    if (e->mode != GDK_CROSSING_NORMAL)
+        return FALSE;
+    if (dock_away && dock_peek && !leave_id)
+        leave_id = g_timeout_add(700, go_again, NULL);
+    return FALSE;
+}
+
+static gboolean on_dock_enter(GtkWidget *w, GdkEventCrossing *e, gpointer d)
+{
+    (void)w; (void)e; (void)d;
+    if (leave_id) {
+        g_source_remove(leave_id);
+        leave_id = 0;
+    }
+    /* Its one row left on the screen is reached before the edge strip
+     * is, where the two overlap. */
+    if (dock_away && !dock_peek) {
+        dock_peek = TRUE;
+        slide(0.0);
+    }
+    return FALSE;
+}
+
+static gboolean on_dock_leave(GtkWidget *w, GdkEventCrossing *e, gpointer d)
+{
+    (void)w; (void)d;
+    /* Into one of its own items, or a menu it opened: still here. */
+    if (e->detail == GDK_NOTIFY_INFERIOR || e->mode != GDK_CROSSING_NORMAL)
+        return FALSE;
+    if (dock_away && dock_peek && !leave_id)
+        leave_id = g_timeout_add(700, go_again, NULL);
+    return FALSE;
+}
+
 static gboolean recentre(gpointer d)
 {
     (void)d;
     reserve_room();
+    /* Its height is known only now: a dock that had to be away from the
+     * start (a maximised window already there) is put away here. */
+    place_dock();
     GdkDisplay *dpy = gdk_display_get_default();
     GdkWindow *gw = gtk_widget_get_window(GTK_WIDGET(win));
     GdkMonitor *mon = gw ? gdk_display_get_monitor_at_window(dpy, gw) : NULL;
@@ -992,14 +1158,21 @@ int main(int argc, char **argv)
     win = lp_layer_window("lp-dock", GTK_LAYER_SHELL_LAYER_TOP,
                           LP_EDGE_BOTTOM | LP_EDGE_LEFT);
     gtk_layer_set_margin(win, GTK_LAYER_SHELL_EDGE_BOTTOM, DOCK_MARGIN);
-    /* Its own zone would be ignored (a corner); the spacer reserves it. */
-    gtk_layer_set_exclusive_zone(win, 0);
+    /* Its own zone would be ignored (a corner); the spacer reserves it.
+     * -1, not 0: a surface with zone 0 is laid out inside the room the
+     * others reserve - the spacer's included - so with 0 the dock was
+     * lifted by its own height and sat ~110px above the screen's bottom
+     * edge instead of DOCK_MARGIN. -1 puts it against the edge. */
+    gtk_layer_set_exclusive_zone(win, -1);
     spacer = lp_layer_window("lp-dock-space", GTK_LAYER_SHELL_LAYER_BOTTOM,
                              LP_EDGE_BOTTOM | LP_EDGE_LEFT | LP_EDGE_RIGHT);
     gtk_widget_set_size_request(GTK_WIDGET(spacer), -1, 1);
     g_signal_connect(spacer, "realize", G_CALLBACK(spacer_realized), NULL);
     gtk_widget_show(GTK_WIDGET(spacer));
     g_signal_connect(win, "size-allocate", G_CALLBACK(on_dock_allocate), NULL);
+    gtk_widget_add_events(GTK_WIDGET(win), GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
+    g_signal_connect(win, "enter-notify-event", G_CALLBACK(on_dock_enter), NULL);
+    g_signal_connect(win, "leave-notify-event", G_CALLBACK(on_dock_leave), NULL);
     /* A new resolution or scale moves the middle of the screen. */
     g_signal_connect_swapped(gdk_screen_get_default(), "monitors-changed",
                              G_CALLBACK(recentre), NULL);
@@ -1027,7 +1200,7 @@ int main(int argc, char **argv)
     gtk_style_context_add_class(gsc, "lp-dock-item");
     gtk_style_context_add_class(gsc, "lp-grid-button");
     gtk_container_add(GTK_CONTAINER(grid_button),
-                      lp_icon("view-app-grid-symbolic", 28));
+                      lp_icon("view-app-grid-symbolic", 22));
     gtk_widget_set_tooltip_text(grid_button, T("Show applications", "앱 보기"));
     lp_on_tap(grid_button, (LpTapFn)on_grid, NULL);
     add_pull(grid_button, FALSE);
@@ -1040,8 +1213,8 @@ int main(int argc, char **argv)
     char *conf = lp_config_path("dock.conf");
     char *cs = NULL;
     if (g_file_get_contents(conf, &cs, NULL, NULL)) {
-        if (strstr(cs, "size=small")) icon_px = 36;
-        else if (strstr(cs, "size=large")) icon_px = 56;
+        if (strstr(cs, "size=small")) icon_px = 30;
+        else if (strstr(cs, "size=large")) icon_px = 48;
         g_free(cs);
     }
     GFile *cf = g_file_new_for_path(conf);

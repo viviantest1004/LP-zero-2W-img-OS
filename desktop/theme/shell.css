@@ -225,19 +225,19 @@ menu.lp-menu, .lp-menu menu, .lp-menu {
 .lp-dock {
   background-color: rgba(16, 34, 51, 0.80);
   border: 1px solid rgba(255, 255, 255, 0.10);
-  border-radius: 22px;
-  padding: 4px 8px;
+  border-radius: 18px;
+  padding: 3px 6px;
   margin: 12px 16px 4px 16px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35),
               inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .lp-dock button.lp-dock-item {
-  min-width: 58px;
-  min-height: 62px;
+  min-width: 46px;
+  min-height: 50px;
   padding: 0;
-  margin: 2px 2px;
-  border-radius: 14px;
+  margin: 2px 1px;
+  border-radius: 12px;
 }
 
 /* A mockup app with nothing installed behind it yet. Present, so the
@@ -258,7 +258,7 @@ menu.lp-menu, .lp-menu menu, .lp-menu {
 .lp-dock separator {
   background-color: rgba(255, 255, 255, 0.14);
   min-width: 1px;
-  margin: 14px 6px;
+  margin: 12px 5px;
 }
 
 .lp-dock .lp-grid-button image { color: @lp_t1; }

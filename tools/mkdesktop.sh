@@ -335,8 +335,14 @@ mkdir -p "$ROOT/usr/local/bin" "$ROOT/usr/local/share/applications" "$ROOT/usr/l
 
 if [[ -d "$D/theme" ]]; then
     mkdir -p "$ROOT/usr/share/themes/LP/gtk-4.0" "$ROOT/usr/share/themes/LP/gtk-3.0"
-    cp -a "$D/theme/gtk-4.0/gtk.css" "$ROOT/usr/share/themes/LP/gtk-4.0/" 2>/dev/null || true
-    cp -a "$D/theme/gtk-3.0/gtk.css" "$ROOT/usr/share/themes/LP/gtk-3.0/" 2>/dev/null || true
+    # GTK_THEME=LP (session-run) makes each file the WHOLE theme, so GTK's
+    # own dark theme goes in front of it: without it every widget the file
+    # does not mention - menus, menu bars, toolbars, entries - came out in
+    # GTK's unstyled fallback (LibreOffice's "FileEditViewInsert...").
+    { printf '@import url("resource:///org/gtk/libgtk/theme/Default/Default-dark.css");\n\n'
+      cat "$D/theme/gtk-4.0/gtk.css"; } > "$ROOT/usr/share/themes/LP/gtk-4.0/gtk.css"
+    { printf '@import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained-dark.css");\n\n'
+      cat "$D/theme/gtk-3.0/gtk.css"; } > "$ROOT/usr/share/themes/LP/gtk-3.0/gtk.css"
     # The shell's own style (top bar, dock, quick settings, app grid, OSK)
     # and the springs as CSS transitions. lp-shell.c reads them from
     # /usr/local/share/lp; without them every shell surface is drawn in
@@ -354,6 +360,18 @@ fi
 if [[ -d "$D/session" ]]; then
     cp -a "$D/session/start-desktop" "$ROOT/usr/lib/lp/start-desktop.session"
     cp -a "$D/session/session-run" "$ROOT/bin/session-run"
+    # LP's sway: maximise and minimise work, and a window never opens
+    # under the top bar (desktop/compositor/sway-1.7-lp.patch).
+    if [[ -x "$D/compositor/sway" ]]; then
+        install -m 755 "$D/compositor/sway" "$ROOT/usr/bin/sway"
+    fi
+    # And LP's wlroots under both compositors: the pointer on the GPU's
+    # cursor plane (a virtual machine's too) instead of a whole-screen
+    # redraw for every movement (desktop/compositor/wlroots-0.15.1-lp.patch).
+    if [[ -f "$D/compositor/libwlroots.so.10" ]]; then
+        install -m 644 "$D/compositor/libwlroots.so.10" \
+            "$ROOT/usr/lib/x86_64-linux-gnu/libwlroots.so.10"
+    fi
     # Every GTK 3 window draws its own title bar (desktop/csd/lp-csd.c).
     if [[ -f "$D/csd/liblp-csd.so" ]]; then
         install -D -m 755 "$D/csd/liblp-csd.so" "$ROOT/usr/local/lib/liblp-csd.so"
@@ -385,7 +403,11 @@ if [[ -d "$D/bar" ]]; then
 fi
 if [[ -f "$D/theme/gtk-4.0/gtk.css" ]]; then
     mkdir -p "$H/.config/gtk-4.0" "$H/.config/gtk-3.0"
+    # And again as the person's own stylesheet, without the import: GTK
+    # reads it above every application's CSS (libadwaita's, libhandy's),
+    # so the title bar and its three buttons are the same in all of them.
     cp -a "$D/theme/gtk-4.0/gtk.css" "$H/.config/gtk-4.0/gtk.css"
+    cp -a "$D/theme/gtk-3.0/gtk.css" "$H/.config/gtk-3.0/gtk.css"
     if [[ -f "$D/theme/settings.ini" ]]; then
         cp -a "$D/theme/settings.ini" "$H/.config/gtk-4.0/settings.ini"
         cp -a "$D/theme/settings.ini" "$H/.config/gtk-3.0/settings.ini"
@@ -395,6 +417,8 @@ fi
     cp -a "$D/terminal/foot.ini" "$ROOT/etc/xdg/foot/foot.ini"
 [[ -f "$D/terminal/foot.desktop" ]] &&
     cp -a "$D/terminal/foot.desktop" "$ROOT/usr/local/share/applications/foot.desktop"
+[[ -f "$D/terminal/org.gnome.Console.desktop" ]] &&
+    cp -a "$D/terminal/org.gnome.Console.desktop" "$ROOT/usr/local/share/applications/org.gnome.Console.desktop"
 
 # Every program the desktop tracks have built: desktop/<dir>/lp-* that
 # is executable, and its .desktop entry. The installer's own are below.

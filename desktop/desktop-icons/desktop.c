@@ -646,8 +646,13 @@ static void m_terminal(GtkMenuItem *m, gpointer d)
 {
     (void)m; (void)d;
     char *dir = desktop_dir();
-    const char *a[] = { "foot", "--working-directory", dir, NULL };
-    lp_spawn(a);
+    char *kgx = g_find_program_in_path("kgx");
+    char *wd = g_strconcat("--working-directory=", dir, NULL);
+    const char *a_kgx[] = { "kgx", wd, NULL };
+    const char *a_foot[] = { "foot", "--working-directory", dir, NULL };
+    lp_spawn(kgx ? a_kgx : a_foot);
+    g_free(kgx);
+    g_free(wd);
     g_free(dir);
 }
 

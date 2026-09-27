@@ -78,25 +78,24 @@ if test -e "${XDG_RUNTIME_DIR}/lp-logout" ; then
     have lp-lock && lp-lock > "$LOGDIR/lock.log" 2>&1 &
 fi
 
-# Animations: off in GTK apps when the CPU draws the screen (sway), on
-# with a GPU - unless the person turned motion down in Settings.
+# Animations: on, under either compositor - the switches, pages, menus and
+# the dock's slide move without a GPU too - unless the person turned motion
+# down in Settings (Accessibility), which is the one thing that stops them.
 if have gsettings ; then
-    if test "$compositor" = wayfire && ! test -e "$HOME/.config/lp/reduce-motion" ; then
-        gsettings set org.gnome.desktop.interface enable-animations true
-    elif test "$compositor" = sway ; then
+    if test -e "$HOME/.config/lp/reduce-motion" ; then
         gsettings set org.gnome.desktop.interface enable-animations false
+    else
+        gsettings set org.gnome.desktop.interface enable-animations true
     fi 2> /dev/null
 fi
 
-# Header bars: minimise only where it does something. sway ignores a
-# window's request to minimise, and a button that does nothing is worse
-# than none; wayfire minimises (and the dock brings the window back).
+# Header bars: minimise, maximise, close - the same three in every
+# window under either compositor. wayfire minimises and maximises by
+# itself; LP's sway does too now (desktop/compositor/sway-1.7-lp.patch),
+# where stock sway ignored both and the buttons did nothing. The dock
+# brings a minimised window back.
 if have gsettings ; then
-    if test "$compositor" = wayfire ; then
-        gsettings set org.gnome.desktop.wm.preferences button-layout 'appmenu:minimize,maximize,close'
-    else
-        gsettings set org.gnome.desktop.wm.preferences button-layout 'appmenu:maximize,close'
-    fi 2> /dev/null
+    gsettings set org.gnome.desktop.wm.preferences button-layout 'appmenu:minimize,maximize,close' 2> /dev/null
 fi
 
 # 1. The screen's scale first: every surface below is sized for the
