@@ -216,9 +216,14 @@ static void own_pw_done(int st, const char *out, const char *err, gpointer p)
         return;
     }
     char *why = lp_first_line(err, out);
-    /* passwd's refusals, in words a person expects. */
-    if (strstr(why, "Authentication token manipulation") || strstr(why, "Authentication failure") ||
-        strstr(why, "incorrect"))
+    /* passwd's refusals, in words a person expects. Looked for in all it
+     * said: its last line is only "password unchanged", after the
+     * reason. */
+    char *all = g_strconcat(err ? err : "", "\n", out ? out : "", NULL);
+    gboolean wrong = strstr(all, "Authentication token manipulation") ||
+                     strstr(all, "Authentication failure") || strstr(all, "incorrect");
+    g_free(all);
+    if (wrong)
         lp_dialog_error(d, T("The current password is not right.", "현재 비밀번호가 맞지 않습니다."));
     else
         lp_dialog_error(d, why);

@@ -124,6 +124,10 @@ static const char *CSS =
     ".lp-settings headerbar { background: @lp_header; color: @lp_fg; min-height: 48px;"
     "  box-shadow: none; border-bottom: 1px solid @lp_border; }\n"
     ".lp-settings headerbar button { min-width: 44px; min-height: 40px; }\n"
+    /* The theme colours the title label itself (its light-on-dark text),
+     * so the header's colour did not reach it: in the light style the
+     * title was white on a light bar. */
+    ".lp-settings headerbar .title { color: @lp_fg; }\n"
     ".lp-settings .lp-sidebar { background: @lp_side; border-right: 1px solid @lp_border; }\n"
     ".lp-settings .lp-sidebar list { background: transparent; }\n"
     ".lp-settings .lp-sidebar row { min-height: 48px; border-radius: 8px; margin: 1px 8px; padding: 0 6px;"
@@ -185,6 +189,9 @@ static const char *CSS =
     "  border-radius: 14px; background: #ffffff; border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.3); }\n"
     ".lp-settings switch image { color: transparent; }\n"
     ".lp-settings switch:disabled { opacity: 0.45; }\n"
+    /* A slider that cannot be moved (no backlight to dim) looked exactly
+     * like one that can. */
+    ".lp-settings scale:disabled { opacity: 0.45; }\n"
     ".lp-settings scale { min-height: 48px; padding: 0 12px; }\n"
     ".lp-settings scale trough { min-height: 8px; border-radius: 4px; background: @lp_track; border: none; }\n"
     ".lp-settings scale highlight { min-height: 8px; border-radius: 4px; background: @lp_accent; }\n"
@@ -230,6 +237,11 @@ static const char *CSS =
      * (ui.c, LpSheet). The margin is room for the shadow inside the
      * window's own surface. */
     "window.lp-dialog.lp-settings { background: transparent; }\n"
+    /* ui.c gives dialogs an empty title bar so GTK tells the compositor
+     * they draw their own frame; that also makes them .csd, which the
+     * theme answers with a window shadow and outline around the whole
+     * transparent window. The card has its own. */
+    "window.lp-dialog.lp-settings.csd { box-shadow: none; border-radius: 0; }\n"
     ".lp-settings .lp-sheet { margin: 28px; }\n"
     ".lp-settings .lp-sheet-card { background: @lp_card; color: @lp_fg; border-radius: 14px;"
     "  border: 1px solid @lp_border; padding: 22px 24px 20px 24px;"

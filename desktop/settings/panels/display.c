@@ -418,6 +418,9 @@ static void confirm_keep(lp_dialog_t *dlg, gpointer p)
     lp_toast(FALSE, T("Kept the new display settings", "새 화면 설정을 유지합니다"));
     confirm_free(c);
     lp_dialog_close(dlg);
+    /* Read back what the display is doing now, as after a revert: the
+     * subtitle and "Now 1920 × 1080" still told the mode from before. */
+    if (DP) reload(DP);
 }
 
 /* Closed by Cancel, Escape or the window going: that is a "no". */
@@ -468,13 +471,18 @@ static out_t *sel_out(disp_t *d)
 }
 
 /* Resolution, refresh rate and rotation: live, then the question. */
-static void apply_risky(disp_t *d, int new_cur, const char *new_tf)
+static void apply_risky(disp_t *d, int new_cur, const char *new_tf_in)
 {
     out_t *o = sel_out(d);
     if (!o || o->cur < 0) return;
     const mode_t_ *old = &g_array_index(o->modes, mode_t_, o->cur);
     char *old_mode = mode_arg(old);
     char *old_tf = g_strdup(o->transform);
+    /* A copy: a new mode keeps the rotation, so callers pass o->transform
+     * itself, which is freed and replaced below - wayfire.ini then got
+     * whatever was left in that memory as "transform = ", and wayfire
+     * logged "Bad output transform" at every re-read. */
+    char *new_tf = g_strdup(new_tf_in);
 
     const mode_t_ *nm = &g_array_index(o->modes, mode_t_, new_cur);
     char *mode = mode_arg(nm);
@@ -496,7 +504,7 @@ static void apply_risky(disp_t *d, int new_cur, const char *new_tf)
         hold(o->name, FALSE);
         rebuild_controls(d);
     }
-    g_free(mode); g_free(old_mode); g_free(old_tf);
+    g_free(mode); g_free(old_mode); g_free(old_tf); g_free(new_tf);
 }
 
 static void auto_done(int st, const char *out, const char *err, gpointer p)

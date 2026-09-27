@@ -22,7 +22,11 @@
  * and two people on one machine may read different ones. What the login
  * screen, the console and new accounts use is the system's
  * (`localectl set-locale`), which needs an administrator and is a
- * separate, explicit button.
+ * separate, explicit button. localectl only asks systemd-localed, which
+ * LP's init does not run - it answered every time with "Failed to connect
+ * to bus" - so when it cannot reach it the same two lines are written to
+ * /etc/default/locale directly, the file localed itself keeps and the
+ * installer writes.
  *
  * English is the default: no file means en_US.UTF-8.
  *
@@ -105,9 +109,20 @@ static void on_formats(GtkWidget *seg, int i, gpointer p)
                       "날짜와 숫자 형식은 다음 로그인부터 바뀝니다"));
 }
 
+static const char *WHY_SYSTEM_LOCALE;
+
 static void system_done(int st, const char *out, const char *err, gpointer p)
 {
-    (void)p;
+    char *body = p;
+    /* No localed to talk to (no systemd): the file it would have written. */
+    if (st != 0 && body && err &&
+        (strstr(err, "Failed to connect to bus") || strstr(err, "not been booted with systemd"))) {
+        lp_admin_write_file("/etc/default/locale", body, WHY_SYSTEM_LOCALE, NULL,
+                            system_done, NULL);
+        g_free(body);
+        return;
+    }
+    g_free(body);
     if (st == 0)
         lp_toast(FALSE, T("The login screen and new accounts use this language now",
                           "이제 로그인 화면과 새 계정이 이 언어를 씁니다"));
@@ -126,10 +141,11 @@ static void on_system_wide(GtkButton *b, gpointer p)
     char *a1 = g_strdup_printf("LANG=%s", lang ? lang : "en_US.UTF-8");
     char *a2 = g_strdup_printf("LC_TIME=%s", fmt ? fmt : (lang ? lang : "en_US.UTF-8"));
     const char *v[] = { "localectl", "set-locale", a1, a2, NULL };
-    lp_admin_run(v, NULL, T("Changing the language of the login screen and of new accounts needs "
-                            "an administrator.",
-                            "로그인 화면과 새 계정의 언어를 바꾸려면 관리자 권한이 필요합니다."),
-                 GTK_WIDGET(b), system_done, NULL);
+    WHY_SYSTEM_LOCALE = T("Changing the language of the login screen and of new accounts needs "
+                          "an administrator.",
+                          "로그인 화면과 새 계정의 언어를 바꾸려면 관리자 권한이 필요합니다.");
+    lp_admin_run(v, NULL, WHY_SYSTEM_LOCALE, GTK_WIDGET(b), system_done,
+                 g_strdup_printf("%s\n%s\n", a1, a2));
     g_free(a1); g_free(a2); g_free(lang); g_free(fmt);
 }
 

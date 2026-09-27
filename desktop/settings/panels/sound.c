@@ -214,12 +214,27 @@ static void send_volume(int id, double v, int bal, const char *key)
     g_free(props);
 }
 
+/* "Speakers · 40%" under the title, from the slider and the switch as
+ * they are now - it was written once, when the page was built, and still
+ * said 100% after the volume had been turned down and the output muted. */
+static void out_subtitle(snd_t *s)
+{
+    node_t *sink = default_of(s->sinks);
+    if (!sink || !s->out_vol) return;
+    int v = (int)lround(gtk_range_get_value(GTK_RANGE(row_control(s->out_vol))));
+    char *sub = sink->muted ? g_strdup_printf(T("%s · muted", "%s · 음소거"), sink->name)
+                            : g_strdup_printf(T("%s · %d%%", "%s · %d%%"), sink->name, v);
+    page_set_subtitle(s->page, sub);
+    g_free(sub);
+}
+
 static void on_out_volume(GtkRange *r, gpointer p)
 {
     (void)p;
     node_t *n = SN ? default_of(SN->sinks) : NULL;
     if (!n) return;
     send_volume(n->id, gtk_range_get_value(r) / 100.0, balance_get(), "sink-volume");
+    out_subtitle(SN);
 }
 
 static void on_in_volume(GtkRange *r, gpointer p)
@@ -265,6 +280,7 @@ static void on_mute(GObject *sw, GParamSpec *ps, gpointer p)
     if (lp_run_full(a, NULL, &out, &err) == 0) {
         n->muted = on;
         lp_toast(FALSE, on ? T("Muted %s", "%s 음소거") : T("Unmuted %s", "%s 음소거 해제"), n->name);
+        if (!strcmp(which, "out")) out_subtitle(SN);
     } else {
         char *why = lp_first_line(err, out);
         lp_toast(TRUE, T("Could not change mute: %s", "음소거를 바꾸지 못했습니다: %s"), why);
@@ -313,18 +329,33 @@ static void on_stream_volume(GtkRange *r, gpointer p)
 }
 
 /* Left, then right: the test says both that sound comes out and that it
- * comes out of the side the balance says. */
+ * comes out of the side the balance says. Each sound is a second long;
+ * pw-play into an output that never takes the samples (a virtual
+ * machine's "Dummy Output") never returns, so each gets ten seconds. */
+#define TEST_MS (10 * 1000)
+
+static void on_test_done(int st, const char *out, const char *err, gpointer p)
+{
+    (void)p;
+    if (st == 0) return;
+    char *why = lp_first_line(err, out);
+    lp_toast(TRUE, st == LP_RUN_TIMEOUT
+                   ? T("The test sound did not finish - the output device is not playing: %s",
+                       "시험 소리가 끝나지 않았습니다 - 출력 장치가 소리를 내지 않습니다: %s")
+                   : T("Could not play the test sound: %s", "시험 소리를 내지 못했습니다: %s"),
+             why);
+    g_free(why);
+}
+
 static void on_test_right(int st, const char *out, const char *err, gpointer p)
 {
-    (void)out; (void)p;
     if (st != 0) {
-        lp_toast(TRUE, T("Could not play the test sound: %s", "시험 소리를 내지 못했습니다: %s"),
-                 err && *err ? err : "pw-play");
+        on_test_done(st, out, err, p);
         return;
     }
     static const char *const v[] = { "pw-play",
         "/usr/share/sounds/freedesktop/stereo/audio-channel-front-right.oga", NULL };
-    lp_run_async(v, NULL, NULL, NULL, NULL);
+    lp_run_async_timeout(v, NULL, TEST_MS, NULL, on_test_done, NULL);
 }
 
 static void on_test(GtkButton *b, gpointer p)
@@ -333,7 +364,7 @@ static void on_test(GtkButton *b, gpointer p)
     lp_toast(FALSE, T("Playing: left, then right", "재생 중: 왼쪽, 그다음 오른쪽"));
     static const char *const v[] = { "pw-play",
         "/usr/share/sounds/freedesktop/stereo/audio-channel-front-left.oga", NULL };
-    lp_run_async(v, NULL, NULL, on_test_right, NULL);
+    lp_run_async_timeout(v, NULL, TEST_MS, NULL, on_test_right, NULL);
 }
 
 /* ── building ───────────────────────────────────────────────────────── */
@@ -440,12 +471,10 @@ static void on_status(int st, const char *out, const char *err, gpointer p)
         row_value(s->apps, T("No application is playing sound", "소리를 내는 앱이 없습니다"),
                   NULL, NULL);
 
-    char *sub = sink
-        ? g_strdup_printf(sink->muted ? T("%s · muted", "%s · 음소거") : T("%s · %d%%", "%s · %d%%"),
-                          sink->name, (int)lround(v))
-        : g_strdup(T("No output device", "출력 장치 없음"));
-    page_set_subtitle(s->page, sub);
-    g_free(sub);
+    if (sink)
+        out_subtitle(s);
+    else
+        page_set_subtitle(s->page, T("No output device", "출력 장치 없음"));
 }
 
 static void reload(snd_t *s)
@@ -497,24 +526,39 @@ gboolean lp_sound_reset(char **why)
     kv_set(c, "balance", "0");
     g_free(c);
     balance_live = 1000;
-    static const char *const out[] = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "0.40", NULL };
-    static const char *const in[] = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", "1.00", NULL };
     char *err = NULL, *o = NULL;
-    int st = lp_run_full(out, NULL, &o, &err);
-    if (st == 0) {
+    int st = 0;
+    /* By id, the same device the page shows (default_of): "@DEFAULT_AUDIO_
+     * SINK@" is an error when WirePlumber has not marked a default - a
+     * virtual machine's lone Dummy Output - and so is the source on a
+     * machine with no microphone ("'-1' is not a valid ID"), which made
+     * the whole reset report a failure. */
+    static const char *const sv[] = { "wpctl", "status", NULL };
+    char *status = lp_run(sv);
+    snd_t tmp = { 0 };
+    tmp.sinks = g_ptr_array_new_with_free_func(node_free);
+    tmp.sources = g_ptr_array_new_with_free_func(node_free);
+    tmp.streams = g_ptr_array_new_with_free_func(node_free);
+    if (status) parse_status(&tmp, status);
+    node_t *targets[] = { default_of(tmp.sinks), default_of(tmp.sources) };
+    const char *levels[] = { "0.40", "1.00" };
+    for (int k = 0; k < 2 && st == 0; k++) {
+        if (!targets[k]) continue;
+        char ids[16];
+        g_snprintf(ids, sizeof ids, "%d", targets[k]->id);
+        const char *a[] = { "wpctl", "set-volume", ids, levels[k], NULL };
         g_free(err); g_free(o);
-        st = lp_run_full(in, NULL, &o, &err);
+        err = o = NULL;
+        st = lp_run_full(a, NULL, &o, &err);
+    }
+    if (!status) {
+        st = 1;
+        g_free(err);
+        err = g_strdup(T("The sound service is not answering", "소리 서비스가 답하지 않습니다"));
     }
     if (st != 0 && why) *why = lp_first_line(err, o);
     /* Every app's own volume, for the ones playing now. */
-    static const char *const sv[] = { "wpctl", "status", NULL };
-    char *status = lp_run(sv);
     if (status) {
-        snd_t tmp = { 0 };
-        tmp.sinks = g_ptr_array_new_with_free_func(node_free);
-        tmp.sources = g_ptr_array_new_with_free_func(node_free);
-        tmp.streams = g_ptr_array_new_with_free_func(node_free);
-        parse_status(&tmp, status);
         for (guint i = 0; i < tmp.streams->len; i++) {
             char ids[16];
             g_snprintf(ids, sizeof ids, "%d", ((node_t *)g_ptr_array_index(tmp.streams, i))->id);
@@ -522,11 +566,11 @@ gboolean lp_sound_reset(char **why)
             char *x = lp_run(a);
             g_free(x);
         }
-        g_ptr_array_free(tmp.sinks, TRUE);
-        g_ptr_array_free(tmp.sources, TRUE);
-        g_ptr_array_free(tmp.streams, TRUE);
         g_free(status);
     }
+    g_ptr_array_free(tmp.sinks, TRUE);
+    g_ptr_array_free(tmp.sources, TRUE);
+    g_ptr_array_free(tmp.streams, TRUE);
     g_free(err); g_free(o);
     return st == 0;
 }

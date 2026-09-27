@@ -624,11 +624,14 @@ static void scale_tramp(GtkRange *r, gpointer d)
 /* A panel sets its lp-fmt after row_scale has written the first readout,
  * and setting the same value again changes nothing - so the first
  * number used to be the bare default ("100" beside a volume that then
- * read "33%"). Shown means formatted. */
-static void scale_mapped(GtkWidget *w, gpointer d)
+ * read "33%"). The readout is written once more when the panel's code
+ * has returned; a slider already gone from its page is left alone. */
+static gboolean scale_first_readout(gpointer p)
 {
-    (void)d;
-    LP_QUIET(scale_tramp(GTK_RANGE(w), NULL));
+    GtkWidget *sc = p;
+    if (gtk_widget_get_root(sc))
+        LP_QUIET(scale_tramp(GTK_RANGE(sc), NULL));
+    return G_SOURCE_REMOVE;
 }
 
 static void scale_gone(GtkWidget *w, gpointer d)
@@ -665,7 +668,8 @@ GtkWidget *row_scale(GtkWidget *list, const char *title, const char *detail,
     g_object_set_data(G_OBJECT(sc), "lp-cb-data", data);
     g_signal_connect(sc, "value-changed", G_CALLBACK(scale_tramp), NULL);
     g_signal_connect(sc, "destroy", G_CALLBACK(scale_gone), NULL);
-    g_signal_connect(sc, "map", G_CALLBACK(scale_mapped), NULL);
+    g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, scale_first_readout, g_object_ref(sc),
+                    g_object_unref);
     LP_QUIET(scale_tramp(GTK_RANGE(sc), NULL));
     if (!cb) gtk_widget_set_sensitive(sc, FALSE);
     if (list) row_add(list, row);
@@ -991,6 +995,27 @@ lp_dialog_t *lp_dialog_new(const char *title, const char *ok, gboolean danger,
                          gtk_named_action_new("window.close")));
     gtk_widget_add_controller(d->win, sc);
     return d;
+}
+
+int lp_dialog_fit(int want, int chrome)
+{
+    GdkDisplay *dpy = gdk_display_get_default();
+    GtkNative *nat = lp_window() ? GTK_NATIVE(lp_window()) : NULL;
+    GdkSurface *surf = nat ? gtk_native_get_surface(nat) : NULL;
+    GdkMonitor *mon = surf ? gdk_display_get_monitor_at_surface(dpy, surf) : NULL;
+    if (!mon) {
+        GListModel *ms = gdk_display_get_monitors(dpy);
+        mon = ms && g_list_model_get_n_items(ms) ? g_list_model_get_item(ms, 0) : NULL;
+        if (mon) g_object_unref(mon);          /* the list keeps it */
+    }
+    if (!mon) return want;
+    GdkRectangle geo;
+    gdk_monitor_get_geometry(mon, &geo);
+    /* The top bar (36) and the dock's room (96) cover the screen's edges
+     * above every window, dialogs included; a dialog taller than what is
+     * between them had its buttons under the dock. */
+    int room = geo.height - 36 - 96 - 16 - chrome;
+    return CLAMP(room, MIN(160, want), want);
 }
 
 GtkWidget *lp_dialog_body(lp_dialog_t *d)      { return d->body; }

@@ -217,7 +217,7 @@ static void on_tz(GtkWidget *row, gpointer p)
     g_signal_connect(list, "row-activated", G_CALLBACK(tz_activated), dl);
     GtkWidget *sw = gtk_scrolled_window_new();
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_widget_set_size_request(sw, 480, 420);
+    gtk_widget_set_size_request(sw, 480, lp_dialog_fit(420, 320));
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), list);
     gtk_box_append(GTK_BOX(lp_dialog_body(dl)), sw);
     lp_dialog_set_data(dl, "lp-list", list, NULL);

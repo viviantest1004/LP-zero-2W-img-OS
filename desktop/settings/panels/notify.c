@@ -130,6 +130,14 @@ static void on_dnd(GObject *sw, GParamSpec *ps, gpointer p)
     kv_set(c, "dnd", on ? "yes" : "no");
     g_free(c);
     apply_dnd(on, GTK_WIDGET(sw), TRUE);
+    /* The subtitle says the state too; it was only written at build. */
+    GtkWidget *page = GTK_WIDGET(sw);
+    while (page && !g_object_get_data(G_OBJECT(page), "lp-dnd"))
+        page = gtk_widget_get_parent(page);
+    if (page)
+        page_set_subtitle(page, on ? T("Do not disturb is on", "방해 금지가 켜져 있습니다")
+                                   : T("Notifications appear at the top of the screen",
+                                       "알림은 화면 위쪽에 나타납니다"));
 }
 
 static void on_clear(GtkButton *b, gpointer p)

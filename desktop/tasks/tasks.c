@@ -3129,9 +3129,12 @@ static GtkWidget *build_cpu(void)
         A->g_pkg = g_new0(LptGraph *, S.npkg);
         for (int k = 0; k < S.npkg; k++) {
             Pkg *pk = &S.pkg[k];
-            char *h = g_strdup_printf(T("Processor %d · %s · %d cores, %d threads",
-                                        "프로세서 %d · %s · %d코어 %d스레드"),
-                                      pk->id, pk->model, pk->cores, pk->threads);
+            char *h = lp_korean()
+                ? g_strdup_printf("프로세서 %d · %s · %d코어 %d스레드",
+                                  pk->id, pk->model, pk->cores, pk->threads)
+                : g_strdup_printf("Processor %d · %s · %d core%s, %d thread%s",
+                                  pk->id, pk->model, pk->cores, pk->cores == 1 ? "" : "s",
+                                  pk->threads, pk->threads == 1 ? "" : "s");
             GtkWidget *hl = label(h, "lpt-dev", 0);
             gtk_label_set_ellipsize(GTK_LABEL(hl), PANGO_ELLIPSIZE_END);
             gtk_widget_set_margin_top(hl, k ? 14 : 2);

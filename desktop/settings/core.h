@@ -176,6 +176,11 @@ typedef void (*lp_dialog_fn)(lp_dialog_t *d, gpointer data);
 lp_dialog_t *lp_dialog_new(const char *title, const char *ok, gboolean danger,
                            lp_dialog_fn on_ok, gpointer data);
 GtkWidget   *lp_dialog_body(lp_dialog_t *d);
+/* The height for a scrolled list inside a dialog: `want`, or less on a
+ * screen too short for it once `chrome` pixels of the rest of the dialog
+ * (title, fields, buttons) are counted - so the buttons stay above the
+ * dock on a 768-line screen. */
+int          lp_dialog_fit(int want, int chrome);
 GtkWidget   *lp_dialog_window(lp_dialog_t *d);
 GtkWidget   *lp_dialog_ok_button(lp_dialog_t *d);
 void         lp_dialog_text(lp_dialog_t *d, const char *text, const char *css);

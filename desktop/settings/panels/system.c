@@ -282,7 +282,7 @@ static void on_info(GtkWidget *row, gpointer p)
     gtk_label_set_xalign(GTK_LABEL(l), 0);
     gtk_widget_add_css_class(l, "lp-mono");
     GtkWidget *sw = gtk_scrolled_window_new();
-    gtk_widget_set_size_request(sw, 640, 460);
+    gtk_widget_set_size_request(sw, 640, lp_dialog_fit(460, 290));
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), l);
     gtk_box_append(GTK_BOX(lp_dialog_body(d)), sw);
     GtkWidget *b = gtk_button_new_with_label(T("Copy", "복사"));
