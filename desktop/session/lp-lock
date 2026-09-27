@@ -6,9 +6,12 @@
 # the account's own, the same one sudo asks for.
 #
 # The ring is the theme's: teal while typing, orange on each key, red
-# when the password was wrong.
+# when the password was wrong. It shows from the start
+# (--indicator-idle-visible): the machine now locks at every boot, and a
+# screen showing only the wallpaper did not say that it wanted a
+# password.
 WALL=/usr/share/backgrounds/lp/lp-wallpaper-dark-3840x2160.png
-set -- -f --show-failed-attempts \
+set -- -f --show-failed-attempts --indicator-idle-visible \
     --color 0B1722 \
     --inside-color 0B1722CC --inside-clear-color 0B1722CC \
     --inside-ver-color 16304ACC --inside-wrong-color 3A1414CC \
