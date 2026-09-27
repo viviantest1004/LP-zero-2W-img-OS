@@ -128,7 +128,7 @@ struct Desk {
     GPtrArray  *icons;
     cairo_surface_t *wall;     /* at the output's size and scale */
     int         wall_w, wall_h;
-    int         alloc_w, alloc_h;
+    int         grid_cols, grid_rows; /* the grid place_all() last filled */
     /* the primary press in progress */
     PressMode   mode;
     char       *press_name;    /* the icon it went down on; NULL: the wallpaper */
@@ -146,6 +146,7 @@ struct Desk {
     GtkWidget  *rename_pop, *rename_entry, *rename_msg;
     char       *rename_name;
     gboolean    rename_fresh;  /* a folder just made: "Folder Name", not "Rename" */
+    gboolean    rename_stem;   /* the name's stem still to be selected */
 };
 
 static GList *desks;
@@ -161,6 +162,8 @@ static struct {
     GPtrArray *names;          /* NULL: no drag of ours */
     char      *lead;           /* the icon under the pointer */
     double     off_x, off_y;   /* the pointer, inside the lead icon */
+    double     pic_x, pic_y;   /* the lead, inside the drag icon */
+    gboolean   corner;         /* the drag icon hangs by its corner */
 } carry;
 
 static const GtkTargetEntry uri_target[] = { { (char *)"text/uri-list", 0, 0 } };
@@ -390,17 +393,23 @@ static void icon_open(Icon *ic)
 
 /* ── icon placement ──────────────────────────────────────────────── */
 
+/* The grid is measured on the monitor, which the surface covers, and not
+ * on the window: the window has no size until the compositor's first
+ * configure, and a grid measured before then was one cell - every saved
+ * position outside it was forgotten, at every start. */
 static int rows_on(Desk *d)
 {
-    int H = gtk_widget_get_allocated_height(GTK_WIDGET(d->win));
-    int r = (H - ORIGIN_Y - 8) / CELL_H;
+    GdkRectangle g;
+    gdk_monitor_get_geometry(d->mon, &g);
+    int r = (g.height - ORIGIN_Y - 8) / CELL_H;
     return r > 0 ? r : 1;
 }
 
 static int cols_on(Desk *d)
 {
-    int W = gtk_widget_get_allocated_width(GTK_WIDGET(d->win));
-    int c = (W - ORIGIN_X - 8) / CELL_W;
+    GdkRectangle g;
+    gdk_monitor_get_geometry(d->mon, &g);
+    int c = (g.width - ORIGIN_X - 8) / CELL_W;
     return c > 0 ? c : 1;
 }
 
@@ -464,6 +473,8 @@ static void icon_frame(GtkWidget *w, gpointer data)
 static void place_all(Desk *d)
 {
     int rows = rows_on(d), cols = cols_on(d);
+    d->grid_cols = cols;
+    d->grid_rows = rows;
     for (guint i = 0; i < d->icons->len; i++) {
         Icon *ic = g_ptr_array_index(d->icons, i);
         if (ic->placed && (ic->col >= cols || ic->row >= rows))
@@ -900,20 +911,36 @@ static void rename_commit(Desk *d)
 
 static void on_rename_activate(GtkWidget *w, gpointer data) { (void)w; rename_commit(data); }
 
-/* Once shown: the name without its extension selected, ready to be typed
- * over, the way every file manager hands over a name. */
+/* The name without its extension selected, ready to be typed over, the
+ * way every file manager hands over a name. After each of GtkEntry's own
+ * grab_focus, which selects all of it (gtk-entry-select-on-focus) - the
+ * popover's map grabs the focus more than once - until the owner first
+ * clicks or types in the field. */
+static void on_rename_grab(GtkWidget *e, gpointer data)
+{
+    Desk *d = data;
+    if (!d->rename_stem)
+        return;
+    const char *t = gtk_entry_get_text(GTK_ENTRY(e));
+    const char *dot = strrchr(t, '.');
+    Icon *ic = icon_named(d, d->rename_name);
+    int end = (!ic || ic->is_dir || !dot || dot == t) ? -1 : (int)g_utf8_pointer_to_offset(t, dot);
+    gtk_editable_select_region(GTK_EDITABLE(e), 0, end);
+}
+
+static gboolean on_rename_touched(GtkWidget *e, GdkEvent *ev, gpointer data)
+{
+    (void)e; (void)ev;
+    ((Desk *)data)->rename_stem = FALSE;
+    return FALSE;
+}
+
 static void on_rename_map(GtkWidget *pop, gpointer data)
 {
     (void)pop;
     Desk *d = data;
-    if (!d->rename_entry)
-        return;
-    gtk_widget_grab_focus(d->rename_entry);
-    const char *t = gtk_entry_get_text(GTK_ENTRY(d->rename_entry));
-    const char *dot = strrchr(t, '.');
-    Icon *ic = icon_named(d, d->rename_name);
-    int end = (!ic || ic->is_dir || !dot || dot == t) ? -1 : (int)g_utf8_pointer_to_offset(t, dot);
-    gtk_editable_select_region(GTK_EDITABLE(d->rename_entry), 0, end);
+    if (d->rename_entry)
+        gtk_widget_grab_focus(d->rename_entry);
 }
 
 /* A popover under the icon, inside the desktop's own surface: the surface
@@ -924,6 +951,7 @@ static void rename_begin(Desk *d, Icon *ic, const char *text, gboolean fresh)
     rename_close(d);
     d->rename_name = g_strdup(ic->name);
     d->rename_fresh = fresh;
+    d->rename_stem = text == NULL;
 
     GtkWidget *pop = gtk_popover_new(d->layout);
     gtk_style_context_add_class(gtk_widget_get_style_context(pop), "lp-note");
@@ -944,6 +972,9 @@ static void rename_begin(Desk *d, Icon *ic, const char *text, gboolean fresh)
     gtk_entry_set_text(GTK_ENTRY(e), text ? text : ic->name);
     gtk_entry_set_width_chars(GTK_ENTRY(e), 24);
     g_signal_connect(e, "activate", G_CALLBACK(on_rename_activate), d);
+    g_signal_connect_after(e, "grab-focus", G_CALLBACK(on_rename_grab), d);
+    g_signal_connect(e, "button-press-event", G_CALLBACK(on_rename_touched), d);
+    g_signal_connect(e, "key-press-event", G_CALLBACK(on_rename_touched), d);
     gtk_box_pack_start(GTK_BOX(row), e, TRUE, TRUE, 0);
     GtkWidget *b = gtk_button_new_with_label(fresh ? T("Done", "완료") : T("Rename", "바꾸기"));
     g_signal_connect(b, "clicked", G_CALLBACK(on_rename_activate), d);
@@ -1304,6 +1335,11 @@ static void carry_start(Desk *d, GtkGesture *g, Icon *lead)
     carry.lead = g_strdup(lead->name);
     carry.off_x = d->press_x - lead->sx.x;
     carry.off_y = d->press_y - lead->sy.x;
+    carry.pic_x = carry.pic_y = 0;
+    /* sway 1.7 draws a drag icon with its top-left corner at the pointer,
+     * whatever hotspot it was given (1.8 reads it). There the drop puts
+     * the icons where their picture was, not where the grab would. */
+    carry.corner = g_getenv("SWAYSOCK") != NULL;
 
     GdkEventSequence *seq = gtk_gesture_single_get_current_sequence(GTK_GESTURE_SINGLE(g));
     const GdkEvent *ev = gtk_gesture_get_last_event(g, seq);
@@ -1407,6 +1443,8 @@ static cairo_surface_t *carry_picture(Desk *d)
     /* The hotspot, as GTK reads it: the device offset of the pointer's
      * pixel, negated (gtktreeview.c does the same). */
     cairo_surface_set_device_offset(s, -(hx - bx0) * sf, -(hy - by0) * sf);
+    carry.pic_x = lead->sx.x - bx0;
+    carry.pic_y = lead->sy.x - by0;
     return s;
 }
 
@@ -1494,7 +1532,8 @@ static void carry_drop(Desk *d, double x, double y)
     Icon *lead = icon_named(d, carry.lead);
     if (!lead)
         return;
-    double lx = x - carry.off_x, ly = y - carry.off_y;
+    double lx = carry.corner ? x + carry.pic_x : x - carry.off_x;
+    double ly = carry.corner ? y + carry.pic_y : y - carry.off_y;
     GPtrArray *moving = g_ptr_array_new();
     GArray *at = g_array_new(FALSE, FALSE, sizeof(double));
     for (guint i = 0; i < carry.names->len; i++) {
@@ -1958,17 +1997,26 @@ static void on_realize(GtkWidget *w, gpointer d)
     cairo_region_destroy(reg);
 }
 
+/* A new mode, or a new scale: the grid may have changed. Only then -
+ * placing moves every icon, which queues a new allocation, which would
+ * place them again, every frame. */
+static void regrid(Desk *d)
+{
+    if (cols_on(d) == d->grid_cols && rows_on(d) == d->grid_rows)
+        return;
+    place_all(d);
+}
+
 static void on_size(GtkWidget *w, GdkRectangle *a, gpointer data)
 {
-    (void)w;
-    Desk *d = data;
-    /* Only for a new size: placing moves every icon, which queues a new
-     * allocation, which would place them again, every frame. */
-    if (a->width == d->alloc_w && a->height == d->alloc_h)
-        return;
-    d->alloc_w = a->width;
-    d->alloc_h = a->height;
-    place_all(d);
+    (void)w; (void)a;
+    regrid(data);
+}
+
+static void on_geometry(GObject *o, GParamSpec *ps, gpointer data)
+{
+    (void)o; (void)ps;
+    regrid(data);
 }
 
 static GtkGesture *desk_gesture(Desk *d, GtkGesture *g)
@@ -1991,6 +2039,7 @@ static Desk *desk_new(GdkMonitor *mon)
     d->win = lp_layer_window("lp-desktop", GTK_LAYER_SHELL_LAYER_BACKGROUND,
                              LP_EDGE_TOP | LP_EDGE_BOTTOM | LP_EDGE_LEFT | LP_EDGE_RIGHT);
     gtk_layer_set_monitor(d->win, mon);
+    g_signal_connect(mon, "notify::geometry", G_CALLBACK(on_geometry), d);
     /* -1: under the bar and the dock too; they are translucent. */
     gtk_layer_set_exclusive_zone(d->win, -1);
     /* The keyboard when clicked, for Delete, Enter and typing a name. */
@@ -1999,15 +2048,18 @@ static Desk *desk_new(GdkMonitor *mon)
                           gdk_screen_get_system_visual(gdk_screen_get_default()));
     g_signal_connect(d->win, "realize", G_CALLBACK(on_realize), NULL);
     g_signal_connect(d->win, "key-press-event", G_CALLBACK(on_key), d);
+    g_signal_connect_after(d->win, "size-allocate", G_CALLBACK(on_size), d);
 
     d->layout = gtk_layout_new(NULL, NULL);
     gtk_widget_set_app_paintable(d->layout, TRUE);
     gtk_style_context_add_class(gtk_widget_get_style_context(d->layout), "lp-desktop");
     g_signal_connect(d->layout, "draw", G_CALLBACK(desk_draw), d);
     g_signal_connect_after(d->layout, "draw", G_CALLBACK(band_draw), d);
-    g_signal_connect(d->layout, "size-allocate", G_CALLBACK(on_size), d);
     gtk_container_add(GTK_CONTAINER(d->win), d->layout);
 
+    /* The gestures below need these on the layout's own windows. */
+    gtk_widget_add_events(d->layout, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK |
+                                     GDK_BUTTON_MOTION_MASK | GDK_TOUCH_MASK);
     lp_on_hold(d->layout, on_hold, d);
     GtkGesture *mp = desk_gesture(d, gtk_gesture_multi_press_new(d->layout));
     g_signal_connect(mp, "pressed", G_CALLBACK(on_multi_press), d);
@@ -2038,6 +2090,7 @@ static Desk *desk_new(GdkMonitor *mon)
 static void desk_free(Desk *d)
 {
     desks = g_list_remove(desks, d);
+    g_signal_handlers_disconnect_by_data(d->mon, d);
     if (carry.desk == d)
         carry_clear();
     rename_close(d);
