@@ -62,8 +62,13 @@
 
 #include <string.h>
 #include <time.h>
+#include <errno.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <sys/timerfd.h>
 
 #include <gio/gunixsocketaddress.h>
+#include <glib-unix.h>
 
 #include "lp-apps.h"
 #include "lp-json.h"
@@ -170,6 +175,8 @@ static void set_clock(void)
     g_date_time_unref(now);
 }
 
+static guint clock_source;
+
 static gboolean clock_tick(gpointer d)
 {
     (void)d;
@@ -180,8 +187,46 @@ static gboolean clock_tick(gpointer d)
     GDateTime *now = g_date_time_new_now_local();
     int wait = 60 - g_date_time_get_second(now);
     g_date_time_unref(now);
-    g_timeout_add_seconds(wait > 0 ? wait : 60, clock_tick, NULL);
+    clock_source = g_timeout_add_seconds(wait > 0 ? wait : 60, clock_tick, NULL);
     return G_SOURCE_REMOVE;
+}
+
+/* The clock itself being set - Settings > Date & time's manual time, or
+ * ntp. The minute timer runs on the monotonic clock and knew nothing of
+ * it: the bar showed the old time for up to a minute and then kept its
+ * minute changing at the old second. A CLOCK_REALTIME timerfd armed with
+ * TFD_TIMER_CANCEL_ON_SET is the kernel's way to hear of it: its read
+ * fails with ECANCELED the moment anyone sets the time. */
+static int clock_set_fd = -1;
+
+static void clock_set_arm(void)
+{
+    struct itimerspec far = { .it_value = { .tv_sec = 0x7fffffff } };
+    timerfd_settime(clock_set_fd, TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET,
+                    &far, NULL);
+}
+
+static gboolean on_clock_set(gint fd, GIOCondition c, gpointer d)
+{
+    (void)c; (void)d;
+    uint64_t n;
+    if (read(fd, &n, sizeof n) < 0 && errno != ECANCELED && errno != EAGAIN)
+        return G_SOURCE_REMOVE;
+    clock_set_arm();
+    if (clock_source)
+        g_source_remove(clock_source);
+    clock_source = 0;
+    clock_tick(NULL);
+    return G_SOURCE_CONTINUE;
+}
+
+static void clock_set_watch(void)
+{
+    clock_set_fd = timerfd_create(CLOCK_REALTIME, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (clock_set_fd < 0)
+        return;
+    clock_set_arm();
+    g_unix_fd_add(clock_set_fd, G_IO_IN, on_clock_set, NULL);
 }
 
 static void on_clock_file(GFileMonitor *m, GFile *f, GFile *o,
@@ -1027,6 +1072,7 @@ int main(int argc, char **argv)
     paint_lang();
 
     clock_tick(NULL);
+    clock_set_watch();
     char *clock_file = lp_config_path("clock");
     clock_watch(clock_file);
     g_free(clock_file);
