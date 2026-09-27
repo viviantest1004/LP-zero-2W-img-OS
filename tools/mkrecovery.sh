@@ -229,6 +229,12 @@ printf '%s\n' "${line# }" > reinstall/esp/cmdline.txt
 
 VERSION="LP"
 [[ -s "$ROOTFS/etc/osname" ]] && VERSION="$(head -1 "$ROOTFS/etc/osname")"
+# The desktop says what it is in os-release (desktop/branding); the
+# recovery menu shows this, and "LP-zero" was the Pi image's old name.
+if [[ -s "$ROOTFS/usr/lib/os-release" ]]; then
+    v="$(. "$ROOTFS/usr/lib/os-release" && printf '%s' "${PRETTY_NAME:-}")"
+    [[ -n "$v" ]] && VERSION="$v"
+fi
 VERSION="$VERSION $(date -u -r "$KERNEL" +%Y-%m-%d)"
 {
     printf 'version %s\n' "$VERSION"

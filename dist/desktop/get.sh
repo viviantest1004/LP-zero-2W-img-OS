@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/viviantest1004/LP-zero-2W-img-OS/refs/heads/claude/hohho-xvzof5/dist/desktop/get.sh | sh
 #
-# The image is 1.6GB compressed, over GitHub's 100MB limit for one file,
+# The image is about 2GB compressed, over GitHub's 100MB limit for one file,
 # so it is kept here as 45MB pieces. This fetches every piece (resuming
 # any that were cut off), checks each against SHA256SUMS, joins them into
 # linux-LP_desktop.img.xz, checks that too, and unpacks it to
@@ -85,4 +85,7 @@ else
 fi
 echo
 echo "USB stick:  sudo dd if=linux-LP_desktop.img of=/dev/<stick> bs=4M conv=fsync status=progress"
-echo "UTM/QEMU:   use linux-LP_desktop.img as a disk (UEFI, x86_64, Q35)."
+echo "UTM/QEMU:   use linux-LP_desktop.img as a disk (UEFI, x86_64, Q35, 4GB+ RAM)."
+echo "            Display: a GPU-accelerated one (UTM: virtio-gpu-gl / \"GPU Supported\";"
+echo "            QEMU: -device virtio-vga-gl -display gtk,gl=on) gives window buttons with"
+echo "            minimise and animations; without 3D, LP runs its CPU-drawn session."
