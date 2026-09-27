@@ -407,6 +407,13 @@ static void menu_add(GtkWidget *menu, const char *label, GCallback cb,
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
 }
 
+/* Menus the dock has open. While one is, the dock stays up: over a
+ * maximised window it slides away 0.7s after the pointer leaves it, and
+ * going up into the menu is leaving it (the menu is another surface) -
+ * the dock went, and the menu with it, before an item could be reached. */
+static int dock_menus;
+static void dock_menu_done(GtkMenuShell *menu, gpointer d);
+
 static void on_hold(GtkWidget *w, double x, double y, gpointer d)
 {
     Item *it = d;
@@ -435,6 +442,8 @@ static void on_hold(GtkWidget *w, double x, double y, gpointer d)
     }
     g_list_free(wins);
     gtk_widget_show_all(menu);
+    dock_menus++;
+    g_signal_connect(menu, "deactivate", G_CALLBACK(dock_menu_done), NULL);
     g_signal_connect(menu, "deactivate", G_CALLBACK(gtk_widget_destroy), NULL);
     lp_menu_popup_at(menu, w, x, y);
 }
@@ -1026,11 +1035,25 @@ static gboolean go_again(gpointer d)
 {
     (void)d;
     leave_id = 0;
+    if (dock_menus > 0)
+        return G_SOURCE_REMOVE;          /* dock_menu_done asks again */
     if (dock_away && dock_peek) {
         dock_peek = FALSE;
         slide(1.0);
     }
     return G_SOURCE_REMOVE;
+}
+
+/* A menu closed: the dock goes as if the pointer had just left it. If
+ * the pointer is on the dock, its enter (the menu surface going) takes
+ * that back. */
+static void dock_menu_done(GtkMenuShell *menu, gpointer d)
+{
+    (void)menu; (void)d;
+    if (dock_menus > 0)
+        dock_menus--;
+    if (!dock_menus && dock_away && dock_peek && !leave_id)
+        leave_id = g_timeout_add(700, go_again, NULL);
 }
 
 static gboolean on_edge_enter(GtkWidget *w, GdkEventCrossing *e, gpointer d)

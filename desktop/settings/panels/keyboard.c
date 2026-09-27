@@ -928,6 +928,23 @@ char *lp_keyboard_sway_keys(void)
         g_free(v); g_free(cmd); g_free(ck);
     }
     g_strfreev(keys);
+    /* Not keys, but read at the same login: the pointer speeds Settings >
+     * Mouse & Touchpad keeps in wayfire.ini, which sway would otherwise
+     * forget at every login (the slider sends them to a running sway). */
+    static const struct { const char *key, *type; } SPEEDS[] = {
+        { "mouse_cursor_speed", "pointer" }, { "touchpad_cursor_speed", "touchpad" },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(SPEEDS); i++) {
+        char *v = ini_get(ini, "input", SPEEDS[i].key);
+        char *end = NULL;
+        double d = v ? g_ascii_strtod(v, &end) : 0;
+        if (v && end != v && d >= -1 && d <= 1) {
+            char sp[32];
+            g_ascii_formatd(sp, sizeof sp, "%.2f", d);
+            g_string_append_printf(o, "input type:%s pointer_accel %s\n", SPEEDS[i].type, sp);
+        }
+        g_free(v);
+    }
     g_free(ini);
     return g_string_free(o, FALSE);
 }
