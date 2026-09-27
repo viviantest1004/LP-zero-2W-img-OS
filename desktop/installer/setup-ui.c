@@ -70,7 +70,11 @@ static const char CSS[] =
     "button.su-choice:checked { background-color: alpha(@su_accent, 0.22);\n"
     "  box-shadow: inset 0 0 0 2px @su_accent; }\n"
     "button.su-choice:disabled { opacity: 0.45; }\n"
-    ".su-choice-title { font-size: 19px; font-weight: 600; }\n"
+    /* Every label on a button says its colour. Left to inherit, a title
+     * took Adwaita's light-theme button text (#2e3436) and vanished into
+     * the dark card - "English" and "한국어" were unreadable. */
+    "button.su-choice, button.su-secondary { color: @su_text; }\n"
+    ".su-choice-title { font-size: 19px; font-weight: 600; color: @su_text; }\n"
     ".su-choice-detail { font-size: 15px; color: @su_dim; }\n"
     "button.su-primary, button.su-secondary, button.su-danger {\n"
     "  min-height: 56px; min-width: 150px; padding: 0 28px;\n"

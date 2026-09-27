@@ -340,7 +340,7 @@ fi
 if [[ -d "$D/session" ]]; then
     cp -a "$D/session/start-desktop" "$ROOT/usr/lib/lp/start-desktop.session"
     cp -a "$D/session/session-run" "$ROOT/bin/session-run"
-    for s in lp-audio-start lp-idle; do
+    for s in lp-audio-start lp-idle lp-autoscale; do
         [[ -f "$D/session/$s" ]] && cp -a "$D/session/$s" "$ROOT/usr/local/bin/$s"
     done
     [[ -f "$D/session/wayfire.ini" ]] && mkdir -p "$H/.config" &&
@@ -384,6 +384,14 @@ for f in "$D"/*/lp-*.desktop; do
     [[ -f "$f" ]] && cp -a "$f" "$ROOT/usr/local/share/applications/"
 done
 log "$n desktop programs"
+
+# The wallpapers (branding track), at the resolutions they were drawn
+# for; sway.config points at the 3840x2160 dark one.
+if compgen -G "$D/branding/wallpaper/*.png" >/dev/null; then
+    mkdir -p "$ROOT/usr/share/backgrounds/lp"
+    cp -a "$D"/branding/wallpaper/*.png "$ROOT/usr/share/backgrounds/lp/"
+    log "wallpapers: $(ls "$D"/branding/wallpaper/*.png | wc -l)"
+fi
 
 # The icon theme (branding track), if it has been made.
 if [[ -f "$D/icons/LP/index.theme" ]]; then

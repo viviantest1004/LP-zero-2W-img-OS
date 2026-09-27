@@ -261,30 +261,28 @@ def kiosk(mode):
         # software rendering works on every machine this boots on.
         "WLR_RENDERER": "pixman", "WLR_RENDERER_ALLOW_SOFTWARE": "1",
         "LIBGL_ALWAYS_SOFTWARE": "1", "GSK_RENDERER": "cairo", "GDK_BACKEND": "wayland",
+        # The windows are drawn for a dark card on #0e0e0e; Adwaita's light
+        # defaults under them left some text dark-on-dark.
+        "GTK_THEME": "Adwaita:dark",
         "XKB_DEFAULT_LAYOUT": "us", "NO_AT_BRIDGE": "1", "GTK_A11Y": "none",
         "LANG": setup_lang(), "LP_SETUP_MODE": mode,
         # The windows' backends, through the relay (see the top).
         "LP_INSTALL": RELAY + "/lp-install", "LP_NET": RELAY + "/lp-net",
         "LP_POWER": RELAY + "/power",
     }
+    # The seat: left to libseat, exactly as the desktop session leaves it,
+    # because that is the arrangement that works on this machine. Two
+    # earlier attempts both failed "Timeout waiting session to become
+    # active" and fell through to the desktop after three tries: starting
+    # a private seatd for uid 1000 (it never became active without a VT
+    # session), and forcing LIBSEAT_BACKEND=noop.
     seatd = None
-    if os.access("/usr/bin/seatd", os.X_OK):
-        # A seat for uid 1000: sway opens the GPU and the input devices
-        # through seatd, which runs as root for the kiosk's lifetime.
+    for dev in ["/dev/dri/card0", "/dev/dri/renderD128"] + \
+            ["/dev/input/event%d" % i for i in range(32)]:
         try:
-            os.unlink("/run/seatd.sock")
-        except FileNotFoundError:
+            os.chmod(dev, 0o666)
+        except OSError:
             pass
-        seatd = subprocess.Popen(["/usr/bin/seatd", "-u", pw.pw_name,
-                                  "-g", grp.getgrgid(pw.pw_gid).gr_name],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(50):
-            if os.path.exists("/run/seatd.sock"):
-                break
-            time.sleep(0.05)
-        env["LIBSEAT_BACKEND"] = "seatd"
-    else:
-        env["LIBSEAT_BACKEND"] = "noop"
 
     groups = [g.gr_gid for g in grp.getgrall()
               if g.gr_name in ("video", "input", "render", "audio", "netdev")]

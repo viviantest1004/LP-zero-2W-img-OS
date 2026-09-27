@@ -134,5 +134,11 @@ LPS(R_CK_LEFT,       S, "%s: problems remain (code %d)", "%s: 문제가 남아 �
 LPS(R_CK_MISSING,    S, "%s: not found", "%s: 찾을 수 없음")
 LPS(R_CK_DONE,       M, "Done", "완료")
 
+/* the on-screen keyboard and the recovery shell */
+LPS(R_OSK_CLOSE,     M, "Close", "닫기")
+LPS(R_SHELL_BAR,     S, "Recovery shell · root · type exit to return to the menu",
+                        "복구 셸 · 루트 · exit를 입력하면 메뉴로 돌아갑니다")
+LPS(R_SHELL_FAILED,  S, "The shell could not be started (%s).", "셸을 시작하지 못했습니다 (%s).")
+
 /* exit */
 LPS(R_RESTARTING,    M, "Restarting…", "다시 시작하는 중…")

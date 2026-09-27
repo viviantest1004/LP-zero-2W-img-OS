@@ -1389,6 +1389,74 @@ static void do_shutdown(int what)
         lp_sleep_ms(60000);
 }
 
+/* ── Recovery mode (recovery/, the boot-recovery track) ───────────────
+ *
+ * lp.mode=recovery on the kernel command line is the boot menu's "LP
+ * Recovery" (boot/efi/lpboot.c): the root is then the LP-RECOVERY
+ * partition, and the one thing to run is the recovery menu, as root, on
+ * tty1 - no rc, no services, no splash (the menu draws its own screen)
+ * and no shell on any console: the menu's recovery shell asks for an
+ * administrator's password first, and an open console would not. If the
+ * menu exits it is started again. It restarts the machine by sending
+ * SIGUSR2 like `reboot`; / is made read-only before the reboot so the
+ * recovery partition comes back clean. */
+#define RECOVERY_MENU "/recovery/bin/lp-recovery"
+
+static bool recovery_mode(void)
+{
+    char cmdline[1024];
+    return proc_read("/proc/cmdline", cmdline, sizeof(cmdline)) > 0 &&
+           strstr(cmdline, "lp.mode=recovery") != NULL;
+}
+
+static void run_recovery(void)
+{
+    printf("init: recovery mode - starting " RECOVERY_MENU " on tty1\n");
+    lp_signal_handler(SIGUSR1, on_poweroff);
+    lp_signal_handler(SIGUSR2, on_reboot);
+    for (;;) {
+        pid_t pid = lp_fork();
+        if (pid == 0) {
+            lp_setsid();
+            long fd = lp_open("/dev/tty1", O_RDWR, 0);
+            if (fd >= 0) {
+                lp_dup2((int)fd, STDIN_FILENO);
+                lp_dup2((int)fd, STDOUT_FILENO);
+                lp_dup2((int)fd, STDERR_FILENO);
+                if (fd > STDERR_FILENO)
+                    lp_close((int)fd);
+                lp_term_make_controlling(STDIN_FILENO);
+            }
+            char *argv[] = { (char *)"lp-recovery", NULL };
+            char *envp[] = { (char *)"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+                             (char *)"HOME=/root", (char *)"TERM=linux", NULL };
+            lp_execve(RECOVERY_MENU, argv, envp);
+            lp_exit(127);
+        }
+        screen_pid = pid;
+        /* Non-blocking, like the main loop: the reboot signal has to be
+         * noticed while the menu is still running. */
+        for (;;) {
+            if (shutdown_wanted) {
+                if (pid > 0)
+                    lp_kill(pid, SIGTERM);
+                lp_sleep_ms(500);
+                lp_sync();
+                lp_mount(NULL, "/", NULL, MS_REMOUNT | MS_RDONLY, NULL);
+                do_shutdown(shutdown_wanted);
+            }
+            int status = 0;
+            pid_t r = lp_waitpid(-1, &status, WNOHANG);
+            if (r == pid || pid < 0) {
+                printf("init: the recovery menu exited - starting it again\n");
+                break;
+            }
+            lp_sleep_ms(r > 0 ? 0 : 200);
+        }
+        lp_sleep_ms(RESPAWN_MS);
+    }
+}
+
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -1400,6 +1468,8 @@ int main(int argc, char **argv)
     if (is_pid1) {
         mount_filesystems();
         setup_console();
+        if (recovery_mode())
+            run_recovery();             /* never returns */
         show_splash();
     } else
         printf("init: not pid 1, skipping the mounts (test mode)\n");

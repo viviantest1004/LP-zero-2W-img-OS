@@ -12,6 +12,8 @@
  *
  *   Recovery shell (administrator)  a root shell with the installed
  *        system at /mnt/lp, after an administrator's password (auth.c).
+ *        The shell runs on a pty inside this program (term.c), not on
+ *        the kernel console, so it can be used by touch.
  *   Reinstall LP  keep /home and the accounts, or erase everything, from
  *        the payload in /reinstall, with a typed confirmation
  *        (reinstall.c).
@@ -22,10 +24,16 @@
  *
  * and a status line: disk state, battery, clock.
  *
+ * Everything works by touch alone (the owner's request): the screens
+ * that take text - the password, the typed REINSTALL, the shell - open
+ * with an on-screen keyboard (osk.c) under them, which has a Close key
+ * and comes back from the "Keyboard" button. A physical keyboard works
+ * everywhere as well.
+ *
  * English by default, Korean when the boot menu was in Korean (it passes
- * lp.lang=ko), or when the installed system's locale is Korean. The text
- * shell itself is always English: the kernel console's font has no
- * Hangul.
+ * lp.lang=ko), or when the installed system's locale is Korean. The
+ * shell's terminal is English: its font (lp-glyphs-mono.h) carries ASCII
+ * and the line-drawing characters, not Hangul.
  *
  * Motion follows COMMON.md: the focus highlight moves on the menu spring
  * (interruptible - retargeting keeps its velocity), screens crossfade in
@@ -39,14 +47,17 @@
 #include "recovery.h"
 #include "lp-efivar.h"
 
-#define TIOCSCTTY 0x540E
 #define SIGPIPE_  13
+
+/* lp-ui.h's screen scale and language, shared by every file of the
+ * program (see LPUI_SHARED_STATE there). */
+int  lpui_permille = 1000;
+bool lpui_korean;
 
 static lpui_canvas_t cv_old;            /* the last frame, for crossfades */
 static bool reduced;
 
 /* ── Layout ───────────────────────────────────────────────────────── */
-typedef struct { int x, y, w, h; } rect_t;
 static int ox, oy;
 static int X(int v) { return ox + lpui_px(v); }
 static int Y(int v) { return oy + lpui_px(v); }
@@ -54,10 +65,10 @@ static int P(int v) { int p = lpui_px(v); return p < 1 ? 1 : p; }
 static int TXT(int v) { return lpui_text_px(v); }
 
 enum { SC_MENU, SC_AUTH, SC_RE_CHOOSE, SC_RE_CONFIRM, SC_RE_PROGRESS, SC_RE_DONE,
-       SC_CHECK, SC_RESTART };
+       SC_CHECK, SC_RESTART, SC_SHELL };
 static int screen = -1;
 
-enum { T_ROW, T_BUTTON, T_PRIMARY, T_DANGER, T_CHIP, T_FIELD, T_KEY };
+enum { T_ROW, T_BUTTON, T_PRIMARY, T_DANGER, T_CHIP, T_FIELD };
 typedef struct { rect_t r; int id; int style; bool disabled; } target_t;
 #define MAXT 80
 static target_t tg[MAXT];
@@ -69,7 +80,6 @@ enum {
     ID_KEEP = 10, ID_ERASE,
     ID_CHIP = 100,
     ID_FIELD = 200, ID_BACK, ID_KBD, ID_OPEN, ID_GO, ID_RESTART, ID_DONE,
-    ID_KEY = 300, ID_K_SHIFT = 390, ID_K_BKSP, ID_K_CLOSE, ID_K_SPACE, ID_K_ENTER,
 };
 
 /* ── State of the screens ─────────────────────────────────────────── */
@@ -81,7 +91,7 @@ static char confirm[16];
 static int conflen;
 static char msg[240];
 static u32 msg_color;
-static bool osk, osk_shift;
+static char shell_admin[40];            /* who opened the shell, for the log */
 static int re_mode;
 static re_progress_t re_prog;
 static char re_result[240];
@@ -115,7 +125,7 @@ static void button(lpui_canvas_t *c, const target_t *t, const char *label)
         lpui_rrect(c, r.x, r.y, r.w, r.h, rad, 0xffffff, 36);
         lpui_rrect_stroke(c, r.x, r.y, r.w, r.h, rad, P(3), 0xffffff, LPUI_LINE_A);
     }
-    int tp = TXT(t->style == T_KEY ? 56 : 60);
+    int tp = TXT(60);
     int w = lpui_text_width(LPG_M, tp, label);
     lpui_text(c, LPG_M, tp, r.x + (r.w - w) / 2, r.y + r.h / 2 + lpui_ascent(LPG_M, tp) * 36 / 100,
               LPUI_INK, a, label);
@@ -131,7 +141,7 @@ static void chrome(lpui_canvas_t *c, int title, const char *sub)
 
 static void status_line(lpui_canvas_t *c)
 {
-    if (osk)
+    if (osk_shown() || screen == SC_SHELL)
         return;
     int sp = TXT(40);
     int y = Y(2085);
@@ -179,72 +189,6 @@ static void field(lpui_canvas_t *c, const target_t *t, const char *text, bool se
     lpui_rrect(c, x + w + P(8), r.y + r.h / 5, P(6), r.h * 3 / 5, 0, LPUI_ACCENT, 256);
 }
 
-/* ── The on-screen keyboard ───────────────────────────────────────────
- * The owner uses the touch panel without a keyboard attached, and a
- * password cannot be typed with a finger otherwise. It opens from the
- * "Keyboard" button and has a close key of its own (×) - the owner's
- * one explicit request about on-screen keyboards is that closing one is
- * never forgotten. */
-static const char *const OSK_ROWS[2][4] = {
-    { "1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm." },
-    { "!@#$%^&*()", "QWERTYUIOP", "ASDFGHJKL_", "ZXCVBNM," },
-};
-#define OSK_TOP 1545
-
-static void osk_layout(void)
-{
-    if (!osk)
-        return;
-    int gap = 16, kw = (2600 - 9 * gap) / 10, kh = 100, x0 = 620;
-    for (int row = 0; row < 5; row++) {
-        int y = OSK_TOP + 20 + row * (kh + 14);
-        if (row < 3) {
-            for (int i = 0; i < 10; i++)
-                tg[ntg++] = (target_t){ { X(x0 + i * (kw + gap)), Y(y), P(kw), P(kh) },
-                                        ID_KEY + row * 16 + i, T_KEY, false };
-        } else if (row == 3) {
-            tg[ntg++] = (target_t){ { X(x0), Y(y), P(kw), P(kh) }, ID_K_SHIFT, T_KEY, false };
-            for (int i = 0; i < 8; i++)
-                tg[ntg++] = (target_t){ { X(x0 + (i + 1) * (kw + gap)), Y(y), P(kw), P(kh) },
-                                        ID_KEY + 3 * 16 + i, T_KEY, false };
-            tg[ntg++] = (target_t){ { X(x0 + 9 * (kw + gap)), Y(y), P(kw), P(kh) }, ID_K_BKSP, T_KEY, false };
-        } else {
-            tg[ntg++] = (target_t){ { X(x0), Y(y), P(kw), P(kh) }, ID_K_CLOSE, T_KEY, false };
-            tg[ntg++] = (target_t){ { X(x0 + (kw + gap)), Y(y), P(7 * kw + 6 * gap), P(kh) },
-                                    ID_K_SPACE, T_KEY, false };
-            tg[ntg++] = (target_t){ { X(x0 + 8 * (kw + gap)), Y(y), P(2 * kw + gap), P(kh) },
-                                    ID_K_ENTER, T_KEY, false };
-        }
-    }
-}
-
-static void osk_draw(lpui_canvas_t *c)
-{
-    if (!osk)
-        return;
-    lpui_rrect(c, X(580), Y(OSK_TOP), P(2680), P(600), P(40), 0x000000, 90);
-    for (int i = 0; i < ntg; i++) {
-        const target_t *t = &tg[i];
-        if (t->style != T_KEY)
-            continue;
-        char lab[8];
-        int id = t->id;
-        if (id >= ID_KEY && id < ID_KEY + 64) {
-            int row = (id - ID_KEY) / 16, col = (id - ID_KEY) % 16;
-            lab[0] = OSK_ROWS[osk_shift][row][col];
-            lab[1] = 0;
-        } else
-            strlcpy(lab, id == ID_K_SHIFT ? "⇧" : id == ID_K_BKSP ? "⌫" : id == ID_K_CLOSE ? "×" :
-                         id == ID_K_ENTER ? "⏎" : "", sizeof lab);
-        target_t k = *t;
-        if (id == ID_K_SHIFT && osk_shift)
-            k.style = T_PRIMARY;
-        if (id == ID_K_ENTER)
-            k.style = T_PRIMARY;
-        button(c, &k, lab);
-    }
-}
-
 /* ── Screens: layout ──────────────────────────────────────────────── */
 static void add(int x, int y, int w, int h, int id, int style)
 {
@@ -253,11 +197,16 @@ static void add(int x, int y, int w, int h, int id, int style)
 }
 
 /* Buttons centred in a row. */
-static void add_buttons(int y, const int *ids, const int *styles, int n)
+static void add_buttons_h(int y, int h, const int *ids, const int *styles, int n)
 {
     int w = 560, gap = 60, total = n * w + (n - 1) * gap, x = 1920 - total / 2;
     for (int i = 0; i < n; i++)
-        add(x + i * (w + gap), y, w, 160, ids[i], styles[i]);
+        add(x + i * (w + gap), y, w, h, ids[i], styles[i]);
+}
+
+static void add_buttons(int y, const int *ids, const int *styles, int n)
+{
+    add_buttons_h(y, 160, ids, styles, n);
 }
 
 static int rows_top(void) { return interrupted ? 790 : 720; }
@@ -271,6 +220,9 @@ static void layout(void)
             add(770, rows_top() + i * 264, 2300, 230, ID_SHELL + i, T_ROW);
         break;
     case SC_AUTH: {
+        /* With the on-screen keyboard up, everything moves up to sit
+         * above it (compact); closed, the screen has room to breathe. */
+        bool k = osk_shown();
         int chips = ai.mode == AUTH_ADMINS ? ai.nusers : ai.mode == AUTH_RECOVERY ? 1 : 0;
         int cw[AUTH_MAX_USERS], total = 0;
         for (int i = 0; i < chips; i++) {
@@ -281,21 +233,20 @@ static void layout(void)
         }
         int x = 1920 - total / 2;
         for (int i = 0; i < chips; i++) {
-            add(x, 760, cw[i], 150, ID_CHIP + i, T_CHIP);
+            add(x, k ? 640 : 760, cw[i], k ? 130 : 150, ID_CHIP + i, T_CHIP);
             x += cw[i] + 40;
         }
         if (chips)
-            add(1120, 1030, 1600, 170, ID_FIELD, T_FIELD);
+            add(1120, k ? 840 : 1030, 1600, k ? 140 : 170, ID_FIELD, T_FIELD);
         if (chips) {
             int ids[] = { ID_BACK, ID_KBD, ID_OPEN };
             int st[] = { T_BUTTON, T_BUTTON, T_PRIMARY };
-            add_buttons(1360, ids, st, 3);
+            add_buttons_h(k ? 1020 : 1360, k ? 130 : 160, ids, st, 3);
         } else {
             int ids[] = { ID_BACK };
             int st[] = { T_BUTTON };
-            add_buttons(1360, ids, st, 1);
+            add_buttons_h(k ? 1020 : 1360, k ? 130 : 160, ids, st, 1);
         }
-        osk_layout();
         break;
     }
     case SC_RE_CHOOSE:
@@ -310,12 +261,19 @@ static void layout(void)
         }
         break;
     case SC_RE_CONFIRM: {
-        add(1320, 1170, 1200, 170, ID_FIELD, T_FIELD);
+        bool k = osk_shown();
+        add(1320, k ? 960 : 1170, 1200, k ? 130 : 170, ID_FIELD, T_FIELD);
         int ids[] = { ID_BACK, ID_KBD, ID_GO };
         int st[] = { T_BUTTON, T_BUTTON, re_mode == RE_ERASE ? T_DANGER : T_PRIMARY };
-        add_buttons(1380, ids, st, 3);
+        add_buttons_h(k ? 1120 : 1380, k ? 120 : 160, ids, st, 3);
         tg[ntg - 1].disabled = strcmp(confirm, "REINSTALL") != 0;
-        osk_layout();
+        break;
+    }
+    case SC_SHELL: {
+        /* The keyboard toggle, top right, in screen coordinates: this
+         * screen fills the whole panel whatever its shape. */
+        int bw = lpui_px(460), bh = lpui_px(116);
+        tg[ntg++] = (target_t){ { SW - lpui_px(50) - bw, lpui_px(17), bw, bh }, ID_KBD, T_BUTTON, false };
         break;
     }
     case SC_RE_DONE: {
@@ -381,7 +339,7 @@ static void draw_auth(lpui_canvas_t *c)
             lpui_text(c, LPG_S, TXT(40), t->r.x, t->r.y - P(24), LPUI_INK2, 220,
                       lpui_s(LPS_R_AUTH_PASSWORD));
             field(c, t, pw, true);
-        } else if (t->style != T_KEY) {
+        } else {
             int id = t->id;
             button(c, t, lpui_s(id == ID_BACK ? LPS_R_BACK : id == ID_KBD ? LPS_R_KEYBOARD :
                                 LPS_R_AUTH_OPEN));
@@ -389,9 +347,8 @@ static void draw_auth(lpui_canvas_t *c)
     }
     const char *m = ai.mode == AUTH_NOBODY ? lpui_s(LPS_R_AUTH_NOBODY) : msg;
     if (m[0])
-        lpui_text_wrap(c, LPG_S, TXT(40), X(620), Y(1290), P(2600),
+        lpui_text_wrap(c, LPG_S, TXT(40), X(620), Y(osk_shown() ? 1225 : 1290), P(2600),
                        ai.mode == AUTH_NOBODY ? LPUI_DANGER : msg_color, 256, true, m);
-    osk_draw(c);
 }
 
 static void draw_re_choose(lpui_canvas_t *c)
@@ -420,12 +377,17 @@ static void draw_re_choose(lpui_canvas_t *c)
 
 static void draw_re_confirm(lpui_canvas_t *c)
 {
+    /* With the keyboard up (compact), what will happen is still all on
+     * the screen; the version and the power-loss note are not - the
+     * previous screen showed the one, the progress screen shows the
+     * other. */
+    bool k = osk_shown();
     chrome(c, LPS_R_RE_TITLE, 0);
     int sp = TXT(40), lh = lpui_line(LPG_S, sp);
-    lpui_text_center(c, LPG_M, TXT(60), SW / 2, Y(640),
+    lpui_text_center(c, LPG_M, TXT(60), SW / 2, Y(k ? 600 : 640),
                      re_mode == RE_ERASE ? LPUI_DANGER : LPUI_INK, 256,
                      lpui_s(re_mode == RE_ERASE ? LPS_R_RE_ERASE : LPS_R_RE_KEEP));
-    int y = Y(760);
+    int y = Y(k ? 690 : 760);
     char b[200];
     if (re_mode == RE_KEEP) {
         y += lh * lpui_text_wrap(c, LPG_S, sp, X(620), y, P(2600), LPUI_INK, 256, true,
@@ -435,19 +397,45 @@ static void draw_re_confirm(lpui_canvas_t *c)
     } else
         y += lh * lpui_text_wrap(c, LPG_S, sp, X(620), y, P(2600), LPUI_DANGER, 256, true,
                                  lpui_s(LPS_R_RE_ERASED));
-    lpui_fmt(b, sizeof b, lpui_s(LPS_R_RE_PAYLOAD), version);
-    y += lh * lpui_text_wrap(c, LPG_S, sp, X(620), y, P(2600), LPUI_INK2, 220, true, b);
-    lpui_text_wrap(c, LPG_S, sp, X(620), y, P(2600), LPUI_INK2, 190, true, lpui_s(LPS_R_RE_AGAIN));
-    lpui_text_center(c, LPG_S, sp, SW / 2, Y(1130), LPUI_INK, 256, lpui_s(LPS_R_RE_TYPE));
+    if (!k) {
+        lpui_fmt(b, sizeof b, lpui_s(LPS_R_RE_PAYLOAD), version);
+        y += lh * lpui_text_wrap(c, LPG_S, sp, X(620), y, P(2600), LPUI_INK2, 220, true, b);
+        lpui_text_wrap(c, LPG_S, sp, X(620), y, P(2600), LPUI_INK2, 190, true,
+                       lpui_s(LPS_R_RE_AGAIN));
+    }
+    lpui_text_center(c, LPG_S, sp, SW / 2, Y(k ? 935 : 1130), LPUI_INK, 256, lpui_s(LPS_R_RE_TYPE));
     for (int i = 0; i < ntg; i++) {
         const target_t *t = &tg[i];
         if (t->style == T_FIELD)
             field(c, t, confirm, false);
-        else if (t->style != T_KEY)
+        else
             button(c, t, lpui_s(t->id == ID_BACK ? LPS_R_CANCEL : t->id == ID_KBD ?
                                 LPS_R_KEYBOARD : LPS_R_RE_GO));
     }
-    osk_draw(c);
+}
+
+/* ── The recovery shell's screen ──────────────────────────────────────
+ * A header band with what this is and the keyboard toggle, the terminal
+ * under it, and the on-screen keyboard (drawn by osk.c over the bottom)
+ * when it is up. Laid out in screen pixels, not the 4K frame: the
+ * terminal should use every row the panel has. */
+static int shell_head(void) { return lpui_px(150); }
+
+static rect_t shell_area(void)
+{
+    int m = lpui_px(40), y = shell_head();
+    int bottom = osk_shown() ? osk_rest_top() - lpui_px(24) : SH - m;
+    return (rect_t){ m, y, SW - 2 * m, bottom - y };
+}
+
+static void draw_shell(lpui_canvas_t *c)
+{
+    int sp = TXT(40);
+    lpui_text(c, LPG_S, sp, lpui_px(70), shell_head() / 2 + lpui_ascent(LPG_S, sp) * 36 / 100,
+              LPUI_INK2, 230, lpui_s(LPS_R_SHELL_BAR));
+    for (int i = 0; i < ntg; i++)
+        button(c, &tg[i], lpui_s(LPS_R_KEYBOARD));
+    term_draw(c, true);
 }
 
 static rect_t bar_rect(void) { return (rect_t){ X(720), Y(980), P(2400), P(44) }; }
@@ -517,6 +505,7 @@ static void draw_base(void)
     case SC_RE_DONE:     draw_re_done(c); break;
     case SC_CHECK:       draw_check(c); break;
     case SC_RESTART:     draw_restart(c); break;
+    case SC_SHELL:       draw_shell(c); break;
     }
     status_line(c);
 }
@@ -597,6 +586,7 @@ static void compose_rect(rect_t d)
         return;
     lpui_copy_rect(&cv_frame, &cv_base, d.x, d.y, d.w, d.h);
     lpui_canvas_t win = { cv_frame.px + (u64)d.y * cv_frame.stride + d.x, d.w, d.h, cv_frame.stride };
+    osk_compose(&win, d.x, d.y);
     draw_overlays(&win, d.x, d.y);
     scr_present(&cv_frame, d.x, d.y, d.w, d.h);
 }
@@ -683,14 +673,22 @@ static void go(int sc, bool from_black)
     pressed = -1;
     focus = 0;
     hl_on = false;
+    /* The screens that take text open with the keyboard up - recovery
+     * must work with a finger alone - and it arrives with the screen,
+     * inside the crossfade. */
+    osk_show((sc == SC_AUTH && ai.mode != AUTH_NOBODY) || sc == SC_RE_CONFIRM ||
+             sc == SC_SHELL, false);
     layout();
     draw_base();
-    set_focus(ntg ? 0 : -1, true);
+    set_focus(ntg && sc != SC_SHELL ? 0 : -1, true);
     /* the finished frame */
     lpui_copy_rect(&cv_frame, &cv_base, 0, 0, SW, SH);
     ov_last = overlays_bound();
     lpui_canvas_t full = cv_frame;
+    osk_compose(&full, 0, 0);
     draw_overlays(&full, 0, 0);
+    rect_t ignore;
+    osk_dirty(&ignore);
     /* keep a copy of the old picture for the mix (cv_old is reused) */
     int dur = reduced ? 100 : 180;
     s64 t0 = lp_monotonic_ms();
@@ -720,53 +718,47 @@ static void redraw(void)
     present_all();
 }
 
-/* ── The recovery shell ───────────────────────────────────────────── */
+static void set_msg(u32 col, const char *fmt, int v, const char *s);
+static void move_focus(int d);
+static void back(void);
+
+/* ── The recovery shell ───────────────────────────────────────────────
+ * Only reached from auth_submit, after an administrator's password. The
+ * shell runs on a pty inside this program (term.c) so it can be used by
+ * touch: the on-screen keyboard types into it, and a physical keyboard
+ * still works (its keys come through evdev, never through tty1). LP-ROOT
+ * is read-write while the shell is open and read-only again after. */
 static void open_shell(const char *who_name)
 {
+    strlcpy(shell_admin, who_name, sizeof shell_admin);
     sys_root_remount(true);
     rlog("recovery shell opened (administrator: %s)", who_name);
-    scr_graphics(false);
     static const char hello[] =
-        "\033[2J\033[H\033[?25h\r\n"
-        "  You are root on the recovery system. The installed system is at /mnt/lp.\r\n"
-        "  Type exit to return.\r\n\r\n";
-    lp_write(STDOUT_FILENO, hello, sizeof hello - 1);
-    pid_t pid = lp_fork();
-    if (pid == 0) {
-        lp_setsid();
-        long fd = lp_open("/dev/tty1", O_RDWR, 0);
-        if (fd >= 0) {
-            lp_dup2((int)fd, 0);
-            lp_dup2((int)fd, 1);
-            lp_dup2((int)fd, 2);
-            if (fd > 2)
-                lp_close((int)fd);
-        }
-        lp_ioctl(0, TIOCSCTTY, (void *)1);
-        lp_term_sane(0);
-        lp_term_set_utf8(0);
-        for (int s = 1; s < 32; s++)
-            if (s != 9 && s != 19)
-                lp_signal_default(s);
-        lp_chdir("/root");
-        const char *sh = lp_exists("/bin/lpsh") ? "/bin/lpsh" : "/bin/sh";
-        char *argv[] = { (char *)sh, 0 };
-        char *envp[] = { "HOME=/root", "PATH=/bin:/sbin:/usr/bin:/usr/sbin", "TERM=linux",
-                         "USER=root", "LOGNAME=root", "SHELL=/bin/lpsh", "LANG=C.UTF-8", 0 };
-        lp_execve(sh, argv, envp);
-        lp_exit(127);
+        "\033[1mYou are root on the recovery system. The installed system is at /mnt/lp.\r\n"
+        "Type exit to return.\033[0m\r\n\r\n";
+    /* The terminal needs its size before the screen is drawn: the
+     * keyboard is up on this screen, so the area is the one above it. */
+    osk_show(true, false);
+    const char *err = term_start(shell_area(), hello);
+    if (err) {
+        rlog("recovery shell: %s", err);
+        sys_root_remount(false);
+        set_msg(LPUI_DANGER, lpui_s(LPS_R_SHELL_FAILED), 0, err);
+        redraw();
+        return;
     }
-    int status = 0;
-    if (pid > 0)
-        while (lp_waitpid(pid, &status, 0) != pid)
-            ;
-    rlog("recovery shell closed (status %d)", LP_WIFEXITED(status) ? LP_WEXITSTATUS(status) : -1);
+    msg[0] = 0;
+    go(SC_SHELL, false);
+}
+
+static void close_shell(void)
+{
+    term_stop();
+    rlog("recovery shell closed (administrator: %s)", shell_admin);
     lp_sync();
     sys_root_remount(false);
-    scr_graphics(true);
     in_drain();
-    msg[0] = 0;
-    go(SC_MENU, true);
+    go(SC_MENU, false);
 }
 
 /* ── Exit ─────────────────────────────────────────────────────────── */
@@ -899,8 +891,11 @@ static void reinstall_go(void)
 }
 
 /* ── Actions ──────────────────────────────────────────────────────── */
+static bool msg_wait;                   /* msg is the lockout countdown */
+
 static void set_msg(u32 col, const char *fmt, int v, const char *s)
 {
+    msg_wait = fmt == lpui_s(LPS_R_AUTH_WAIT);
     if (s)
         lpui_fmt(msg, sizeof msg, fmt, s);
     else
@@ -987,18 +982,63 @@ static void backspace(void)
     redraw();
 }
 
-static void toggle_osk(bool on)
+/* The keyboard is on its way up or down: the screen under it takes its
+ * other layout at once (compact above the keyboard, or roomy without
+ * it), the shell's terminal gains or loses rows, and the keyboard slides
+ * over the result. */
+static void osk_changed(void)
 {
-    osk = on;
-    osk_shift = false;
-    int keep = tg[focus].id;
+    int keep = focus < ntg ? tg[focus].id : -1;
     layout();
+    if (screen == SC_SHELL)
+        term_set_area(shell_area());
     focus = 0;
     for (int i = 0; i < ntg; i++)
         if (tg[i].id == keep)
             focus = i;
-    set_focus(focus, true);
+    if (screen != SC_SHELL)
+        set_focus(focus, true);
     redraw();
+}
+
+static void toggle_osk(bool on)
+{
+    osk_show(on, true);
+    osk_changed();
+}
+
+/* A key of the on-screen keyboard. */
+static void on_osk_key(const osk_key_t *k)
+{
+    if (screen == SC_SHELL) {
+        term_osk(k);
+        return;
+    }
+    switch (k->what) {
+    case OSK_TEXT:
+        for (const char *p = k->text; *p; p++)
+            if ((u8)*p >= 32 && (u8)*p < 127)
+                type_char((u8)*p);
+        return;
+    case OSK_BKSP:
+        backspace();
+        return;
+    case OSK_ENTER:
+        if (screen == SC_AUTH && pwlen > 0)
+            auth_submit();
+        else if (screen == SC_RE_CONFIRM && !strcmp(confirm, "REINSTALL"))
+            reinstall_go();
+        return;
+    case OSK_ESC:
+        back();
+        return;
+    case OSK_TAB: case OSK_DOWN: case OSK_RIGHT:
+        move_focus(1);
+        return;
+    case OSK_UP: case OSK_LEFT:
+        move_focus(-1);
+        return;
+    }
 }
 
 static void back(void)
@@ -1009,11 +1049,9 @@ static void back(void)
     case SC_CHECK:
         memset(pw, 0, sizeof pw);
         pwlen = 0;
-        osk = false;
         go(SC_MENU, false);
         break;
     case SC_RE_CONFIRM:
-        osk = false;
         go(SC_RE_CHOOSE, false);
         break;
     case SC_RE_DONE:
@@ -1025,18 +1063,12 @@ static void back(void)
 
 static void activate(int id)
 {
-    if (id >= ID_KEY && id < ID_KEY + 64) {
-        int row = (id - ID_KEY) / 16, col = (id - ID_KEY) % 16;
-        type_char((u8)OSK_ROWS[osk_shift][row][col]);
-        return;
-    }
     switch (id) {
     case ID_SHELL:
         msg[0] = 0;
         memset(pw, 0, sizeof pw);
         pwlen = 0;
         who = 0;
-        osk = false;
         auth_prepare(&ai);
         go(SC_AUTH, false);
         if (ai.mode != AUTH_NOBODY && find(ID_FIELD)) {
@@ -1066,7 +1098,6 @@ static void activate(int id)
         re_mode = id == ID_KEEP ? RE_KEEP : RE_ERASE;
         confirm[0] = 0;
         conflen = 0;
-        osk = false;
         go(SC_RE_CONFIRM, false);
         for (int i = 0; i < ntg; i++)
             if (tg[i].id == ID_FIELD)
@@ -1080,22 +1111,8 @@ static void activate(int id)
         go(SC_MENU, false);
         return;
     case ID_KBD:
-        toggle_osk(!osk);
+        toggle_osk(!osk_shown());
         return;
-    case ID_K_CLOSE:
-        toggle_osk(false);
-        return;
-    case ID_K_SHIFT:
-        osk_shift = !osk_shift;
-        redraw();
-        return;
-    case ID_K_BKSP:
-        backspace();
-        return;
-    case ID_K_SPACE:
-        type_char(' ');
-        return;
-    case ID_K_ENTER:
     case ID_FIELD:
     case ID_OPEN:
     case ID_GO:
@@ -1127,21 +1144,54 @@ static int hit(int x, int y)
 }
 
 static bool ptr_down;
+static int ptr_slot;                    /* the finger pressing a target */
+static int drag_slot = -1, drag_y;      /* the finger scrolling the terminal */
 
 static void on_ptr(const uev_t *e)
 {
     if (e->mouse) {
         cur_x = e->x;
         cur_y = e->y;
-    } else
+    } else if (cur_x >= 0) {
         cur_x = cur_y = -1;
+        present_overlays();
+    }
+    /* The keyboard first: it is on top. */
+    if (osk_pointer(e)) {
+        if (e->mouse)
+            present_overlays();
+        return;
+    }
+    /* A finger on the terminal scrolls it. */
+    if (screen == SC_SHELL) {
+        rect_t a = term_area();
+        bool in = e->x >= a.x && e->x < a.x + a.w && e->y >= a.y && e->y < a.y + a.h;
+        if (e->down && drag_slot < 0 && !ptr_down && in) {
+            drag_slot = e->slot;
+            drag_y = e->y;
+            term_drag(0, true);
+            return;
+        }
+        if (drag_slot >= 0 && e->slot == drag_slot) {
+            if (e->down) {
+                term_drag(e->y - drag_y, false);
+                drag_y = e->y;
+            } else
+                drag_slot = -1;
+            return;
+        }
+    }
+    if (ptr_down && e->slot != ptr_slot)
+        return;                         /* one finger at a time on buttons */
     int t = hit(e->x, e->y);
     if (e->down && !ptr_down) {
         ptr_down = true;
+        ptr_slot = e->slot;
         pressed = t;                    /* feedback on touch-down, no delay */
-        if (t >= 0 && !tg[t].disabled)
-            set_focus(t, false);
-        else
+        if (t >= 0 && !tg[t].disabled) {
+            if (screen != SC_SHELL)
+                set_focus(t, false);
+        } else
             pressed = -1;
         present_overlays();
     } else if (!e->down && ptr_down) {
@@ -1149,15 +1199,22 @@ static void on_ptr(const uev_t *e)
         int p = pressed;
         pressed = -1;
         present_overlays();
-        if (p >= 0 && p == t)
-            activate(tg[p].id);
+        if (p >= 0 && p == t) {
+            /* A tap on a text field asks for the keyboard; Enter (or the
+             * button beside it) is what submits. */
+            if (tg[p].id == ID_FIELD) {
+                if (!osk_shown())
+                    toggle_osk(true);
+            } else
+                activate(tg[p].id);
+        }
     } else if (e->down) {
         if (t != pressed && pressed >= 0) {
             pressed = -1;               /* slid off: cancel */
             present_overlays();
         }
     } else {
-        if (e->mouse && t >= 0 && t != focus && !tg[t].disabled)
+        if (e->mouse && t >= 0 && t != focus && !tg[t].disabled && screen != SC_SHELL)
             set_focus(t, false);
         present_overlays();
     }
@@ -1182,6 +1239,10 @@ static void move_focus(int d)
 
 static void on_key(const uev_t *e)
 {
+    if (screen == SC_SHELL) {
+        term_key(e);                    /* every key is the shell's */
+        return;
+    }
     switch (e->code) {
     case K_TAB: case K_DOWN: case K_RIGHT:
         move_focus(1);
@@ -1196,10 +1257,7 @@ static void on_key(const uev_t *e)
         set_focus(ntg - 1, false);
         return;
     case K_ESC:
-        if (osk)
-            toggle_osk(false);
-        else
-            back();
+        back();
         return;
     case K_BACKSPACE:
         backspace();
@@ -1300,6 +1358,10 @@ int main(void)
     oy = (SH - lpui_px(2160)) / 2;
     lpui_gradient(&cv_bg);
     lpui_logo(&cv_bg, SW / 2, Y(250), P(210), logo_scratch);
+    osk_init();
+    osk_emit = on_osk_key;
+    osk_closed = osk_changed;
+    osk_reduce_motion = reduced;
     in_rescan();
     scr_graphics(true);
     in_drain();
@@ -1309,8 +1371,18 @@ int main(void)
 
     s64 last = lp_monotonic_ms();
     for (;;) {
+        /* Sleep until input, the shell's output, or the next frame of
+         * whatever is moving (highlight spring, keyboard slide, key
+         * repeat); a still menu wakes once a second for the clock. */
+        int wait = anim ? 12 : 250;
+        int ow = osk_tick();
+        if (ow >= 0 && ow < wait)
+            wait = ow;
+        rect_t r;
+        if (osk_dirty(&r))
+            present_rect(r);
         uev_t e;
-        int got = in_wait(&e, anim ? 12 : 250);
+        int got = in_wait(&e, wait);
         s64 now = lp_monotonic_ms();
         int dt = (int)(now - last);
         last = now;
@@ -1319,6 +1391,14 @@ int main(void)
                 on_key(&e);
             else if (e.kind == UEV_PTR)
                 on_ptr(&e);
+            else if (e.kind == UEV_FD && screen == SC_SHELL && !term_pump()) {
+                close_shell();
+                continue;
+            }
+        }
+        if (screen == SC_SHELL && term_dirty(&r)) {
+            term_draw(&cv_base, false);
+            present_rect(r);
         }
         if (anim) {
             anim = springs_step(dt > 0 ? dt : 1);
@@ -1326,20 +1406,27 @@ int main(void)
         }
         if (now - last_status >= 1000) {
             last_status = now;
+            if (screen == SC_SHELL && !term_pump()) {
+                /* exited without a word on the pty (it was quiet, and
+                 * something in the background still holds it open) */
+                close_shell();
+                continue;
+            }
+            rect_t band = { 0, Y(1150), SW, Y(1400) - Y(1150) };
             if (screen == SC_AUTH) {
                 int w = auth_lockout_left();
                 if (w > 0) {
                     set_msg(LPUI_DANGER, lpui_s(LPS_R_AUTH_WAIT), w, 0);
                     draw_base();
-                    present_rect((rect_t){ 0, Y(1220), SW, Y(1360) - Y(1220) });
-                } else if (msg_color == LPUI_DANGER && strstr(msg, "s.") && pwlen == 0 &&
-                           auth_tries_left() == 3) {
+                    present_rect(band);
+                } else if (msg_wait) {
                     msg[0] = 0;
+                    msg_wait = false;
                     draw_base();
-                    present_rect((rect_t){ 0, Y(1220), SW, Y(1360) - Y(1220) });
+                    present_rect(band);
                 }
             }
-            if (!osk) {
+            if (!osk_shown() && screen != SC_SHELL) {
                 draw_base();
                 present_rect(status_band());
             }

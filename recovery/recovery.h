@@ -25,6 +25,7 @@
 #include "stdlib.h"
 #include "unistd.h"
 #include "syscall.h"
+#define LPUI_SHARED_STATE            /* see lp-ui.h */
 #include "ui/lp-ui.h"
 
 /* ── Paths on the recovery partition ─────────────────────────────── */
@@ -187,6 +188,7 @@ typedef struct {
 } osk_key_t;
 
 void osk_init(void);                    /* after scr_open and lpui_set_screen */
+extern bool osk_reduce_motion;
 /* Show or hide. `animate` false jumps (a new screen, reduced motion). */
 void osk_show(bool on, bool animate);
 bool osk_shown(void);                   /* where it is going */

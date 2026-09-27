@@ -64,8 +64,9 @@ FACES = [("T", 104, 600), ("M", 60, 500), ("S", 40, 400)]
 
 ASCII = "".join(chr(c) for c in range(0x20, 0x7F))
 # Characters drawn by code rather than written in a string: the password
-# bullet, the on-screen keyboard's special keys, the replacement box.
-EXTRA = {"T": "0123456789", "M": ASCII + "•⌫⏎⇧×", "S": ASCII + "•…·"}
+# bullet, the on-screen keyboard's special keys and arrows, the
+# replacement box.
+EXTRA = {"T": "0123456789", "M": ASCII + "•⌫⏎⇧×←↑→↓", "S": ASCII + "•…·"}
 
 
 MONO_FONT = os.environ.get(

@@ -62,7 +62,18 @@ typedef struct {
  * Layout is written in pixels of the owner's 3840x2160 panel and scaled
  * by the smaller of the two ratios, so a 16:10 VM window and a portrait
  * tablet both keep every element on the screen. */
+/* The screen scale and the language are the program's, not a source
+ * file's: lp-recovery is several files, and each would otherwise have
+ * its own copy of a static and draw at the wrong size or in the wrong
+ * language (recovery.h defines LPUI_SHARED_STATE and lp-recovery.c owns
+ * the variables). The boot menu is one file and keeps them static. */
+#ifdef LPUI_SHARED_STATE
+extern int lpui_permille;
+extern bool lpui_korean;
+#else
 static int lpui_permille = 1000;
+static bool lpui_korean;
+#endif
 
 LPUI void lpui_set_screen(int w, int h)
 {
@@ -663,7 +674,6 @@ static const char *const LPUI_KO[LPS_COUNT] = {
 #undef LPS
 };
 
-static bool lpui_korean;
 LPUI const char *lpui_s(int id) { return (lpui_korean ? LPUI_KO : LPUI_EN)[id]; }
 
 #endif
