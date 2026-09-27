@@ -305,9 +305,32 @@ def apply():
             call(["swaymsg", "output", name, "scale", want])
 
 
+def compositor_socket():
+    """The compositor this process talks to, as the identity of its
+    Wayland socket file (device, inode), or None without one."""
+    wd = os.environ.get("WAYLAND_DISPLAY", "")
+    if not wd:
+        return None
+    path = wd if wd.startswith("/") else os.path.join(os.environ.get("XDG_RUNTIME_DIR", ""), wd)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return (st.st_dev, st.st_ino)
+
+
 def watch():
     """Again on every change the kernel reports for the graphics card.
-    Kernel uevents need no privilege to read."""
+    Kernel uevents need no privilege to read.
+
+    Only while the compositor it was started under lives. A watcher holds
+    no Wayland connection between changes, so nothing ends it when that
+    compositor goes, and the next compositor makes a socket of the same
+    name: the first-boot kiosk's watcher (lp-setup-gate) went on into the
+    desktop session, reading the kiosk's empty config, and on the first
+    change the VM window sent it put the preferred mode back over the one
+    chosen in Settings > Display. The socket's inode tells the two apart."""
+    mine = compositor_socket()
     apply()
     try:
         p = subprocess.Popen(["udevadm", "monitor", "--kernel", "--subsystem-match=drm"],
@@ -316,6 +339,10 @@ def watch():
         return
     for line in p.stdout:
         if " change " in line:
+            if mine is not None and compositor_socket() != mine:
+                log("the compositor this watcher started under is gone; stopping")
+                p.terminate()
+                return
             time.sleep(0.5)
             apply()
 

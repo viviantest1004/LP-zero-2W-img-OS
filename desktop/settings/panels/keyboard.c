@@ -55,6 +55,7 @@
 #include <linux/input-event-codes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ── input sources ──────────────────────────────────────────────────── */
 
@@ -423,13 +424,29 @@ static gboolean switch_keys_fcitx(unsigned k)
     return changed;
 }
 
+/* fcitx5-remote is a D-Bus call, and the session bus starts fcitx5 for
+ * it when it is not running (Debian ships org.fcitx.Fcitx5.service).
+ * Under sway nothing else starts fcitx5 - lp-osk does the typing there -
+ * and one started this way made the top bar's EN/한 follow it instead of
+ * lp-osk. A fcitx5 that is not running reads its files when it starts,
+ * so only a running one is told. */
+static gboolean fcitx_running(void)
+{
+    if (!lp_have("fcitx5-remote")) return FALSE;
+    char *uid = g_strdup_printf("%u", (unsigned)getuid());
+    const char *v[] = { "pgrep", "-x", "-u", uid, "fcitx5", NULL };
+    int st = lp_run_full(v, NULL, NULL, NULL);
+    g_free(uid);
+    return st == 0;
+}
+
 /* Tell the running input methods. Both are optional: whichever is not
  * running reads the files when it starts. */
 static void switch_keys_tell(gboolean fcitx)
 {
     const char *osk[] = { "lp-osk", "reload", NULL };
     lp_spawn_bg(osk);
-    if (fcitx && lp_have("fcitx5-remote")) {
+    if (fcitx && fcitx_running()) {
         const char *fr[] = { "fcitx5-remote", "-r", NULL };
         lp_spawn_bg(fr);
     }
@@ -1341,7 +1358,7 @@ static void keyboard_restore(void)
             g_free(have); g_free(ck); g_free(bk);
         }
     g_free(ini);
-    if (switch_keys_fcitx(switch_keys_get()) && lp_have("fcitx5-remote")) {
+    if (switch_keys_fcitx(switch_keys_get()) && fcitx_running()) {
         const char *fr[] = { "fcitx5-remote", "-r", NULL };
         lp_spawn_bg(fr);
     }

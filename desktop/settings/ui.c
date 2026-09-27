@@ -812,15 +812,22 @@ static void lp_sheet_init(LpSheet *sh)
     lp_spring_init(&sh->s, LP_SPRING_SHEET, 0.0);
 }
 
+/* Once only: the spring coming to rest and the deadline below can both
+ * get there. */
+static void sheet_destroy_window(GtkRoot *win)
+{
+    if (!win || g_object_get_data(G_OBJECT(win), "lp-sheet-gone")) return;
+    g_object_set_data(G_OBJECT(win), "lp-sheet-gone", GINT_TO_POINTER(1));
+    gtk_window_destroy(GTK_WINDOW(win));
+}
+
 static void sheet_frame(GtkWidget *w, gpointer d)
 {
     (void)d;
     LpSheet *sh = (LpSheet *)w;
     gtk_widget_queue_draw(w);
-    if (sh->closing && !sh->s.moving) {
-        GtkRoot *win = gtk_widget_get_root(w);
-        if (win) gtk_window_destroy(GTK_WINDOW(win));
-    }
+    if (sh->closing && !sh->s.moving)
+        sheet_destroy_window(gtk_widget_get_root(w));
 }
 
 static void sheet_open(LpSheet *sh)
@@ -834,9 +841,35 @@ static void sheet_open(LpSheet *sh)
     lp_motion_kick(sh->m);
 }
 
+/* The frames that finish a close come from the compositor, and it sends
+ * none to a window that is on no screen. Display's "keep these settings?"
+ * is centred on the mode being tried; a 5120x2160 tried from 1440x900 and
+ * put back left it wholly off the screen, where the closing spring never
+ * ticked again, and the modal dialog nobody could see stayed up and took
+ * every click Settings got. So a close also has a deadline: well after the
+ * spring's 182ms, the window goes whether or not it was ever drawn. */
+#define SHEET_CLOSE_DEADLINE_MS 600
+
+static gboolean sheet_close_late(gpointer p)
+{
+    GtkWidget *win = g_weak_ref_get(p);
+    if (win) {
+        sheet_destroy_window(GTK_ROOT(win));
+        g_object_unref(win);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static void sheet_weak_free(gpointer p)
+{
+    g_weak_ref_clear(p);
+    g_free(p);
+}
+
 /* Out at 0.7x, from wherever it is - a sheet closed while still arriving
  * turns round with the velocity it had (lp-motion's springs). The window
- * is destroyed when the spring comes to rest at 0. */
+ * is destroyed when the spring comes to rest at 0, or at the deadline
+ * above if no frame comes to finish it. */
 static void sheet_close(LpSheet *sh)
 {
     if (sh->closing) return;
@@ -848,13 +881,21 @@ static void sheet_close(LpSheet *sh)
         gtk_widget_set_sensitive(GTK_WIDGET(sh), FALSE);
     }
     if (!sh->m || !gtk_widget_get_mapped(GTK_WIDGET(sh))) {
-        if (win) gtk_window_destroy(GTK_WINDOW(win));
+        sheet_destroy_window(win);
         return;
     }
     lp_spring_set_target_out(&sh->s, 0.0);
     lp_motion_kick(sh->m);
-    if (!sh->s.moving && win)
-        gtk_window_destroy(GTK_WINDOW(win));
+    if (!sh->s.moving && win) {
+        sheet_destroy_window(win);
+        return;
+    }
+    if (win) {
+        GWeakRef *ref = g_new0(GWeakRef, 1);
+        g_weak_ref_init(ref, win);
+        g_timeout_add_full(G_PRIORITY_DEFAULT, SHEET_CLOSE_DEADLINE_MS,
+                           sheet_close_late, ref, sheet_weak_free);
+    }
 }
 
 /* ── dialogs ────────────────────────────────────────────────────────── */
