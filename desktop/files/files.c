@@ -278,9 +278,13 @@ static char *format_date(guint64 seconds)
     else if (days == 1)
         text = g_strdup(T("yesterday", "어제"));
     else if (g_date_time_get_year(when) == g_date_time_get_year(now))
-        text = g_strdup_printf(T("%d %b", "%d월 %d일"),
-                               g_date_time_get_month(when),
-                               g_date_time_get_day_of_month(when));
+        /* "Sep 27" / "9월 27일". This was one printf format for both
+         * languages, and the English one ("%d %b") handed the month's
+         * number to %d and the day to %b, which printf does not have:
+         * every date this year read "9 110". */
+        text = lp_korean() ? g_strdup_printf("%d월 %d일", g_date_time_get_month(when),
+                                             g_date_time_get_day_of_month(when))
+                           : g_date_time_format(when, "%b %-d");
     else
         text = g_strdup_printf("%d. %d. %d.",
                                g_date_time_get_year(when),

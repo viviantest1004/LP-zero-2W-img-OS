@@ -379,6 +379,8 @@ if [[ -f "$D/theme/gtk-4.0/gtk.css" ]]; then
 fi
 [[ -f "$D/terminal/foot.ini" ]] && mkdir -p "$ROOT/etc/xdg/foot" &&
     cp -a "$D/terminal/foot.ini" "$ROOT/etc/xdg/foot/foot.ini"
+[[ -f "$D/terminal/foot.desktop" ]] &&
+    cp -a "$D/terminal/foot.desktop" "$ROOT/usr/local/share/applications/foot.desktop"
 
 # Every program the desktop tracks have built: desktop/<dir>/lp-* that
 # is executable, and its .desktop entry. The installer's own are below.

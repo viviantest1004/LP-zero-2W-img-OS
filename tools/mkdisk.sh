@@ -283,9 +283,11 @@ REC_TREE="${LPZERO_WORK}/recovery-tree"
 rm -rf "$REC_TREE"
 mkdir -p "$REC_TREE"
 MKREC="${REPO_ROOT}/tools/mkrecovery.sh"
-if [[ -x "$MKREC" ]]; then
-    "$MKREC" --root "$ROOTFS" --out "$REC_TREE" --kernel "${KERNEL_OUT}/bzImage" ||
-        die "tools/mkrecovery.sh failed"
+REC_HAS_SYSTEM=0
+if [[ -x "$MKREC" && "${LP_NO_RECOVERY:-0}" != 1 ]]; then
+    "$MKREC" --root "$ROOTFS" --out "$REC_TREE" --kernel "${KERNEL_OUT}/bzImage" \
+        --cmdline "$KERNEL_CMDLINE" || die "tools/mkrecovery.sh failed"
+    REC_HAS_SYSTEM=1
     log "tools/mkrecovery.sh: $(du -sh "$REC_TREE" | cut -f1)"
 else
     printf 'LP recovery partition.\n\nThis image was built before tools/mkrecovery.sh existed, so the\nrecovery system is not here yet. The partition is in its place so the\ndisk layout is already the final one.\n' \
@@ -313,6 +315,7 @@ PARTUUIDS="$(python3 "${REPO_ROOT}/tools/write-gpt.py" "$IMAGE" \
     "${ROOT_START}:${ROOT_SECTORS}:root:${ROOT_LABEL}")"
 while read -r n u; do log "p${n} PARTUUID=${u}"; done <<< "$PARTUUIDS"
 ROOT_PARTUUID="$(awk '$1 == 3 { print $2 }' <<< "$PARTUUIDS")"
+REC_PARTUUID="$(awk '$1 == 2 { print $2 }' <<< "$PARTUUIDS")"
 
 # ── 6. the EFI system partition ──────────────────────────────────
 step "EFI system partition (FAT32, ${ESP_LABEL})"
@@ -356,6 +359,13 @@ printf '%s\n' "$CMDLINE_FILE" | esp_text EFI/LP/cmdline.txt
 # A copy at the top, for a person with a card reader; the same line.
 printf '%s\n' "$CMDLINE_FILE" | esp_text cmdline.txt
 log "EFI/LP/cmdline.txt: root=PARTUUID=${ROOT_PARTUUID}"
+# The boot menu offers LP Recovery - and falls back to it after two
+# failed starts - only when this says p2 holds a recovery system, and it
+# names p2 by PARTUUID (every LP disk has an LP-RECOVERY).
+if [[ "$REC_HAS_SYSTEM" = 1 ]]; then
+    printf 'root=PARTUUID=%s\n' "$REC_PARTUUID" | esp_text EFI/LP/recovery.ok
+    log "EFI/LP/recovery.ok: root=PARTUUID=${REC_PARTUUID}"
+fi
 
 # startup.nsh, and it is not belt and braces.
 #
