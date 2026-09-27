@@ -974,7 +974,9 @@ static gint by_size_desc(gconstpointer a, gconstpointer b)
     int aw, ah, bw, bh;
     sscanf(*(char *const *)a, "%dx%d", &aw, &ah);
     sscanf(*(char *const *)b, "%dx%d", &bw, &bh);
-    return (bw * bh) - (aw * ah);
+    /* Widest first, then tallest: by pixel count 2048 x 1152 came after
+     * 1792 x 1344, which reads as a list out of order. */
+    return bw != aw ? bw - aw : bh - ah;
 }
 
 static void rebuild_controls(disp_t *d)
