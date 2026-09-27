@@ -61,19 +61,32 @@ for card in /sys/class/drm/card[0-9]*; do
         i915|amdgpu|radeon|nouveau|vmwgfx)
             comp=wayfire; why="$drv"; break ;;
         virtio_gpu|virtio-pci|virtio_pci)
-            # virtio-gpu has 3D only when the host gave it virgl
-            # (UTM: a "GPU Supported" display; QEMU: virtio-vga-gl).
+            # A virtual machine gets sway even when the host gave the
+            # card 3D (virgl: UTM's "GPU Supported" display, QEMU's
+            # virtio-vga-gl). Measured with the pointer circling at
+            # 60 Hz: wayfire on virgl renders a whole GL frame per
+            # motion, about 40% of an emulated CPU, where sway with LP's
+            # wlroots and kernel (single buffer, damage clips) sends the
+            # host a 32x30 patch and uses a third of that. Under UTM on a
+            # Mac, where every guest instruction is emulated, that is the
+            # pointer lag. The pixman path is also the same on every host,
+            # where virgl's GL goes on through the host's own GL (ANGLE
+            # to Metal on a Mac) and misbehaved there in ways QEMU here
+            # does not show (Settings' clicks). /etc/lp/compositor=wayfire
+            # brings wayfire back.
             if dmesg 2>/dev/null | grep -q 'features: +virgl'; then
-                comp=wayfire; why="virtio-gpu with virgl"; break
-            fi
-            why="virtio-gpu without 3D (virgl)" ;;
+                why="virtio-gpu with virgl: a virtual machine, sway draws less"
+            else
+                why="virtio-gpu without 3D (virgl)"
+            fi ;;
         *)  why="$drv: no 3D" ;;
     esac
 done
 if test -s /etc/lp/compositor; then
     read -r want < /etc/lp/compositor
     case $want in
-        wayfire|sway) comp=$want; why="/etc/lp/compositor" ;;
+        # The card stays in the reason: session-run reads "virtio" there.
+        wayfire|sway) comp=$want; why="/etc/lp/compositor ($why)" ;;
     esac
 fi
 printf '%s\n%s\n' "$comp" "$why" > /run/lp-session/compositor
