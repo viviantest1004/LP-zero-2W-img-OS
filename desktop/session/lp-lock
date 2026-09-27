@@ -10,6 +10,18 @@
 # (--indicator-idle-visible): the machine now locks at every boot, and a
 # screen showing only the wallpaper did not say that it wanted a
 # password.
+#
+# An account with no usable password is not locked at all. Try's live
+# account is one ("!" in /etc/shadow, `passwd -S` says L): Log out there
+# brought the session back behind a lock that answered "Wrong" to
+# everything, and the only way on was the power button - the same for
+# the lock button and Super+L. Only when the status cannot be read is
+# the screen locked anyway.
+lp_pw=$(/usr/bin/passwd -S "$(id -un)" 2> /dev/null | awk '{ print $2 }')
+if test -n "$lp_pw" && test "$lp_pw" != P ; then
+    echo "lp-lock: $(id -un) has no password to unlock with ($lp_pw); not locking" >&2
+    exit 0
+fi
 WALL=/usr/share/backgrounds/lp/lp-wallpaper-dark-3840x2160.png
 set -- -f --show-failed-attempts --indicator-idle-visible \
     --color 0B1722 \

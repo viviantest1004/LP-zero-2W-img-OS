@@ -82,7 +82,8 @@ esac
 # 0. Who is at the keyboard.
 #
 #    After a logout (lp-logout left the marker) the new session starts
-#    locked: nobody gets back in without the password.
+#    locked: nobody gets back in without the password. (Not Try's
+#    account, which has none to type: lp-lock declines to lock it.)
 #
 #    So does every start of the machine, unless Settings > Users named
 #    this account for automatic sign-in (/etc/lp/autologin; no file

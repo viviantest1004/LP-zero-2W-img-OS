@@ -32,6 +32,39 @@ chmod 0666 /dev/input/event* 2>/dev/null
 chown 1000 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
 chmod 0666 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
 
+# The keyboard of the VT under the session is switched off here, and
+# the VT put in graphics mode - the two things libseat's built-in
+# backend tries to do itself and cannot: the kernel lets only root, or a
+# process whose controlling terminal the VT is, change them, and the
+# session is neither ("Could not set KD keyboard mode to disabled:
+# Operation not permitted" in session.log). Left alone, the VT's
+# keyboard stays in unicode mode, and every key typed anywhere on the
+# desktop is also typed into the VT - where init runs /bin/login on an
+# installed machine (/etc/lp/console-login), the VT the session draws
+# on. The password typed at the lock screen became a login name on
+# tty1, in clear text on its screen, and each line after it one more
+# login attempt. (K_OFF also keeps the kernel from switching VTs on
+# Ctrl+Alt+Fn by itself, behind the compositor's back.) When the
+# session gives up (below), the VT gets its keyboard back, so that
+# login can be used after all.
+vt_keyboard() {
+    test -x /usr/bin/python3 || return 0
+    /usr/bin/python3 - "$1" <<'PY' 2>/dev/null
+import fcntl, os, sys
+KDSETMODE, KDSKBMODE = 0x4B3A, 0x4B45
+K_UNICODE, K_OFF, KD_TEXT, KD_GRAPHICS = 3, 4, 0, 1
+vt = open("/sys/class/tty/tty0/active").read().strip()
+fd = os.open("/dev/" + vt, os.O_RDWR | os.O_NOCTTY)
+if sys.argv[1] == "off":
+    fcntl.ioctl(fd, KDSKBMODE, K_OFF)
+    fcntl.ioctl(fd, KDSETMODE, KD_GRAPHICS)
+else:
+    fcntl.ioctl(fd, KDSETMODE, KD_TEXT)
+    fcntl.ioctl(fd, KDSKBMODE, K_UNICODE)
+PY
+}
+vt_keyboard off
+
 # 소리.
 #
 # udev 가 /dev/snd/* 를 audio 그룹 소유로 만들고, uid 1000 은 그
@@ -150,6 +183,7 @@ while :; do
     fi
     if test $quick -ge 3; then
         echo "start-desktop: the session ended three times within 30 s; not starting it again" >> /data/log/session.log
+        vt_keyboard on
         exit 1
     fi
     sleep 1

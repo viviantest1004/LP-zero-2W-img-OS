@@ -47,6 +47,7 @@ boot menu's count of unconfirmed boots is reset (lp-reboot-recovery
 --boot-ok, boot-recovery track) - a boot that got this far worked.
 """
 
+import fcntl
 import json
 import os
 import pwd
@@ -205,6 +206,29 @@ def prepare_devices():
                     os.chmod(p, 0o666)
         except OSError:
             pass
+    vt_keyboard_off()
+
+
+def vt_keyboard_off():
+    """The keyboard of the VT under the kiosk off, the VT in graphics
+    mode - what libseat's built-in backend tries and, as uid 1000 without
+    the VT as its controlling terminal, is not allowed to do. Otherwise
+    every key typed into the setup windows is also typed into the VT,
+    where init runs /bin/login (/etc/lp/console-login): the password
+    chosen on the account page arrived there as a login name, in clear
+    text on tty1's screen. start-desktop does the same for the session
+    and gives the VT its keyboard back if the session cannot start."""
+    try:
+        with open("/sys/class/tty/tty0/active") as f:
+            vt = f.read().strip()
+        fd = os.open("/dev/" + vt, os.O_RDWR | os.O_NOCTTY)
+        try:
+            fcntl.ioctl(fd, 0x4B45, 4)       # KDSKBMODE, K_OFF
+            fcntl.ioctl(fd, 0x4B3A, 1)       # KDSETMODE, KD_GRAPHICS
+        finally:
+            os.close(fd)
+    except OSError as e:
+        log("could not take the keyboard from the VT:", e)
 
 
 def gpu_3d():
