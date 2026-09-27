@@ -789,11 +789,41 @@ static void item_drop(Item *it)
     boxes_sync();
 }
 
+/* A tray icon from the session itself, not from an application: the
+ * input method's (fcitx5 puts a keyboard in the tray under wayfire, and
+ * the bar already shows the input language as EN / 한 beside the
+ * on-screen keyboard button - two keyboards side by side), or anything
+ * else the session runs. Known by the item's Id and icon, and by the
+ * name of the process that owns it. */
+static gboolean sni_is_session(Item *it)
+{
+    static const char *const ids[] = { "fcitx", "Fcitx", "ibus", "IBus", NULL };
+    static const char *const icons[] = { "fcitx", "input-keyboard", "input-method",
+                                         "ibus", "org.fcitx", NULL };
+    if (has_prefix_in(it->id, ids) || has_prefix_in(it->icon_name, icons))
+        return TRUE;
+    if (it->pid) {
+        char *path = g_strdup_printf("/proc/%u/comm", it->pid);
+        char *comm = NULL;
+        gboolean session = FALSE;
+        if (g_file_get_contents(path, &comm, NULL, NULL)) {
+            g_strchomp(comm);
+            session = is_session_name(comm);
+        }
+        g_free(comm);
+        g_free(path);
+        if (session)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static gboolean item_shown(Item *it)
 {
     if (it->kind == KIND_APP)
         return TRUE;
-    return it->loaded && !it->gone && g_strcmp0(it->status, "Passive") != 0;
+    return it->loaded && !it->gone && g_strcmp0(it->status, "Passive") != 0 &&
+           !sni_is_session(it);
 }
 
 /* What it is called, for its tooltip and for the question about it. */
