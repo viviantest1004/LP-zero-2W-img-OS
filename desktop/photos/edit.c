@@ -18,6 +18,13 @@
  * this machine; drawing a path over a ready-made screen-sized cache does
  * not.
  *
+ * Ink does not go into the photo itself but into a transparent layer of
+ * the same size (app->ann, see photos.h), which is what lets the eraser
+ * rub out a stroke and leave the photo under it as it was. Mosaic, blur,
+ * brightness and the like are the opposite: they change the photo, and
+ * the eraser does not bring back what they hid - that would defeat the
+ * point of hiding it.
+ *
  * Widths are chosen in screen pixels and turned into picture pixels at
  * the zoom the stroke began at, so "medium" looks medium however far in
  * or out you are - what you see is what is saved.
@@ -36,13 +43,19 @@
 #include <string.h>
 #include <glib/gstdio.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #define UNDO_BUDGET ((gsize)160 << 20)
 
 static const double PEN_W[3]    = { 3, 6, 12 };    /* screen pixels */
 static const double HL_W[3]     = { 14, 24, 40 };
+static const double ERASER_W[3] = { 12, 26, 50 };
 static const double TEXT_PX[3]  = { 20, 32, 52 };
 static const double MOSAIC_PX[3] = { 8, 14, 24 };
+static const double BLUR_PX[3]  = { 5, 9, 16 };     /* box radius, three passes */
+
+#define TEXT_FONT "Pretendard Variable,Pretendard,Noto Sans CJK KR,Sans Bold"
+
 
 static const double SWATCH[N_SWATCH][3] = {
     { 0.00, 0.00, 0.00 },    /* black  */
@@ -54,6 +67,9 @@ static const double SWATCH[N_SWATCH][3] = {
     { 0.12, 0.53, 0.90 },    /* blue   */
     { 0.56, 0.14, 0.67 },    /* purple */
 };
+
+static void syncing_aspect(app_t *app);
+static void crop_reset(app_t *app);
 
 static void after_edit(app_t *app)
 {
@@ -68,10 +84,35 @@ static gsize surf_bytes(cairo_surface_t *s)
     return s ? (gsize)cairo_image_surface_get_stride(s) * cairo_image_surface_get_height(s) : 0;
 }
 
+static gsize entry_bytes(const undo_t *e) { return surf_bytes(e->surf) + surf_bytes(e->ann); }
+
 static void undo_free(undo_t *e)
 {
     if (e->surf) cairo_surface_destroy(e->surf);
-    e->surf = NULL;
+    if (e->ann) cairo_surface_destroy(e->ann);
+    e->surf = e->ann = NULL;
+}
+
+void ink_drop(app_t *app)
+{
+    if (app->ann) cairo_surface_destroy(app->ann);
+    app->ann = NULL;
+}
+
+/* Made on the first stroke. A new cairo surface is all zeros, which is
+ * exactly "no ink anywhere". */
+static gboolean ink_ensure(app_t *app)
+{
+    if (app->ann) return TRUE;
+    app->ann = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, app->iw, app->ih);
+    if (cairo_surface_status(app->ann) != CAIRO_STATUS_SUCCESS) {
+        cairo_surface_destroy(app->ann);
+        app->ann = NULL;
+        toast(app, T("Not enough memory to draw on a picture this large.",
+                     "사진이 너무 커서 그릴 메모리가 부족합니다."));
+        return FALSE;
+    }
+    return TRUE;
 }
 
 void undo_clear(app_t *app)
@@ -87,7 +128,7 @@ gboolean edit_dirty(app_t *app) { return app->upos != app->usaved; }
 static void undo_push(app_t *app, undo_t e)
 {
     for (int i = app->upos; i < app->un; i++) {
-        app->ubytes -= surf_bytes(app->u[i].surf);
+        app->ubytes -= entry_bytes(&app->u[i]);
         undo_free(&app->u[i]);
     }
     app->un = app->upos;
@@ -100,10 +141,10 @@ static void undo_push(app_t *app, undo_t e)
     }
     app->u[app->un++] = e;
     app->upos = app->un;
-    app->ubytes += surf_bytes(e.surf);
+    app->ubytes += entry_bytes(&e);
 
     while (app->ubytes > UNDO_BUDGET && app->un > 1) {
-        app->ubytes -= surf_bytes(app->u[0].surf);
+        app->ubytes -= entry_bytes(&app->u[0]);
         undo_free(&app->u[0]);
         memmove(app->u, app->u + 1, sizeof(undo_t) * (app->un - 1));
         app->un--; app->upos--;
@@ -123,26 +164,33 @@ static cairo_surface_t *copy_rect(cairo_surface_t *src, int x, int y, int w, int
     return s;
 }
 
-static void push_region(app_t *app, int x, int y, int w, int h)
+/* Keep the pixels a change is about to cover, of the photo or of the ink. */
+static void push_region(app_t *app, gboolean ink, int x, int y, int w, int h)
 {
-    undo_t e = { U_REGION, x, y, copy_rect(app->img, x, y, w, h), 0 };
+    undo_t e = { U_REGION, x, y, copy_rect(ink ? app->ann : app->img, x, y, w, h), 0, ink, NULL };
     undo_push(app, e);
 }
 
-/* The new picture replaces the old one; the old one *is* the undo. */
-static void replace_image(app_t *app, cairo_surface_t *s)
+/* The new picture replaces the old one; the old one *is* the undo. With
+ * `ink` the ink layer is replaced along with it (crop, resize: the ink
+ * has to be cut and scaled the same way); without, adjusting colours, it
+ * stays as it is. */
+static void replace_image(app_t *app, cairo_surface_t *s, gboolean ink, cairo_surface_t *ann)
 {
-    undo_t e = { U_FULL, 0, 0, app->img, 0 };
+    undo_t e = { U_FULL, 0, 0, app->img, 0, ink, NULL };
     app->img = s;
+    if (ink) { e.ann = app->ann; app->ann = ann; }
     undo_push(app, e);
     view_image_changed(app);
 }
 
 static void swap_region(app_t *app, undo_t *e)
 {
+    cairo_surface_t *dst = e->ink ? app->ann : app->img;
+    if (!dst) return;
     int w = cairo_image_surface_get_width(e->surf), h = cairo_image_surface_get_height(e->surf);
-    cairo_surface_t *cur = copy_rect(app->img, e->x, e->y, w, h);
-    cairo_t *cr = cairo_create(app->img);
+    cairo_surface_t *cur = copy_rect(dst, e->x, e->y, w, h);
+    cairo_t *cr = cairo_create(dst);
     cairo_set_source_surface(cr, e->surf, e->x, e->y);
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_rectangle(cr, e->x, e->y, w, h);
@@ -153,9 +201,9 @@ static void swap_region(app_t *app, undo_t *e)
     view_region_changed(app, e->x, e->y, w, h);
 }
 
-static void apply_xform(app_t *app, xform_t op)
+static cairo_surface_t *xform_surface(cairo_surface_t *src, xform_t op)
 {
-    int w = app->iw, h = app->ih;
+    int w = cairo_image_surface_get_width(src), h = cairo_image_surface_get_height(src);
     gboolean turn = op == XF_ROT_L || op == XF_ROT_R;
     cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, turn ? h : w, turn ? w : h);
     cairo_t *cr = cairo_create(s);
@@ -165,15 +213,26 @@ static void apply_xform(app_t *app, xform_t op)
     case XF_FLIP_H: cairo_translate(cr, w, 0); cairo_scale(cr, -1, 1); break;
     case XF_FLIP_V: cairo_translate(cr, 0, h); cairo_scale(cr, 1, -1); break;
     }
-    cairo_set_source_surface(cr, app->img, 0, 0);
+    cairo_set_source_surface(cr, src, 0, 0);
     /* Exact quarter turns land pixel centres on pixel centres; NEAREST
      * keeps them bit-identical instead of smearing half a pixel. */
     cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_paint(cr);
     cairo_destroy(cr);
+    return s;
+}
+
+static void apply_xform(app_t *app, xform_t op)
+{
+    cairo_surface_t *s = xform_surface(app->img, op);
     cairo_surface_destroy(app->img);
     app->img = s;
+    if (app->ann) {
+        s = xform_surface(app->ann, op);
+        cairo_surface_destroy(app->ann);
+        app->ann = s;
+    }
     app->fit = TRUE;           /* a turned picture has a new best fit */
     view_image_changed(app);
 }
@@ -188,9 +247,12 @@ static void undo_apply(app_t *app, undo_t *e, gboolean undo)
     switch (e->kind) {
     case U_REGION: swap_region(app, e); break;
     case U_FULL: {
+        app->ubytes -= entry_bytes(e);
         cairo_surface_t *t = app->img;
         app->img = e->surf;
         e->surf = t;
+        if (e->ink) { t = app->ann; app->ann = e->ann; e->ann = t; }
+        app->ubytes += entry_bytes(e);
         view_image_changed(app);
         break;
     }
@@ -198,29 +260,36 @@ static void undo_apply(app_t *app, undo_t *e, gboolean undo)
     }
 }
 
+/* After the picture changed shape under it, a crop box starts over. */
+static void crop_follow(app_t *app)
+{
+    app->crop_has = FALSE;
+    if (app->editing && app->tool == TOOL_CROP) crop_reset(app);
+}
+
 void edit_undo(app_t *app)
 {
     if (app->upos == 0 || app->adjusting) return;
-    app->crop_has = FALSE;
     undo_apply(app, &app->u[--app->upos], TRUE);
+    crop_follow(app);
     after_edit(app);
 }
 
 void edit_redo(app_t *app)
 {
     if (app->upos >= app->un || app->adjusting) return;
-    app->crop_has = FALSE;
     undo_apply(app, &app->u[app->upos++], FALSE);
+    crop_follow(app);
     after_edit(app);
 }
 
 void edit_xform(app_t *app, xform_t op)
 {
     if (!app->img) return;
-    app->crop_has = FALSE;
     apply_xform(app, op);
-    undo_t e = { U_XFORM, 0, 0, NULL, op };
+    undo_t e = { U_XFORM, 0, 0, NULL, op, FALSE, NULL };
     undo_push(app, e);
+    crop_follow(app);
     after_edit(app);
 }
 
@@ -228,7 +297,7 @@ void edit_xform(app_t *app, xform_t op)
 
 static double shape_lw(app_t *app)
 {
-    const double *t = app->tool == TOOL_HIGHLIGHT ? HL_W : PEN_W;
+    const double *t = app->tool == TOOL_HIGHLIGHT ? HL_W : app->tool == TOOL_ERASER ? ERASER_W : PEN_W;
     return t[app->width_idx] / app->stroke_zoom;
 }
 
@@ -249,7 +318,9 @@ static void arrow(cairo_t *cr, double x0, double y0, double x1, double y1, doubl
 }
 
 /* One function paints the shape for the preview and for the real thing,
- * so the two cannot disagree. `cr` is in picture coordinates. */
+ * so the two cannot disagree. `cr` is in picture coordinates. The eraser
+ * brings its own source (the photo, for the preview) or operator (CLEAR,
+ * for the ink layer). */
 static void paint_shape(app_t *app, cairo_t *cr)
 {
     double lw = shape_lw(app);
@@ -257,13 +328,15 @@ static void paint_shape(app_t *app, cairo_t *cr)
     cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
     cairo_set_line_width(cr, lw);
-    cairo_set_source_rgba(cr, c[0], c[1], c[2], app->tool == TOOL_HIGHLIGHT ? 0.4 : 1.0);
+    if (app->tool != TOOL_ERASER)
+        cairo_set_source_rgba(cr, c[0], c[1], c[2], app->tool == TOOL_HIGHLIGHT ? 0.4 : 1.0);
     double x0 = MIN(app->ax, app->bx), y0 = MIN(app->ay, app->by);
     double w = fabs(app->bx - app->ax), h = fabs(app->by - app->ay);
 
     switch (app->tool) {
     case TOOL_PEN:
-    case TOOL_HIGHLIGHT: {
+    case TOOL_HIGHLIGHT:
+    case TOOL_ERASER: {
         double *p = (double *)app->pts->data;
         guint n = app->pts->len / 2;
         if (n == 0) return;
@@ -307,7 +380,7 @@ static gboolean shape_bbox(app_t *app, int *rx, int *ry, int *rw, int *rh)
 {
     double lw = shape_lw(app);
     double x0 = G_MAXDOUBLE, y0 = G_MAXDOUBLE, x1 = -G_MAXDOUBLE, y1 = -G_MAXDOUBLE;
-    if (app->tool == TOOL_PEN || app->tool == TOOL_HIGHLIGHT) {
+    if (app->tool == TOOL_PEN || app->tool == TOOL_HIGHLIGHT || app->tool == TOOL_ERASER) {
         double *p = (double *)app->pts->data;
         for (guint i = 0; i + 1 < app->pts->len; i += 2) {
             x0 = MIN(x0, p[i]); x1 = MAX(x1, p[i]);
@@ -329,8 +402,15 @@ static void commit_shape(app_t *app)
 {
     int x, y, w, h;
     if (!shape_bbox(app, &x, &y, &w, &h)) return;
-    push_region(app, x, y, w, h);
-    cairo_t *cr = cairo_create(app->img);
+    if (app->tool == TOOL_ERASER && !app->ann) {
+        toast(app, T("The eraser removes what you drew. The photo itself stays.",
+                     "지우개는 그린 것만 지웁니다. 사진은 그대로 둡니다."));
+        return;
+    }
+    if (!ink_ensure(app)) return;
+    push_region(app, TRUE, x, y, w, h);
+    cairo_t *cr = cairo_create(app->ann);
+    if (app->tool == TOOL_ERASER) cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
     paint_shape(app, cr);
     cairo_destroy(cr);
     view_region_changed(app, x, y, w, h);
@@ -341,7 +421,7 @@ static void commit_shape(app_t *app)
 
 static void mosaic(app_t *app, int x, int y, int w, int h, int b)
 {
-    push_region(app, x, y, w, h);
+    push_region(app, FALSE, x, y, w, h);
     cairo_surface_flush(app->img);
     guchar *data = cairo_image_surface_get_data(app->img);
     int st = cairo_image_surface_get_stride(app->img);
@@ -370,6 +450,48 @@ static void mosaic(app_t *app, int x, int y, int w, int h, int b)
     after_edit(app);
 }
 
+/* One row or column of a box blur, `len` pixels `step` apart, averaged
+ * over 2r+1 neighbours with the ends repeated. Averaging premultiplied
+ * pixels is the right thing to do, so no conversion is needed. */
+static void blur_line(guint32 *p, int len, gsize step, int r, guint32 *tmp)
+{
+    for (int i = 0; i < len; i++) tmp[i] = p[i * step];
+    guint32 s[4] = { 0 };
+    guint32 win = 2 * r + 1;
+    for (int k = -r; k <= r; k++) {
+        guint32 v = tmp[CLAMP(k, 0, len - 1)];
+        for (int c = 0; c < 4; c++) s[c] += (v >> (c * 8)) & 255;
+    }
+    for (int i = 0; i < len; i++) {
+        guint32 v = 0;
+        for (int c = 0; c < 4; c++) v |= ((s[c] + win / 2) / win) << (c * 8);
+        p[i * step] = v;
+        guint32 o = tmp[CLAMP(i - r, 0, len - 1)], n = tmp[CLAMP(i + r + 1, 0, len - 1)];
+        for (int c = 0; c < 4; c++) s[c] += ((n >> (c * 8)) & 255) - ((o >> (c * 8)) & 255);
+    }
+}
+
+/* Three box blurs in a row are close enough to a gaussian that nobody
+ * can tell, and each costs the same whatever the radius. */
+static void blur(app_t *app, int x, int y, int w, int h, int r)
+{
+    push_region(app, FALSE, x, y, w, h);
+    cairo_surface_flush(app->img);
+    guchar *data = cairo_image_surface_get_data(app->img);
+    gsize st = cairo_image_surface_get_stride(app->img) / 4;
+    guint32 *base = (guint32 *)data + (gsize)y * st + x;
+    guint32 *tmp = g_new(guint32, MAX(w, h));
+    r = MIN(r, MAX(w, h));
+    for (int pass = 0; pass < 3; pass++) {
+        for (int yy = 0; yy < h; yy++) blur_line(base + (gsize)yy * st, w, 1, r, tmp);
+        for (int xx = 0; xx < w; xx++) blur_line(base + xx, h, st, r, tmp);
+    }
+    g_free(tmp);
+    cairo_surface_mark_dirty_rectangle(app->img, x, y, w, h);
+    view_region_changed(app, x, y, w, h);
+    after_edit(app);
+}
+
 static gboolean rect_of(app_t *app, double ax, double ay, double bx, double by,
                         int *x, int *y, int *w, int *h)
 {
@@ -387,7 +509,7 @@ static gboolean rect_of(app_t *app, double ax, double ay, double bx, double by,
 static PangoLayout *text_layout(app_t *app, cairo_t *cr, const char *text)
 {
     PangoLayout *pl = pango_cairo_create_layout(cr);
-    PangoFontDescription *fd = pango_font_description_from_string("Sans Bold");
+    PangoFontDescription *fd = pango_font_description_from_string(TEXT_FONT);
     pango_font_description_set_absolute_size(fd, TEXT_PX[app->width_idx] / app->text_zoom * PANGO_SCALE);
     pango_layout_set_font_description(pl, fd);
     pango_font_description_free(fd);
@@ -422,10 +544,10 @@ static void text_hide(app_t *app)
 void edit_text_commit(app_t *app, const char *text)
 {
     if (!app->text_active) return;
-    if (!text || !*text) { text_hide(app); return; }
+    if (!text || !*text || !ink_ensure(app)) { text_hide(app); return; }
     char *t = g_strdup(text);
     /* Measure where the ink will land, keep those pixels, then draw. */
-    cairo_t *mcr = cairo_create(app->img);
+    cairo_t *mcr = cairo_create(app->ann);
     PangoLayout *pl = text_layout(app, mcr, t);
     PangoRectangle ink, logical;
     pango_layout_get_pixel_extents(pl, &ink, &logical);
@@ -437,8 +559,8 @@ void edit_text_commit(app_t *app, const char *text)
     double x1 = app->tx + MAX(ink.x + ink.width, logical.x + logical.width) + 4;
     double y1 = top + MAX(ink.y + ink.height, logical.y + logical.height) + 4;
     if (rect_of(app, x0, y0, x1, y1, &x, &y, &w, &h)) {
-        push_region(app, x, y, w, h);
-        cairo_t *cr = cairo_create(app->img);
+        push_region(app, TRUE, x, y, w, h);
+        cairo_t *cr = cairo_create(app->ann);
         text_paint(app, cr, t);
         cairo_destroy(cr);
         view_region_changed(app, x, y, w, h);
@@ -481,10 +603,144 @@ static void on_text_changed(GtkEditable *e, gpointer d) { (void)e; view_queue(d)
 
 /* ── crop ─────────────────────────────────────────────────────────── */
 
+/*
+ * The crop box starts as the whole picture, with handles on its corners
+ * and edges: dragging a handle moves that side, dragging inside moves
+ * the box, dragging outside draws a new one. With a fixed shape chosen
+ * (1:1, 4:3, ...) only whole corners move, from the opposite corner, so
+ * the shape holds; an edge handle then acts as the corner next to it.
+ */
+static double aspect_value(app_t *app, int i)
+{
+    switch (i) {
+    case 1: return (double)app->iw / app->ih;    /* the picture's own */
+    case 2: return 1.0;
+    case 3: return 4.0 / 3.0;
+    case 4: return 16.0 / 9.0;
+    default: return 0;                            /* free */
+    }
+}
+
 static void crop_update_bar(app_t *app)
 {
     gtk_widget_set_visible(app->crop_bar, app->editing && app->tool == TOOL_CROP && !app->adjusting);
-    gtk_widget_set_sensitive(app->crop_apply, app->crop_has);
+    int x, y, w, h;
+    gboolean whole = !app->crop_has ||
+        (rect_of(app, app->cx0, app->cy0, app->cx1, app->cy1, &x, &y, &w, &h)
+         && w == app->iw && h == app->ih);
+    gtk_widget_set_sensitive(app->crop_apply, !whole);
+}
+
+/* The largest box of the chosen shape, in the middle of the picture. */
+static void crop_reset(app_t *app)
+{
+    double r = aspect_value(app, app->crop_aspect);
+    double w = app->iw, h = app->ih;
+    if (r > 0) {
+        if (w / h > r) w = h * r; else h = w / r;
+    }
+    app->cx0 = (app->iw - w) / 2; app->cx1 = app->cx0 + w;
+    app->cy0 = (app->ih - h) / 2; app->cy1 = app->cy0 + h;
+    app->crop_has = app->img != NULL;
+    crop_update_bar(app);
+    view_queue(app);
+}
+
+void edit_set_aspect(app_t *app, int idx)
+{
+    if (idx < 0 || idx >= N_ASPECT) return;
+    app->crop_aspect = idx;
+    syncing_aspect(app);
+    if (app->tool == TOOL_CROP) crop_reset(app);
+}
+
+/* Which handle (or the inside) is under the pointer, in screen pixels:
+ * handles are for fingers too, so they are generous. */
+static int crop_hit(app_t *app, double wx, double wy)
+{
+    const double R = 16;
+    double z = app->zoom;
+    double x0 = app->ox + app->cx0 * z, x1 = app->ox + app->cx1 * z;
+    double y0 = app->oy + app->cy0 * z, y1 = app->oy + app->cy1 * z;
+    gboolean iny = wy > y0 - R && wy < y1 + R, inx = wx > x0 - R && wx < x1 + R;
+    int m = 0;
+    double dl = fabs(wx - x0), dr = fabs(wx - x1), dt = fabs(wy - y0), db = fabs(wy - y1);
+    if (iny && MIN(dl, dr) < R) m |= dl <= dr ? CE_L : CE_R;
+    if (inx && MIN(dt, db) < R) m |= dt <= db ? CE_T : CE_B;
+    if (!m && wx > x0 && wx < x1 && wy > y0 && wy < y1) m = CE_MOVE;
+    return m;
+}
+
+static void crop_press(app_t *app, double wx, double wy, double ix, double iy)
+{
+    int m = app->crop_has ? crop_hit(app, wx, wy) : 0;
+    if (!m) {
+        /* a new box, from here */
+        app->cx0 = app->cx1 = CLAMP(ix, 0, app->iw);
+        app->cy0 = app->cy1 = CLAMP(iy, 0, app->ih);
+        app->crop_has = FALSE;
+        m = CE_R | CE_B;
+    } else if (m != CE_MOVE && aspect_value(app, app->crop_aspect) > 0
+               && !((m & (CE_L | CE_R)) && (m & (CE_T | CE_B)))) {
+        m |= (m & (CE_L | CE_R)) ? CE_B : CE_R;
+    }
+    app->crop_grab = m;
+    if (m == CE_MOVE) {
+        app->ax = ix; app->ay = iy;             /* where the grab began */
+        app->bx = app->cx0; app->by = app->cy0; /* and where the box was */
+    } else {
+        /* the fixed corner, opposite the one being dragged */
+        app->ax = (m & CE_L) ? app->cx1 : app->cx0;
+        app->ay = (m & CE_T) ? app->cy1 : app->cy0;
+    }
+}
+
+static void crop_drag(app_t *app, double ix, double iy)
+{
+    int m = app->crop_grab;
+    double W = app->iw, H = app->ih;
+    if (m == CE_MOVE) {
+        double w = app->cx1 - app->cx0, h = app->cy1 - app->cy0;
+        double x0 = CLAMP(app->bx + ix - app->ax, 0, W - w);
+        double y0 = CLAMP(app->by + iy - app->ay, 0, H - h);
+        app->cx0 = x0; app->cy0 = y0; app->cx1 = x0 + w; app->cy1 = y0 + h;
+        return;
+    }
+    gboolean hx = (m & (CE_L | CE_R)) != 0, hy = (m & (CE_T | CE_B)) != 0;
+    if (hx && hy) {
+        double r = aspect_value(app, app->crop_aspect);
+        double dx = ix - app->ax, dy = iy - app->ay;
+        double sx = dx < 0 ? -1 : 1, sy = dy < 0 ? -1 : 1;
+        double maxw = sx > 0 ? W - app->ax : app->ax, maxh = sy > 0 ? H - app->ay : app->ay;
+        double w = MIN(fabs(dx), maxw), h = MIN(fabs(dy), maxh);
+        if (r > 0) {
+            /* follow whichever way the pointer went further */
+            if (w > h * r) h = w / r; else w = h * r;
+            if (w > maxw) { w = maxw; h = w / r; }
+            if (h > maxh) { h = maxh; w = h * r; }
+        }
+        double x1 = app->ax + sx * w, y1 = app->ay + sy * h;
+        app->cx0 = MIN(app->ax, x1); app->cx1 = MAX(app->ax, x1);
+        app->cy0 = MIN(app->ay, y1); app->cy1 = MAX(app->ay, y1);
+    } else if (hx) {
+        if (m & CE_L) app->cx0 = CLAMP(ix, 0, app->cx1 - 1);
+        else app->cx1 = CLAMP(ix, app->cx0 + 1, W);
+    } else if (hy) {
+        if (m & CE_T) app->cy0 = CLAMP(iy, 0, app->cy1 - 1);
+        else app->cy1 = CLAMP(iy, app->cy0 + 1, H);
+    }
+}
+
+static void crop_release(app_t *app)
+{
+    app->crop_grab = 0;
+    /* A click, not a drag, outside the box: start again from the whole
+     * picture rather than leave a box too small to see. */
+    if ((app->cx1 - app->cx0) * app->zoom < 4 || (app->cy1 - app->cy0) * app->zoom < 4)
+        crop_reset(app);
+    else
+        app->crop_has = TRUE;
+    crop_update_bar(app);
 }
 
 void edit_crop_apply(app_t *app)
@@ -492,19 +748,17 @@ void edit_crop_apply(app_t *app)
     int x, y, w, h;
     if (!app->crop_has || !rect_of(app, app->cx0, app->cy0, app->cx1, app->cy1, &x, &y, &w, &h))
         return;
-    app->crop_has = FALSE;
     if (w == app->iw && h == app->ih) { crop_update_bar(app); view_queue(app); return; }
     app->fit = TRUE;
-    replace_image(app, copy_rect(app->img, x, y, w, h));
-    crop_update_bar(app);
+    replace_image(app, copy_rect(app->img, x, y, w, h), TRUE,
+                  app->ann ? copy_rect(app->ann, x, y, w, h) : NULL);
+    crop_reset(app);
     after_edit(app);
 }
 
 void edit_crop_cancel(app_t *app)
 {
-    app->crop_has = FALSE;
-    crop_update_bar(app);
-    view_queue(app);
+    crop_reset(app);
 }
 
 /* ── adjust ───────────────────────────────────────────────────────── */
@@ -622,6 +876,7 @@ static void adjust_end(app_t *app)
     if (app->adj_prev) cairo_surface_destroy(app->adj_prev);
     app->adj_base = app->adj_prev = NULL;
     gtk_widget_set_visible(app->adj_bar, FALSE);
+    if (app->editing && app->tool == TOOL_CROP) crop_reset(app);
     crop_update_bar(app);
     view_cursor(app);
     edit_update_buttons(app);
@@ -637,7 +892,7 @@ void edit_adjust_apply(app_t *app)
     if (b == 0 && c == 0 && s == 0) return;
     cairo_surface_t *n = copy_rect(app->img, 0, 0, app->iw, app->ih);
     adjust_pixels(n, b, c, s);
-    replace_image(app, n);
+    replace_image(app, n, FALSE, NULL);
     after_edit(app);
 }
 
@@ -652,26 +907,40 @@ static void b_adj_reset(GtkButton *b, gpointer d)
 
 /* ── resize ───────────────────────────────────────────────────────── */
 
-void edit_resize(app_t *app, int w, int h)
+static cairo_surface_t *scale_surface(cairo_surface_t *src, int w, int h)
 {
-    if (!app->img || w < 1 || h < 1 || (w == app->iw && h == app->ih)) return;
+    int sw = cairo_image_surface_get_width(src), sh = cairo_image_surface_get_height(src);
     cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
     if (cairo_surface_status(s) != CAIRO_STATUS_SUCCESS) {
         cairo_surface_destroy(s);
-        toast(app, T("That size is too large.", "너무 큰 크기입니다."));
-        return;
+        return NULL;
     }
     cairo_t *cr = cairo_create(s);
-    cairo_scale(cr, (double)w / app->iw, (double)h / app->ih);
-    cairo_set_source_surface(cr, app->img, 0, 0);
+    cairo_scale(cr, (double)w / sw, (double)h / sh);
+    cairo_set_source_surface(cr, src, 0, 0);
     cairo_pattern_set_filter(cairo_get_source(cr),
-                             w < app->iw ? CAIRO_FILTER_GOOD : CAIRO_FILTER_BILINEAR);
+                             w < sw ? CAIRO_FILTER_GOOD : CAIRO_FILTER_BILINEAR);
     cairo_pattern_set_extend(cairo_get_source(cr), CAIRO_EXTEND_PAD);
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_paint(cr);
     cairo_destroy(cr);
+    return s;
+}
+
+void edit_resize(app_t *app, int w, int h)
+{
+    if (!app->img || w < 1 || h < 1 || (w == app->iw && h == app->ih)) return;
+    cairo_surface_t *s = scale_surface(app->img, w, h);
+    cairo_surface_t *a = app->ann ? scale_surface(app->ann, w, h) : NULL;
+    if (!s || (app->ann && !a)) {
+        if (s) cairo_surface_destroy(s);
+        if (a) cairo_surface_destroy(a);
+        toast(app, T("That size is too large.", "너무 큰 크기입니다."));
+        return;
+    }
     app->fit = TRUE;
-    replace_image(app, s);
+    replace_image(app, s, TRUE, a);
+    if (app->tool == TOOL_CROP) crop_reset(app);
     after_edit(app);
 }
 
@@ -791,7 +1060,7 @@ gboolean edit_save_to(app_t *app, const char *path, GError **err)
         return FALSE;
     }
     gboolean alpha = strcmp(type, "jpeg") && strcmp(type, "bmp");
-    GdkPixbuf *pb = surface_to_pixbuf(app->img, alpha);
+    GdkPixbuf *pb = surface_to_pixbuf(app->img, app->ann, alpha);
     if (!pb) {
         g_set_error(err, G_IO_ERROR, G_IO_ERROR_NO_SPACE, "out of memory");
         return FALSE;
@@ -800,8 +1069,10 @@ gboolean edit_save_to(app_t *app, const char *path, GError **err)
      * full, card pulled) must not leave half a photo where a whole one
      * was. */
     char *tmp = g_strdup_printf("%s.lp-photos-%d", path, (int)getpid());
+    char q[8];
+    g_snprintf(q, sizeof q, "%d", app->jpeg_quality > 0 ? CLAMP(app->jpeg_quality, 10, 100) : 92);
     gboolean ok = !strcmp(type, "jpeg")
-        ? gdk_pixbuf_save(pb, tmp, type, err, "quality", "92", NULL)
+        ? gdk_pixbuf_save(pb, tmp, type, err, "quality", q, NULL)
         : gdk_pixbuf_save(pb, tmp, type, err, NULL);
     g_object_unref(pb);
     if (ok) {
@@ -871,14 +1142,26 @@ static void save_as_response(GtkNativeDialog *nd, int resp, gpointer d)
         GFile *f = gtk_file_chooser_get_file(GTK_FILE_CHOOSER(nd));
         if (f) { path = g_file_get_path(f); g_object_unref(f); }
     }
+    /* The format box decides the type and the name follows it: typing
+     * "photo.png" and choosing JPEG saves photo.jpg, not a PNG with the
+     * wrong name. An extension the box does not offer (.webp, .bmp) is
+     * taken as meant. */
+    const char *fmt = gtk_file_chooser_get_choice(GTK_FILE_CHOOSER(nd), "type");
+    const char *qs = gtk_file_chooser_get_choice(GTK_FILE_CHOOSER(nd), "quality");
+    gboolean jpeg = !g_strcmp0(fmt, "jpeg");
+    if (qs) app->jpeg_quality = atoi(qs);
+    if (path) {
+        const char *t = type_for_path(path);
+        if (!t || !strcmp(t, "png") || !strcmp(t, "jpeg")) {
+            char *dot = strrchr(path, '.'), *slash = strrchr(path, '/');
+            if (t && dot && (!slash || dot > slash)) *dot = 0;
+            char *p2 = g_strconcat(path, jpeg ? ".jpg" : ".png", NULL);
+            g_free(path);
+            path = p2;
+        }
+    }
     g_object_unref(nd);
     if (!path) { cont_drop(app); return; }
-    const char *dot = strrchr(path, '.'), *slash = strrchr(path, '/');
-    if (!dot || (slash && dot < slash)) {
-        char *p2 = g_strconcat(path, ".png", NULL);   /* no extension: PNG loses nothing */
-        g_free(path);
-        path = p2;
-    }
     GError *e = NULL;
     if (edit_save_to(app, path, &e)) {
         app->usaved = app->upos;
@@ -913,6 +1196,20 @@ void edit_save_as(app_t *app)
     if (dot) *dot = 0;
     char *name = g_strdup_printf("%s-%s%s", base, T("edited", "편집"), ext);
     gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(nd), name);
+    const char *tids[] = { "png", "jpeg", NULL };
+    const char *tlab[] = { T("PNG — exact, larger", "PNG — 손실 없음, 큰 파일"),
+                           T("JPEG — photos, smaller", "JPEG — 사진용, 작은 파일"), NULL };
+    gtk_file_chooser_add_choice(GTK_FILE_CHOOSER(nd), "type", T("Format", "형식"), tids, tlab);
+    gtk_file_chooser_set_choice(GTK_FILE_CHOOSER(nd), "type",
+                                g_str_has_suffix(name, ".png") || !app->path ? "png" : "jpeg");
+    const char *qids[] = { "95", "90", "80", "70", "50", NULL };
+    const char *qlab[] = { T("Best (95)", "최고 (95)"), T("High (90)", "높음 (90)"),
+                           T("Good (80)", "좋음 (80)"), T("Medium (70)", "보통 (70)"),
+                           T("Smallest (50)", "가장 작게 (50)"), NULL };
+    gtk_file_chooser_add_choice(GTK_FILE_CHOOSER(nd), "quality", T("JPEG quality", "JPEG 품질"), qids, qlab);
+    int q = app->jpeg_quality > 0 ? app->jpeg_quality : 90;
+    gtk_file_chooser_set_choice(GTK_FILE_CHOOSER(nd), "quality",
+                                q >= 93 ? "95" : q >= 85 ? "90" : q >= 75 ? "80" : q >= 60 ? "70" : "50");
     g_free(name); g_free(base);
     g_signal_connect(nd, "response", G_CALLBACK(save_as_response), app);
     gtk_native_dialog_show(GTK_NATIVE_DIALOG(nd));
@@ -1007,6 +1304,7 @@ void edit_press(app_t *app, double wx, double wy)
     switch (app->tool) {
     case TOOL_PEN:
     case TOOL_HIGHLIGHT:
+    case TOOL_ERASER:
         g_array_set_size(app->pts, 0);
         g_array_append_val(app->pts, ix);
         g_array_append_val(app->pts, iy);
@@ -1016,18 +1314,7 @@ void edit_press(app_t *app, double wx, double wy)
         text_begin(app, wx, wy);
         break;
     case TOOL_CROP:
-        if (app->crop_has && ix > MIN(app->cx0, app->cx1) && ix < MAX(app->cx0, app->cx1)
-            && iy > MIN(app->cy0, app->cy1) && iy < MAX(app->cy0, app->cy1)) {
-            /* Pressing inside the box moves it rather than starting over. */
-            app->ax = ix; app->ay = iy;
-            app->bx = -1;      /* marks "moving" */
-            app->by = -1;
-        } else {
-            app->cx0 = app->cx1 = CLAMP(ix, 0, app->iw);
-            app->cy0 = app->cy1 = CLAMP(iy, 0, app->ih);
-            app->crop_has = FALSE;
-            app->bx = 0; app->by = 0;
-        }
+        crop_press(app, wx, wy, ix, iy);
         app->stroking = TRUE;
         break;
     default:
@@ -1046,7 +1333,8 @@ void edit_motion(app_t *app, double wx, double wy)
     view_w2i(app, wx, wy, &ix, &iy);
     switch (app->tool) {
     case TOOL_PEN:
-    case TOOL_HIGHLIGHT: {
+    case TOOL_HIGHLIGHT:
+    case TOOL_ERASER: {
         double *p = (double *)app->pts->data;
         guint n = app->pts->len;
         if (hypot(ix - p[n - 2], iy - p[n - 1]) * app->zoom < 1.0) return;
@@ -1055,18 +1343,7 @@ void edit_motion(app_t *app, double wx, double wy)
         break;
     }
     case TOOL_CROP:
-        if (app->bx == -1 && app->by == -1) {
-            double dx = ix - app->ax, dy = iy - app->ay;
-            double x0 = MIN(app->cx0, app->cx1), y0 = MIN(app->cy0, app->cy1);
-            double w = fabs(app->cx1 - app->cx0), h = fabs(app->cy1 - app->cy0);
-            x0 = CLAMP(x0 + dx, 0, app->iw - w);
-            y0 = CLAMP(y0 + dy, 0, app->ih - h);
-            app->cx0 = x0; app->cy0 = y0; app->cx1 = x0 + w; app->cy1 = y0 + h;
-            app->ax = ix; app->ay = iy;
-        } else {
-            app->cx1 = CLAMP(ix, 0, app->iw);
-            app->cy1 = CLAMP(iy, 0, app->ih);
-        }
+        crop_drag(app, ix, iy);
         break;
     default:
         app->bx = ix; app->by = iy;
@@ -1085,22 +1362,26 @@ void edit_release(app_t *app, double wx, double wy)
     switch (app->tool) {
     case TOOL_PEN:
     case TOOL_HIGHLIGHT:
+    case TOOL_ERASER:
         commit_shape(app);
         g_array_set_size(app->pts, 0);
         break;
     case TOOL_LINE: case TOOL_ARROW: case TOOL_RECT: case TOOL_ELLIPSE:
         if (moved >= 3) commit_shape(app);
         break;
-    case TOOL_MOSAIC: {
+    case TOOL_MOSAIC:
+    case TOOL_BLUR: {
         int x, y, w, h;
-        if (moved >= 3 && rect_of(app, app->ax, app->ay, app->bx, app->by, &x, &y, &w, &h))
+        if (moved < 3 || !rect_of(app, app->ax, app->ay, app->bx, app->by, &x, &y, &w, &h))
+            break;
+        if (app->tool == TOOL_MOSAIC)
             mosaic(app, x, y, w, h, MAX(2, (int)lround(MOSAIC_PX[app->width_idx] / app->zoom)));
+        else
+            blur(app, x, y, w, h, MAX(2, (int)lround(BLUR_PX[app->width_idx] / app->zoom)));
         break;
     }
     case TOOL_CROP:
-        app->crop_has = fabs(app->cx1 - app->cx0) * app->zoom >= 4 &&
-                        fabs(app->cy1 - app->cy0) * app->zoom >= 4;
-        crop_update_bar(app);
+        crop_release(app);
         break;
     default:
         break;
@@ -1113,14 +1394,28 @@ void edit_release(app_t *app, double wx, double wy)
 void edit_draw_overlay(app_t *app, cairo_t *cr)
 {
     double z = app->zoom;
-    if (app->stroking && app->tool >= TOOL_PEN && app->tool <= TOOL_ELLIPSE) {
+    if (app->stroking && app->tool == TOOL_ERASER && app->ann) {
+        /* The photo, drawn along the stroke: what will be left once the
+         * ink there is gone. */
+        cairo_save(cr);
+        cairo_translate(cr, app->ox, app->oy);
+        cairo_scale(cr, z, z);
+        if (app->has_alpha) cairo_set_source_rgb(cr, 0.7, 0.7, 0.7);
+        else {
+            cairo_set_source_surface(cr, app->img, 0, 0);
+            cairo_pattern_set_filter(cairo_get_source(cr), z < 1 ? CAIRO_FILTER_FAST : CAIRO_FILTER_BILINEAR);
+        }
+        paint_shape(app, cr);
+        cairo_restore(cr);
+    } else if (app->stroking && app->tool >= TOOL_PEN && app->tool <= TOOL_ELLIPSE
+               && app->tool != TOOL_ERASER) {
         cairo_save(cr);
         cairo_translate(cr, app->ox, app->oy);
         cairo_scale(cr, z, z);
         paint_shape(app, cr);
         cairo_restore(cr);
     }
-    if (app->stroking && app->tool == TOOL_MOSAIC) {
+    if (app->stroking && (app->tool == TOOL_MOSAIC || app->tool == TOOL_BLUR)) {
         double x = app->ox + MIN(app->ax, app->bx) * z, y = app->oy + MIN(app->ay, app->by) * z;
         double w = fabs(app->bx - app->ax) * z, h = fabs(app->by - app->ay) * z;
         cairo_rectangle(cr, x + 0.5, y + 0.5, w, h);
@@ -1155,6 +1450,7 @@ void edit_draw_overlay(app_t *app, cairo_t *cr)
         cairo_rectangle(cr, x, y, w, h);
         cairo_stroke(cr);
         cairo_set_line_width(cr, 4);
+        cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
         double k = MIN(18, MIN(w, h) / 3);
         double cx[4] = { x, x + w, x, x + w }, cy[4] = { y, y, y + h, y + h };
         for (int i = 0; i < 4; i++) {
@@ -1163,7 +1459,32 @@ void edit_draw_overlay(app_t *app, cairo_t *cr)
             cairo_line_to(cr, cx[i], cy[i]);
             cairo_line_to(cr, cx[i], cy[i] + sy * k);
         }
+        /* edge handles, where a side alone can be moved */
+        if (aspect_value(app, app->crop_aspect) <= 0 && w > 3 * k && h > 3 * k) {
+            cairo_move_to(cr, x + w / 2 - k / 2, y); cairo_line_to(cr, x + w / 2 + k / 2, y);
+            cairo_move_to(cr, x + w / 2 - k / 2, y + h); cairo_line_to(cr, x + w / 2 + k / 2, y + h);
+            cairo_move_to(cr, x, y + h / 2 - k / 2); cairo_line_to(cr, x, y + h / 2 + k / 2);
+            cairo_move_to(cr, x + w, y + h / 2 - k / 2); cairo_line_to(cr, x + w, y + h / 2 + k / 2);
+        }
         cairo_stroke(cr);
+        cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+        /* the size it will be, in picture pixels */
+        int px, py, pw, ph;
+        if (rect_of(app, app->cx0, app->cy0, app->cx1, app->cy1, &px, &py, &pw, &ph)) {
+            char buf[48];
+            g_snprintf(buf, sizeof buf, "%d × %d", pw, ph);
+            PangoLayout *pl = gtk_widget_create_pango_layout(app->canvas, buf);
+            int lw, lh;
+            pango_layout_get_pixel_size(pl, &lw, &lh);
+            double tx = x + w / 2 - lw / 2.0, ty = y + 10;
+            cairo_set_source_rgba(cr, 0, 0, 0, 0.6);
+            cairo_rectangle(cr, tx - 8, ty - 3, lw + 16, lh + 6);
+            cairo_fill(cr);
+            cairo_set_source_rgb(cr, 1, 1, 1);
+            cairo_move_to(cr, tx, ty);
+            pango_cairo_show_layout(cr, pl);
+            g_object_unref(pl);
+        }
     }
     if (app->text_active) {
         const char *t = gtk_editable_get_text(GTK_EDITABLE(app->text_entry));
@@ -1230,6 +1551,17 @@ static void icon_draw(GtkDrawingArea *da, cairo_t *cr, int w, int h, gpointer d)
         cairo_line_to(cr, 17, 5); cairo_line_to(cr, 11, 11); cairo_close_path(cr);
         cairo_stroke(cr);
         break;
+    case TOOL_ERASER:  /* a block eraser, tilted, over a rubbed-out line */
+        cairo_save(cr);
+        cairo_translate(cr, 10.5, 8.5);
+        cairo_rotate(cr, -G_PI / 4);
+        cairo_rectangle(cr, -7, -3.5, 14, 7);
+        cairo_stroke(cr);
+        cairo_rectangle(cr, -7, -3.5, 5, 7);
+        cairo_fill(cr);
+        cairo_restore(cr);
+        cairo_move_to(cr, 8, 18); cairo_line_to(cr, 18, 18); cairo_stroke(cr);
+        break;
     case TOOL_LINE:
         cairo_move_to(cr, 3, 17); cairo_line_to(cr, 17, 3); cairo_stroke(cr);
         break;
@@ -1259,6 +1591,19 @@ static void icon_draw(GtkDrawingArea *da, cairo_t *cr, int w, int h, gpointer d)
                 cairo_rectangle(cr, 2 + x * 4, 2 + y * 4, 4, 4);
                 cairo_fill(cr);
             }
+        break;
+    case TOOL_BLUR:    /* a drop, fading out */
+        cairo_move_to(cr, 10, 2);
+        cairo_curve_to(cr, 13, 6, 16, 9.5, 16, 12.5);
+        cairo_arc(cr, 10, 12.5, 6, 0, G_PI);
+        cairo_curve_to(cr, 4, 9.5, 7, 6, 10, 2);
+        cairo_close_path(cr);
+        cairo_stroke(cr);
+        for (int i = 0; i < 3; i++) {
+            cairo_set_source_rgba(cr, fg.red, fg.green, fg.blue, 0.8 - i * 0.25);
+            cairo_arc(cr, 7.5 + i * 2.5, 13.5 - (i % 2) * 2, 1.1, 0, 2 * G_PI);
+            cairo_fill(cr);
+        }
         break;
     case TOOL_CROP:
         cairo_move_to(cr, 5, 1); cairo_line_to(cr, 5, 15); cairo_line_to(cr, 19, 15);
@@ -1327,12 +1672,14 @@ static const char *tool_tip(tool_t t)
     case TOOL_MOVE: return T("Move around (drag to pan)", "이동 (끌어서 화면 옮기기)");
     case TOOL_PEN: return T("Pen", "펜");
     case TOOL_HIGHLIGHT: return T("Highlighter", "형광펜");
+    case TOOL_ERASER: return T("Eraser — rubs out drawing, not the photo", "지우개 — 그린 것만 지웁니다");
     case TOOL_LINE: return T("Line", "직선");
     case TOOL_ARROW: return T("Arrow", "화살표");
     case TOOL_RECT: return T("Rectangle", "사각형");
     case TOOL_ELLIPSE: return T("Ellipse", "타원");
     case TOOL_TEXT: return T("Text — click where it should go", "글자 — 넣을 곳을 누르십시오");
     case TOOL_MOSAIC: return T("Mosaic — drag over what to hide", "모자이크 — 가릴 곳을 끌어서 고르십시오");
+    case TOOL_BLUR: return T("Blur — drag over what to hide", "흐리게 — 가릴 곳을 끌어서 고르십시오");
     case TOOL_CROP: return T("Crop", "자르기");
     default: return "";
     }
@@ -1353,9 +1700,11 @@ void edit_set_tool(app_t *app, tool_t t)
     if (t >= N_TOOLS) return;
     if (app->text_active && t != TOOL_TEXT)
         edit_text_commit(app, gtk_editable_get_text(GTK_EDITABLE(app->text_entry)));
-    if (t != TOOL_CROP) app->crop_has = FALSE;
     app->stroking = FALSE;
+    gboolean was_crop = app->tool == TOOL_CROP;
     app->tool = t;
+    if (t != TOOL_CROP) app->crop_has = FALSE;
+    else if (!was_crop || !app->crop_has) crop_reset(app);
     syncing = TRUE;
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->tool_btn[t]), TRUE);
     syncing = FALSE;
@@ -1402,6 +1751,22 @@ static void on_color_set(GtkColorButton *cb, gpointer d)
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->swatch[i]), FALSE);
     syncing = FALSE;
     view_queue(app);
+}
+
+static void syncing_aspect(app_t *app)
+{
+    if (!app->aspect_btn[0]) return;
+    syncing = TRUE;
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->aspect_btn[app->crop_aspect]), TRUE);
+    syncing = FALSE;
+}
+
+static void on_aspect(GtkToggleButton *b, gpointer d)
+{
+    app_t *app = d;
+    if (syncing || !gtk_toggle_button_get_active(b)) return;
+    for (int i = 0; i < N_ASPECT; i++)
+        if (app->aspect_btn[i] == GTK_WIDGET(b)) edit_set_aspect(app, i);
 }
 
 static void on_width(GtkToggleButton *b, gpointer d)
@@ -1622,12 +1987,27 @@ void edit_build_ui(app_t *app)
     gtk_revealer_set_reveal_child(GTK_REVEALER(app->edit_bar), FALSE);
     gtk_revealer_set_transition_duration(GTK_REVEALER(app->edit_bar), 150);
 
-    /* crop bar */
+    /* crop bar: the shape presets, then cancel / crop */
     app->crop_bar = osd_bar();
-    GtkWidget *cl = gtk_label_new(T("Drag to choose the part to keep", "남길 부분을 끌어서 고르십시오"));
+    GtkWidget *cl = gtk_label_new(T("Shape", "비율"));
     gtk_widget_set_margin_start(cl, 10);
-    gtk_widget_set_margin_end(cl, 6);
+    gtk_widget_set_margin_end(cl, 2);
+    gtk_widget_set_tooltip_text(cl, T("Drag the corners or edges; drag inside to move the box",
+                                      "모서리나 변을 끌어 조절하고, 안쪽을 끌어 옮깁니다"));
     gtk_box_append(GTK_BOX(app->crop_bar), cl);
+    const char *asp[N_ASPECT] = { T("Free", "자유"), T("Original", "원본"), "1:1", "4:3", "16:9" };
+    GtkToggleButton *afirst = NULL;
+    for (int i = 0; i < N_ASPECT; i++) {
+        GtkWidget *b = gtk_toggle_button_new_with_label(asp[i]);
+        gtk_widget_set_focus_on_click(b, FALSE);
+        gtk_widget_add_css_class(b, "text-button");
+        if (afirst) gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(b), afirst);
+        else afirst = GTK_TOGGLE_BUTTON(b);
+        g_signal_connect(b, "toggled", G_CALLBACK(on_aspect), app);
+        app->aspect_btn[i] = b;
+        gtk_box_append(GTK_BOX(app->crop_bar), b);
+    }
+    gtk_box_append(GTK_BOX(app->crop_bar), sep());
     GtkWidget *cc = gtk_button_new_with_label(T("Cancel", "취소"));
     g_signal_connect(cc, "clicked", G_CALLBACK(b_crop_cancel), app);
     gtk_box_append(GTK_BOX(app->crop_bar), cc);
@@ -1697,6 +2077,7 @@ void edit_build_ui(app_t *app)
     gtk_overlay_add_overlay(GTK_OVERLAY(app->overlay), app->text_box);
 
     /* initial selections */
+    syncing_aspect(app);
     edit_set_tool(app, app->tool);
     edit_set_color(app, app->swatch_sel >= 0 ? app->swatch_sel : 2);
     edit_set_width(app, app->width_idx);
@@ -1715,6 +2096,7 @@ void edit_enter(app_t *app)
     gtk_widget_set_visible(app->hb_view_end, FALSE);
     gtk_widget_set_visible(app->hb_edit_start, TRUE);
     gtk_widget_set_visible(app->hb_edit_end, TRUE);
+    if (app->tool == TOOL_CROP) crop_reset(app);
     crop_update_bar(app);
     edit_update_buttons(app);
     title_update(app);
@@ -1768,7 +2150,8 @@ gboolean edit_key(app_t *app, guint kv, GdkModifierType mods)
         if (app->text_active) text_hide(app);
         else if (app->adjusting) edit_adjust_cancel(app);
         else if (app->stroking) { app->stroking = FALSE; g_array_set_size(app->pts, 0); view_queue(app); }
-        else if (app->crop_has) edit_crop_cancel(app);
+        else if (app->tool == TOOL_CROP && gtk_widget_get_sensitive(app->crop_apply))
+            edit_crop_cancel(app);
         else edit_leave(app);
         return TRUE;
     case GDK_KEY_Return: case GDK_KEY_KP_Enter:

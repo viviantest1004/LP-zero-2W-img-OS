@@ -29,6 +29,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <glib/gstdio.h>
 
 #define SLIDE_MS   3000
 #define HIDE_MS    2500
@@ -79,23 +80,44 @@ cairo_surface_t *pixbuf_to_surface(GdkPixbuf *pb, gboolean *has_alpha)
     return s;
 }
 
-/* The other way, for saving. Without alpha (JPEG) the picture is laid on
- * white, because a transparent corner saved as black surprises people. */
-GdkPixbuf *surface_to_pixbuf(cairo_surface_t *s, gboolean keep_alpha)
+/* Premultiplied "top over bottom" for one pixel. */
+static inline guint32 px_over(guint32 top, guint32 bot)
+{
+    guint ta = top >> 24;
+    if (ta == 255) return top;
+    if (ta == 0) return bot;
+    guint k = 255 - ta;
+    guint32 out = 0;
+    for (int sh = 0; sh < 32; sh += 8) {
+        guint c = ((top >> sh) & 255) + (((bot >> sh) & 255) * k + 127) / 255;
+        out |= (guint32)MIN(c, 255u) << sh;
+    }
+    return out;
+}
+
+/* The other way, for saving and copying, with the ink layer (if any)
+ * laid over the picture on the way - that costs no second full-size
+ * surface. Without alpha (JPEG) the picture is laid on white, because a
+ * transparent corner saved as black surprises people. */
+GdkPixbuf *surface_to_pixbuf(cairo_surface_t *s, cairo_surface_t *ink, gboolean keep_alpha)
 {
     cairo_surface_flush(s);
+    if (ink) cairo_surface_flush(ink);
     int w = cairo_image_surface_get_width(s), h = cairo_image_surface_get_height(s);
     int ss = cairo_image_surface_get_stride(s);
     const guchar *src = cairo_image_surface_get_data(s);
+    const guchar *isrc = ink ? cairo_image_surface_get_data(ink) : NULL;
+    int is = ink ? cairo_image_surface_get_stride(ink) : 0;
     GdkPixbuf *pb = gdk_pixbuf_new(GDK_COLORSPACE_RGB, keep_alpha, 8, w, h);
     if (!pb) return NULL;
     int n = keep_alpha ? 4 : 3, rs = gdk_pixbuf_get_rowstride(pb);
     guchar *dst = gdk_pixbuf_get_pixels(pb);
     for (int y = 0; y < h; y++) {
         const guint32 *p = (const guint32 *)(src + (gsize)y * ss);
+        const guint32 *ip = isrc ? (const guint32 *)(isrc + (gsize)y * is) : NULL;
         guchar *q = dst + (gsize)y * rs;
         for (int x = 0; x < w; x++, q += n) {
-            guint32 v = p[x];
+            guint32 v = ip ? px_over(ip[x], p[x]) : p[x];
             guint a = v >> 24, r = (v >> 16) & 255, g = (v >> 8) & 255, b = v & 255;
             if (keep_alpha) {
                 if (a && a != 255) {
@@ -112,23 +134,95 @@ GdkPixbuf *surface_to_pixbuf(cairo_surface_t *s, gboolean keep_alpha)
     return pb;
 }
 
+/* ── the clipboard ── */
+
+/*
+ * The picture goes to the clipboard as a PNG through wl-copy, the way the
+ * rest of LP copies images (the screenshot tool does the same): wl-copy
+ * stays behind to serve the paste after this window is closed, which a
+ * clipboard owned by GTK does not. Encoding a PNG of a big photo takes a
+ * moment, so it happens in a thread. Without wl-copy (not a Wayland
+ * session) GTK's own clipboard is the fallback.
+ */
+static void clip_encode(GTask *task, gpointer src, gpointer data, GCancellable *c)
+{
+    (void)src; (void)c;
+    gchar *buf = NULL;
+    gsize len = 0;
+    GError *e = NULL;
+    /* Level 1: a clipboard copy is read once, soon; speed over size. */
+    if (gdk_pixbuf_save_to_buffer(data, &buf, &len, "png", &e, "compression", "1", NULL))
+        g_task_return_pointer(task, g_bytes_new_take(buf, len), (GDestroyNotify)g_bytes_unref);
+    else
+        g_task_return_error(task, e);
+}
+
+static void clip_texture(app_t *app, GBytes *png)
+{
+    GdkTexture *tex = gdk_texture_new_from_bytes(png, NULL);
+    if (tex) {
+        gdk_clipboard_set_texture(gtk_widget_get_clipboard(app->win), tex);
+        g_object_unref(tex);
+    }
+}
+
+static void clip_sent(GObject *o, GAsyncResult *res, gpointer d)
+{
+    app_t *app = d;
+    GError *e = NULL;
+    gboolean ok = g_subprocess_communicate_finish(G_SUBPROCESS(o), res, NULL, NULL, &e)
+                  && g_subprocess_get_if_exited(G_SUBPROCESS(o))
+                  && g_subprocess_get_exit_status(G_SUBPROCESS(o)) == 0;
+    GBytes *png = g_object_get_data(o, "png");
+    if (!ok && png) clip_texture(app, png);
+    g_clear_error(&e);
+    toast(app, T("Copied to the clipboard", "클립보드에 복사했습니다"));
+    if (app->st_cmds) g_print("selftest: copied (%s)\n", ok ? "wl-copy" : "gtk");
+    g_object_unref(o);
+}
+
+static void clip_encoded(GObject *src, GAsyncResult *res, gpointer d)
+{
+    (void)src;
+    app_t *app = d;
+    GError *e = NULL;
+    GBytes *png = g_task_propagate_pointer(G_TASK(res), &e);
+    if (!png) {
+        char *m = g_strdup_printf(T("Could not copy: %s", "복사하지 못했습니다: %s"), e->message);
+        toast(app, m);
+        g_free(m);
+        g_error_free(e);
+        return;
+    }
+    char *wl = g_find_program_in_path("wl-copy");
+    GSubprocess *p = wl && g_getenv("WAYLAND_DISPLAY")
+        ? g_subprocess_new(G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_SILENCE
+                           | G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL,
+                           wl, "--type", "image/png", NULL)
+        : NULL;
+    g_free(wl);
+    if (p) {
+        g_object_set_data_full(G_OBJECT(p), "png", g_bytes_ref(png), (GDestroyNotify)g_bytes_unref);
+        g_subprocess_communicate_async(p, png, NULL, clip_sent, app);
+    } else {
+        clip_texture(app, png);
+        toast(app, T("Copied to the clipboard", "클립보드에 복사했습니다"));
+        if (app->st_cmds) g_print("selftest: copied (gtk)\n");
+    }
+    g_bytes_unref(png);
+}
+
 void surface_to_clipboard(app_t *app)
 {
     if (!app->img) return;
-    cairo_surface_flush(app->img);
-    int h = cairo_image_surface_get_height(app->img);
-    int st = cairo_image_surface_get_stride(app->img);
-    /* GDK_MEMORY_DEFAULT is defined as exactly cairo's ARGB32 layout, so
-     * the bytes go across unchanged. The copy is needed: the clipboard
-     * outlives edits to the picture. */
-    GBytes *bytes = g_bytes_new(cairo_image_surface_get_data(app->img),
-                                (gsize)st * h);
-    GdkTexture *tex = gdk_memory_texture_new(app->iw, app->ih,
-                                             GDK_MEMORY_DEFAULT, bytes, st);
-    gdk_clipboard_set_texture(gtk_widget_get_clipboard(app->win), tex);
-    g_object_unref(tex);
-    g_bytes_unref(bytes);
-    toast(app, T("Copied to the clipboard", "클립보드에 복사했습니다"));
+    /* The pixels are taken now, on this thread: the picture may be drawn
+     * on again while the PNG is being made. */
+    GdkPixbuf *pb = surface_to_pixbuf(app->img, app->ann, TRUE);
+    if (!pb) return;
+    GTask *task = g_task_new(NULL, NULL, clip_encoded, app);
+    g_task_set_task_data(task, pb, g_object_unref);
+    g_task_run_in_thread(task, clip_encode);
+    g_object_unref(task);
 }
 
 /* ── the folder ───────────────────────────────────────────────────── */
@@ -236,7 +330,18 @@ void title_update(app_t *app)
         sub = g_strdup(edit_dirty(app) ? T("Editing · not saved", "편집 중 · 저장 안 함")
                                        : T("Editing", "편집 중"));
     } else if (app->path && app->files && app->files->len > 0) {
-        sub = g_strdup_printf("%d / %u", app->index + 1, app->files->len);
+        /* What people check first about a photo - how big it is - stays
+         * in sight without opening the details panel. */
+        GString *g = g_string_new(NULL);
+        g_string_append_printf(g, "%d / %u", app->index + 1, app->files->len);
+        if (app->img && !app->loading)
+            g_string_append_printf(g, "  ·  %d × %d", app->iw, app->ih);
+        if (app->file_size > 0 && !app->loading) {
+            char *sz = g_format_size(app->file_size);
+            g_string_append_printf(g, "  ·  %s", sz);
+            g_free(sz);
+        }
+        sub = g_string_free(g, FALSE);
     }
     gtk_label_set_text(GTK_LABEL(app->subtitle), sub ? sub : "");
     gtk_widget_set_visible(app->subtitle, sub != NULL);
@@ -424,6 +529,8 @@ static void cache_build(app_t *app)
     cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+    paint_ink(app, cr, CAIRO_FILTER_GOOD);
     cairo_destroy(cr);
     app->cache_zoom = app->zoom;
     if (app->st_cmds) g_print("cache %dx%d built in %.0f ms\n", w, h, (g_get_monotonic_time() - t0) / 1e3);
@@ -466,9 +573,20 @@ void view_region_changed(app_t *app, double x, double y, double w, double h)
         cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
         cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
         cairo_paint(cr);
+        cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+        paint_ink(app, cr, CAIRO_FILTER_GOOD);
         cairo_destroy(cr);
     }
     view_queue(app);
+}
+
+/* The ink layer, in picture coordinates, over whatever `cr` has. */
+void paint_ink(app_t *app, cairo_t *cr, cairo_filter_t f)
+{
+    if (!app->ann) return;
+    cairo_set_source_surface(cr, app->ann, 0, 0);
+    cairo_pattern_set_filter(cairo_get_source(cr), f);
+    cairo_paint(cr);
 }
 
 /* ── the canvas ───────────────────────────────────────────────────── */
@@ -546,6 +664,12 @@ static void draw_fn(GtkDrawingArea *da, cairo_t *cr, int w, int h, gpointer d)
                          : CAIRO_FILTER_BILINEAR;
         cairo_pattern_set_filter(cairo_get_source(cr), f);
         cairo_paint(cr);
+        if (app->ann) {
+            /* ink is always full size; undo the preview's scale for it */
+            cairo_scale(cr, 1 / k * z, 1 / k * z);
+            paint_ink(app, cr, z >= 2.0 ? CAIRO_FILTER_NEAREST
+                               : z < 1.0 ? CAIRO_FILTER_FAST : CAIRO_FILTER_BILINEAR);
+        }
         cairo_restore(cr);
     }
 
@@ -644,13 +768,36 @@ static void on_click(GtkGestureClick *g, int n, double x, double y, gpointer d)
 
 static double ptr_x, ptr_y;
 
+/* Two fingers on a touchpad or screen: the picture follows the pinch,
+ * centred between the fingers. */
+static void pinch_begin(GtkGesture *g, GdkEventSequence *seq, gpointer d)
+{
+    (void)g; (void)seq;
+    app_t *app = d;
+    app->pinch_zoom0 = app->zoom;
+}
+
+static void pinch_scale(GtkGestureZoom *g, double scale, gpointer d)
+{
+    app_t *app = d;
+    double cx, cy;
+    if (!app->img || app->pinch_zoom0 <= 0) return;
+    if (!gtk_gesture_get_bounding_box_center(GTK_GESTURE(g), &cx, &cy)) {
+        cx = cw(app) / 2.0; cy = ch(app) / 2.0;
+    }
+    zoom_at(app, app->pinch_zoom0 * scale, cx, cy);
+}
+
 static gboolean on_scroll(GtkEventControllerScroll *c, double dx, double dy, gpointer d)
 {
     app_t *app = d;
     if (!app->img) return FALSE;
     GdkModifierType m = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(c));
     gboolean wheel = gtk_event_controller_scroll_get_unit(c) == GDK_SCROLL_UNIT_WHEEL;
-    if (m & GDK_CONTROL_MASK) {
+    /* A mouse wheel zooms, at the pointer - in a picture viewer that is
+     * what a wheel is for. Two fingers on a touchpad pan (they have the
+     * pinch to zoom), unless Ctrl is held. Shift+wheel pans sideways. */
+    if ((m & GDK_CONTROL_MASK) || (wheel && !(m & GDK_SHIFT_MASK) && dy != 0)) {
         double f = wheel ? pow(ZOOM_STEP, -dy) : pow(1.01, -dy);
         zoom_at(app, app->zoom * f, ptr_x, ptr_y);
         return TRUE;
@@ -687,6 +834,8 @@ typedef struct {
     cairo_surface_t *surf;
     gboolean alpha;
     char *fmt_name, *fmt_desc, *err;
+    gint64 size;
+    double ms;
 } load_t;
 
 static void load_free(gpointer p)
@@ -704,6 +853,9 @@ static void load_thread(GTask *task, gpointer src, gpointer data, GCancellable *
 {
     (void)src; (void)c;
     load_t *L = data;
+    gint64 t0 = g_get_monotonic_time();
+    GStatBuf st;
+    if (g_stat(L->path, &st) == 0) L->size = st.st_size;
     GdkPixbufFormat *f = gdk_pixbuf_get_file_info(L->path, NULL, NULL);
     if (f) {
         L->fmt_name = gdk_pixbuf_format_get_name(f);
@@ -736,6 +888,7 @@ static void load_thread(GTask *task, gpointer src, gpointer data, GCancellable *
     if (!L->surf && !L->anim)
         L->err = g_strdup(e ? e->message : "?");
     g_clear_error(&e);
+    L->ms = (g_get_monotonic_time() - t0) / 1e3;
     g_task_return_boolean(task, TRUE);
 }
 
@@ -782,6 +935,7 @@ static void set_image(app_t *app, cairo_surface_t *s, gboolean alpha)
     if (app->img) cairo_surface_destroy(app->img);
     app->img = s;
     app->has_alpha = alpha;
+    ink_drop(app);
     undo_clear(app);
     app->fit = TRUE;
     view_image_changed(app);
@@ -799,6 +953,8 @@ static void load_done(GObject *src, GAsyncResult *res, gpointer d)
 
     g_free(app->fmt_name); app->fmt_name = g_steal_pointer(&L->fmt_name);
     g_free(app->fmt_desc); app->fmt_desc = g_steal_pointer(&L->fmt_desc);
+    app->file_size = L->size;
+    if (app->st_cmds) g_print("selftest: decoded %s in %.0f ms (off the main thread)\n", L->path, L->ms);
 
     if (L->anim) {
         app->anim = g_steal_pointer(&L->anim);
@@ -866,9 +1022,11 @@ static void show_empty(app_t *app)
     anim_stop(app);
     if (app->img) cairo_surface_destroy(app->img);
     app->img = NULL;
+    ink_drop(app);
     cache_drop(app);
     undo_clear(app);
     g_free(app->path); app->path = NULL;
+    app->file_size = 0;
     gtk_stack_set_visible_child_name(GTK_STACK(app->stack), "empty");
     gtk_widget_set_sensitive(app->edit_btn, FALSE);
     gtk_widget_set_sensitive(app->copy_btn, FALSE);
@@ -887,6 +1045,8 @@ void after_save_as(app_t *app, const char *path)
     app->path = keep;
     path = keep;
     files_for(app, path, TRUE);
+    GStatBuf st;
+    if (g_stat(path, &st) == 0) app->file_size = st.st_size;
     GdkPixbufFormat *f = gdk_pixbuf_get_file_info(path, NULL, NULL);
     if (f) {
         g_free(app->fmt_name); app->fmt_name = gdk_pixbuf_format_get_name(f);
@@ -1347,45 +1507,58 @@ static GtkWidget *icon_button(const char *icon, const char *tip, GCallback cb, g
     return b;
 }
 
+/* LP's own colours: the navy of the window theme around the picture
+ * (a neutral that does not tint the photo), and the one warm accent -
+ * LP orange, #f28c28, as in theme/shell.css - for the thing to press. */
 static const char *CSS =
-    ".lp-photos-canvas { background-color: #1b1b1d; }\n"
+    "window.lp-photos, window.lp-photos-dialog {"
+    "  font-family: \"Pretendard Variable\", \"Pretendard\", \"Noto Sans CJK KR\", sans-serif; }\n"
+    ".lp-photos-canvas { background-color: #0e161f; }\n"
     "window.lp-photos-fs .lp-photos-canvas { background-color: #000; }\n"
-    ".lp-photos-empty { background-color: #1b1b1d; color: #e8e8ea; }\n"
-    ".lp-photos-empty .dim-label { color: #a0a0a6; }\n"
+    ".lp-photos-empty { background-color: #0e161f; color: #eaf2f8; }\n"
+    ".lp-photos-empty .dim-label { color: #9fb3c4; }\n"
     ".lp-photos-h1 { font-size: 17pt; font-weight: bold; }\n"
     ".lp-photos-h2 { font-size: 12.5pt; font-weight: bold; }\n"
-    ".lp-photos-empty button { background-color: #3584e4; color: #fff; padding: 8px 26px; border-radius: 999px; }\n"
-    ".lp-photos-empty button:hover { background-color: #4a93ec; }\n"
-    ".lp-photos-osd { background-color: rgba(24,24,27,0.88); color: #f0f0f2;"
+    ".lp-photos-empty button { background-color: #f28c28; color: #1a1206; font-weight: 600;"
+    "  padding: 8px 26px; border-radius: 999px; }\n"
+    ".lp-photos-empty button:hover { background-color: #ffa24a; }\n"
+    ".lp-photos-osd { background-color: rgba(14,18,24,0.88); color: #f1f5f9;"
     "  border-radius: 14px; padding: 4px; border: 1px solid rgba(255,255,255,0.08); }\n"
-    ".lp-photos-osd button { color: #f0f0f2; background: none; border: none; box-shadow: none;"
+    ".lp-photos-osd button { color: #f1f5f9; background: none; border: none; box-shadow: none;"
     "  min-width: 34px; min-height: 34px; border-radius: 10px; padding: 0 6px; }\n"
     ".lp-photos-osd button:hover { background-color: rgba(255,255,255,0.12); }\n"
-    ".lp-photos-osd button:checked { background-color: rgba(255,255,255,0.22); }\n"
-    ".lp-photos-osd button:disabled { color: rgba(240,240,242,0.35); }\n"
-    ".lp-photos-osd label { color: #f0f0f2; }\n"
+    ".lp-photos-osd button:checked { background-color: rgba(242,140,40,0.30); color: #ffb36b; }\n"
+    ".lp-photos-osd button:disabled { color: rgba(241,245,249,0.35); }\n"
+    ".lp-photos-osd label { color: #f1f5f9; }\n"
     ".lp-photos-osd separator { background-color: rgba(255,255,255,0.14); margin: 6px 4px; min-width: 1px; }\n"
     ".lp-photos-osd button.text-button { background-color: rgba(255,255,255,0.10); padding: 0 14px; }\n"
-    ".lp-photos-osd button.suggested-action { background-color: #3584e4; color: #fff; }\n"
-    ".lp-photos-osd button.suggested-action:hover { background-color: #4a93ec; }\n"
-    ".lp-photos-osd button.suggested-action:disabled { background-color: rgba(53,132,228,0.35); color: rgba(255,255,255,0.5); }\n"
+    ".lp-photos-osd button.text-button:checked { background-color: rgba(242,140,40,0.30); color: #ffb36b; }\n"
+    ".lp-photos-osd button.suggested-action, headerbar button.suggested-action,"
+    " .lp-photos-textbox button.suggested-action {"
+    "  background-color: #f28c28; color: #1a1206; font-weight: 600; }\n"
+    ".lp-photos-osd button.suggested-action:hover, headerbar button.suggested-action:hover,"
+    " .lp-photos-textbox button.suggested-action:hover { background-color: #ffa24a; }\n"
+    ".lp-photos-osd button.suggested-action:disabled { background-color: rgba(242,140,40,0.30); color: rgba(255,255,255,0.45); }\n"
     ".lp-photos-osd scale { min-height: 26px; }\n"
     ".lp-photos-osd scale trough { min-height: 4px; border-radius: 2px; background-color: rgba(255,255,255,0.22); }\n"
-    ".lp-photos-osd scale highlight { min-height: 4px; border-radius: 2px; background-color: #3584e4; }\n"
+    ".lp-photos-osd scale highlight { min-height: 4px; border-radius: 2px; background-color: #f28c28; }\n"
     ".lp-photos-osd scale slider { min-width: 16px; min-height: 16px; margin: -6px; border-radius: 8px;"
     "  background-color: #f4f4f6; border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.5); }\n"
+    ".lp-photos-osd scale value { color: #f1f5f9; min-width: 34px; }\n"
     ".lp-photos-dialog button { padding: 6px 16px; background-color: rgba(127,127,127,0.18); }\n"
-    ".lp-photos-dialog button.suggested-action { background-color: #3584e4; color: #fff; }\n"
+    ".lp-photos-dialog button.suggested-action { background-color: #f28c28; color: #1a1206; font-weight: 600; }\n"
     ".lp-photos-dialog button.destructive-action { background-color: #c01c28; color: #fff; }\n"
-    ".lp-photos-toast { background-color: rgba(24,24,27,0.92); color: #fff; border-radius: 10px;"
+    ".lp-photos-toast { background-color: rgba(14,18,24,0.92); color: #fff; border-radius: 10px;"
     "  padding: 8px 16px; margin-top: 14px; }\n"
     ".lp-photos-info { padding: 18px 18px; }\n"
     ".lp-photos-info .lp-photos-key { font-size: smaller; opacity: 0.65; margin-top: 10px; }\n"
     ".lp-photos-editbar { padding: 3px 8px; }\n"
     ".lp-photos-editbar button { min-width: 28px; min-height: 28px; padding: 2px; margin: 0; }\n"
+    ".lp-photos-editbar button:checked { background-color: rgba(242,140,40,0.28); color: #ffb36b; }\n"
     ".lp-photos-editbar button.lp-photos-swatch { min-width: 24px; min-height: 24px; padding: 1px; }\n"
+    ".lp-photos-editbar button.lp-photos-swatch:checked { background-color: rgba(242,140,40,0.55); }\n"
     ".lp-photos-editbar separator { margin: 5px 5px; }\n"
-    ".lp-photos-textbox { background-color: rgba(24,24,27,0.92); border-radius: 10px; padding: 6px; }\n";
+    ".lp-photos-textbox { background-color: rgba(14,18,24,0.92); border-radius: 10px; padding: 6px; }\n";
 
 static GtkWidget *info_panel(app_t *app)
 {
@@ -1584,6 +1757,10 @@ static void build_window(app_t *app)
     GtkGesture *click = gtk_gesture_click_new();
     g_signal_connect(click, "pressed", G_CALLBACK(on_click), app);
     gtk_widget_add_controller(app->canvas, GTK_EVENT_CONTROLLER(click));
+    GtkGesture *pinch = gtk_gesture_zoom_new();
+    g_signal_connect(pinch, "begin", G_CALLBACK(pinch_begin), app);
+    g_signal_connect(pinch, "scale-changed", G_CALLBACK(pinch_scale), app);
+    gtk_widget_add_controller(app->canvas, GTK_EVENT_CONTROLLER(pinch));
     GtkEventController *sc = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
     g_signal_connect(sc, "scroll", G_CALLBACK(on_scroll), app);
     gtk_widget_add_controller(app->canvas, sc);
@@ -1706,6 +1883,48 @@ static void st_press(app_t *app, const char *label)
     g_print("selftest: no button %s\n", label);
 }
 
+static const char *ST_TOOLS[N_TOOLS] = {
+    "move", "pen", "highlight", "eraser", "line", "arrow",
+    "rect", "ellipse", "text", "mosaic", "blur", "crop",
+};
+
+/* A key press as the window's key handler would see it:
+ * "key:z,ctrl,shift" is Ctrl+Shift+Z. */
+static void st_key(app_t *app, char *arg)
+{
+    char **p = g_strsplit(arg, ",", -1);
+    GdkModifierType m = 0;
+    for (int i = 1; p[i]; i++) {
+        if (!strcmp(p[i], "ctrl")) m |= GDK_CONTROL_MASK;
+        if (!strcmp(p[i], "shift")) m |= GDK_SHIFT_MASK;
+    }
+    guint kv = gdk_keyval_from_name(p[0]);
+    if (m & GDK_SHIFT_MASK) kv = gdk_keyval_to_upper(kv);
+    gtk_widget_grab_focus(app->canvas);
+    on_key(NULL, kv, 0, m, app);
+    g_strfreev(p);
+}
+
+/* Accept whatever file chooser is open, as if Save had been pressed. */
+static void st_chooser(app_t *app, char *arg)
+{
+    char **p = g_strsplit(arg, ",", -1);
+    GListModel *tl = gtk_window_get_toplevels();
+    for (guint i = 0; i < g_list_model_get_n_items(tl); i++) {
+        GtkWidget *w = g_list_model_get_item(tl, i);
+        g_object_unref(w);
+        if (w == app->win || !GTK_IS_FILE_CHOOSER(w)) continue;
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+        if (p[1] && *p[1]) gtk_file_chooser_set_choice(GTK_FILE_CHOOSER(w), "type", p[1]);
+        if (p[1] && p[2]) gtk_file_chooser_set_choice(GTK_FILE_CHOOSER(w), "quality", p[2]);
+        gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(w), p[0]);
+        gtk_dialog_response(GTK_DIALOG(w), GTK_RESPONSE_ACCEPT);
+        G_GNUC_END_IGNORE_DEPRECATIONS
+        break;
+    }
+    g_strfreev(p);
+}
+
 static gboolean st_step(gpointer d)
 {
     app_t *app = d;
@@ -1729,7 +1948,29 @@ static gboolean st_step(gpointer d)
     else if (!strcmp(c, "zoom")) zoom_at(app, a[0], cw(app) / 2.0, ch(app) / 2.0);
     else if (!strcmp(c, "fit")) view_fit(app);
     else if (!strcmp(c, "pan")) { app->ox += a[0]; app->oy += a[1]; app->fit = FALSE; view_clamp(app); view_queue(app); }
-    else if (!strcmp(c, "tool")) edit_set_tool(app, (tool_t)a[0]);
+    else if (!strcmp(c, "tool")) {
+        for (int i = 0; arg && i < N_TOOLS; i++)
+            if (!strcmp(arg, ST_TOOLS[i])) edit_set_tool(app, i);
+    }
+    else if (!strcmp(c, "aspect")) edit_set_aspect(app, (int)a[0]);
+    else if (!strcmp(c, "key") && arg) st_key(app, arg);
+    else if (!strcmp(c, "copy")) surface_to_clipboard(app);
+    else if (!strcmp(c, "quality")) app->jpeg_quality = (int)a[0];
+    else if (!strcmp(c, "saveasdlg")) { cont_drop(app); edit_save_as(app); }
+    else if (!strcmp(c, "chooser") && arg) st_chooser(app, arg);
+    else if (!strcmp(c, "open") && arg) open_path(app, arg);
+    else if (!strcmp(c, "opendlg")) open_dialog(app);
+    else if (!strcmp(c, "rgb")) {
+        GdkRGBA rgba = { a[0], a[1], a[2], 1 };
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+        gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(app->color_btn), &rgba);
+        G_GNUC_END_IGNORE_DEPRECATIONS
+        g_signal_emit_by_name(app->color_btn, "color-set");
+    }
+    else if (!strcmp(c, "close")) gtk_window_close(GTK_WINDOW(app->win));
+    else if (!strcmp(c, "wheel")) zoom_at(app, app->zoom * pow(ZOOM_STEP, -a[0]),
+                                          app->ox + a[1] * app->iw * app->zoom,
+                                          app->oy + a[2] * app->ih * app->zoom);
     else if (!strcmp(c, "color")) edit_set_color(app, (int)a[0]);
     else if (!strcmp(c, "width")) edit_set_width(app, (int)a[0]);
     else if (!strcmp(c, "fill")) edit_toggle_fill(app);
@@ -1768,9 +2009,11 @@ static gboolean st_step(gpointer d)
         g_spawn_sync(NULL, (char **)argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, NULL, NULL);
     }
     else if (!strcmp(c, "print"))
-        g_print("selftest: state img=%dx%d zoom=%.4f ox=%.1f oy=%.1f undo=%d/%d dirty=%d editing=%d index=%d/%u path=%s\n",
+        g_print("selftest: state img=%dx%d zoom=%.4f ox=%.1f oy=%.1f undo=%d/%d dirty=%d editing=%d index=%d/%u fs=%d ink=%d crop=%.0f,%.0f,%.0f,%.0f path=%s sub=\"%s\"\n",
                 app->iw, app->ih, app->zoom, app->ox, app->oy, app->upos, app->un,
-                edit_dirty(app), app->editing, app->index, app->files ? app->files->len : 0, app->path);
+                edit_dirty(app), app->editing, app->index, app->files ? app->files->len : 0,
+                app->fullscreen, app->ann != NULL, app->cx0, app->cy0, app->cx1, app->cy1, app->path,
+                gtk_label_get_text(GTK_LABEL(app->subtitle)));
     else if (!strcmp(c, "quit")) { app->editing = FALSE; gtk_window_destroy(GTK_WINDOW(app->win)); return G_SOURCE_REMOVE; }
     else g_print("selftest: unknown command %s\n", c);
 

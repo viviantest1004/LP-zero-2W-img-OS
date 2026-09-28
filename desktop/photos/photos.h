@@ -10,6 +10,12 @@
  * Why one surface and not a viewer copy plus an editor copy: a 20 MP
  * photo is 80 MB as ARGB32 and the machine this is written for has
  * 512 MB. Two of them, plus undo, would not fit.
+ *
+ * The one exception is ink. Pen, highlighter, shapes and text go into a
+ * second, transparent surface of the same size (app->ann) that is laid
+ * over the picture when it is shown, copied or saved - so the eraser can
+ * take ink away and leave the photo under it untouched. It is made on
+ * the first stroke, so just looking at pictures never pays for it.
  */
 
 #ifndef LP_PHOTOS_H
@@ -19,10 +25,15 @@
 #include "lp-i18n.h"
 
 typedef enum {
-    TOOL_MOVE, TOOL_PEN, TOOL_HIGHLIGHT, TOOL_LINE, TOOL_ARROW,
-    TOOL_RECT, TOOL_ELLIPSE, TOOL_TEXT, TOOL_MOSAIC, TOOL_CROP,
+    TOOL_MOVE, TOOL_PEN, TOOL_HIGHLIGHT, TOOL_ERASER, TOOL_LINE, TOOL_ARROW,
+    TOOL_RECT, TOOL_ELLIPSE, TOOL_TEXT, TOOL_MOSAIC, TOOL_BLUR, TOOL_CROP,
     N_TOOLS
 } tool_t;
+
+/* Crop box edges being dragged; a corner is two of them. */
+enum { CE_L = 1, CE_R = 2, CE_T = 4, CE_B = 8, CE_MOVE = 16 };
+
+#define N_ASPECT 5
 
 /* Geometric edits that are their own inverse's partner. They cost no
  * memory in the undo stack: undoing a left turn is a right turn. */
@@ -35,6 +46,9 @@ typedef struct {
     int              x, y;        /* U_REGION: where surf goes back   */
     cairo_surface_t *surf;        /* U_REGION: old pixels; U_FULL: old image */
     xform_t          op;          /* U_XFORM */
+    gboolean         ink;         /* U_REGION: surf belongs to app->ann;
+                                   * U_FULL: ann below is swapped too   */
+    cairo_surface_t *ann;         /* U_FULL with ink: old ink layer (may be NULL) */
 } undo_t;
 
 #define N_SWATCH 8
@@ -71,7 +85,7 @@ struct app {
     GtkWidget *color_btn;
     GtkWidget *width_btn[3];
     GtkWidget *fill_btn;
-    GtkWidget *crop_bar, *crop_apply;
+    GtkWidget *crop_bar, *crop_apply, *aspect_btn[N_ASPECT];
     GtkWidget *adj_bar, *adj_scale_w[3];
     GtkWidget *text_box, *text_entry;
 
@@ -83,7 +97,9 @@ struct app {
 
     /* the picture */
     cairo_surface_t *img;
+    cairo_surface_t *ann;        /* ink layer over img, NULL until drawn on */
     int        iw, ih;
+    gint64     file_size;
     gboolean   has_alpha;
     char      *fmt_name, *fmt_desc;
     GdkPixbufAnimation     *anim;
@@ -118,7 +134,9 @@ struct app {
     double     ax, ay, bx, by;   /* shape / region anchor and end, image coords */
     double     stroke_zoom;      /* zoom when the stroke began: fixes widths */
     gboolean   crop_has;
-    double     cx0, cy0, cx1, cy1;
+    double     cx0, cy0, cx1, cy1;   /* kept with cx0 < cx1, cy0 < cy1 */
+    int        crop_grab;            /* CE_* being dragged */
+    int        crop_aspect;          /* index into the presets, 0 = free */
     gboolean   text_active;
     double     tx, ty, text_zoom;
 
@@ -130,6 +148,9 @@ struct app {
     cairo_surface_t *adj_base, *adj_prev;
     double     adj_scale;
     guint      adj_idle;
+
+    int        jpeg_quality;     /* last one chosen in Save As */
+    double     pinch_zoom0;
 
     /* pending "save / discard / cancel" continuation */
     cont_fn    cont;
@@ -158,7 +179,8 @@ GtkWidget *dialog_add_button(GtkWidget *dlg, const char *label, const char *css,
                              GCallback cb, gpointer data);
 void  surface_to_clipboard(app_t *app);
 cairo_surface_t *pixbuf_to_surface(GdkPixbuf *pb, gboolean *has_alpha);
-GdkPixbuf *surface_to_pixbuf(cairo_surface_t *s, gboolean keep_alpha);
+GdkPixbuf *surface_to_pixbuf(cairo_surface_t *s, cairo_surface_t *ink, gboolean keep_alpha);
+void  paint_ink(app_t *app, cairo_t *cr, cairo_filter_t f);
 
 /* edit.c */
 void  edit_build_ui(app_t *app);
@@ -172,6 +194,8 @@ void  edit_motion(app_t *app, double wx, double wy);
 void  edit_release(app_t *app, double wx, double wy);
 gboolean edit_key(app_t *app, guint key, GdkModifierType mods);
 void  edit_set_tool(app_t *app, tool_t t);
+void  edit_set_aspect(app_t *app, int idx);
+void  ink_drop(app_t *app);
 void  edit_set_color(app_t *app, int swatch);
 void  edit_set_width(app_t *app, int idx);
 void  edit_toggle_fill(app_t *app);
