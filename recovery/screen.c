@@ -59,6 +59,7 @@ static int fb_fd = -1;
 static u32 fb_bpp, fb_line, fb_xoff, fb_yoff;
 static u32 fb_off[3], fb_len[3];
 static u8 *rowbuf;
+static s64 opened_at;                   /* for the repaints below scr_present */
 
 bool scr_open(void)
 {
@@ -102,6 +103,7 @@ bool scr_open(void)
         return false;
     }
     fb_fd = (int)fd;
+    opened_at = lp_monotonic_ms();
     size_t px = (size_t)SW * (size_t)SH;
     cv_bg = (lpui_canvas_t){ malloc(px * 4), SW, SH, SW };
     cv_base = (lpui_canvas_t){ malloc(px * 4), SW, SH, SW };
@@ -136,6 +138,19 @@ static const lpui_canvas_t *settle_c;
 static int sx0, sy0, sx1, sy1;          /* union of rows written, or sx1 == 0 */
 static s64 settle_at;
 
+/* ── The whole screen, again, at the start ──
+ *
+ * In a VM (virtio-gpu, KVM and QEMU alike) the first picture never
+ * reached the screen: the menu came up black, and only what was drawn
+ * after it - the focus moving - showed, as an island in the black.
+ * Writing it twice (the settle above) did not help; something between
+ * the kernel console letting go of the framebuffer and the driver's
+ * first flushes loses it. So for the first twenty seconds the whole
+ * frame is written again now and then. A 1280 x 800 frame is 4 MB. */
+static const int REPAINT_MS[] = { 300, 1000, 2500, 5000, 10000, 20000 };
+#define NREPAINT ((int)(sizeof REPAINT_MS / sizeof REPAINT_MS[0]))
+static int repaint_next;
+
 void scr_present(const lpui_canvas_t *c, int x, int y, int w, int h)
 {
     if (fb_fd < 0 || w <= 0 || h <= 0)
@@ -157,14 +172,26 @@ void scr_present(const lpui_canvas_t *c, int x, int y, int w, int h)
 
 int scr_settle(void)
 {
-    if (!sx1 || !settle_c)
-        return -1;
     s64 now = lp_monotonic_ms();
-    if (now < settle_at)
-        return (int)(settle_at - now);
+    int wait = -1;
+    if (settle_c && repaint_next < NREPAINT) {
+        if (now >= opened_at + REPAINT_MS[repaint_next]) {
+            fb_put(settle_c, 0, 0, SW, SH);
+            while (repaint_next < NREPAINT && now >= opened_at + REPAINT_MS[repaint_next])
+                repaint_next++;
+        }
+        if (repaint_next < NREPAINT)
+            wait = (int)(opened_at + REPAINT_MS[repaint_next] - now);
+    }
+    if (!sx1 || !settle_c)
+        return wait;
+    if (now < settle_at) {
+        int w = (int)(settle_at - now);
+        return (wait < 0 || w < wait) ? w : wait;
+    }
     fb_put(settle_c, sx0, sy0, sx1 - sx0, sy1 - sy0);
     sx1 = 0;
-    return -1;
+    return wait;
 }
 
 static void fb_put(const lpui_canvas_t *c, int x, int y, int w, int h)
