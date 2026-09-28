@@ -292,7 +292,9 @@ log "${ROOT_MB}MiB, $(( NEED_KB / 1024 ))MiB in it"
 # the layout - and everything that finds partitions by it - is already
 # the final one.
 step "recovery partition (ext4, ${REC_LABEL})"
-REC_TREE="${LPZERO_WORK}/recovery-tree"
+# LP_REC_TREE puts it elsewhere - a build host whose work disk has no
+# room for a second copy of the root (the payload) next to the first.
+REC_TREE="${LP_REC_TREE:-${LPZERO_WORK}/recovery-tree}"
 rm -rf "$REC_TREE"
 mkdir -p "$REC_TREE"
 MKREC="${REPO_ROOT}/tools/mkrecovery.sh"
