@@ -24,6 +24,12 @@
  *   region     time zone and computer name.
  *   disks      one large row per disk; the stick we run from and disks
  *              with mounted partitions are shown, greyed, with the reason.
+ *              Under the chosen disk, how LP goes on it: the whole disk
+ *              (erased), one partition, or its free space - the last
+ *              two leave the rest of the disk, Windows say, as it is.
+ *   parts      the partitions of that disk, each with its size, what is
+ *              on it, and whether LP can go there (greyed, with the
+ *              reason, when not). Only when "a partition" was chosen.
  *   confirm    what will be erased, and a tick box before the red button.
  *              No typed confirmation: the person may have no keyboard
  *              yet, and a tick box is as deliberate as typing a name.
@@ -51,6 +57,10 @@
 
 #define EXIT_TRY 10
 
+/* How LP goes on the chosen disk (lp-install install --disk, --partition,
+ * --free-space). */
+enum { MODE_NONE, MODE_WHOLE, MODE_PART, MODE_FREE };
+
 typedef struct {
     GtkApplication *app;
     GtkWidget  *win;
@@ -71,9 +81,18 @@ typedef struct {
     char        disk_size[32];
     int         disk_parts;
     gboolean    disk_inplace;       /* the disk LP runs from, installed where it is */
+    LpJson     *list;               /* `lp-install list --json`, while its rows live */
+    LpJson     *disk_j;             /* the chosen disk's entry in it */
+    int         mode;               /* MODE_* */
+    GtkWidget  *mode_reveal, *mode_box;
+    /* parts */
+    GtkWidget  *part_box, *part_next, *part_group;
+    char        part[64];           /* /dev/nvme0n1p3 */
+    char       *part_en, *part_ko;  /* /dev/nvme0n1p3 (120 GB, ntfs "Data") */
     /* confirm */
     GtkWidget  *confirm_title;
     GtkWidget  *confirm_what, *confirm_warn, *confirm_check, *confirm_go;
+    GtkWidget  *confirm_note;
     /* progress */
     GtkWidget  *step;
     GtkWidget  *percent;
