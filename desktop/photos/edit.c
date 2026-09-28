@@ -532,6 +532,17 @@ static gboolean rect_of(app_t *app, double ax, double ay, double bx, double by,
 static PangoLayout *text_layout(app_t *app, cairo_t *cr, const char *text)
 {
     PangoLayout *pl = pango_cairo_create_layout(cr);
+    /* Text becomes pixels of the picture, not of a screen: no subpixel
+     * colour fringes (they would be saved, and turned with the picture),
+     * and no hinting, so the preview at any zoom and the ink at 100% lay
+     * the glyphs out the same. */
+    cairo_font_options_t *fo = cairo_font_options_create();
+    cairo_font_options_set_antialias(fo, CAIRO_ANTIALIAS_GRAY);
+    cairo_font_options_set_hint_style(fo, CAIRO_HINT_STYLE_NONE);
+    cairo_font_options_set_hint_metrics(fo, CAIRO_HINT_METRICS_OFF);
+    pango_cairo_context_set_font_options(pango_layout_get_context(pl), fo);
+    cairo_font_options_destroy(fo);
+    pango_layout_context_changed(pl);
     PangoFontDescription *fd = pango_font_description_from_string(TEXT_FONT);
     pango_font_description_set_absolute_size(fd, TEXT_PX[app->width_idx] / app->text_zoom * PANGO_SCALE);
     pango_layout_set_font_description(pl, fd);
@@ -1078,31 +1089,18 @@ static const char *type_for_path(const char *path)
     return (t && format_writable(t)) ? t : NULL;
 }
 
-gboolean edit_save_to(app_t *app, const char *path, GError **err)
+/* The part of saving that may run in a thread: it touches nothing but
+ * its arguments. Write next to the original and rename over it: a failed
+ * save (disk full, card pulled) must not leave half a photo where a whole
+ * one was. */
+static gboolean write_pixbuf(GdkPixbuf *pb, const char *path, const char *type, int quality, GError **err)
 {
-    const char *type = type_for_path(path);
-    if (!type) {
-        g_set_error(err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                    "%s", T("This file type cannot be written. Use .png or .jpg.",
-                            "이 형식으로는 저장할 수 없습니다. .png 나 .jpg 를 쓰십시오."));
-        return FALSE;
-    }
-    gboolean alpha = strcmp(type, "jpeg") && strcmp(type, "bmp");
-    GdkPixbuf *pb = surface_to_pixbuf(app->img, app->ann, alpha);
-    if (!pb) {
-        g_set_error(err, G_IO_ERROR, G_IO_ERROR_NO_SPACE, "out of memory");
-        return FALSE;
-    }
-    /* Write next to the original and rename over it: a failed save (disk
-     * full, card pulled) must not leave half a photo where a whole one
-     * was. */
     char *tmp = g_strdup_printf("%s.lp-photos-%d", path, (int)getpid());
     char q[8];
-    g_snprintf(q, sizeof q, "%d", app->jpeg_quality > 0 ? CLAMP(app->jpeg_quality, 10, 100) : 92);
+    g_snprintf(q, sizeof q, "%d", quality > 0 ? CLAMP(quality, 10, 100) : 92);
     gboolean ok = !strcmp(type, "jpeg")
         ? gdk_pixbuf_save(pb, tmp, type, err, "quality", q, NULL)
         : gdk_pixbuf_save(pb, tmp, type, err, NULL);
-    g_object_unref(pb);
     if (ok) {
         GStatBuf st;
         if (g_stat(path, &st) == 0) g_chmod(tmp, st.st_mode & 07777);
@@ -1113,6 +1111,32 @@ gboolean edit_save_to(app_t *app, const char *path, GError **err)
     }
     if (!ok) g_unlink(tmp);
     g_free(tmp);
+    return ok;
+}
+
+/* The part that must run here: the picture as it is now, ink laid on. */
+static GdkPixbuf *save_pixels(app_t *app, const char *path, const char **type, GError **err)
+{
+    *type = type_for_path(path);
+    if (!*type) {
+        g_set_error(err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                    "%s", T("This file type cannot be written. Use .png or .jpg.",
+                            "이 형식으로는 저장할 수 없습니다. .png 나 .jpg 를 쓰십시오."));
+        return NULL;
+    }
+    gboolean alpha = strcmp(*type, "jpeg") && strcmp(*type, "bmp");
+    GdkPixbuf *pb = surface_to_pixbuf(app->img, app->ann, alpha);
+    if (!pb) g_set_error(err, G_IO_ERROR, G_IO_ERROR_NO_SPACE, "out of memory");
+    return pb;
+}
+
+gboolean edit_save_to(app_t *app, const char *path, GError **err)
+{
+    const char *type;
+    GdkPixbuf *pb = save_pixels(app, path, &type, err);
+    if (!pb) return FALSE;
+    gboolean ok = write_pixbuf(pb, path, type, app->jpeg_quality, err);
+    g_object_unref(pb);
     return ok;
 }
 
@@ -1146,20 +1170,95 @@ static void save_error(app_t *app, GError *e)
     g_free(m);
 }
 
-static void save_here(app_t *app)
+/*
+ * Encoding a 20 MP photo as JPEG takes a second or more here, so the
+ * file is written in a thread while the window shows a spinner. The
+ * pixels are taken first, on this thread, so what is saved is what was
+ * on screen when Save was pressed; the window takes no edits until the
+ * file is written, so "saved" still means that state when it lands.
+ */
+typedef struct {
+    app_t *app;
+    GdkPixbuf *pb;
+    char *path;
+    const char *type;
+    int quality;
+    GError *err;
+} save_job_t;
+
+static void save_job_free(gpointer p)
 {
-    GError *e = NULL;
-    if (edit_save_to(app, app->path, &e)) {
+    save_job_t *j = p;
+    g_object_unref(j->pb);
+    g_free(j->path);
+    g_clear_error(&j->err);
+    g_free(j);
+}
+
+static void save_thread(GTask *task, gpointer src, gpointer data, GCancellable *c)
+{
+    (void)src; (void)c;
+    save_job_t *j = data;
+    g_task_return_boolean(task, write_pixbuf(j->pb, j->path, j->type, j->quality, &j->err));
+}
+
+static void saving_set(app_t *app, gboolean on)
+{
+    app->saving = on;
+    gtk_widget_set_sensitive(app->stack, !on);
+    gtk_widget_set_sensitive(app->hb_edit_start, !on);
+    gtk_widget_set_sensitive(app->hb_edit_end, !on);
+    gtk_widget_set_visible(app->spinner, on);
+    if (on) gtk_spinner_start(GTK_SPINNER(app->spinner));
+    else gtk_spinner_stop(GTK_SPINNER(app->spinner));
+}
+
+static void save_done(GObject *src, GAsyncResult *res, gpointer d)
+{
+    (void)src; (void)d;
+    save_job_t *j = g_task_get_task_data(G_TASK(res));
+    app_t *app = j->app;
+    saving_set(app, FALSE);
+    if (g_task_propagate_boolean(G_TASK(res), NULL)) {
         app->usaved = app->upos;
+        after_save_as(app, j->path);       /* name, size and date changed */
         after_edit(app);
-        after_save_as(app, app->path);       /* size and date changed */
         toast(app, T("Saved", "저장했습니다"));
+        if (app->st_cmds) g_print("selftest: saved %s in a thread\n", j->path);
         cont_run(app);
     } else {
-        save_error(app, e);
-        g_clear_error(&e);
+        save_error(app, j->err);
         cont_drop(app);
     }
+}
+
+static void save_start(app_t *app, const char *path)
+{
+    GError *e = NULL;
+    const char *type;
+    GdkPixbuf *pb = app->saving ? NULL : save_pixels(app, path, &type, &e);
+    if (!pb) {
+        if (e) save_error(app, e);
+        g_clear_error(&e);
+        cont_drop(app);
+        return;
+    }
+    save_job_t *j = g_new0(save_job_t, 1);
+    j->app = app;
+    j->pb = pb;
+    j->path = g_strdup(path);
+    j->type = type;
+    j->quality = app->jpeg_quality;
+    saving_set(app, TRUE);
+    GTask *task = g_task_new(NULL, NULL, save_done, NULL);
+    g_task_set_task_data(task, j, save_job_free);
+    g_task_run_in_thread(task, save_thread);
+    g_object_unref(task);
+}
+
+static void save_here(app_t *app)
+{
+    save_start(app, app->path);
 }
 
 static void save_as_response(GtkNativeDialog *nd, int resp, gpointer d)
@@ -1191,18 +1290,7 @@ static void save_as_response(GtkNativeDialog *nd, int resp, gpointer d)
     }
     g_object_unref(nd);
     if (!path) { cont_drop(app); return; }
-    GError *e = NULL;
-    if (edit_save_to(app, path, &e)) {
-        app->usaved = app->upos;
-        after_save_as(app, path);
-        after_edit(app);
-        toast(app, T("Saved", "저장했습니다"));
-        cont_run(app);
-    } else {
-        save_error(app, e);
-        g_clear_error(&e);
-        cont_drop(app);
-    }
+    save_start(app, path);
     g_free(path);
 }
 
@@ -1247,6 +1335,13 @@ void edit_save_as(app_t *app)
         if (i != qi) { qids[k] = QV[i]; qlab[k] = QL[i]; k++; }
     qids[5] = qlab[5] = NULL;
     gtk_file_chooser_add_choice(GTK_FILE_CHOOSER(nd), "quality", T("JPEG quality", "JPEG 품질"), qids, qlab);
+    /* Without a filter GTK's chooser shows an empty "(None)" box next to
+     * the two choices; one filter makes it say what the list holds. */
+    GtkFileFilter *ff = gtk_file_filter_new();
+    gtk_file_filter_set_name(ff, T("Pictures", "사진"));
+    gtk_file_filter_add_pixbuf_formats(ff);
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(nd), ff);
+    g_object_unref(ff);
     g_free(name); g_free(base);
     g_signal_connect(nd, "response", G_CALLBACK(save_as_response), app);
     gtk_native_dialog_show(GTK_NATIVE_DIALOG(nd));

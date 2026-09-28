@@ -1967,6 +1967,8 @@ def print_plan(plan):
         tail = ""
         if r["action"] == "erase" and r.get("name"):
             tail = " -> %s" % r["name"]
+        if r.get("note") == "lp-unstarted":
+            tail = " (the LP here no longer starts)"
         print("  %-8s %-16s %-9s %s%s" % (words.get(r["action"], r["action"]),
                                          r["dev"] or r.get("name", ""), r["size_text"],
                                          r["what"], tail))
@@ -2159,7 +2161,9 @@ def shared_esp_rows(disk, rows, esp_shared):
 
 def install_partition(a, pwhash, info, disks):
     """LP into one partition of a GPT disk, the rest of the disk as it
-    was: --partition /dev/nvme0n1p3."""
+    was: --partition /dev/nvme0n1p3. LP starts from the disk's own EFI
+    partition (\\EFI\\LP\\ on it); a disk that has none gets LP-ESP,
+    512 MiB, in its free space - the one partition this install makes."""
     real = os.path.realpath(a.partition)
     pname = os.path.basename(real)
     disk = part = None
@@ -2173,49 +2177,102 @@ def install_partition(a, pwhash, info, disks):
     if not part["usable"]:
         raise Refused(part["reason"], shared_refusal(part["reason"], part["dev"], disk))
     refuse_secure_boot(info)
+    name, number = disk["name"], part["number"]
+    bs = gpt_geometry(name)[0]
+    # The names the other partitions have: ours is LP-ROOT unless one of
+    # them is called that already (another LP on this disk, whose
+    # recovery system finds its root by that name).
+    taken = {p["partlabel"] for p in disk["parts"] if p["dev"] != part["dev"]}
+    root_name = lp_name("LP-ROOT", taken)
+    esp_name = lp_name("LP-ESP", taken)
+    new_esp = not disk["esp"]
+    # Another LP that starts from this EFI partition today, from another
+    # partition: \EFI\LP\ is one LP's, and after this install it is
+    # this one's. That LP's partition is kept - it just no longer starts.
+    other_lp = disk["esp_lp_dev"] if disk["esp_lp_dev"] != part["dev"] else ""
+
     rows = []
+    esp_at = disk["esp_new"][0] * bs // 512 if new_esp else -1
     for p in disk["parts"]:
+        if 0 <= esp_at < p["start"]:
+            rows.append(plan_new(esp_name, ESP_MIB * 1024 ** 2, "FAT32 · EFI System (LP's own)"))
+            esp_at = -1
         r = {"dev": p["dev"], "size": p["size"], "size_text": p["size_text"],
              "what": part_what(p), "action": "keep"}
         if p["dev"] == part["dev"]:
-            r.update(action="erase", name="LP-ROOT")
+            r.update(action="erase", name=root_name)
+        if p["dev"] == other_lp:
+            r["note"] = "lp-unstarted"
         rows.append(r)
-    plan = make_plan("partition", disk, shared_esp_rows(disk, rows, True), esp_shared=True,
-                     fallback_other=disk["esp_fallback_other"], recovery=False,
-                     partition=part["dev"])
+    if esp_at >= 0:
+        rows.append(plan_new(esp_name, ESP_MIB * 1024 ** 2, "FAT32 · EFI System (LP's own)"))
+    plan = make_plan("partition", disk, shared_esp_rows(disk, rows, not new_esp),
+                     esp_shared=not new_esp,
+                     fallback_other=not new_esp and disk["esp_fallback_other"],
+                     recovery=False, partition=part["dev"], esp=disk["esp"],
+                     esp_lp_dev=other_lp, new_esp_why="none" if new_esp else "")
     if emit_plan(a, plan):
         return
-    ask(a, plan, ["Everything on %s will be erased. The other partitions on %s (%s, %s)"
-                  " are left as they are." % (part_words(part), disk["path"], disk["model"],
-                                              disk["size_text"]),
-                  "LP starts from the disk's EFI partition %s (\\EFI\\LP\\)."
-                  " No recovery partition is made." % disk["esp"]], pname)
+    lines = ["Everything on %s will be erased. The other partitions on %s (%s, %s)"
+             " are left as they are." % (part_words(part), disk["path"], disk["model"],
+                                         disk["size_text"])]
+    if new_esp:
+        lines.append("The disk has no EFI partition: a %d MiB one (%s) is made in its free"
+                     " space to start LP. No recovery partition is made." % (ESP_MIB, esp_name))
+    else:
+        lines.append("LP starts from the disk's EFI partition %s (\\EFI\\LP\\)."
+                     " No recovery partition is made." % disk["esp"])
+    if other_lp:
+        lines.append("The LP on %s starts from that EFI partition now; after this it no"
+                     " longer starts (its partition is kept)." % other_lp)
+    ask(a, plan, lines, pname)
 
     t0 = time.time()
     os.makedirs(WORK, exist_ok=True)
     umount_all(WORK)
-    name, number = disk["name"], part["number"]
-    gpt = gpt_entries(name)
-    esp_no = next(n for n in sorted(gpt) if gpt[n][0] == TYPE_ESP)
+    say("STEP", "partition", "Preparing %s" % part["dev"])
+    progress(1, "partition")
+    before = gpt_entries(name)
+    mine = {number}
+    if new_esp:
+        # 1a. LP-ESP, appended in the free space found for it; every entry
+        # that is there stays as it is (check_others).
+        start = disk["esp_new"][0]
+        cnt = ESP_MIB * 1024 ** 2 // bs
+        run([tool("sfdisk"), "-q", "--append", "--no-reread", "--no-tell-kernel",
+             disk["path"]], input="start=%d, size=%d, type=%s, name=\"%s\"\n"
+                                  % (start, cnt, TYPE_ESP, esp_name))
+        after = gpt_entries(name)
+        check_others(before, after, set())
+        esp_no = next((k for k in after if k not in before and after[k][3] == start), None)
+        if esp_no is None:
+            raise RuntimeError("the new EFI partition is not in the table as it was written")
+        subprocess.run([tool("partx"), "-a", "--nr", str(esp_no), disk["path"]],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not wait_for([part_path(name, esp_no)]):
+            subprocess.run([tool("partx"), "-u", disk["path"]], stderr=subprocess.DEVNULL)
+            if not wait_for([part_path(name, esp_no)], 10):
+                raise RuntimeError("the new EFI partition did not appear")
+        before = after
+        mine.add(esp_no)
+    else:
+        esp_no = next(n for n in sorted(before) if before[n][0] == TYPE_ESP)
 
     # 1. Its entry in the table: the name the layout contract gives LP's
     # root, the Linux type. Both in place, one field each - the other
     # entries, the disk's GUID and this partition's own (its PARTUUID,
     # which the boot is about to name) are not rewritten. The kernel is
     # not asked to re-read a table whose partitions did not move.
-    say("STEP", "partition", "Preparing %s" % part["dev"])
-    progress(1, "partition")
-    before = gpt_entries(name)
-    for opt, value in (("--part-label", "LP-ROOT"), ("--part-type", TYPE_LINUX)):
+    for opt, value in (("--part-label", root_name), ("--part-type", TYPE_LINUX)):
         run([tool("sfdisk"), "-q", "--no-reread", "--no-tell-kernel", opt,
              disk["path"], str(number), value])
     gpt = gpt_entries(name)
-    if (gpt.get(number, ("",))[0] != TYPE_LINUX or gpt[number][2] != "LP-ROOT"
+    if (gpt.get(number, ("",))[0] != TYPE_LINUX or gpt[number][2] != root_name
             or gpt[number][1].lower() != part["partuuid"].lower()):
-        raise RuntimeError("the partition table did not take LP-ROOT's name and type")
-    check_others(before, gpt, {number})
+        raise RuntimeError("the partition table did not take %s's name and type" % root_name)
+    check_others(before, gpt, mine)
     progress(3, "partition")
-    return install_into(a, pwhash, disk, number, esp_no, False, "partition", t0)
+    return install_into(a, pwhash, disk, number, esp_no, new_esp, "partition", t0)
 
 
 def check_others(before, after, mine):
@@ -2247,7 +2304,7 @@ def install_free_space(a, pwhash, info, disks):
                       shared_refusal(disk["shared_reason"], disk["path"], disk))
     if not disk["free"]:
         raise Refused("no-free-space", "%s has no unallocated space of %s or more"
-                      % (disk["path"], human(disk["root_need"] + (0 if disk["esp"] else
+                      % (disk["path"], human(disk["root_need"] + (0 if disk["esp_usable"] else
                                                                   ESP_MIB * 1024 ** 2))))
     region = disk["free"][0]                    # the largest
     bs = gpt_geometry(name)[0]
@@ -2258,8 +2315,8 @@ def install_free_space(a, pwhash, info, disks):
     if size and size < disk["root_need"]:
         raise Refused("too-small", "%s MiB is too small: LP needs at least %s"
                       % (a.size, disk["root_need_text"]))
-    lay = free_layout(n * bs, disk["root_need"], bool(disk["esp"]), size,
-                      recovery=not a.no_recovery)
+    lay = free_layout(n * bs, disk["root_need"], disk["esp_usable"], size,
+                      recovery=not a.no_recovery and not disk["lp_names"])
     if not lay:
         raise Refused("too-big", "%s MiB does not fit: the free space on %s holds %s"
                       % (a.size, disk["path"], region["size_text"]))
@@ -2270,6 +2327,14 @@ def install_free_space(a, pwhash, info, disks):
     esp_n = lay["esp_size"] // bs
     rec_n = lay["recovery_size"] // bs
     root_n = lay["root_size"] // bs // mib * mib
+    # LP's names, unless the disk has them already (lp_name); then there
+    # is no LP-RECOVERY either (free_layout was told so).
+    taken = {p["partlabel"] for p in disk["parts"]}
+    names = {k: lp_name(k, taken) for k in LP_NAMES}
+    # Why LP gets an EFI partition of its own, for the words around the plan.
+    why = ("" if not lay["new_esp"] else "recovery" if lay["recovery"] else
+           "none" if not disk["esp"] else "other-lp" if disk["esp_lp_dev"] else
+           disk["esp_reason"] or "none")
 
     # The plan: the disk's partitions in the order they lie, the new ones
     # where the free space is.
@@ -2277,10 +2342,10 @@ def install_free_space(a, pwhash, info, disks):
     at = start * bs // 512
     new_rows = []
     if esp_n:
-        new_rows.append(plan_new("LP-ESP", esp_n * bs, "FAT32 · EFI System (LP's own)"))
+        new_rows.append(plan_new(names["LP-ESP"], esp_n * bs, "FAT32 · EFI System (LP's own)"))
     if rec_n:
-        new_rows.append(plan_new("LP-RECOVERY", rec_n * bs, "ext4 · LP's recovery system"))
-    new_rows.append(plan_new("LP-ROOT", root_n * bs, "ext4 · LP"))
+        new_rows.append(plan_new(names["LP-RECOVERY"], rec_n * bs, "ext4 · LP's recovery system"))
+    new_rows.append(plan_new(names["LP-ROOT"], root_n * bs, "ext4 · LP"))
     placed = False
     for p in disk["parts"]:
         if not placed and p["start"] > at:
@@ -2295,7 +2360,7 @@ def install_free_space(a, pwhash, info, disks):
                      esp_shared=esp_shared,
                      fallback_other=esp_shared and disk["esp_fallback_other"],
                      recovery=lay["recovery"], esp=disk["esp"] if esp_shared else "",
-                     free=region["size_text"])
+                     free=region["size_text"], new_esp_why=why, disk_esp=disk["esp"])
     if emit_plan(a, plan):
         return
     ask(a, plan, ["New partitions for LP are made in the %s of free space on %s (%s, %s)."
@@ -2317,9 +2382,9 @@ def install_free_space(a, pwhash, info, disks):
     script = ""
     at = start
     starts = {}
-    for key, cnt, typ, pname in (("esp", esp_n, TYPE_ESP, "LP-ESP"),
-                                 ("rec", rec_n, TYPE_LINUX, "LP-RECOVERY"),
-                                 ("root", root_n, TYPE_LINUX, "LP-ROOT")):
+    for key, cnt, typ, pname in (("esp", esp_n, TYPE_ESP, names["LP-ESP"]),
+                                 ("rec", rec_n, TYPE_LINUX, names["LP-RECOVERY"]),
+                                 ("root", root_n, TYPE_LINUX, names["LP-ROOT"])):
         if not cnt:
             continue
         script += "start=%d, size=%d, type=%s, name=\"%s\"\n" % (at, cnt, typ, pname)

@@ -107,6 +107,7 @@ struct app {
     guint      anim_timer;
     guint      load_gen;
     gboolean   loading;
+    gboolean   saving;           /* a Save is being written in a thread */
 
     /* view: widget point = (ox + x*zoom, oy + y*zoom) for image point x,y */
     double     zoom, ox, oy;

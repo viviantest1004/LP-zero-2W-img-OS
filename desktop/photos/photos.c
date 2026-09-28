@@ -1464,6 +1464,7 @@ static gboolean on_key(GtkEventControllerKey *k, guint kv, guint code,
 {
     (void)k; (void)code;
     app_t *app = d;
+    if (app->saving) return TRUE;         /* the window waits for the file */
     /* Typing into the text tool's entry or a spin button is typing, not
      * shortcuts - except Escape, which the entry does not use. */
     GtkWidget *focus = gtk_root_get_focus(GTK_ROOT(app->win));
@@ -1534,6 +1535,10 @@ static gboolean on_close_request(GtkWindow *w, gpointer d)
 {
     (void)w;
     app_t *app = d;
+    if (app->saving) {
+        toast(app, T("Saving…", "저장하는 중…"));
+        return TRUE;
+    }
     if (edit_dirty(app)) {
         ask_unsaved(app, cont_close, NULL, NULL);
         return TRUE;
@@ -2043,7 +2048,7 @@ static gboolean st_step(gpointer d)
 {
     app_t *app = d;
     if (!app->st_cmds[app->st_pos]) return G_SOURCE_REMOVE;
-    if (app->loading) { g_timeout_add(100, st_step, app); return G_SOURCE_REMOVE; }
+    if (app->loading || app->saving) { g_timeout_add(100, st_step, app); return G_SOURCE_REMOVE; }
     char *c = app->st_cmds[app->st_pos++];
     g_print("selftest %.2f: %s\n", g_get_monotonic_time() / 1e6, c);
     double a[4] = {0};
