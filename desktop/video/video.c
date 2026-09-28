@@ -1211,6 +1211,15 @@ static gboolean player_init(void)
     };
     for (size_t i = 0; i < G_N_ELEMENTS(opts); i++)
         M.set_option_string(A.mpv, opts[i][0], opts[i][1]);
+    /* With no sound card at all (a VM given none) PipeWire still takes
+     * the stream and never plays it, and audio-fallback-to-null never
+     * fires: playback sat at 0:00 on its first frame. Then there is
+     * nothing to hear, so the audio goes nowhere and the video plays. */
+    gchar *cards = NULL;
+    if (g_file_get_contents("/proc/asound/cards", &cards, NULL, NULL) &&
+        strstr(cards, "no soundcards"))
+        M.set_option_string(A.mpv, "ao", "null");
+    g_free(cards);
     if (g_getenv("LP_VIDEO_DEBUG")) {
         M.set_option_string(A.mpv, "terminal", "yes");
         M.set_option_string(A.mpv, "msg-level", "all=v");
@@ -1498,6 +1507,16 @@ static void set_video_widget_sw(void)
 static gboolean gl_usable(void)
 {
     if (g_getenv("LP_VIDEO_SW")) return FALSE;
+    /* A session that draws GTK with cairo (session-run sets it in every
+     * virtual machine, and under sway): a GtkGLArea there realizes, but
+     * what mpv draws into it never reached the window - the video area
+     * stayed black in a VM with virgl. The software path shows it. */
+    const char *gsk = g_getenv("GSK_RENDERER");
+    if (gsk && !strcmp(gsk, "cairo")) {
+        if (g_getenv("LP_VIDEO_DEBUG"))
+            g_printerr("lp-video: GSK_RENDERER=cairo, software rendering\n");
+        return FALSE;
+    }
     GError *err = NULL;
     GdkGLContext *c = gdk_display_create_gl_context(gdk_display_get_default(),
                                                     &err);
