@@ -220,9 +220,10 @@ static gboolean is_virtual(const out_t *o)
  * what the 15 seconds of "Keep these settings?" are there for.
  *
  * So the list gets the usual sizes of the display's own shape up to its
- * largest, and the usual rates for every size: all of them on a virtual
- * screen, which shows any rate, and on a real one only up to the fastest
- * rate it lists itself - no panel is made faster by asking. */
+ * largest, and the usual rates for every size up to the fastest rate the
+ * display lists itself - no panel is made faster by asking. That holds
+ * for a virtual screen too: it used to be offered every rate to 240 Hz,
+ * which the monitor behind the VM window may well not show. */
 static const int COMMON_HZ[] = { 24, 25, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240 };
 static const int SIZES_16_9[][2]  = { {5120, 2880}, {3840, 2160}, {3200, 1800}, {2560, 1440},
                                       {1920, 1080}, {1600, 900}, {1366, 768}, {1280, 720} };
@@ -280,7 +281,6 @@ static void add_custom_modes(out_t *o)
     int big_w = g_array_index(o->modes, mode_t_, big).w;
     int big_h = g_array_index(o->modes, mode_t_, big).h;
     if (big_w <= 0 || big_h <= 0) return;
-    if (is_virtual(o)) max_mhz = 240000;
 
     /* Sizes of the same shape, no larger than the display - except on a
      * virtual one, whose "own size" is only the host window's: a VM in a
