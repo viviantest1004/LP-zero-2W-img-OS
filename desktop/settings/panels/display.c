@@ -503,6 +503,7 @@ typedef struct {
     char *old_mode, *old_transform;
     char *new_mode, *new_transform;  /* NULL: that one did not change */
     gboolean old_enabled;
+    char *ini_old;       /* set when the mode went in through wayfire.ini */
     int secs;
     guint timer;
     lp_dialog_t *dlg;
@@ -515,12 +516,20 @@ static void confirm_free(gpointer p)
     if (c->timer) g_source_remove(c->timer);
     hold(c->name, FALSE);
     g_free(c->name); g_free(c->old_mode); g_free(c->old_transform);
-    g_free(c->new_mode); g_free(c->new_transform);
+    g_free(c->new_mode); g_free(c->new_transform); g_free(c->ini_old);
     g_free(c);
 }
 
 static void revert(confirm_t *c)
 {
+    if (c->ini_old) {
+        /* It went in through wayfire.ini (apply_risky says why); the
+         * file's old value puts the old mode back the same way. */
+        char *ini = wayfire_ini();
+        char *sec = g_strdup_printf("output:%s", c->name);
+        ini_set(ini, sec, "mode", c->ini_old);
+        g_free(sec); g_free(ini);
+    }
     if (c->old_enabled) {
         const char *v[] = { "wlr-randr", "--output", c->name, "--on", "--mode", c->old_mode,
                             "--transform", c->old_transform, NULL };
@@ -588,9 +597,10 @@ static void confirm_gone(gpointer p)
 }
 
 static void ask_keep(const out_t *before_o, const char *old_mode, const char *old_tf, gboolean old_en,
-                     const char *new_mode, const char *new_tf)
+                     const char *new_mode, const char *new_tf, const char *ini_old)
 {
     confirm_t *c = g_new0(confirm_t, 1);
+    c->ini_old = g_strdup(ini_old);
     c->name = g_strdup(before_o->name);
     c->old_mode = g_strdup(old_mode);
     c->old_transform = g_strdup(old_tf);
@@ -654,20 +664,43 @@ static void apply_risky(disp_t *d, int new_cur, const char *new_tf_in)
     /* Before the change: a VM window following the new mode is a change
      * event lp-autoscale --watch would answer with the preferred mode. */
     hold(o->name, TRUE);
-    if (randr(v)) {
+    /* wayfire takes a size its display did not list only from its config
+     * file: a custom mode asked for through wlr-output-management
+     * (wlr-randr --custom-mode) is answered "done" and ignored - 2560 x
+     * 1440 in a VM showed the keep-it question over an unchanged screen.
+     * Written to [output:NAME] mode, it is applied when wayfire re-reads
+     * the file, a moment later. A listed mode still goes through wlr-randr. */
+    char *ini_old = NULL;
+    gboolean ok;
+    if (under_wayfire() && nm->custom) {
+        char *ini = wayfire_ini();
+        char *sec = g_strdup_printf("output:%s", o->name);
+        ini_old = ini_get(ini, sec, "mode");
+        if (!ini_old) ini_old = g_strdup("auto");
+        char *wm = g_strdup_printf("%dx%d@%d", nm->w, nm->h, nm->mhz);
+        ok = ini_set(ini, sec, "mode", wm);
+        if (ok && strcmp(new_tf, o->transform) != 0) {
+            const char *tv[] = { "wlr-randr", "--output", o->name, "--transform", new_tf, NULL };
+            randr(tv);
+        }
+        g_free(wm); g_free(sec); g_free(ini);
+    } else {
+        ok = randr(v);
+    }
+    if (ok) {
         gboolean mode_changed = new_cur != o->cur, tf_changed = strcmp(new_tf, o->transform) != 0;
         g_array_index(o->modes, mode_t_, o->cur).current = FALSE;
         o->cur = new_cur;
         g_array_index(o->modes, mode_t_, o->cur).current = TRUE;
         g_free(o->transform);
         o->transform = g_strdup(new_tf);
-        ask_keep(o, old_mode, old_tf, TRUE, mode_changed ? mode : NULL, tf_changed ? new_tf : NULL);
+        ask_keep(o, old_mode, old_tf, TRUE, mode_changed ? mode : NULL, tf_changed ? new_tf : NULL, ini_old);
         if (d->arrange) gtk_widget_queue_draw(d->arrange);
     } else {
         hold(o->name, FALSE);
         rebuild_controls(d);
     }
-    g_free(mode); g_free(old_mode); g_free(old_tf); g_free(new_tf);
+    g_free(mode); g_free(old_mode); g_free(old_tf); g_free(new_tf); g_free(ini_old);
 }
 
 static void auto_done(int st, const char *out, const char *err, gpointer p)
