@@ -814,7 +814,10 @@ mkdir -p "$ROOT/etc/xdg"
     echo 'inode/directory=lp-files.desktop'
     for t in application/pdf application/x-pdf application/postscript image/tiff; do echo "$t=org.gnome.Evince.desktop"; done
     for t in text/plain text/markdown text/x-log text/csv application/x-shellscript text/x-csrc text/x-chdr text/x-python application/json application/xml; do echo "$t=org.gnome.gedit.desktop"; done
-    for t in image/png image/jpeg image/gif image/webp image/bmp image/svg+xml image/x-icon image/heif image/avif; do echo "$t=org.gnome.eog.desktop"; done
+    # Photos open in LP Photos (desktop/photos), which also edits them;
+    # the formats it does not read stay with Eye of GNOME.
+    for t in image/png image/jpeg image/gif image/webp image/bmp; do echo "$t=lp-photos.desktop"; done
+    for t in image/svg+xml image/x-icon image/heif image/avif; do echo "$t=org.gnome.eog.desktop"; done
     # Videos open in LP Videos (desktop/video), which also trims and
     # converts them; music stays in Celluloid, which keeps a playlist.
     for t in video/mp4 video/x-matroska video/webm video/quicktime video/x-msvideo video/mpeg video/ogg video/3gpp; do echo "$t=lp-video.desktop"; done
