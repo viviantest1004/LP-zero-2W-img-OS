@@ -805,6 +805,13 @@ static void out_add(const char *s, u32 col)
 static void on_fsck_line(const char *s, void *ctx)
 {
     (void)ctx;
+    /* fsck.fat looks for iconv's codepage modules, which recovery does
+     * not carry, says so in two lines, and uses its own CP850 table -
+     * the same answer. Those two lines read like a failure; they are not
+     * shown. */
+    if (!strncmp(s, "Cannot initialize conversion from ", 34) ||
+        !strncmp(s, "Using internal CP850 conversion table", 37))
+        return;
     out_add(s, LPUI_INK2);
 }
 
