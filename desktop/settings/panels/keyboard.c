@@ -565,6 +565,7 @@ static const shortcut_t SHORTCUTS[] = {
     { "command",    "binding_shot", "Screenshot", "스크린샷", "KEY_SYSRQ" },
     { "command",    "binding_shot_area", "Screenshot of an area", "영역 스크린샷",
       "<shift> KEY_SYSRQ | <super> <shift> KEY_S" },
+    { "command",    "binding_shot_window", "Screenshot of the window", "창 스크린샷", "<alt> KEY_SYSRQ" },
     { "command",    "binding_shot_app", "Screenshot app", "스크린샷 앱", "<ctrl> <shift> KEY_SYSRQ" },
     { "core",       "close_top_view", "Close the window", "창 닫기", "<super> KEY_Q | <alt> KEY_F4" },
     { "wm-actions", "toggle_maximize", "Maximize or restore the window", "창 최대화 / 복원",
