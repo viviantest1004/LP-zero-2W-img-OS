@@ -103,15 +103,13 @@ else
     export WLR_LIBINPUT_NO_DEVICES=1
 fi
 # The pointer is drawn by the compositor itself (a software cursor) in
-# every virtual machine. LP's wlroots can put it on the virtual GPU's
-# cursor plane instead (WLR_DRM_CURSOR_HOTSPOT=1, desktop/compositor/
-# wlroots-0.15.1-lp.patch), and that was switched on under KVM for a
-# pointer that lagged behind the hand with virgl - but the host then drew
-# the pointer upside down, and the screen flickered while the mouse or a
-# window moved, in KVM as it had in UTM before. So no virtual GPU gets
-# the cursor plane: WLR_NO_HARDWARE_CURSORS keeps the software cursor on
-# every path (atomic or legacy), and real GPUs, where the plane works,
-# keep it. The drivers are the ones virtual_gpu() in lp-autoscale knows.
+# every virtual machine - except sway under KVM (run_sway) - and real
+# GPUs keep their cursor plane. LP's wlroots can put it on the virtual
+# GPU's cursor plane (WLR_DRM_CURSOR_HOTSPOT=1, desktop/compositor/
+# wlroots-0.15.1-lp.patch); drawn by wayfire with OpenGL the host showed
+# it upside down, and under UTM the host's pointer followed it and fed
+# back into the guest's. The drivers are the ones virtual_gpu() in
+# lp-autoscale knows.
 for lp_drv in /sys/class/drm/card*/device/driver ; do
     case $(basename "$(readlink -f "$lp_drv")") in
         virtio_gpu|virtio-pci|virtio_pci|qxl|bochs-drm|bochs|cirrus|cirrus-qemu|vmwgfx|vboxvideo)
@@ -191,20 +189,32 @@ run_sway() {
     export WLR_RENDERER_ALLOW_SOFTWARE=1
     export LIBGL_ALWAYS_SOFTWARE=1
     export GSK_RENDERER=cairo
-    # Two buffers, not one, under KVM with 3D (virgl). LP's wlroots draws
-    # a virtual GPU's screen into the buffer being shown, so only the
-    # damage is uploaded (desktop/compositor/wlroots-0.15.1-lp.patch) -
-    # right for a host that shows a copy (QEMU's own window, UTM), but
-    # virt-manager's SPICE with OpenGL hands the client the very texture
-    # being written, and the screen flickered wherever the mouse or a
-    # window moved. At KVM's CPU speed a whole-frame upload per flip costs
-    # nothing; under UTM's emulation it is what made the pointer lag, so
-    # there the single buffer stays.
-    case $(sed -n 2p /run/lp-session/compositor 2> /dev/null) in
-        *virgl*)
-            grep -qs kvm-clock /sys/devices/system/clocksource/clocksource0/available_clocksource &&
-                export WLR_DRM_SINGLE_BUFFER=0 ;;
-    esac
+    # Under KVM, on virtio-gpu (with 3D or without): the pointer on the
+    # GPU's cursor plane, one buffer for the screen, and one pixel of
+    # damage for a commit where only the pointer moved.
+    #
+    # With the software cursor every motion of the mouse was a new frame
+    # of the whole screen's buffer, and virt-manager's SPICE with OpenGL
+    # showed the screen flickering, with trails where the pointer or a
+    # window moved - whether that frame went out as damage (one buffer)
+    # or whole (two). On the cursor plane the host draws the pointer
+    # itself, as it does for GNOME: moving it sends no frame at all
+    # (desktop/compositor/wlroots-0.15.1-lp.patch, 6.: WLR_DRM_MIN_DAMAGE),
+    # and the screen changes only where a window does. Drawn on the CPU
+    # (pixman), the cursor image reaches the host upright - it was upside
+    # down only when wayfire drew it with OpenGL. UTM keeps the software
+    # cursor: its host moved its own pointer after the plane, which moved
+    # the guest's.
+    if grep -qs kvm-clock /sys/devices/system/clocksource/clocksource0/available_clocksource; then
+        for lp_drv in /sys/class/drm/card*/device/driver ; do
+            case $(basename "$(readlink -f "$lp_drv")") in
+                virtio_gpu|virtio-pci|virtio_pci)
+                    unset WLR_NO_HARDWARE_CURSORS
+                    export WLR_DRM_CURSOR_HOTSPOT=1 WLR_DRM_MIN_DAMAGE=1 ;;
+            esac
+        done
+        unset lp_drv
+    fi
     exec /usr/bin/sway
 }
 

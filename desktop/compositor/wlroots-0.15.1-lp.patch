@@ -69,12 +69,27 @@ Built by build-wlroots.sh; see README-wlroots.md.
    real GPUs and bochs-drm (scanout from VRAM, the flip is free) keep
    double buffering.
 
+6. One pixel of damage for a commit that changed nothing (LP-only,
+   WLR_DRM_MIN_DAMAGE=1). Moving a hardware cursor is an atomic commit
+   that also carries the primary plane with its unchanged FB and no
+   damage, and a plane update without FB_DAMAGE_CLIPS is a full update to
+   the kernel: virtio-gpu uploaded and flushed the whole screen for each
+   pointer motion, so the cursor plane saved nothing. Such a commit now
+   says (0,0)-(1,1), a pixel that is already on the screen. Only asked
+   for on virtual GPUs whose FB stays the same (single buffer, 5.): a
+   commit with a new FB is a full upload there regardless.
+
 ---
 diff --git a/backend/drm/atomic.c b/backend/drm/atomic.c
-index 5348791..02d999f 100644
 --- a/backend/drm/atomic.c
 +++ b/backend/drm/atomic.c
-@@ -103,6 +103,39 @@ static bool create_gamma_lut_blob(struct wlr_drm_backend *drm,
+@@ -1,4 +1,5 @@
+ #include <stdlib.h>
++#include <string.h>
+ #include <wlr/util/log.h>
+ #include <xf86drm.h>
+ #include <xf86drmMode.h>
+@@ -103,6 +104,39 @@
  	return true;
  }
  
@@ -114,10 +129,19 @@ index 5348791..02d999f 100644
  static void commit_blob(struct wlr_drm_backend *drm,
  		uint32_t *current, uint32_t next) {
  	if (*current == next) {
-@@ -163,6 +196,10 @@ error:
+@@ -163,6 +197,19 @@
  	atom->failed = true;
  }
  
++static bool want_min_damage(void) {
++	static int want = -1;
++	if (want < 0) {
++		const char *env = getenv("WLR_DRM_MIN_DAMAGE");
++		want = env != NULL && strcmp(env, "1") == 0;
++	}
++	return want;
++}
++
 +static bool supports_cursor_hotspots(const struct wlr_drm_plane *plane) {
 +	return plane->props.hotspot_x && plane->props.hotspot_y;
 +}
@@ -125,7 +149,7 @@ index 5348791..02d999f 100644
  static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
  		const struct wlr_drm_connector_state *state, uint32_t flags,
  		bool test_only) {
-@@ -201,15 +238,9 @@ static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
+@@ -201,14 +248,24 @@
  
  	uint32_t fb_damage_clips = 0;
  	if ((state->base->committed & WLR_OUTPUT_STATE_DAMAGE) &&
@@ -136,14 +160,27 @@ index 5348791..02d999f 100644
 -			(pixman_region32_t *)&state->base->damage, &rects_len);
 -		if (drmModeCreatePropertyBlob(drm->fd, rects,
 -				sizeof(*rects) * rects_len, &fb_damage_clips) != 0) {
--			wlr_log_errno(WLR_ERROR, "Failed to create FB_DAMAGE_CLIPS property blob");
--		}
 +		create_fb_damage_clips_blob(drm, plane_get_next_fb(crtc->primary),
 +			&state->base->damage, &fb_damage_clips);
++	}
++	// LP: a commit that changes nothing on the primary plane - the cursor
++	// plane moved, nothing else - carries no damage, and no FB_DAMAGE_CLIPS
++	// means "all of it" to the kernel: virtio-gpu then uploads and flushes
++	// the whole screen for every pointer motion. With WLR_DRM_MIN_DAMAGE=1
++	// such a commit says one pixel instead (still drawn, so resending it
++	// changes nothing on the screen).
++	if (fb_damage_clips == 0 && active && want_min_damage() &&
++			crtc->primary->props.fb_damage_clips != 0 &&
++			plane_get_next_fb(crtc->primary) != NULL) {
++		pixman_box32_t one = { .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 1 };
++		if (drmModeCreatePropertyBlob(drm->fd, &one, sizeof(one),
++				&fb_damage_clips) != 0) {
+ 			wlr_log_errno(WLR_ERROR, "Failed to create FB_DAMAGE_CLIPS property blob");
++			fb_damage_clips = 0;
+ 		}
  	}
  
- 	bool prev_vrr_enabled =
-@@ -254,6 +285,15 @@ static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
+@@ -254,6 +311,15 @@
  			if (drm_connector_is_cursor_visible(conn)) {
  				set_plane_props(&atom, drm, crtc->cursor, crtc->id,
  					conn->cursor_x, conn->cursor_y);
@@ -160,7 +197,6 @@ index 5348791..02d999f 100644
  				plane_disable(&atom, crtc->cursor);
  			}
 diff --git a/backend/drm/drm.c b/backend/drm/drm.c
-index 43de54e..2ecb45d 100644
 --- a/backend/drm/drm.c
 +++ b/backend/drm/drm.c
 @@ -31,6 +31,11 @@
@@ -175,7 +211,7 @@ index 43de54e..2ecb45d 100644
  static const uint32_t SUPPORTED_OUTPUT_STATE =
  	WLR_OUTPUT_STATE_BACKEND_OPTIONAL |
  	WLR_OUTPUT_STATE_BUFFER |
-@@ -85,6 +90,18 @@ bool check_drm_features(struct wlr_drm_backend *drm) {
+@@ -85,6 +90,18 @@
  		wlr_log(WLR_DEBUG, "Using atomic DRM interface");
  		drm->iface = &atomic_iface;
  	}
@@ -195,10 +231,9 @@ index 43de54e..2ecb45d 100644
  	int ret = drmGetCap(drm->fd, DRM_CAP_TIMESTAMP_MONOTONIC, &cap);
  	drm->clock = (ret == 0 && cap == 1) ? CLOCK_MONOTONIC : CLOCK_REALTIME;
 diff --git a/backend/drm/properties.c b/backend/drm/properties.c
-index f269659..390679d 100644
 --- a/backend/drm/properties.c
 +++ b/backend/drm/properties.c
-@@ -51,6 +51,8 @@ static const struct prop_info plane_info[] = {
+@@ -51,6 +51,8 @@
  	{ "CRTC_Y", INDEX(crtc_y) },
  	{ "FB_DAMAGE_CLIPS", INDEX(fb_damage_clips) },
  	{ "FB_ID", INDEX(fb_id) },
@@ -208,10 +243,9 @@ index f269659..390679d 100644
  	{ "SRC_H", INDEX(src_h) },
  	{ "SRC_W", INDEX(src_w) },
 diff --git a/include/backend/drm/properties.h b/include/backend/drm/properties.h
-index 10c1ccd..d1f4f46 100644
 --- a/include/backend/drm/properties.h
 +++ b/include/backend/drm/properties.h
-@@ -62,8 +62,10 @@ union wlr_drm_plane_props {
+@@ -62,8 +62,10 @@
  		uint32_t fb_id;
  		uint32_t crtc_id;
  		uint32_t fb_damage_clips;
