@@ -12,9 +12,24 @@
 #             i915/skl_{guc,huc}_*.bin     only with i915.enable_guc=2
 #                                          (below)
 #   ath10k    ath10k/QCA6174/hw3.0/...     Killer 1535 WiFi
-#   brcmfmac  brcm/brcmfmac4350-pcie.bin   Dell DW1830 WiFi (the other
-#                                          card this model was sold with)
+#   brcmfmac  brcm/brcmfmac43602-pcie.bin  Dell DW1830 WiFi (BCM43602, the
+#                                          other card this model was sold
+#                                          with - checked on a real 9550
+#                                          under Ubuntu, which loads this)
+#             brcm/brcmfmac4350-pcie.bin   DW1820A (BCM4350), sold in
+#                                          some later units
 #   btusb     qca/rampatch + nvm           Killer 1535 Bluetooth
+#             brcm/BCM20703A1-0a5c-6410.hcd  DW1830 Bluetooth (BCM20703A1,
+#                                          USB 0a5c:6410); without the
+#                                          patch it runs its ROM firmware
+#                                          and pairs unreliably
+#   microcode intel-ucode/06-5e-03         i7-6700HQ / i5-6300HQ (Skylake
+#                                          H, stepping 3): the BIOS's 0xd6
+#                                          becomes 0xf0 at boot, with the
+#                                          fixes since. Built into the
+#                                          kernel (kernel/build.sh), which
+#                                          is how Linux loads it early
+#                                          without an initrd of its own.
 #
 # plus regulatory.db and its signature, which built-in cfg80211 asks for
 # once at boot and, if it is missing, never again: the radio then stays
@@ -65,11 +80,18 @@
 # not a boot that asks for a file that is not there, stalls on the
 # timeout, and carries on without it. 340KB.
 #
+# Where the files come from:
+#   lf  linux-firmware, one pinned commit
+#   rd  wireless-regdb, one pinned commit
+#   bt  winterheart/broadcom-bt-firmware, one pinned commit: linux-firmware
+#       has no patch for Broadcom's USB Bluetooth chips (Broadcom ships
+#       them through Windows Update only); this repository collects them
+#       from there, and it is where Ubuntu's brcm/BCM-0a5c-6410.hcd is
+#       from too. The kernel asks for BCM20703A1-0a5c-6410.hcd first.
+#   mc  Intel's microcode repository, one pinned release tag's commit
+#
 # Not here, on purpose:
-#   BCM4350 Bluetooth patch (brcm/BCM4350C5-*.hcd)  linux-firmware has
-#                 none - Broadcom only ships it inside Windows drivers.
-#                 The chip runs on its ROM firmware without it.
-#   brcmfmac4350c2-pcie.bin  early BCM4350 revisions (0-7); the DW1830
+#   brcmfmac4350c2-pcie.bin  early BCM4350 revisions (0-7); the DW1820A
 #                 is revision 8 and takes brcmfmac4350-pcie.bin.
 set -euo pipefail
 
@@ -90,6 +112,15 @@ RD_COMMIT="389b9b702cf9018e9a9078ccc4fa8eaae2e054e3"
 RD_URLS=(
     "https://git.kernel.org/pub/scm/linux/kernel/git/wens/wireless-regdb.git/plain/%s?id=${RD_COMMIT}"
 )
+BT_COMMIT="f326999656515a0749258dfefb7cc6731e9933d5"
+BT_URLS=(
+    "https://raw.githubusercontent.com/winterheart/broadcom-bt-firmware/${BT_COMMIT}/%s"
+)
+# microcode-20260925
+MC_COMMIT="bdc92abe5c499c3fd7988b76a128d05c9120a520"
+MC_URLS=(
+    "https://raw.githubusercontent.com/intel/Intel-Linux-Processor-Microcode-Data-Files/${MC_COMMIT}/%s"
+)
 
 # kind  sha256  path-in-out  path-upstream  source
 #   fw   goes into the kernel's initramfs and /lib/firmware
@@ -100,7 +131,10 @@ fw  ccb6e2abf19a88c1ab0fc09f5340a6ff85d52548340031c4e04088d9fc9dc2ce i915/skl_gu
 fw  c7a1dce013050f823471de2cdc5f0170b1acf8c811ca8c8da41e35f526bcb1d7 i915/skl_huc_2.0.0.bin                          i915/skl_huc_2.0.0.bin                          lf
 fw  66e83dde1c9af535df1fcd17c72971a96a263357300e921b358d35a353227d60 ath10k/QCA6174/hw3.0/board-2.bin                ath10k/QCA6174/hw3.0/board-2.bin                lf
 fw  04d3bad5efa3f9fbe3ba53fd3e25fa9b0585ed227eea8111303b4e08861f979d ath10k/QCA6174/hw3.0/firmware-6.bin             ath10k/QCA6174/hw3.0/firmware-6.bin             lf
+fw  bf4cfc23ee952a3d82ef33a0f5f87853201c98f1bed034876a910f354f37862d brcm/brcmfmac43602-pcie.bin                     brcm/brcmfmac43602-pcie.bin                     lf
 fw  5691d1e0ceb70baf18efb7a0ec6cb84feb9edd2d0700c525b42930c4e7e4b845 brcm/brcmfmac4350-pcie.bin                      brcm/brcmfmac4350-pcie.bin                      lf
+fw  e526fd12cd3529b7e01c0076f69189b7e2d9a0124a91e7583c6ddefecdbe0599 brcm/BCM20703A1-0a5c-6410.hcd                   brcm/BCM20703A1-0a5c-6410.hcd                   bt
+fw  15e96637a89012390e2c254effad092fc9535912b709ffa316069fc5606efb65 intel-ucode/06-5e-03                            intel-ucode/06-5e-03                            mc
 fw  f0d15f6d7c4ce17270c951287222699c0909bea9028ecb84d2e8be6fa364691e qca/rampatch_usb_00000302.bin                   qca/rampatch_usb_00000302.bin                   lf
 fw  9ee2cff5bd51523b65c941b72ecf05a8b5e7b9e280c79fa08c70ade7205088a5 qca/nvm_usb_00000302.bin                        qca/nvm_usb_00000302.bin                        lf
 fw  7e236caecd939c8ec98be4870bf30422f28ffef2565a38aaaa2d9ddabd0c2641 regulatory.db                                   regulatory.db                                   rd
@@ -111,6 +145,8 @@ doc 337a55102138d7baa143ee4a4c6c91693e0113fece35d380b2a12109e8c23b3f LICENSES/LI
 doc 600276e0992c8e5a85300d605fb2db6132ffcf2a21ddcfd0e8566a19e0f491c3 LICENSES/NOTICE.qca                             LICENSES/NOTICE.qca                             lf
 doc b16056fc91b82a0e3e8de8f86c2dac98201aa9dc3cbd33e8d38f1b087fcec30d LICENSES/LICENCE.broadcom_bcm43xx               LICENSES/LICENCE.broadcom_bcm43xx               lf
 doc 678b0df753c86198fc496d1f1033429bbd57f101472132ee7eaaf9f5e0a7fae1 LICENSES/LICENSE.wireless-regdb                 LICENSE                                         rd
+doc a12e372fee6d54196c189d85b8a7b52221042c8585c048def2b32ee7294f95b9 LICENSES/LICENSE.broadcom_bcm20702             LICENSE.broadcom_bcm20702                       bt
+doc 03efb1491c7e899feb2665fa299363e64035e5444c1b8bc1f6ebed30de964e12 LICENSES/LICENSE.intel-ucode                    license                                         mc
 "
 
 die() { printf 'fetch-pc-fw: %s\n' "$*" >&2; exit 1; }
@@ -159,7 +195,7 @@ STAGE="$(mktemp -d "${OUT%/*}/.pc-fw.stage.XXXXXX" 2>/dev/null)" || {
 }
 trap 'rm -rf "$STAGE"' EXIT
 
-echo "fetch-pc-fw: linux-firmware ${LF_COMMIT:0:12}, wireless-regdb ${RD_COMMIT:0:12}"
+echo "fetch-pc-fw: linux-firmware ${LF_COMMIT:0:12}, wireless-regdb ${RD_COMMIT:0:12}, broadcom-bt ${BT_COMMIT:0:12}, microcode ${MC_COMMIT:0:12}"
 FAILED=0
 while read -r kind sum path up src; do
     dst="${STAGE}/${path}"
@@ -171,7 +207,13 @@ while read -r kind sum path up src; do
         printf '  have  %s\n' "$path"
         continue
     fi
-    if [[ "$src" == lf ]]; then urls=("${LF_URLS[@]}"); else urls=("${RD_URLS[@]}"); fi
+    case $src in
+        lf) urls=("${LF_URLS[@]}") ;;
+        rd) urls=("${RD_URLS[@]}") ;;
+        bt) urls=("${BT_URLS[@]}") ;;
+        mc) urls=("${MC_URLS[@]}") ;;
+        *)  die "unknown source ${src} for ${path}" ;;
+    esac
     got=false
     for fmt in "${urls[@]}"; do
         # shellcheck disable=SC2059

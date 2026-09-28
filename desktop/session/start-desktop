@@ -14,12 +14,25 @@ mkdir -p /run/user/1000
 chown 1000:1000 /run/user/1000
 chmod 700 /run/user/1000
 mkdir -p /data/log
-chmod 0666 /dev/dri/card0 /dev/dri/renderD128 2>/dev/null
+# The devices go to uid 1000 - owner, read and write - and to their own
+# groups, never to everybody. They were once opened 0666: any account,
+# any daemon on the machine could then read every key typed, passwords
+# included. udev does the same for anything plugged in later
+# (/etc/udev/rules.d/71-lp-seat.rules); this covers what was there
+# before udev's rules existed, and an image made before them.
+seat_dev() {
+    for d in "$@"; do
+        test -c "$d" || continue
+        chown 1000 "$d" 2>/dev/null
+        chmod 0660 "$d" 2>/dev/null
+    done
+}
+seat_dev /dev/dri/card* /dev/dri/renderD*
 # Every event node, not the first six: the XPS has more input devices
 # than that (keyboard, touchpad, touchscreen, pen, lid, buttons, the
 # video bus), and the touchscreen was often past event5 - lp-osk could
 # then not see that the last touch came from a finger, and never showed.
-chmod 0666 /dev/input/event* 2>/dev/null
+seat_dev /dev/input/event*
 # The virtual terminals are also given to uid 1000, not only opened to
 # everyone: libseat's built-in backend opens /dev/tty1 for its VT, and a
 # mode alone does not hold. init puts a root shell on tty1 at about the
@@ -30,7 +43,7 @@ chmod 0666 /dev/input/event* 2>/dev/null
 # an installed machine came up at a root prompt instead of the desktop.
 # `mesg` never touches the owner's bits, so owning the node survives it.
 chown 1000 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
-chmod 0666 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
+chmod 0620 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
 
 # The keyboard of the VT under the session is switched off here, and
 # the VT put in graphics mode - the two things libseat's built-in
@@ -72,10 +85,11 @@ vt_keyboard off
 # sink 가 하나도 없는 채로 남는다 - 퀵메뉴에는 "소리 장치가 없습니다"
 # 라고 나오고, 소리 장치는 멀쩡히 있다.
 #
-# 그룹에 넣는 대신 노드를 여는 이유는, 여기에 logind 가 없어서
-# 그룹 소속이 세션마다 갱신되지 않기 때문이다. 이 파일이 하는 다른
-# 일들과 같다: 원래 logind 가 할 일을 한 번에 해 둔다.
-chmod 0666 /dev/snd/* 2>/dev/null
+# 그룹에만 기대지 않고 노드의 주인을 uid 1000 으로 하는 이유는,
+# 여기에 logind 가 없어서 그룹 소속이 세션마다 갱신되지 않기
+# 때문이다. 모두에게 여는 것(0666)은 하지 않는다 - 다른 계정이 마이크를
+# 열 수 있게 된다.
+seat_dev /dev/snd/*
 
 # Which compositor: wayfire where there is 3D graphics, sway where
 # there is not.

@@ -87,7 +87,9 @@
 #include <stdlib.h>
 #include <math.h>
 
-typedef struct { int w, h, mhz; gboolean preferred, current; } mode_t_;
+/* custom: not a mode the display listed, but one it can be given
+ * (wlr-randr --custom-mode) - see add_custom_modes. */
+typedef struct { int w, h, mhz; gboolean preferred, current, custom; } mode_t_;
 
 typedef struct {
     char    *name, *desc;
@@ -172,7 +174,7 @@ static GPtrArray *parse_randr(const char *text)
         double hz;
         if (in_modes && sscanf(t, "%dx%d px, %lf Hz", &w, &h, &hz) == 3) {
             mode_t_ m = { w, h, (int)lround(hz * 1000.0), strstr(t, "preferred") != NULL,
-                          strstr(t, "current") != NULL };
+                          strstr(t, "current") != NULL, FALSE };
             g_array_append_val(o->modes, m);
             if (m.current) o->cur = o->modes->len - 1;
         } else {
@@ -197,6 +199,118 @@ static gboolean is_internal(const out_t *o)
 {
     return g_str_has_prefix(o->name, "eDP") || g_str_has_prefix(o->name, "LVDS") ||
            g_str_has_prefix(o->name, "DSI");
+}
+
+/* A virtual machine's screen (virtio-gpu calls its outputs Virtual-N,
+ * QEMU's other cards the same or "Unknown"). */
+static gboolean is_virtual(const out_t *o)
+{
+    return g_str_has_prefix(o->name, "Virtual") ||
+           (o->desc && strstr(o->desc, "Virtual") != NULL);
+}
+
+/* ── the modes a display did not list ────────────────────────────────
+ *
+ * A display lists what its EDID says, and a virtual one lists little:
+ * UTM's gave one refresh rate per size and sizes of a shape the host
+ * window did not have (16:10 on a 16:9 screen, with black bars), and no
+ * 2560 × 1440. Any size and rate can still be asked for with a custom
+ * mode, which the compositor builds (CVT timings) and the card either
+ * takes or refuses - and a refusal, or a monitor that shows nothing, is
+ * what the 15 seconds of "Keep these settings?" are there for.
+ *
+ * So the list gets the usual sizes of the display's own shape up to its
+ * largest, and the usual rates for every size: all of them on a virtual
+ * screen, which shows any rate, and on a real one only up to the fastest
+ * rate it lists itself - no panel is made faster by asking. */
+static const int COMMON_HZ[] = { 24, 25, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240 };
+static const int SIZES_16_9[][2]  = { {5120, 2880}, {3840, 2160}, {3200, 1800}, {2560, 1440},
+                                      {1920, 1080}, {1600, 900}, {1366, 768}, {1280, 720} };
+static const int SIZES_16_10[][2] = { {3840, 2400}, {2880, 1800}, {2560, 1600}, {1920, 1200},
+                                      {1680, 1050}, {1440, 900}, {1280, 800} };
+static const int SIZES_4_3[][2]   = { {2048, 1536}, {1600, 1200}, {1400, 1050}, {1024, 768} };
+static const int SIZES_3_2[][2]   = { {3000, 2000}, {2256, 1504}, {1920, 1280}, {1500, 1000} };
+
+static gboolean has_mode(const out_t *o, int w, int h, int mhz)
+{
+    for (guint k = 0; k < o->modes->len; k++) {
+        const mode_t_ *m = &g_array_index(o->modes, mode_t_, k);
+        if (m->w == w && m->h == h && (mhz < 0 || abs(m->mhz - mhz) < 500))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static void add_custom(out_t *o, int w, int h, int mhz)
+{
+    mode_t_ m = { w, h, mhz, FALSE, FALSE, TRUE };
+    g_array_append_val(o->modes, m);
+}
+
+static void add_custom_modes(out_t *o)
+{
+    if (!o->modes->len) return;
+    /* The display's own size: its preferred mode, else its largest. */
+    int big = -1, max_mhz = 0;
+    for (guint k = 0; k < o->modes->len; k++) {
+        const mode_t_ *m = &g_array_index(o->modes, mode_t_, k);
+        if (m->mhz > max_mhz) max_mhz = m->mhz;
+        if (m->preferred && big < 0) big = k;
+    }
+    if (big < 0)
+        big = 0;
+    if (!g_array_index(o->modes, mode_t_, big).preferred)
+        for (guint k = 0; k < o->modes->len; k++) {
+            const mode_t_ *m = &g_array_index(o->modes, mode_t_, k);
+            const mode_t_ *b = &g_array_index(o->modes, mode_t_, big);
+            if ((gint64)m->w * m->h > (gint64)b->w * b->h) big = k;
+        }
+    int big_w = g_array_index(o->modes, mode_t_, big).w;
+    int big_h = g_array_index(o->modes, mode_t_, big).h;
+    if (big_w <= 0 || big_h <= 0) return;
+    if (is_virtual(o)) max_mhz = 240000;
+
+    /* Sizes of the same shape, no larger than the display. */
+    double r = (double)big_w / big_h;
+    const int (*tab)[2] = NULL;
+    size_t n = 0;
+    if (fabs(r - 16.0 / 9) < 0.03)       { tab = SIZES_16_9;  n = G_N_ELEMENTS(SIZES_16_9); }
+    else if (fabs(r - 16.0 / 10) < 0.03) { tab = SIZES_16_10; n = G_N_ELEMENTS(SIZES_16_10); }
+    else if (fabs(r - 4.0 / 3) < 0.03)   { tab = SIZES_4_3;   n = G_N_ELEMENTS(SIZES_4_3); }
+    else if (fabs(r - 3.0 / 2) < 0.03)   { tab = SIZES_3_2;   n = G_N_ELEMENTS(SIZES_3_2); }
+    for (size_t i = 0; i < n; i++)
+        if (tab[i][0] <= big_w && tab[i][1] <= big_h && !has_mode(o, tab[i][0], tab[i][1], -1))
+            add_custom(o, tab[i][0], tab[i][1], 60000);
+
+    /* Rates, for every size now in the list. */
+    guint listed = o->modes->len;
+    for (guint k = 0; k < listed; k++) {
+        const mode_t_ m = g_array_index(o->modes, mode_t_, k);
+        gboolean first = TRUE;           /* one pass per size */
+        for (guint j = 0; j < k && first; j++) {
+            const mode_t_ *e = &g_array_index(o->modes, mode_t_, j);
+            if (e->w == m.w && e->h == m.h) first = FALSE;
+        }
+        if (!first) continue;
+        for (size_t i = 0; i < G_N_ELEMENTS(COMMON_HZ); i++) {
+            int mhz = COMMON_HZ[i] * 1000;
+            if (mhz > max_mhz + 500) continue;
+            if (!has_mode(o, m.w, m.h, mhz))
+                add_custom(o, m.w, m.h, mhz);
+        }
+    }
+}
+
+/* "60 Hz", or "59.94 Hz" when it is not a whole number. */
+static char *hz_label(const mode_t_ *m)
+{
+    int whole = (int)lround(m->mhz / 1000.0);
+    char *hz = abs(m->mhz - whole * 1000) < 5 ? g_strdup_printf("%d Hz", whole)
+                                               : g_strdup_printf("%.2f Hz", m->mhz / 1000.0);
+    if (!m->custom) return hz;
+    char *l = g_strdup_printf(T("%s (custom)", "%s (사용자 지정)"), hz);
+    g_free(hz);
+    return l;
 }
 
 /* The scale that makes a pixel of text about the size it was designed
@@ -501,7 +615,11 @@ static void apply_risky(disp_t *d, int new_cur, const char *new_tf_in)
 
     const mode_t_ *nm = &g_array_index(o->modes, mode_t_, new_cur);
     char *mode = mode_arg(nm);
-    const char *v[] = { "wlr-randr", "--output", o->name, "--mode", mode,
+    /* One the display did not list goes in as a custom mode; once set,
+     * the compositor lists it, so the way back (the current mode) is
+     * always --mode. */
+    const char *v[] = { "wlr-randr", "--output", o->name,
+                        nm->custom ? "--custom-mode" : "--mode", mode,
                         "--transform", new_tf, NULL };
     /* Before the change: a VM window following the new mode is a change
      * event lp-autoscale --watch would answer with the preferred mode. */
@@ -545,7 +663,10 @@ static void go_auto(disp_t *d, out_t *o)
     char *ini = wayfire_ini();
     char *sec = g_strdup_printf("output:%s", o->name);
     ini_set(ini, sec, "mode", "auto");
-    ini_set(ini, sec, "scale", w >= 2560 ? "2.000000" : "1.000000");
+    /* A virtual machine stays at 100% (lp-autoscale's guess() says the
+     * same): its window is fitted with fewer pixels instead, which the
+     * emulated CPU draws faster than it draws the same size at 2x. */
+    ini_set(ini, sec, "scale", (w >= 2560 && !is_virtual(o)) ? "2.000000" : "1.000000");
     g_free(sec); g_free(ini);
     lp_toast(FALSE, T("%s follows the window size again", "%s 이(가) 다시 창 크기를 따라갑니다"), o->name);
     static const char *const v[] = { "lp-autoscale", NULL };
@@ -567,14 +688,23 @@ static void on_resolution(GObject *dd, GParamSpec *ps, gpointer p)
     if (i >= d->res_list->len) return;
     int w, h;
     sscanf(g_ptr_array_index(d->res_list, i), "%dx%d", &w, &h);
-    /* The highest refresh rate this size offers: a person choosing a
-     * resolution has not also chosen to drop to 30Hz. */
+    /* The highest refresh rate the display lists for this size: a
+     * person choosing a resolution has not also chosen to drop to 30Hz,
+     * nor to try 240Hz. A size it does not list at all goes in at 60. */
     int best = -1;
     for (guint k = 0; k < o->modes->len; k++) {
         mode_t_ *m = &g_array_index(o->modes, mode_t_, k);
-        if (m->w == w && m->h == h &&
+        if (m->w == w && m->h == h && !m->custom &&
             (best < 0 || m->mhz > g_array_index(o->modes, mode_t_, best).mhz))
             best = k;
+    }
+    for (guint k = 0; best < 0 && k < o->modes->len; k++) {
+        mode_t_ *m = &g_array_index(o->modes, mode_t_, k);
+        if (m->w == w && m->h == h && m->mhz == 60000) best = k;
+    }
+    for (guint k = 0; best < 0 && k < o->modes->len; k++) {
+        mode_t_ *m = &g_array_index(o->modes, mode_t_, k);
+        if (m->w == w && m->h == h) best = k;
     }
     if (best >= 0) apply_risky(d, best, o->transform);
 }
@@ -1060,16 +1190,25 @@ static void rebuild_controls(disp_t *d)
     d->rate_list = g_array_new(FALSE, FALSE, sizeof(int));
     labels = g_ptr_array_new_with_free_func(g_free);
     guint fsel = 0;
-    for (guint k = 0; k < o->modes->len; k++) {
-        mode_t_ *m = &g_array_index(o->modes, mode_t_, k);
-        if (m->w != cur->w || m->h != cur->h) continue;
-        gboolean dup = FALSE;
-        for (guint j = 0; j < d->rate_list->len && !dup; j++)
-            dup = g_array_index(d->rate_list, int, j) == m->mhz;
-        if (dup) continue;
+    /* Fastest first, the listed ones and the custom ones together. */
+    for (;;) {
+        int pick = -1;
+        for (guint k = 0; k < o->modes->len; k++) {
+            mode_t_ *m = &g_array_index(o->modes, mode_t_, k);
+            if (m->w != cur->w || m->h != cur->h) continue;
+            gboolean dup = FALSE;
+            for (guint j = 0; j < d->rate_list->len && !dup; j++)
+                dup = g_array_index(d->rate_list, int, j) == m->mhz;
+            if (dup) continue;
+            if (pick < 0 || m->mhz > g_array_index(o->modes, mode_t_, pick).mhz ||
+                (m->mhz == g_array_index(o->modes, mode_t_, pick).mhz && !m->custom))
+                pick = k;
+        }
+        if (pick < 0) break;
+        mode_t_ *m = &g_array_index(o->modes, mode_t_, pick);
         if (m->mhz == cur->mhz) fsel = d->rate_list->len;
         g_array_append_val(d->rate_list, m->mhz);
-        g_ptr_array_add(labels, g_strdup_printf("%.2f Hz", m->mhz / 1000.0));
+        g_ptr_array_add(labels, hz_label(m));
     }
     g_ptr_array_add(labels, NULL);
     r = row_choice(d->controls, T("Refresh rate", "주사율"), NULL,
@@ -1115,6 +1254,8 @@ static void on_randr(int st, const char *out, const char *err, gpointer p)
     }
     g_ptr_array_free(d->outs, TRUE);
     d->outs = parse_randr(out);
+    for (guint i = 0; i < d->outs->len; i++)
+        add_custom_modes(g_ptr_array_index(d->outs, i));
     if (d->sel >= (int)d->outs->len) d->sel = 0;
     /* The internal panel first when nothing was chosen. */
     for (guint i = 0; d->sel < 0 && i < d->outs->len; i++)

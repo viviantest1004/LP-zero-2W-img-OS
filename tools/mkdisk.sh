@@ -118,7 +118,7 @@ REC_LABEL="LP-RECOVERY"
 # loglevel= and the rest the last one given wins. So the recovery entry
 # passes root=PARTLABEL=LP-RECOVERY lp.mode=recovery and gets exactly
 # that, and initrd=\EFI\LP\initrd.img there is read by the EFI stub.
-KERNEL_CMDLINE="root=LABEL=${ROOT_LABEL} rw console=tty0 console=ttyS0,115200 quiet loglevel=3 vt.global_cursor_default=0 fbcon=font:TER16x32"
+KERNEL_CMDLINE="root=LABEL=${ROOT_LABEL} rw console=tty0 console=ttyS0,115200 quiet loglevel=3 vt.global_cursor_default=0 fbcon=font:TER16x32 mem_sleep_default=deep"
 
 # The same label the RAM-live images use, because /etc/rc mounts /boot by
 # label and there is no reason for this image to be the exception - the

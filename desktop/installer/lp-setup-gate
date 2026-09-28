@@ -198,12 +198,18 @@ def output_scale():
 def prepare_devices():
     # What logind would hand a session and nothing here does (the
     # session's own start-desktop does the same).
+    # Owner uid 1000 and 0660, not 0666: open to everyone, any process
+    # could read the keys typed into the installer - the passwords.
     for pat in ("/dev/dri", "/dev/input", "/dev/snd"):
         try:
             for n in os.listdir(pat):
                 p = os.path.join(pat, n)
                 if not os.path.isdir(p):
-                    os.chmod(p, 0o666)
+                    try:
+                        os.chown(p, KIOSK_UID, -1)
+                        os.chmod(p, 0o660)
+                    except OSError:
+                        pass
         except OSError:
             pass
     vt_keyboard_off()
@@ -354,9 +360,8 @@ def kiosk(mode):
                 "/dev/tty0", "/dev/tty1", "/dev/tty2"] + \
             ["/dev/input/event%d" % i for i in range(32)]:
         try:
-            if dev.startswith("/dev/tty"):
-                os.chown(dev, KIOSK_UID, -1)
-            os.chmod(dev, 0o666)
+            os.chown(dev, KIOSK_UID, -1)
+            os.chmod(dev, 0o620 if dev.startswith("/dev/tty") else 0o660)
         except OSError:
             pass
 

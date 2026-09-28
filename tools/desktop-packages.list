@@ -180,6 +180,12 @@ pciutils
 usbutils
 kmod
 lm-sensors
+# Intel's thermal daemon: keeps a Skylake laptop (the XPS 9550's
+# i7-6700HQ) under its limits with RAPL and powerclamp before the BIOS's
+# own emergency throttling does it harder - Ubuntu runs it on the same
+# machine. lp-tune does what power-profiles-daemon would (the profiles);
+# this is the part it does not. Started by init (tools/mkdesktop.sh).
+thermald
 acpi
 powertop
 

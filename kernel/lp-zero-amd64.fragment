@@ -481,9 +481,18 @@ CONFIG_POWERCAP=y
 CONFIG_INTEL_RAPL=y
 CONFIG_THERMAL=y
 CONFIG_X86_PKG_TEMP_THERMAL=y
+# What thermald works through: the ACPI DPTF participants (INT3400,
+# INT3403), idle injection when the package runs hot, and the PCH's own
+# sensor.
+CONFIG_INT340X_THERMAL=y
+CONFIG_ACPI_THERMAL_REL=y
+CONFIG_INTEL_POWERCLAMP=y
+CONFIG_INTEL_PCH_THERMAL=y
 
 # Suspend. SUSPEND gives both s2idle and deep (S3) in /sys/power/
-# mem_sleep; which one is the default is the firmware's to say.
+# mem_sleep. The command line asks for deep (tools/mkdisk.sh): the XPS
+# 9550 sleeps and wakes properly in S3 (Ubuntu uses it there), and its
+# s2idle keeps drawing power. A machine without S3 keeps s2idle.
 # Hibernation stays off - there is no swap partition to write to.
 CONFIG_SUSPEND=y
 CONFIG_PM_SLEEP=y

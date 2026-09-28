@@ -264,6 +264,26 @@ grep -q '^user:' "$ROOT/etc/group" || printf 'user:x:1000:\n' >> "$ROOT/etc/grou
 python3 - "$ROOT" <<'PY'
 import os, sys, time
 root = sys.argv[1]
+# The device groups udev hands the nodes to (50-udev-default.rules:
+# input, render) must exist, or udev leaves the nodes root's alone and
+# the desktop account cannot open its own keyboard - which is what the
+# session used to answer by opening them to everyone (0666).
+have = [l.split(":") for l in open(root + "/etc/group") if l.strip()]
+names_g = {f[0] for f in have}
+used = {int(f[2]) for f in have if len(f) > 2 and f[2].isdigit()}
+add = []
+for g in ("input", "render", "kvm"):
+    if g not in names_g:
+        gid = next(i for i in range(100, 1000) if i not in used)
+        used.add(gid)
+        add.append("%s:x:%d:" % (g, gid))
+if add:
+    with open(root + "/etc/group", "a") as f:
+        f.write("\n".join(add) + "\n")
+    gs = root + "/etc/gshadow"
+    if os.path.exists(gs):
+        with open(gs, "a") as f:
+            f.write("".join("%s:!::\n" % a.split(":")[0] for a in add))
 # group: user in the device groups, and in no admin group.
 lines = []
 for l in open(root + "/etc/group"):
@@ -730,6 +750,38 @@ fi
 if [[ -f "$ROOT/etc/lp/services" && -x "$ROOT/usr/libexec/bluetooth/bluetoothd" ]] &&
    ! grep -q bluetoothd "$ROOT/etc/lp/services"; then
     printf '\n# Bluetooth (bluez). -n: stay in the foreground, init watches it.\n?/usr/libexec/bluetooth/bluetoothd /usr/libexec/bluetooth/bluetoothd -n\n' \
+        >> "$ROOT/etc/lp/services"
+fi
+# The seat's devices belong to the desktop account (uid 1000) as well as
+# to their groups - what logind's uaccess does for the person at the
+# screen, here for the one account the session runs as. A keyboard, a
+# mouse or a USB sound card plugged in later is theirs the same way;
+# before, the session opened every node to every user (0666), which
+# let any process on the machine read the keyboard.
+mkdir -p "$ROOT/etc/udev/rules.d"
+cat > "$ROOT/etc/udev/rules.d/71-lp-seat.rules" <<'RULES'
+# LP: the desktop account owns the seat's devices (tools/mkdesktop.sh).
+SUBSYSTEM=="input", KERNEL=="event*", OWNER="1000", MODE="0660"
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*|renderD*", OWNER="1000", MODE="0660"
+SUBSYSTEM=="sound", OWNER="1000", MODE="0660"
+RULES
+# thermald, on real Intel hardware only. In a virtual machine there is
+# nothing for it to hold down (no RAPL, no DPTF), it exits, and init
+# would start it again and again; there the line waits instead.
+if [[ -f "$ROOT/etc/lp/services" && -x "$ROOT/usr/sbin/thermald" ]] &&
+   ! grep -q thermald "$ROOT/etc/lp/services"; then
+    mkdir -p "$ROOT/usr/lib/lp"
+    cat > "$ROOT/usr/lib/lp/thermald-start" <<'SH'
+#!/bin/sh
+# init's thermald line (tools/mkdesktop.sh).
+if /usr/bin/grep -q GenuineIntel /proc/cpuinfo && ! /usr/bin/grep -qw hypervisor /proc/cpuinfo &&
+   test -d /sys/class/powercap/intel-rapl ; then
+    exec /usr/sbin/thermald --no-daemon --adaptive
+fi
+exec sleep 2147483647
+SH
+    chmod 755 "$ROOT/usr/lib/lp/thermald-start"
+    printf '\n# Intel thermal daemon (real hardware only, see thermald-start).\n?/usr/lib/lp/thermald-start thermald-start\n' \
         >> "$ROOT/etc/lp/services"
 fi
 # The screen's console asks for a login here (userland/init/init.c):

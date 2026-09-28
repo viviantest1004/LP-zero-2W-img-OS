@@ -212,6 +212,20 @@ GEN="${BUILD_DIR}/lp-zero-generated.config"
     # with nothing in between to pass a command line. So it is compiled
     # in, and cmdline.txt on the FAT partition can still override it
     # where a real bootloader is involved.
+    # CPU microcode, built into the kernel. Linux loads Intel microcode
+    # at the very start of boot from an uncompressed cpio in front of the
+    # initrd, or from the kernel's built-in firmware - and these kernels
+    # are started by UEFI with no initrd at all, so built in it is. The
+    # XPS 9550's BIOS leaves its i7-6700HQ at revision 0xd6; this brings
+    # it to the one Ubuntu loads (0xf0) before anything else runs.
+    if [[ -n "$EARLY_FW_LIST" ]]; then
+        UCODE=$("${REPO_ROOT}/tools/fetch-pc-fw.sh" --list | grep '^intel-ucode/' | tr '\n' ' ')
+        if [[ -n "$UCODE" ]]; then
+            echo "CONFIG_EXTRA_FIRMWARE=\"${UCODE% }\""
+            echo "CONFIG_EXTRA_FIRMWARE_DIR=\"${FW_DIR}\""
+        fi
+    fi
+
     if [[ -n "${LP_CMDLINE:-}" ]]; then
         echo "CONFIG_CMDLINE_BOOL=y"
         echo "CONFIG_CMDLINE=\"${LP_CMDLINE}\""
