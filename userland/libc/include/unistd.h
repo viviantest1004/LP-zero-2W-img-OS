@@ -164,6 +164,7 @@ long  lp_unlink(const char *path);
 long  lp_mkdir(const char *path, mode_t mode);
 long  lp_rmdir(const char *path);
 long  lp_chdir(const char *path);
+long  lp_umask(long mask);
 long  lp_getcwd(char *buf, size_t n);
 long  lp_access(const char *path, int mode);
 /* Read directory entries. Returns the bytes filled in, 0 at the end. */

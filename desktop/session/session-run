@@ -30,6 +30,17 @@ export XDG_DATA_HOME=$LP_HOME/.local/share
 # 만들지 못하고, 어떤 판에서는 그것으로 그냥 나가 버린다.
 export XDG_STATE_HOME=$LP_HOME/.local/state
 export XDG_CACHE_HOME=$LP_HOME/.cache
+# F11 joined Super+F as the full-screen key. A home made before that
+# keeps its own copy of the shortcuts, so the old default there is
+# brought up to the new one (a shortcut the person changed is left be).
+if grep -qx 'toggle_fullscreen = <super> KEY_F' "$XDG_CONFIG_HOME/wayfire.ini" 2> /dev/null ; then
+    sed -i 's/^toggle_fullscreen = <super> KEY_F$/toggle_fullscreen = <super> KEY_F | KEY_F11/' \
+        "$XDG_CONFIG_HOME/wayfire.ini"
+    if test -f "$XDG_CONFIG_HOME/sway/lp-keys.conf" &&
+       ! grep -q '^bindcode --no-warn 95 ' "$XDG_CONFIG_HOME/sway/lp-keys.conf" ; then
+        echo 'bindcode --no-warn 95 fullscreen toggle' >> "$XDG_CONFIG_HOME/sway/lp-keys.conf"
+    fi
+fi
 # 런처가 앱 목록을 여기서 읽는다. 비워 두면 fuzzel 이 아무것도 찾지
 # 못하고 빈 창이 뜬다.
 export XDG_DATA_DIRS=/usr/local/share:/usr/share
@@ -85,6 +96,19 @@ if grep -qs '^E:ID_INPUT=1' /run/udev/data/c13:* ; then
     unset WLR_LIBINPUT_NO_DEVICES
 else
     export WLR_LIBINPUT_NO_DEVICES=1
+fi
+# The pointer on the virtual GPU's cursor plane under KVM: the host draws
+# it where the mouse is, the moment it moves. Drawn by the guest instead
+# (a software cursor), it trailed each frame's trip through virgl and the
+# host's GL, and in a KVM window with 3D acceleration it slid past the
+# point where the hand stopped. Linux 6.8+ shows that plane only to a
+# compositor that sets the cursor hotspot, which LP's wlroots does with
+# WLR_DRM_CURSOR_HOTSPOT=1 (desktop/compositor/wlroots-0.15.1-lp.patch).
+# Only where kvm-clock exists, i.e. KVM: under UTM's x86 emulation the host
+# once drew that cursor garbled and warped its own pointer to it, and the
+# pointer wandered - there the software cursor stays.
+if grep -qs kvm-clock /sys/devices/system/clocksource/clocksource0/available_clocksource ; then
+    export WLR_DRM_CURSOR_HOTSPOT=1
 fi
 export GDK_BACKEND=wayland
 # The pointer's theme and size for everything that loads a cursor itself

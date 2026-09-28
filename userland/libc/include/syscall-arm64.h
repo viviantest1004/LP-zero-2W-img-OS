@@ -41,6 +41,7 @@
 #define SYS_statfs          43
 #define SYS_faccessat       48
 #define SYS_chdir           49
+#define SYS_umask           166
 #define SYS_fchmodat        53
 #define SYS_fchownat        54
 #define SYS_openat          56

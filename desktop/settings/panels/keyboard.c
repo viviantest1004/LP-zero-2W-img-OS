@@ -570,7 +570,7 @@ static const shortcut_t SHORTCUTS[] = {
     { "wm-actions", "toggle_maximize", "Maximize or restore the window", "창 최대화 / 복원",
       "<super> KEY_UP | <super> KEY_M" },
     { "wm-actions", "minimize", "Minimize the window", "창 최소화", "<super> KEY_DOWN | <super> KEY_H" },
-    { "wm-actions", "toggle_fullscreen", "Full screen", "전체 화면", "<super> KEY_F" },
+    { "wm-actions", "toggle_fullscreen", "Full screen", "전체 화면", "<super> KEY_F | KEY_F11" },
     { "grid",       "slot_l", "Window to the left half", "창을 왼쪽 절반으로", "<super> KEY_LEFT" },
     { "grid",       "slot_r", "Window to the right half", "창을 오른쪽 절반으로", "<super> KEY_RIGHT" },
     { "switcher",   "next_view", "Switch windows", "창 전환", "<alt> KEY_TAB" },

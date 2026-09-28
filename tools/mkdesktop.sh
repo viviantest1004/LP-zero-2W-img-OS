@@ -806,7 +806,12 @@ log "dpkg clean, bash runs, /bin/sh $(readlink "$ROOT/bin/sh"), ls and init ours
 log "ports from netbase, en_US + ko_KR, Korean fonts, no empty passwords, root locked"
 
 rm -f "$ROOT/tmp/t.sh"
-SIZE_MB=$(du -sxm "$ROOT" --exclude=proc --exclude=sys --exclude=dev 2>/dev/null | cut -f1)
+# Not -x: when the overlay's upper layer is on another filesystem than the
+# base (the work directory in /dev/shm, the base on disk), overlayfs gives
+# each file the st_dev of the layer it lives on, and -x skipped every one
+# of them - the root partition came out a fraction of its size and mkfs
+# failed with "Could not allocate block". The mounts are excluded by name.
+SIZE_MB=$(du -sm "$ROOT" --exclude=proc --exclude=sys --exclude=dev --exclude=tmp 2>/dev/null | cut -f1)
 log "root: ${SIZE_MB}MB (upper layer $(du -sxm "$UPPER" | cut -f1)MB)"
 
 if [[ "${LP_CHECK_ONLY:-0}" == 1 ]]; then

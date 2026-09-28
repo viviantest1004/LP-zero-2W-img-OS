@@ -408,7 +408,7 @@ static void menu_add(GtkWidget *menu, const char *label, GCallback cb,
 }
 
 /* Menus the dock has open. While one is, the dock stays up: over a
- * maximised window it slides away 0.7s after the pointer leaves it, and
+ * full-screen window it slides away 0.7s after the pointer leaves it, and
  * going up into the menu is leaving it (the menu is another surface) -
  * the dock went, and the menu with it, before an item could be reached. */
 static int dock_menus;
@@ -891,10 +891,15 @@ static gboolean on_edge_leave(GtkWidget *w, GdkEventCrossing *e, gpointer d);
 
 /* The bottom edge of every output: an invisible strip that only a finger
  * can use. */
+static GPtrArray *edges;
+
 static void edge_for(GdkMonitor *mon)
 {
     GtkWindow *e = lp_layer_window("lp-edge", GTK_LAYER_SHELL_LAYER_TOP,
                                    LP_EDGE_BOTTOM | LP_EDGE_LEFT | LP_EDGE_RIGHT);
+    if (!edges)
+        edges = g_ptr_array_new();
+    g_ptr_array_add(edges, e);
     gtk_layer_set_monitor(e, mon);
     gtk_layer_set_exclusive_zone(e, -1);
     gtk_widget_set_size_request(GTK_WIDGET(e), -1, EDGE_PX);
@@ -902,7 +907,7 @@ static void edge_for(GdkMonitor *mon)
     gtk_event_box_set_visible_window(GTK_EVENT_BOX(area), FALSE);
     gtk_container_add(GTK_CONTAINER(e), area);
     add_pull(area, TRUE);
-    /* ... and the pointer, which brings the dock up over a maximised
+    /* ... and the pointer, which brings the dock up over a full-screen
      * window (see update_away). */
     gtk_widget_add_events(area, GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
     g_signal_connect(area, "enter-notify-event", G_CALLBACK(on_edge_enter), NULL);
@@ -917,7 +922,7 @@ static void edge_for(GdkMonitor *mon)
  * pixel high, invisible and never clicked, and reserves the dock's
  * height and the gap under it: windows stop above the dock. */
 static GtkWindow *spacer;
-static gboolean dock_away;      /* slid away: the focused window is maximised */
+static gboolean dock_away;      /* slid away: the focused window is full screen */
 
 static void reserve_room(void)
 {
@@ -939,22 +944,22 @@ static void spacer_realized(GtkWidget *w, gpointer d)
     cairo_region_destroy(none);
 }
 
-/* ── out of the way of a maximised window ────────────────────────────
+/* ── out of the way of a full-screen window ──────────────────────────
  *
- * Ordinary windows open and stop above the dock: the spacer keeps that
- * room. A maximised or full-screen window should have the whole screen
- * instead - with the room kept it stopped above the dock and a band of
- * wallpaper showed round the dock, under the window. So while the focused
- * window is maximised (or full screen) the dock slides off the bottom
- * edge and gives its room back, and the window grows to the edge; when
- * that window is restored, minimised, closed or loses focus to one that
- * is not maximised, the dock comes back and takes its room again.
+ * Windows open and stop above the dock: the spacer keeps that room. A
+ * maximised window does too - it fills the screen down to the dock, and
+ * the dock stays where it is, always there to be clicked. (For a while a
+ * maximised window sent the dock away as well; the dock then seemed to
+ * vanish whenever a window was made big, and the owner wants it to stay.)
  *
- * Pushing the pointer against the bottom edge brings the dock up over
- * the maximised window (the edge strip below catches it); it goes again
- * a moment after the pointer leaves it. */
+ * Only a full-screen window - F11, or Super+F - has the whole screen:
+ * the dock slides off the bottom edge and gives its room back. Pushing
+ * the pointer against the bottom edge brings it up over the window (the
+ * edge strip below catches it); it goes again a moment after the pointer
+ * leaves it. When the window leaves full screen, is minimised, closed or
+ * loses focus to one that is not full screen, the dock comes back. */
 #define SLIDE_MS 200
-static gboolean dock_peek;      /* up over a maximised window, for now */
+static gboolean dock_peek;      /* up over a full-screen window, for now */
 static double dock_pos;         /* 0 = in place, 1 = below the edge */
 static double slide_from, slide_to;
 static gint64 slide_start;
@@ -964,8 +969,7 @@ static gboolean window_wants_screen(void)
 {
     for (GList *l = lp_toplevels(); l; l = l->next) {
         LpToplevel *t = l->data;
-        if (t->done && t->activated && !t->minimized &&
-            (t->maximized || t->fullscreen))
+        if (t->done && t->activated && !t->minimized && t->fullscreen)
             return TRUE;
     }
     return FALSE;
@@ -1016,6 +1020,25 @@ static void slide(double to)
     slide_id = g_timeout_add(16, slide_step, NULL);
 }
 
+/* Both compositors draw a full-screen window over the top layer, where
+ * the dock and the edge strip live: the dock could not be brought up
+ * over that window, and the strip under it never saw the pointer. While
+ * a window is full screen the two move up to the overlay layer, and back
+ * down after - the rest of the time the dock has no business over the
+ * lock screen or a notification. */
+static void set_layers(gboolean over)
+{
+    GtkLayerShellLayer l = over ? GTK_LAYER_SHELL_LAYER_OVERLAY
+                                : GTK_LAYER_SHELL_LAYER_TOP;
+    if (gtk_layer_get_layer(win) != l)
+        gtk_layer_set_layer(win, l);
+    for (guint i = 0; edges && i < edges->len; i++) {
+        GtkWindow *e = g_ptr_array_index(edges, i);
+        if (gtk_layer_get_layer(e) != l)
+            gtk_layer_set_layer(e, l);
+    }
+}
+
 static void update_away(void)
 {
     gboolean away = window_wants_screen();
@@ -1028,6 +1051,7 @@ static void update_away(void)
         leave_id = 0;
     }
     reserve_room();
+    set_layers(away);
     slide(away ? 1.0 : 0.0);
 }
 
@@ -1109,7 +1133,7 @@ static gboolean recentre(gpointer d)
     (void)d;
     reserve_room();
     /* Its height is known only now: a dock that had to be away from the
-     * start (a maximised window already there) is put away here. */
+     * start (a full-screen window already there) is put away here. */
     place_dock();
     GdkDisplay *dpy = gdk_display_get_default();
     GdkWindow *gw = gtk_widget_get_window(GTK_WIDGET(win));

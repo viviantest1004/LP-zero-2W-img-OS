@@ -59,6 +59,7 @@
 #define SYS_fcntl             72
 #define SYS_getcwd            79
 #define SYS_chdir             80
+#define SYS_umask             95
 #define SYS_statfs           137
 #define SYS_getpriority      140
 #define SYS_setpriority      141

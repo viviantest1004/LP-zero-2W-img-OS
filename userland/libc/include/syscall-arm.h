@@ -40,6 +40,7 @@
 #define SYS_unlink           10
 #define SYS_execve           11
 #define SYS_chdir            12
+#define SYS_umask            60
 #define SYS_mknod            14
 #define SYS_chmod            15
 #define SYS_lseek            19      /* 32-bit only; _llseek is the real one */

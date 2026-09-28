@@ -252,13 +252,16 @@ def gpu_3d():
     return False
 
 
-# The renderer the kiosk's sway draws with. pixman (the CPU) works on
-# every machine, but wlroots 0.15 gives it no hardware cursor ("Failed to
-# get cursor display formats"): every movement of the mouse is a frame
-# drawn on the CPU and sent to the screen, and in a VM that is a pointer
-# that jumps. With 3D the GL renderer puts the pointer on the cursor
-# plane, which the host (UTM) draws itself - smooth. If sway dies at the
-# start with GL anyway, the next attempt is pixman.
+# The renderer the kiosk's sway draws with: pixman (the CPU), on every
+# machine. It used to be GL wherever there was 3D, for a cursor on the
+# cursor plane - but a virtual GPU hides that plane from a compositor
+# without the hotspot capability anyway (Linux 6.8+), and GL through
+# virgl is the one part of the kiosk that depends on the host's graphics
+# stack: under KVM with 3D acceleration the installer froze mid-way and
+# the machine fell back to the boot splash (sway had lived past the
+# 10-second test below, so nothing switched to pixman). With LP's wlroots
+# a pixman frame for a pointer movement is a cursor-sized upload. GL only
+# when the gate is started with LP_KIOSK_RENDERER=gles2 (for testing).
 RENDERER = None
 
 
@@ -267,7 +270,7 @@ def kiosk(mode):
     exit status."""
     global RENDERER
     if RENDERER is None:
-        RENDERER = "gles2" if gpu_3d() else "pixman"
+        RENDERER = "gles2" if os.environ.get("LP_KIOSK_RENDERER") == "gles2" else "pixman"
     pw = pwd.getpwuid(KIOSK_UID)
     xdg = "/run/user/%d" % KIOSK_UID
     home = RUN + "/home"
@@ -368,6 +371,14 @@ def kiosk(mode):
 
     if RENDERER == "pixman":
         env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+    # The pointer on the cursor plane under KVM, as in the session
+    # (session-run says why, and why not under UTM's emulation).
+    try:
+        with open("/sys/devices/system/clocksource/clocksource0/available_clocksource") as f:
+            if "kvm-clock" in f.read():
+                env["WLR_DRM_CURSOR_HOTSPOT"] = "1"
+    except OSError:
+        pass
     log("kiosk", mode, "scale", output_scale(), "renderer", RENDERER)
     started = time.time()
     with open(LOG, "a") as out:

@@ -60,6 +60,152 @@ static const char *DEFAULT_PATH = "/bin:/data/bin:/sbin:/usr/bin:/usr/sbin";
 /* Home. It is a bind mount from the data partition, so what is saved
  * there survives a reboot - unlike the rest of the root filesystem. */
 #define HOME_DIR "/root"
+
+/* Whose home, though, is $HOME's to say. HOME_DIR is root's, and was
+ * everyone's: a terminal on the desktop runs as the person (uid 1000,
+ * home /home/<name>), and there `cd` alone went to /root - which that
+ * account may not enter - `~` meant /root, and the prompt never showed
+ * ~ at home. HOME_DIR is only what is left when $HOME is not set. */
+static const char *home_dir(void)
+{
+    const char *h = getenv("HOME");
+    return (h && *h) ? h : HOME_DIR;
+}
+
+/* A path as the prompt and `dirs` show it: home as ~. */
+static void tilde_path(const char *path, char *out, size_t size)
+{
+    const char *home = home_dir();
+    size_t hlen = strlen(home);
+    if (hlen > 1 && strncmp(path, home, hlen) == 0 &&
+        (path[hlen] == '\0' || path[hlen] == '/'))
+        snprintf(out, size, "~%s", path + hlen);
+    else
+        strlcpy(out, path, size);
+}
+
+/* Change directory the way `cd` does, for cd, pushd, popd and a
+ * directory typed on its own: a readable reason when it fails, $PWD and
+ * $OLDPWD kept, and the new place printed when `say` (cd -). */
+static int shell_cd(const char *dir, bool say)
+{
+    char was[512], dest[512];
+    if (lp_getcwd(was, sizeof(was)) < 0)
+        was[0] = '\0';
+    strlcpy(dest, dir, sizeof(dest));    /* $OLDPWD may change under it */
+    long r = lp_chdir(dest);
+    if (r < 0) {
+        const char *why = (r == -2)  ? "No such file or directory"
+                        : (r == -20) ? "Not a directory"
+                        : (r == -13) ? "Permission denied"
+                        : NULL;
+        if (why) dprintf(STDERR_FILENO, "cd: %s: %s\n", dest, why);
+        else     dprintf(STDERR_FILENO, "cd: %s: cannot change to it (%ld)\n", dest, -r);
+        return 1;
+    }
+    if (was[0])
+        setenv("OLDPWD", was, 1);
+    char now[512];
+    if (lp_getcwd(now, sizeof(now)) >= 0) {
+        setenv("PWD", now, 1);
+        if (say)
+            printf("%s\n", now);
+    }
+    return 0;
+}
+
+/* ── alias ───────────────────────────────────────────────────────────
+ *
+ *   alias ll='ls -l'     alias      (all of them)     unalias ll
+ *
+ * The name is replaced by the words of its value when it starts a
+ * command. The value is split into words on blanks, with quotes taken
+ * off - enough for what aliases are for, which is a command and its
+ * usual options. (An alias holding a pipe or a ; is a function's job:
+ * `name() { ... }` works here.) */
+#define MAX_ALIASES      64
+#define MAX_ALIAS_WORDS  16
+typedef struct {
+    char  name[32];
+    char *value;                      /* as given, for `alias` to print */
+    char *store;                      /* the words, cut up */
+    char *words[MAX_ALIAS_WORDS];
+    int   nwords;
+} alias_t;
+static alias_t aliases[MAX_ALIASES];
+static int     naliases;
+
+static alias_t *alias_find(const char *name)
+{
+    for (int i = 0; i < naliases; i++)
+        if (strcmp(aliases[i].name, name) == 0)
+            return &aliases[i];
+    return NULL;
+}
+
+static bool alias_set(const char *name, const char *value)
+{
+    if (!name[0] || strlen(name) >= sizeof(aliases[0].name) ||
+        strchr(name, '/') || strchr(name, '='))
+        return false;
+    alias_t *a = alias_find(name);
+    if (!a) {
+        if (naliases >= MAX_ALIASES)
+            return false;
+        a = &aliases[naliases++];
+        memset(a, 0, sizeof(*a));
+        strlcpy(a->name, name, sizeof(a->name));
+    }
+    /* The old words are not freed: a line being run may still point at
+     * them (alias x=...; x), and an alias is a few bytes. */
+    a->value = strdup(value);
+    a->store = strdup(value);
+    a->nwords = 0;
+    if (!a->value || !a->store)
+        return false;
+    char *w = a->store, *o = a->store;
+    while (*w && a->nwords < MAX_ALIAS_WORDS) {
+        while (*w == ' ' || *w == '\t') w++;
+        if (!*w) break;
+        a->words[a->nwords++] = o;
+        char q = 0;
+        while (*w && (q || (*w != ' ' && *w != '\t'))) {
+            if (!q && (*w == '\'' || *w == '"')) { q = *w++; continue; }
+            if (q && *w == q) { q = 0; w++; continue; }
+            *o++ = *w++;
+        }
+        if (*w) w++;
+        *o++ = '\0';
+    }
+    return true;
+}
+
+static bool alias_unset(const char *name)
+{
+    for (int i = 0; i < naliases; i++)
+        if (strcmp(aliases[i].name, name) == 0) {
+            aliases[i] = aliases[--naliases];
+            return true;
+        }
+    return false;
+}
+
+/* Print one the way it can be typed back in. */
+static void alias_print(const alias_t *a)
+{
+    printf("alias %s='", a->name);
+    for (const char *v = a->value; *v; v++) {
+        if (*v == '\'') printf("'\\''");
+        else             printf("%c", *v);
+    }
+    printf("'\n");
+}
+
+/* Set by `return`: the rest of the function, or of the file being
+ * sourced, is skipped - checked where break and continue are. */
+static bool func_return;
+static int  in_source;            /* files being read by `.` */
+
 static bool shell_running = true;
 
 /* ── break and continue ──────────────────────────────────────────
@@ -944,7 +1090,7 @@ static tok_type_t next_token(char **p, char **word_out)
 
     /* ~ or ~/... at the start of a word. Not ~user: there is one user. */
     if (*s == '~' && (s[1] == '\0' || s[1] == '/' || is_space(s[1]))) {
-        const char *home = HOME_DIR;
+        const char *home = home_dir();
         while (*home && n < sizeof(buf)) buf[n++] = *home++;
         s++;
     }
@@ -1408,8 +1554,14 @@ static const char *BUILTINS[] = {
     "exit", "cd", "pwd", "echo", "env", "reboot", "poweroff", "halt",
     "test", "[", "true", "false", ":",
     "read", "shift", "export", "set", "local", "unset", ".", "source",
-    "exec", NULL
+    "exec", "return", "eval", "alias", "unalias", "type", "command",
+    "builtin", "pushd", "popd", "dirs", "history", "jobs", "wait",
+    "umask", "hash", NULL
 };
+
+/* The rest of the builtins, defined further down next to what they use
+ * (the job table, the history, exec_block). */
+static bool run_builtin_more(cmd_t *c);
 
 /* ── local ───────────────────────────────────────────────────────────
  *
@@ -1545,6 +1697,28 @@ static int run_test(char **argv, int argc)
     if (argc == 2)
         return argv[1][0] ? 0 : 1;
 
+    /* -o and -a join two tests: [ -n "$A" -o -n "$B" ]. -o binds
+     * looser than -a, and both looser than !, so the line is split at
+     * the last -o first, then the last -a. Each side is a test of its
+     * own (argv[i] stands in for its "test"). Only past three words:
+     * [ x = -o ] compares the string "-o". */
+    if (argc >= 5) {
+        for (int pass = 0; pass < 2; pass++) {
+            const char *join = pass == 0 ? "-o" : "-a";
+            for (int i = argc - 2; i >= 2; i--) {
+                if (strcmp(argv[i], join) != 0)
+                    continue;
+                char *first = argv[0];
+                argv[0] = (char *)"test";
+                int left = run_test(argv, i);
+                argv[0] = first;
+                if (pass == 0 && left == 0) return 0;
+                if (pass == 1 && left != 0) return left == 2 ? 2 : 1;
+                return run_test(argv + i, argc - i);
+            }
+        }
+    }
+
     /* Negation, which is worth having because "not" reads better than
      * inverting the whole condition. */
     if (strcmp(argv[1], "!") == 0)
@@ -1659,6 +1833,9 @@ static bool is_builtin(const char *name)
 static bool run_builtin(cmd_t *c)
 {
     const char *cmd = c->argv[0];
+
+    if (run_builtin_more(c))
+        return true;
 
     if (strcmp(cmd, "test") == 0 || strcmp(cmd, "[") == 0) {
         last_status = run_test(c->argv, c->argc);
@@ -1968,15 +2145,42 @@ static bool run_builtin(cmd_t *c)
         return true;
     }
 
+    /* cd         home ($HOME)
+     * cd -       back where you were, and say where that is
+     * cd ~, ~/x  home, and under it (the word expands before this)
+     * cd ..      up
+     * $PWD and $OLDPWD follow along, as every other shell keeps them. */
     if (strcmp(cmd, "cd") == 0) {
-        const char *dir = (c->argc > 1) ? c->argv[1] : HOME_DIR;
-        long r = lp_chdir(dir);
-        if (r < 0) {
-            dprintf(STDERR_FILENO, "cd: %s: cannot change to it (%ld)\n", dir, -r);
-            last_status = 1;
-        } else {
-            last_status = 0;
+        const char *dir = home_dir();
+        bool back = false;
+        int  a = 1;
+        /* -L and -P: the path is resolved by the kernel either way. */
+        while (a < c->argc && (strcmp(c->argv[a], "-L") == 0 ||
+                               strcmp(c->argv[a], "-P") == 0))
+            a++;
+        if (a < c->argc && strcmp(c->argv[a], "--") == 0)
+            a++;
+        if (a < c->argc) {
+            dir = c->argv[a];
+            if (strcmp(dir, "-") == 0) {
+                const char *old = getenv("OLDPWD");
+                if (!old || !*old) {
+                    dprintf(STDERR_FILENO, "cd: OLDPWD not set\n");
+                    last_status = 1;
+                    return true;
+                }
+                dir = old;
+                back = true;
+            } else if (*dir == '\0') {
+                dir = ".";
+            }
         }
+        if (a + 1 < c->argc) {
+            dprintf(STDERR_FILENO, "cd: too many arguments\n");
+            last_status = 1;
+            return true;
+        }
+        last_status = shell_cd(dir, back);
         return true;
     }
 
@@ -2485,7 +2689,14 @@ static void run_builtin_redirected(cmd_t *c)
  */
 
 #define HIST_MAX      64
-#define HIST_FILE     "/root/.sh_history"
+/* In the home of whoever is typing: it was /root's for everybody, and
+ * the desktop's account, which may not write there, kept no history. */
+static const char *hist_file(void)
+{
+    static char path[512];
+    snprintf(path, sizeof(path), "%s/.sh_history", home_dir());
+    return path;
+}
 
 static char *history[HIST_MAX];
 static int   hist_count = 0;
@@ -2525,7 +2736,7 @@ static void hist_add(const char *line)
  * not take the session with it. */
 static void hist_load(void)
 {
-    long fd = lp_open(HIST_FILE, O_RDONLY, 0);
+    long fd = lp_open(hist_file(), O_RDONLY, 0);
     if (fd < 0)
         return;
     char line[MAX_LINE];
@@ -2538,7 +2749,7 @@ static void hist_save_one(const char *line)
 {
     if (!line[0])
         return;
-    long fd = lp_open(HIST_FILE, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    long fd = lp_open(hist_file(), O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (fd < 0)
         return;                     /* home is read-only or absent */
     lp_write((int)fd, line, strlen(line));
@@ -3011,6 +3222,31 @@ static long edit_line(const char *prompt, int prompt_w,
     return result;
 }
 
+/* An alias at the start of a command becomes its words. One that
+ * names another alias is followed (ll -> ls -l -> ls --color -l), but
+ * never back into itself: alias ls='ls -F' means the program. */
+static void expand_alias(cmd_t *c)
+{
+    const char *seen[8];
+    int nseen = 0;
+    while (c->argc > 0 && nseen < 8) {
+        alias_t *a = alias_find(c->argv[0]);
+        if (!a || a->nwords == 0)
+            return;
+        for (int i = 0; i < nseen; i++)
+            if (strcmp(seen[i], a->name) == 0)
+                return;
+        if (c->argc - 1 + a->nwords > MAX_ARGS)
+            return;
+        seen[nseen++] = a->name;
+        memmove(&c->argv[a->nwords], &c->argv[1],
+                sizeof(char *) * (size_t)c->argc);  /* the NULL too */
+        for (int i = 0; i < a->nwords; i++)
+            c->argv[i] = a->words[i];
+        c->argc += a->nwords - 1;
+    }
+}
+
 /* Run one ordinary line - pipelines, redirection, && || ; - which is
  * everything the shell did before control structures existed. */
 static void run_logical_line(char *line)
@@ -3024,12 +3260,34 @@ static void run_logical_line(char *line)
     if (np <= 0)
         return;
 
-    for (int i = 0; i < np && shell_running; i++) {
+    for (int i = 0; i < np && shell_running && !func_return; i++) {
         if (pipes[i].link == LINK_AND && last_status != 0) continue;
         if (pipes[i].link == LINK_OR  && last_status == 0) continue;
 
         cmd_t *cmds = pipes[i].cmds;
         int    n    = pipes[i].ncmds;
+
+        for (int k = 0; k < n; k++)
+            expand_alias(&cmds[k]);
+
+        /* A directory typed on its own is somewhere to go - `..`, `~`,
+         * `/etc`, `Documents` - the way fish and zsh take it. Only at a
+         * prompt, only a word on its own, and only when no command has
+         * that name. */
+        if (shell_interactive && n == 1 && cmds[0].argc == 1 &&
+            !pipes[i].background && !cmds[0].redir_in &&
+            !cmds[0].redir_out && !cmds[0].redir_err &&
+            cmds[0].heredoc < 0 && lp_is_dir(cmds[0].argv[0]) &&
+            !func_find(cmds[0].argv[0]) && !is_builtin(cmds[0].argv[0])) {
+            char found[512];
+            bool is_cmd = !strchr(cmds[0].argv[0], '/') &&
+                          resolve_path(cmds[0].argv[0], found, sizeof found) &&
+                          !lp_is_dir(found);
+            if (!is_cmd) {
+                last_status = shell_cd(cmds[0].argv[0], false);
+                continue;
+            }
+        }
 
         /* A function is looked up before anything on disk, and runs in
          * this shell rather than a child - cd and variable assignments
@@ -3725,6 +3983,8 @@ static int exec_while(block_line_t *lines, int n, int start)
 
         exec_block(lines + do_at + 1, end - do_at - 1);
 
+        if (func_return)
+            break;
         if (loop_break) {
             loop_break--;            /* this loop is one of them */
             break;
@@ -4017,6 +4277,8 @@ static int exec_for(block_line_t *lines, int n, int start)
         setenv(name, words[i], 1);
         exec_block(lines + do_at + 1, end - do_at - 1);
 
+        if (func_return)
+            break;
         if (loop_break) {
             loop_break--;
             break;
@@ -4201,6 +4463,7 @@ static void call_func(func_t *f, char **argv, int argc)
     depth++;
     in_function++;
     exec_block(body, nb);
+    func_return = false;             /* it stops here */
     in_function--;
     depth--;
 
@@ -4557,10 +4820,447 @@ static int exec_block(block_line_t *lines, int n)
          * Checking here rather than only at the end of the loop body is
          * what makes `if ... ; then break ; fi` skip the lines after it
          * instead of running them on the way out. */
-        if (loop_break || loop_continue)
+        if (loop_break || loop_continue || func_return)
             break;
     }
     return last_status;
+}
+
+/* ── the everyday builtins that were missing ─────────────────────────
+ *
+ * return, eval, alias, unalias, type, command, builtin, pushd, popd,
+ * dirs, history, jobs, wait, umask, hash. What a person reaches for at a
+ * prompt and what scripts in the wild use; without `return`, for one,
+ * every terminal on the desktop opened with errors from the first file
+ * /etc/profile reads (VTE's, which returns early from anything but bash).
+ */
+static const char *KEYWORDS[] = {
+    "if", "then", "else", "elif", "fi", "case", "esac", "for", "while",
+    "until", "do", "done", "in", "{", "}", "!", NULL
+};
+
+static bool is_keyword(const char *w)
+{
+    for (int i = 0; KEYWORDS[i]; i++)
+        if (strcmp(w, KEYWORDS[i]) == 0)
+            return true;
+    return false;
+}
+
+/* type NAME, command -V NAME. 0 when found. */
+static int describe(const char *name, bool brief)
+{
+    alias_t *a = alias_find(name);
+    if (a) {
+        if (brief) alias_print(a);
+        else       printf("%s is aliased to `%s'\n", name, a->value);
+        return 0;
+    }
+    if (is_keyword(name)) {
+        if (brief) printf("%s\n", name);
+        else       printf("%s is a shell keyword\n", name);
+        return 0;
+    }
+    if (func_find(name)) {
+        if (brief) printf("%s\n", name);
+        else       printf("%s is a function\n", name);
+        return 0;
+    }
+    if (is_builtin(name)) {
+        if (brief) printf("%s\n", name);
+        else       printf("%s is a shell builtin\n", name);
+        return 0;
+    }
+    char path[512];
+    if (resolve_path(name, path, sizeof path) && !lp_is_dir(path)) {
+        if (brief) printf("%s\n", path);
+        else       printf("%s is %s\n", name, path);
+        return 0;
+    }
+    if (!brief)
+        dprintf(STDERR_FILENO, "type: %s: not found\n", name);
+    return 1;
+}
+
+/* The directory stack, top last. */
+#define DIRSTACK_MAX 32
+static char *dirstack[DIRSTACK_MAX];
+static int   ndirs;
+
+static void dirs_print(bool numbered)
+{
+    char cwd[512], shown[520];
+    if (lp_getcwd(cwd, sizeof cwd) < 0)
+        strlcpy(cwd, "?", sizeof cwd);
+    tilde_path(cwd, shown, sizeof shown);
+    if (numbered) printf(" 0  %s\n", shown);
+    else          printf("%s", shown);
+    for (int i = ndirs - 1, k = 1; i >= 0; i--, k++) {
+        tilde_path(dirstack[i], shown, sizeof shown);
+        if (numbered) printf("%2d  %s\n", k, shown);
+        else          printf(" %s", shown);
+    }
+    if (!numbered)
+        printf("\n");
+}
+
+static void job_forget(int i)
+{
+    jobs[i] = jobs[njobs - 1];
+    njobs--;
+}
+
+static int wait_status(int status)
+{
+    return LP_WIFEXITED(status) ? LP_WEXITSTATUS(status)
+                                : 128 + LP_WTERMSIG(status);
+}
+
+static bool run_builtin_more(cmd_t *c)
+{
+    const char *cmd = c->argv[0];
+
+    if (strcmp(cmd, "return") == 0) {
+        if (!in_function && !in_source) {
+            dprintf(STDERR_FILENO,
+                    "return: only from a function or a file read with .\n");
+            last_status = 1;
+            return true;
+        }
+        if (c->argc > 1) {
+            if (!str_is_num(c->argv[1])) {
+                dprintf(STDERR_FILENO, "return: %s: not a number\n", c->argv[1]);
+                last_status = 2;
+            } else {
+                last_status = (int)(str_to_num(c->argv[1]) & 255);
+            }
+        }
+        func_return = true;
+        return true;
+    }
+
+    /* The words put back together and read again, as a line of its own. */
+    if (strcmp(cmd, "eval") == 0) {
+        char line[MAX_LINE];
+        size_t n = 0;
+        line[0] = '\0';
+        for (int i = 1; i < c->argc; i++) {
+            size_t w = strlen(c->argv[i]);
+            if (n + w + 2 >= sizeof line) {
+                dprintf(STDERR_FILENO, "eval: too long\n");
+                last_status = 2;
+                return true;
+            }
+            if (i > 1) line[n++] = ' ';
+            memcpy(line + n, c->argv[i], w);
+            n += w;
+            line[n] = '\0';
+        }
+        last_status = 0;
+        if (!n)
+            return true;
+        block_line_t *blk = malloc(sizeof(block_line_t) * MAX_BLOCK);
+        if (!blk) {
+            last_status = 1;
+            return true;
+        }
+        int nb = split_statements(line, blk, MAX_BLOCK);
+        if (nb > 0)
+            exec_block(blk, nb);
+        free(blk);
+        return true;
+    }
+
+    if (strcmp(cmd, "alias") == 0) {
+        last_status = 0;
+        if (c->argc == 1) {
+            for (int i = 0; i < naliases; i++)
+                alias_print(&aliases[i]);
+            return true;
+        }
+        for (int i = 1; i < c->argc; i++) {
+            const char *arg = c->argv[i];
+            if (strcmp(arg, "-p") == 0) {
+                for (int k = 0; k < naliases; k++)
+                    alias_print(&aliases[k]);
+                continue;
+            }
+            const char *eq = strchr(arg, '=');
+            if (!eq) {
+                alias_t *a = alias_find(arg);
+                if (a) alias_print(a);
+                else {
+                    dprintf(STDERR_FILENO, "alias: %s: not found\n", arg);
+                    last_status = 1;
+                }
+                continue;
+            }
+            char name[64];
+            size_t nl = (size_t)(eq - arg);
+            if (nl >= sizeof name) nl = sizeof name - 1;
+            memcpy(name, arg, nl);
+            name[nl] = '\0';
+            if (!alias_set(name, eq + 1)) {
+                dprintf(STDERR_FILENO, "alias: %s: not a name that can be used\n", name);
+                last_status = 1;
+            }
+        }
+        return true;
+    }
+
+    if (strcmp(cmd, "unalias") == 0) {
+        last_status = 0;
+        if (c->argc == 1) {
+            dprintf(STDERR_FILENO, "unalias: usage: unalias [-a] name ...\n");
+            last_status = 2;
+            return true;
+        }
+        for (int i = 1; i < c->argc; i++) {
+            if (strcmp(c->argv[i], "-a") == 0) {
+                naliases = 0;
+                continue;
+            }
+            if (!alias_unset(c->argv[i])) {
+                dprintf(STDERR_FILENO, "unalias: %s: not found\n", c->argv[i]);
+                last_status = 1;
+            }
+        }
+        return true;
+    }
+
+    if (strcmp(cmd, "type") == 0) {
+        last_status = 0;
+        for (int i = 1; i < c->argc; i++)
+            if (describe(c->argv[i], false))
+                last_status = 1;
+        return true;
+    }
+
+    /* command -v NAME   what would run (scripts ask this to see whether
+     *                   a program is installed)
+     * command -V NAME   the same, said as `type` says it
+     * command NAME ...  run it, passing over any function or alias */
+    if (strcmp(cmd, "command") == 0 || strcmp(cmd, "builtin") == 0) {
+        bool is_b = cmd[0] == 'b';
+        int a = 1;
+        bool v = false, V = false;
+        while (!is_b && a < c->argc && c->argv[a][0] == '-' && c->argv[a][1]) {
+            if (strcmp(c->argv[a], "-v") == 0) v = true;
+            else if (strcmp(c->argv[a], "-V") == 0) V = true;
+            else if (strcmp(c->argv[a], "-p") == 0) ;
+            else if (strcmp(c->argv[a], "--") == 0) { a++; break; }
+            else break;
+            a++;
+        }
+        if (v || V) {
+            last_status = 0;
+            for (int i = a; i < c->argc; i++)
+                if (describe(c->argv[i], v))
+                    last_status = 1;
+            return true;
+        }
+        if (a >= c->argc) {
+            last_status = 0;
+            return true;
+        }
+        memmove(&c->argv[0], &c->argv[a], sizeof(char *) * (size_t)(c->argc - a + 1));
+        c->argc -= a;
+        if (is_builtin(c->argv[0])) {
+            run_builtin(c);
+        } else if (is_b) {
+            dprintf(STDERR_FILENO, "builtin: %s: not a shell builtin\n", c->argv[0]);
+            last_status = 1;
+        } else {
+            /* Any redirection is already in place (the shell's own fds,
+             * or the child's), so the program only inherits it. */
+            c->redir_in = c->redir_out = c->redir_err = NULL;
+            c->heredoc = -1;
+            run_pipeline(c, 1, false);
+        }
+        return true;
+    }
+
+    if (strcmp(cmd, "pushd") == 0) {
+        char cwd[512];
+        if (lp_getcwd(cwd, sizeof cwd) < 0) {
+            dprintf(STDERR_FILENO, "pushd: where this is cannot be read\n");
+            last_status = 1;
+            return true;
+        }
+        if (c->argc < 2) {                   /* swap the top two */
+            if (ndirs == 0) {
+                dprintf(STDERR_FILENO, "pushd: no other directory\n");
+                last_status = 1;
+                return true;
+            }
+            char *to = dirstack[ndirs - 1];
+            if ((last_status = shell_cd(to, false)) != 0)
+                return true;
+            dirstack[ndirs - 1] = strdup(cwd);
+            free(to);
+        } else {
+            if (ndirs >= DIRSTACK_MAX) {
+                dprintf(STDERR_FILENO, "pushd: the stack is full (%d)\n", DIRSTACK_MAX);
+                last_status = 1;
+                return true;
+            }
+            if ((last_status = shell_cd(c->argv[1], false)) != 0)
+                return true;
+            dirstack[ndirs++] = strdup(cwd);
+        }
+        dirs_print(false);
+        return true;
+    }
+
+    if (strcmp(cmd, "popd") == 0) {
+        if (ndirs == 0) {
+            dprintf(STDERR_FILENO, "popd: directory stack empty\n");
+            last_status = 1;
+            return true;
+        }
+        if ((last_status = shell_cd(dirstack[ndirs - 1], false)) != 0)
+            return true;
+        free(dirstack[--ndirs]);
+        dirs_print(false);
+        return true;
+    }
+
+    if (strcmp(cmd, "dirs") == 0) {
+        bool numbered = false;
+        for (int i = 1; i < c->argc; i++) {
+            if (strcmp(c->argv[i], "-c") == 0) {
+                while (ndirs > 0) free(dirstack[--ndirs]);
+                last_status = 0;
+                return true;
+            }
+            if (strcmp(c->argv[i], "-v") == 0) numbered = true;
+        }
+        dirs_print(numbered);
+        last_status = 0;
+        return true;
+    }
+
+    /* history       all of it, numbered
+     * history N     the last N
+     * history -c    forget it, the file too */
+    if (strcmp(cmd, "history") == 0) {
+        last_status = 0;
+        if (c->argc > 1 && strcmp(c->argv[1], "-c") == 0) {
+            for (int i = 0; i < hist_count; i++) free(history[i]);
+            hist_count = 0;
+            long fd = lp_open(hist_file(), O_WRONLY | O_TRUNC, 0600);
+            if (fd >= 0) lp_close((int)fd);
+            return true;
+        }
+        int from = 0;
+        if (c->argc > 1) {
+            if (!str_is_num(c->argv[1])) {
+                dprintf(STDERR_FILENO, "history: %s: not a number\n", c->argv[1]);
+                last_status = 2;
+                return true;
+            }
+            long want = str_to_num(c->argv[1]);
+            if (want < hist_count) from = hist_count - (int)want;
+        }
+        for (int i = from; i < hist_count; i++)
+            printf("%5d  %s\n", i + 1, history[i]);
+        return true;
+    }
+
+    if (strcmp(cmd, "jobs") == 0) {
+        reap_jobs();
+        for (int i = 0; i < njobs; i++)
+            printf("[%d]  running  %d  %s\n", jobs[i].id, (int)jobs[i].pid, jobs[i].cmd);
+        last_status = 0;
+        return true;
+    }
+
+    /* wait            every job there is
+     * wait PID|%N     that one, and its exit code */
+    if (strcmp(cmd, "wait") == 0) {
+        last_status = 0;
+        if (c->argc == 1) {
+            while (njobs > 0) {
+                int st = 0;
+                lp_waitpid(jobs[0].pid, &st, 0);
+                job_forget(0);
+            }
+            return true;
+        }
+        for (int a = 1; a < c->argc; a++) {
+            const char *w = c->argv[a];
+            pid_t pid = -1;
+            int   at  = -1;
+            if (w[0] == '%') {
+                int id = atoi(w + 1);
+                for (int i = 0; i < njobs; i++)
+                    if (jobs[i].id == id) { at = i; pid = jobs[i].pid; }
+            } else if (str_is_num(w)) {
+                pid = (pid_t)str_to_num(w);
+                for (int i = 0; i < njobs; i++)
+                    if (jobs[i].pid == pid) at = i;
+            }
+            if (pid <= 0) {
+                dprintf(STDERR_FILENO, "wait: %s: no such job\n", w);
+                last_status = 127;
+                continue;
+            }
+            int st = 0;
+            if (lp_waitpid(pid, &st, 0) == pid)
+                last_status = wait_status(st);
+            else
+                last_status = 127;
+            if (at >= 0)
+                job_forget(at);
+        }
+        return true;
+    }
+
+    /* umask          what it is, 0022
+     * umask 077      set it (octal) */
+    if (strcmp(cmd, "umask") == 0) {
+        if (c->argc < 2 || strcmp(c->argv[1], "-S") == 0) {
+            long m = lp_umask(0);
+            lp_umask(m);
+            if (c->argc >= 2) {
+                const char *who = "ugo";
+                for (int k = 0; k < 3; k++) {
+                    int bits = (int)(~m >> (6 - 3 * k)) & 7;
+                    printf("%c=%s%s%s%s", who[k], (bits & 4) ? "r" : "",
+                           (bits & 2) ? "w" : "", (bits & 1) ? "x" : "",
+                           k < 2 ? "," : "\n");
+                }
+            } else {
+                printf("0%ld%ld%ld\n", (m >> 6) & 7, (m >> 3) & 7, m & 7);
+            }
+            last_status = 0;
+            return true;
+        }
+        long m = 0;
+        const char *d = c->argv[1];
+        if (!*d) m = -1;
+        for (; *d; d++) {
+            if (*d < '0' || *d > '7') { m = -1; break; }
+            m = m * 8 + (*d - '0');
+        }
+        if (m < 0 || m > 0777) {
+            dprintf(STDERR_FILENO, "umask: %s: an octal number, like 022\n", c->argv[1]);
+            last_status = 1;
+            return true;
+        }
+        lp_umask(m);
+        last_status = 0;
+        return true;
+    }
+
+    /* Programs are looked up afresh every time; there is nothing to
+     * remember or forget, and `hash -r` in a script is not an error. */
+    if (strcmp(cmd, "hash") == 0) {
+        last_status = 0;
+        return true;
+    }
+
+    return false;
 }
 
 /* ── Main loop ─────────────────────────────────────────────────── */
@@ -4625,14 +5325,9 @@ static int build_prompt(char *out, size_t size)
         strlcpy(cwd, "?", sizeof(cwd));
 
     /* Home shows as ~, the way every other shell writes it. */
-    const char *shown = cwd;
     char   collapsed[300];
-    size_t hlen = strlen(HOME_DIR);
-    if (strncmp(cwd, HOME_DIR, hlen) == 0 &&
-        (cwd[hlen] == '\0' || cwd[hlen] == '/')) {
-        snprintf(collapsed, sizeof(collapsed), "~%s", cwd + hlen);
-        shown = collapsed;
-    }
+    tilde_path(cwd, collapsed, sizeof(collapsed));
+    const char *shown = collapsed;
 
     /* Who this is, from the kernel rather than from a string.
      *
@@ -4692,10 +5387,20 @@ static void source_file(const char *path)
     if (fd < 0)
         return;
 
-    static block_line_t sblock[MAX_BLOCK];
+    /* Its own lines, not one static set: /etc/profile runs every file in
+     * /etc/profile.d from inside a for loop, and with one set the file
+     * read inside wrote over the loop that was reading it - what ran
+     * after the first file was the tail of that file, not the loop. */
+    block_line_t *sblock = malloc(sizeof(block_line_t) * MAX_BLOCK);
+    if (!sblock) {
+        lp_close((int)fd);
+        dprintf(STDERR_FILENO, "sh: out of memory reading %s\n", path);
+        return;
+    }
     char line[MAX_LINE];
     int  nblock = 0, depth = 0;
     bool pending = false;
+    in_source++;
 
     for (;;) {
         long len = readline_joined((int)fd, line, sizeof line);
@@ -4723,6 +5428,8 @@ static void source_file(const char *path)
                 exec_block(sblock, nblock);
             nblock = 0;
             depth  = 0;
+            if (func_return || !shell_running)
+                break;               /* `return` in the file: the rest is skipped */
         }
         if (nblock >= MAX_BLOCK - 8) {
             dprintf(STDERR_FILENO,
@@ -4732,11 +5439,14 @@ static void source_file(const char *path)
         }
     }
 
-    if (depth > 0)
+    if (depth > 0 && !func_return)
         dprintf(STDERR_FILENO,
                 "sh: %s ends with %d block%s still open - it was not run\n",
                 path, depth, depth == 1 ? "" : "s");
 
+    func_return = false;
+    in_source--;
+    free(sblock);
     lp_close((int)fd);
 }
 
@@ -4890,8 +5600,18 @@ int main(int argc, char **argv)
 
         read_hostname();
         hist_load();
-        if (lp_is_dir(HOME_DIR))
-            lp_chdir(HOME_DIR);
+        if (lp_is_dir(home_dir()))
+            lp_chdir(home_dir());
+        {
+            char cwd[512];
+            if (lp_getcwd(cwd, sizeof cwd) >= 0)
+                setenv("PWD", cwd, 1);
+        }
+        /* The ones every distribution's .bashrc has. ~/.profile can
+         * change or `unalias` them. */
+        alias_set("ll", "ls -l");
+        alias_set("la", "ls -a");
+        alias_set("l", "ls");
 
         /* Read after chdir, so a profile that does something relative to
          * the home directory means what it looks like it means. */

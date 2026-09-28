@@ -60,6 +60,7 @@ long lp_unlink(const char *p)            { return sys_call3(SYS_unlinkat, AT_FDC
 long lp_rmdir(const char *p)             { return sys_call3(SYS_unlinkat, AT_FDCWD, (long)p, AT_REMOVEDIR); }
 long lp_mkdir(const char *p, mode_t m)   { return sys_call3(SYS_mkdirat, AT_FDCWD, (long)p, (long)m); }
 long lp_chdir(const char *p)             { return sys_call1(SYS_chdir, (long)p); }
+long lp_umask(long m)                    { return sys_call1(SYS_umask, m); }
 long lp_getcwd(char *b, size_t n)        { return sys_call2(SYS_getcwd, (long)b, (long)n); }
 long lp_access(const char *p, int mode)  { return sys_call4(SYS_faccessat, AT_FDCWD, (long)p, mode, 0); }
 long sys_getdents(int fd, void *buf, size_t size) { return sys_call3(SYS_getdents64, fd, (long)buf, (long)size); }

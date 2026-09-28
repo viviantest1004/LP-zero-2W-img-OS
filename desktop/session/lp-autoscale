@@ -188,8 +188,15 @@ def find_mode(o, want):
 # 5120x2880, fifteen million pixels a frame, which no emulated CPU keeps
 # up with - the pointer is the first thing that lags. Above this many
 # pixels the largest offered mode of the same shape under it is used
-# instead (the host scales it up to the window); with a GPU (wayfire) the
-# preferred mode stands.
+# instead (the host scales it up to the window).
+#
+# In a virtual machine the same limit holds with 3D too: every GTK window
+# still draws itself on the (emulated) CPU, and the compositor's frames go
+# through virgl. And the mode keeps the window's shape: a 16:10 mode on a
+# 16:9 screen was black bars left and right. When the virtual GPU offers
+# no mode of that shape under the limit, it gets one of its own (a custom
+# mode; virtio-gpu takes any size) - 5120x2880 becomes 2560x1440, the
+# desktop the same size it was at scale 2, a quarter of the pixels.
 SOFTWARE_MAX_PIXELS = 2560 * 1600
 
 
@@ -198,18 +205,44 @@ def software_rendering():
         os.environ.get("WLR_RENDERER") == "pixman"
 
 
+def virtual_gpu():
+    for card in os.listdir("/sys/class/drm"):
+        if not re.match(r"card\d+$", card):
+            continue
+        drv = os.path.realpath("/sys/class/drm/%s/device/driver" % card)
+        if os.path.basename(drv) in ("virtio_gpu", "virtio-pci", "virtio_pci"):
+            return True
+    return False
+
+
+def custom(w, h, mhz=60000):
+    """A mode the GPU did not list, as a tuple like the listed ones; its
+    string is what wlr-randr --custom-mode takes."""
+    return (w, h, mhz, "%dx%d@%.3fHz" % (w, h, mhz / 1000.0))
+
+
 def fit_mode(o):
     pref = o["pref"]
-    if not software_rendering() or pref[0] * pref[1] <= SOFTWARE_MAX_PIXELS:
+    vm = virtual_gpu()
+    if not (software_rendering() or vm) or pref[0] * pref[1] <= SOFTWARE_MAX_PIXELS:
         return pref
     ratio = pref[0] / pref[1]
     fits = [m for m in o["modes"] if m[0] * m[1] <= SOFTWARE_MAX_PIXELS]
     same_shape = [m for m in fits if abs(m[0] / m[1] - ratio) < 0.02]
-    pool = same_shape or fits
-    if not pool:
+    if same_shape:
+        best = max(same_shape, key=lambda m: (m[0] * m[1], m[2]))
+    elif vm:
+        # Halve until it fits: the same shape, and an even division of the
+        # host's pixels so the picture scales up cleanly.
+        w, h, n = pref[0], pref[1], 1
+        while (w // n) * (h // n) > SOFTWARE_MAX_PIXELS:
+            n += 1
+        best = custom(w // n // 2 * 2, h // n // 2 * 2)
+    elif fits:
+        best = max(fits, key=lambda m: (m[0] * m[1], m[2]))
+    else:
         return pref
-    best = max(pool, key=lambda m: (m[0] * m[1], m[2]))
-    log(o["name"], "preferred %dx%d is too many pixels to draw in software; %s instead"
+    log(o["name"], "preferred %dx%d is too many pixels to draw here; %s instead"
         % (pref[0], pref[1], best[3]))
     return best
 
@@ -230,6 +263,11 @@ def smaller_modes(o, tried):
 
 
 def guess(o):
+    # A virtual machine draws at scale 1: fit_mode already gave a large
+    # window a mode of half its pixels, so the desktop is the size scale 2
+    # would have made it - and at 2560 wide scale 2 made it 1280 wide.
+    if virtual_gpu():
+        return "1"
     return "2" if o["width"] >= 2560 else "1"
 
 
@@ -251,13 +289,16 @@ def apply():
             if not same(o["cur"], want):
                 m = find_mode(o, want)
                 if m is None:
-                    log(name, "chosen mode %s is not offered now; left as it is" % pin)
+                    # Settings offers sizes and refresh rates the GPU does
+                    # not list (a custom mode); put the chosen one back the
+                    # same way.
+                    args += ["--custom-mode", custom(want[0], want[1], want[2] or 60000)[3]]
                 else:
                     args += ["--mode", m[3]]
         elif use_randr and o["pref"]:
             target = fit_mode(o)
-            if target is not None and target != o["cur"]:
-                args += ["--mode", target[3]]
+            if target is not None and not same(o["cur"], target):
+                args += ["--mode" if target in o["modes"] else "--custom-mode", target[3]]
         tf = pinned("transform", name)
         if tf and tf != o["transform"]:
             args += ["--transform", tf]
