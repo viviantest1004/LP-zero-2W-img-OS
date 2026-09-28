@@ -146,6 +146,8 @@ void  view_queue(app_t *app);
 void  view_image_changed(app_t *app);          /* size or pixels all changed */
 void  view_region_changed(app_t *app, double x, double y, double w, double h);
 void  view_fit(app_t *app);
+void  view_cursor(app_t *app);
+void  viewer_prepare_edit(app_t *app);
 void  view_w2i(app_t *app, double wx, double wy, double *ix, double *iy);
 void  toast(app_t *app, const char *msg);
 void  title_update(app_t *app);
@@ -194,6 +196,5 @@ void  ask_unsaved(app_t *app, cont_fn cont, gpointer data, GDestroyNotify fr);
 void  cont_run(app_t *app);
 void  cont_drop(app_t *app);
 void  cont_leave_editor(app_t *app, gpointer data);
-gboolean cursor_needs_crosshair(app_t *app);
 
 #endif /* LP_PHOTOS_H */

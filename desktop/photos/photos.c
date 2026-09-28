@@ -40,6 +40,7 @@ static void go_index(app_t *app, int idx);
 static void controls_show(app_t *app);
 static void update_cursor(app_t *app);
 static void st_start(app_t *app);
+static void info_toggle(app_t *app);
 
 /* ── pixels ───────────────────────────────────────────────────────── */
 
@@ -239,11 +240,13 @@ void title_update(app_t *app)
     }
     gtk_label_set_text(GTK_LABEL(app->subtitle), sub ? sub : "");
     gtk_widget_set_visible(app->subtitle, sub != NULL);
-    if (app->count_label)
-        gtk_label_set_text(GTK_LABEL(app->count_label),
-                           (app->files && app->path)
-                           ? g_strdup_printf("%d / %u", app->index + 1, app->files->len) + 0
-                           : "");
+    if (app->count_label) {
+        char *cnt = (app->files && app->path)
+                    ? g_strdup_printf("%d / %u", app->index + 1, app->files->len)
+                    : g_strdup("");
+        gtk_label_set_text(GTK_LABEL(app->count_label), cnt);
+        g_free(cnt);
+    }
 
     char *wt = base ? g_strdup_printf("%s — %s", base, T("Photos", "사진"))
                     : g_strdup(T("Photos", "사진"));
@@ -293,11 +296,11 @@ static void info_update(app_t *app)
     }
     g_object_unref(f);
     if (app->fmt_desc || app->fmt_name) {
+        /* gdk-pixbuf's description is the readable one ("JPEG", "WebP");
+         * the short name is only a fallback. */
         char *up = app->fmt_name ? g_ascii_strup(app->fmt_name, -1) : NULL;
-        char *s = (up && app->fmt_desc) ? g_strdup_printf("%s (%s)", up, app->fmt_desc)
-                                        : g_strdup(up ? up : app->fmt_desc);
-        gtk_label_set_text(GTK_LABEL(app->info_val[5]), s);
-        g_free(s); g_free(up);
+        gtk_label_set_text(GTK_LABEL(app->info_val[5]), app->fmt_desc ? app->fmt_desc : up);
+        g_free(up);
     }
 }
 
@@ -409,6 +412,7 @@ static void cache_build(app_t *app)
     if (app->cache_timer) { g_source_remove(app->cache_timer); app->cache_timer = 0; }
     cache_drop(app);
     if (!app->img || app->zoom >= 0.999) return;
+    gint64 t0 = g_get_monotonic_time();
     int w = MAX(1, (int)ceil(app->iw * app->zoom));
     int h = MAX(1, (int)ceil(app->ih * app->zoom));
     app->cache = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
@@ -422,6 +426,7 @@ static void cache_build(app_t *app)
     cairo_paint(cr);
     cairo_destroy(cr);
     app->cache_zoom = app->zoom;
+    if (app->st_cmds) g_print("cache %dx%d built in %.0f ms\n", w, h, (g_get_monotonic_time() - t0) / 1e3);
 }
 
 static gboolean cache_timeout(gpointer d)
@@ -771,6 +776,9 @@ static void anim_schedule(app_t *app)
 
 static void set_image(app_t *app, cairo_surface_t *s, gboolean alpha)
 {
+    /* A new picture ends any editing of the old one; every path here
+     * has already asked about unsaved edits. */
+    edit_leave_now(app);
     if (app->img) cairo_surface_destroy(app->img);
     app->img = s;
     app->has_alpha = alpha;
@@ -813,19 +821,19 @@ static void load_done(GObject *src, GAsyncResult *res, gpointer d)
     title_update(app);
     info_update(app);
     update_cursor(app);
-    if (app->slideshow && app->slide_timer == 0) {
-        /* restart the clock from when the picture is actually shown */
-    }
     if (app->st_cmds && app->st_pos == 0) st_start(app);
 }
 
 static void load_path(app_t *app, const char *path)
 {
     anim_stop(app);
+    char *keep = g_strdup(path);          /* path may be app->path itself */
     g_free(app->path);
-    app->path = g_strdup(path);
+    app->path = keep;
+    path = keep;
     files_for(app, path, FALSE);
     gtk_stack_set_visible_child_name(GTK_STACK(app->stack), "image");
+    gtk_widget_set_visible(app->hb_view_end, !app->editing);
 
     load_t *L = g_new0(load_t, 1);
     L->app = app;
@@ -864,6 +872,9 @@ static void show_empty(app_t *app)
     gtk_stack_set_visible_child_name(GTK_STACK(app->stack), "empty");
     gtk_widget_set_sensitive(app->edit_btn, FALSE);
     gtk_widget_set_sensitive(app->copy_btn, FALSE);
+    /* Nothing to copy, edit or show full screen: say so by absence. */
+    gtk_widget_set_visible(app->hb_view_end, FALSE);
+    if (gtk_revealer_get_reveal_child(GTK_REVEALER(app->info_rev))) info_toggle(app);
     title_update(app);
     info_update(app);
 }
@@ -871,8 +882,10 @@ static void show_empty(app_t *app)
 /* After Save As the picture on screen *is* the new file. */
 void after_save_as(app_t *app, const char *path)
 {
+    char *keep = g_strdup(path);          /* path may be app->path itself */
     g_free(app->path);
-    app->path = g_strdup(path);
+    app->path = keep;
+    path = keep;
     files_for(app, path, TRUE);
     GdkPixbufFormat *f = gdk_pixbuf_get_file_info(path, NULL, NULL);
     if (f) {
@@ -970,7 +983,7 @@ static void open_dialog(app_t *app)
 {
     GtkFileChooserNative *nd = gtk_file_chooser_native_new(
         T("Open a Picture", "사진 열기"), GTK_WINDOW(app->win),
-        GTK_FILE_CHOOSER_ACTION_OPEN, T("_Open", "열기(_O)"), T("_Cancel", "취소(_C)"));
+        GTK_FILE_CHOOSER_ACTION_OPEN, T("Open", "열기"), T("Cancel", "취소"));
     GtkFileFilter *ff = gtk_file_filter_new();
     gtk_file_filter_set_name(ff, T("Pictures", "사진"));
     gtk_file_filter_add_pixbuf_formats(ff);
@@ -1023,6 +1036,11 @@ GtkWidget *dialog_new(app_t *app, const char *title, const char *body)
     gtk_window_set_title(GTK_WINDOW(w), title);
     gtk_window_set_default_size(GTK_WINDOW(w), 400, -1);
     gtk_widget_add_css_class(w, "lp-photos-dialog");
+    /* An empty title bar: the title is already the first line of the
+     * dialog, and a compositor-drawn bar would say it a second time. */
+    GtkWidget *nobar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_visible(nobar, FALSE);
+    gtk_window_set_titlebar(GTK_WINDOW(w), nobar);
 
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
     gtk_widget_set_margin_start(box, 24);
@@ -1031,7 +1049,7 @@ GtkWidget *dialog_new(app_t *app, const char *title, const char *body)
     gtk_widget_set_margin_bottom(box, 18);
 
     GtkWidget *t = gtk_label_new(title);
-    gtk_widget_add_css_class(t, "title-4");
+    gtk_widget_add_css_class(t, "lp-photos-h2");
     gtk_label_set_xalign(GTK_LABEL(t), 0);
     gtk_label_set_wrap(GTK_LABEL(t), TRUE);
     gtk_box_append(GTK_BOX(box), t);
@@ -1063,7 +1081,7 @@ GtkWidget *dialog_new(app_t *app, const char *title, const char *body)
 GtkWidget *dialog_add_button(GtkWidget *dlg, const char *label, const char *css,
                              GCallback cb, gpointer data)
 {
-    GtkWidget *b = gtk_button_new_with_mnemonic(label);
+    GtkWidget *b = gtk_button_new_with_label(label);
     if (css) gtk_widget_add_css_class(b, css);
     if (cb) g_signal_connect(b, "clicked", cb, data);
     g_signal_connect_swapped(b, "clicked", G_CALLBACK(gtk_window_destroy), dlg);
@@ -1106,8 +1124,8 @@ static void ask_trash(app_t *app)
     char *body = g_strdup_printf(T("“%s” will be moved to the trash. You can restore it from there.",
                                    "“%s” 을(를) 휴지통으로 옮깁니다. 휴지통에서 되살릴 수 있습니다."), base);
     GtkWidget *dlg = dialog_new(app, T("Move to the trash?", "휴지통으로 옮길까요?"), body);
-    dialog_add_button(dlg, T("_Cancel", "취소(_C)"), NULL, NULL, NULL);
-    GtkWidget *ok = dialog_add_button(dlg, T("_Move to Trash", "휴지통으로 옮기기(_M)"),
+    dialog_add_button(dlg, T("Cancel", "취소"), NULL, NULL, NULL);
+    GtkWidget *ok = dialog_add_button(dlg, T("Move to Trash", "휴지통으로 옮기기"),
                                       "destructive-action", G_CALLBACK(do_trash), app);
     gtk_window_set_default_widget(GTK_WINDOW(dlg), ok);
     gtk_window_present(GTK_WINDOW(dlg));
@@ -1189,6 +1207,17 @@ static void info_toggle(app_t *app)
     gboolean on = !gtk_revealer_get_reveal_child(GTK_REVEALER(app->info_rev));
     gtk_revealer_set_reveal_child(GTK_REVEALER(app->info_rev), on);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->info_btn), on);
+}
+
+void view_cursor(app_t *app) { update_cursor(app); }
+
+/* The editor wants a still picture and the header bar (for Save). */
+void viewer_prepare_edit(app_t *app)
+{
+    anim_stop(app);
+    if (app->slideshow) slideshow_set(app, FALSE);
+    if (app->fullscreen) fullscreen_set(app, FALSE);
+    gtk_revealer_set_reveal_child(GTK_REVEALER(app->navbar), FALSE);
 }
 
 static void view_xform(app_t *app, xform_t op)
@@ -1323,6 +1352,10 @@ static const char *CSS =
     "window.lp-photos-fs .lp-photos-canvas { background-color: #000; }\n"
     ".lp-photos-empty { background-color: #1b1b1d; color: #e8e8ea; }\n"
     ".lp-photos-empty .dim-label { color: #a0a0a6; }\n"
+    ".lp-photos-h1 { font-size: 17pt; font-weight: bold; }\n"
+    ".lp-photos-h2 { font-size: 12.5pt; font-weight: bold; }\n"
+    ".lp-photos-empty button { background-color: #3584e4; color: #fff; padding: 8px 26px; border-radius: 999px; }\n"
+    ".lp-photos-empty button:hover { background-color: #4a93ec; }\n"
     ".lp-photos-osd { background-color: rgba(24,24,27,0.88); color: #f0f0f2;"
     "  border-radius: 14px; padding: 4px; border: 1px solid rgba(255,255,255,0.08); }\n"
     ".lp-photos-osd button { color: #f0f0f2; background: none; border: none; box-shadow: none;"
@@ -1332,14 +1365,26 @@ static const char *CSS =
     ".lp-photos-osd button:disabled { color: rgba(240,240,242,0.35); }\n"
     ".lp-photos-osd label { color: #f0f0f2; }\n"
     ".lp-photos-osd separator { background-color: rgba(255,255,255,0.14); margin: 6px 4px; min-width: 1px; }\n"
-    ".lp-photos-osd scale trough { background-color: rgba(255,255,255,0.2); }\n"
+    ".lp-photos-osd button.text-button { background-color: rgba(255,255,255,0.10); padding: 0 14px; }\n"
+    ".lp-photos-osd button.suggested-action { background-color: #3584e4; color: #fff; }\n"
+    ".lp-photos-osd button.suggested-action:hover { background-color: #4a93ec; }\n"
+    ".lp-photos-osd button.suggested-action:disabled { background-color: rgba(53,132,228,0.35); color: rgba(255,255,255,0.5); }\n"
+    ".lp-photos-osd scale { min-height: 26px; }\n"
+    ".lp-photos-osd scale trough { min-height: 4px; border-radius: 2px; background-color: rgba(255,255,255,0.22); }\n"
+    ".lp-photos-osd scale highlight { min-height: 4px; border-radius: 2px; background-color: #3584e4; }\n"
+    ".lp-photos-osd scale slider { min-width: 16px; min-height: 16px; margin: -6px; border-radius: 8px;"
+    "  background-color: #f4f4f6; border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.5); }\n"
+    ".lp-photos-dialog button { padding: 6px 16px; background-color: rgba(127,127,127,0.18); }\n"
+    ".lp-photos-dialog button.suggested-action { background-color: #3584e4; color: #fff; }\n"
+    ".lp-photos-dialog button.destructive-action { background-color: #c01c28; color: #fff; }\n"
     ".lp-photos-toast { background-color: rgba(24,24,27,0.92); color: #fff; border-radius: 10px;"
     "  padding: 8px 16px; margin-top: 14px; }\n"
     ".lp-photos-info { padding: 18px 18px; }\n"
     ".lp-photos-info .lp-photos-key { font-size: smaller; opacity: 0.65; margin-top: 10px; }\n"
-    ".lp-photos-editbar { padding: 4px 8px; }\n"
-    ".lp-photos-editbar button { min-width: 30px; min-height: 30px; padding: 2px 5px; }\n"
-    ".lp-photos-swatch { padding: 2px; min-width: 26px; min-height: 26px; }\n"
+    ".lp-photos-editbar { padding: 3px 8px; }\n"
+    ".lp-photos-editbar button { min-width: 28px; min-height: 28px; padding: 2px; margin: 0; }\n"
+    ".lp-photos-editbar button.lp-photos-swatch { min-width: 24px; min-height: 24px; padding: 1px; }\n"
+    ".lp-photos-editbar separator { margin: 5px 5px; }\n"
     ".lp-photos-textbox { background-color: rgba(24,24,27,0.92); border-radius: 10px; padding: 6px; }\n";
 
 static GtkWidget *info_panel(app_t *app)
@@ -1348,7 +1393,7 @@ static GtkWidget *info_panel(app_t *app)
     gtk_widget_add_css_class(box, "lp-photos-info");
     gtk_widget_set_size_request(box, 250, -1);
     GtkWidget *h = gtk_label_new(T("Details", "정보"));
-    gtk_widget_add_css_class(h, "title-4");
+    gtk_widget_add_css_class(h, "lp-photos-h2");
     gtk_label_set_xalign(GTK_LABEL(h), 0);
     gtk_box_append(GTK_BOX(box), h);
     const char *keys[6] = {
@@ -1442,13 +1487,13 @@ static GtkWidget *empty_page(app_t *app)
     gtk_widget_add_css_class(im, "dim-label");
     gtk_box_append(GTK_BOX(box), im);
     GtkWidget *t = gtk_label_new(T("No picture open", "열린 사진이 없습니다"));
-    gtk_widget_add_css_class(t, "title-2");
+    gtk_widget_add_css_class(t, "lp-photos-h1");
     gtk_box_append(GTK_BOX(box), t);
     GtkWidget *s = gtk_label_new(T("Open a picture, or drag one here.",
                                    "사진을 열거나 이곳으로 끌어다 놓으십시오."));
     gtk_widget_add_css_class(s, "dim-label");
     gtk_box_append(GTK_BOX(box), s);
-    GtkWidget *b = gtk_button_new_with_mnemonic(T("_Open…", "열기(_O)…"));
+    GtkWidget *b = gtk_button_new_with_label(T("Open…", "열기…"));
     gtk_widget_add_css_class(b, "suggested-action");
     gtk_widget_add_css_class(b, "pill");
     gtk_widget_set_halign(b, GTK_ALIGN_CENTER);
@@ -1491,7 +1536,7 @@ static void build_window(app_t *app)
     gtk_header_bar_set_title_widget(GTK_HEADER_BAR(app->header), tb);
 
     app->hb_view_start = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    GtkWidget *ob = gtk_button_new_with_mnemonic(T("_Open", "열기(_O)"));
+    GtkWidget *ob = gtk_button_new_with_label(T("Open", "열기"));
     gtk_widget_set_tooltip_text(ob, T("Open a picture (Ctrl+O)", "사진 열기 (Ctrl+O)"));
     g_signal_connect(ob, "clicked", G_CALLBACK(b_open), app);
     gtk_box_append(GTK_BOX(app->hb_view_start), ob);
@@ -1637,12 +1682,37 @@ static void st_drag(app_t *app, double fx0, double fy0, double fx1, double fy1, 
     edit_release(app, x1, y1 + (wave ? sin(G_PI * 4) * 30 : 0));
 }
 
+static GtkWidget *st_find_button(GtkWidget *w, const char *label)
+{
+    if (GTK_IS_BUTTON(w) && g_strcmp0(gtk_button_get_label(GTK_BUTTON(w)), label) == 0) return w;
+    for (GtkWidget *c = gtk_widget_get_first_child(w); c; c = gtk_widget_get_next_sibling(c)) {
+        GtkWidget *r = st_find_button(c, label);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+/* Click a button in whichever dialog is open, by its label. */
+static void st_press(app_t *app, const char *label)
+{
+    GListModel *tl = gtk_window_get_toplevels();
+    for (guint i = 0; i < g_list_model_get_n_items(tl); i++) {
+        GtkWidget *w = g_list_model_get_item(tl, i);
+        g_object_unref(w);
+        if (w == app->win) continue;
+        GtkWidget *b = st_find_button(w, label);
+        if (b) { g_signal_emit_by_name(b, "clicked"); return; }
+    }
+    g_print("selftest: no button %s\n", label);
+}
+
 static gboolean st_step(gpointer d)
 {
     app_t *app = d;
     if (!app->st_cmds[app->st_pos]) return G_SOURCE_REMOVE;
+    if (app->loading) { g_timeout_add(100, st_step, app); return G_SOURCE_REMOVE; }
     char *c = app->st_cmds[app->st_pos++];
-    g_print("selftest: %s\n", c);
+    g_print("selftest %.2f: %s\n", g_get_monotonic_time() / 1e6, c);
     double a[4] = {0};
     char *arg = strchr(c, ':');
     if (arg) *arg++ = 0;
@@ -1692,6 +1762,11 @@ static gboolean st_step(gpointer d)
     else if (!strcmp(c, "ask")) ask_unsaved(app, NULL, NULL, NULL);
     else if (!strcmp(c, "trash")) ask_trash(app);
     else if (!strcmp(c, "wait")) delay = (int)a[0];
+    else if (!strcmp(c, "press") && arg) st_press(app, arg);
+    else if (!strcmp(c, "shot") && arg) {
+        const char *argv[] = { "grim", arg, NULL };
+        g_spawn_sync(NULL, (char **)argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, NULL, NULL);
+    }
     else if (!strcmp(c, "print"))
         g_print("selftest: state img=%dx%d zoom=%.4f ox=%.1f oy=%.1f undo=%d/%d dirty=%d editing=%d index=%d/%u path=%s\n",
                 app->iw, app->ih, app->zoom, app->ox, app->oy, app->upos, app->un,
@@ -1705,9 +1780,11 @@ static gboolean st_step(gpointer d)
 
 static void st_start(app_t *app)
 {
+    static gboolean started;
+    if (started) return;
+    started = TRUE;
     app->st_pos = 0;
     g_timeout_add(600, st_step, app);
-    app->st_pos = 0;
 }
 
 /* ── application ──────────────────────────────────────────────────── */
