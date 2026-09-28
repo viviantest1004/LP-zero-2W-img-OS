@@ -773,6 +773,10 @@ install -D -m 755 "$D/system/lp-rollback" "$ROOT/usr/sbin/lp-rollback"
 install -D -m 644 "$D/system/80lp-rollback" "$ROOT/etc/apt/apt.conf.d/80lp-rollback"
 install -D -m 755 "$D/system/lp-safe-mode" "$ROOT/usr/sbin/lp-safe-mode"
 install -D -m 755 "$D/system/lp-bugreport" "$ROOT/usr/bin/lp-bugreport"
+# The login shells' profile. The one the base carried set HOME, TERM,
+# LANG and XDG_RUNTIME_DIR to root's console values in every terminal
+# (desktop/session/profile says what that broke).
+install -m 644 "$D/session/profile" "$ROOT/etc/profile"
 # thermald, on real Intel hardware only. In a virtual machine there is
 # nothing for it to hold down (no RAPL, no DPTF), it exits, and init
 # would start it again and again; there the line waits instead.
@@ -789,7 +793,7 @@ fi
 exec sleep 2147483647
 SH
     chmod 755 "$ROOT/usr/lib/lp/thermald-start"
-    printf '\n# Intel thermal daemon (real hardware only, see thermald-start).\n?/usr/lib/lp/thermald-start thermald-start\n' \
+    printf '\n# Intel thermal daemon (real hardware only, see thermald-start).\n?/usr/lib/lp/thermald-start =thermald /usr/lib/lp/thermald-start\n' \
         >> "$ROOT/etc/lp/services"
 fi
 # The screen's console asks for a login here (userland/init/init.c):

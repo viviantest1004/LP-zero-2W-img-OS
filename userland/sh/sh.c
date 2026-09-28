@@ -263,6 +263,11 @@ static bool is_name_char(char c)
 
 static char   arena[8192];
 static size_t arena_used;
+/* Where a parse starts in the arena. A line being run can call a
+ * function whose body is parsed while the caller's words are still in
+ * use; the inner parse starts after them (run_segment moves the base),
+ * instead of at 0, over them. */
+static size_t arena_base;
 
 /* Copy a token into the arena and return the pointer. NULL if it is full. */
 static char *arena_push(const char *src, size_t len)
@@ -1336,7 +1341,7 @@ static bool try_assignment(const char *word)
  * Returns the pipeline count, 0 for a blank line, -1 on error. */
 static int parse_line(char *line, pipeline_t *pipes, int max_pipes)
 {
-    arena_used = 0;
+    arena_used = arena_base;
     bool assigned = false;      /* the line held at least one NAME=value */
 
     int np = 1;
@@ -3247,18 +3252,102 @@ static void expand_alias(cmd_t *c)
     }
 }
 
+/* Where the next && or || of this line is - outside quotes, $(...) and
+ * `...` - as an offset, with *op 1 for && and 2 for ||; the length of
+ * the line and *op 0 when there is none. A # starting a word ends the
+ * search: the rest is a comment. */
+static size_t andor_at(const char *s, int *op)
+{
+    bool sq = false, dq = false, bq = false, word_start = true;
+    int  depth = 0;
+    *op = 0;
+    for (size_t i = 0; s[i]; i++) {
+        char c = s[i];
+        if (sq) {
+            if (c == '\'') sq = false;
+            continue;
+        }
+        if (c == '\\' && s[i + 1]) {
+            i++;
+            word_start = false;
+            continue;
+        }
+        if (c == '$' && s[i + 1] == '(') { depth++; i++; word_start = false; continue; }
+        if (c == ')' && depth > 0)       { depth--; continue; }
+        if (c == '`')  { bq = !bq; continue; }
+        if (c == '"')  { dq = !dq; word_start = false; continue; }
+        if (dq || bq || depth > 0) continue;
+        if (c == '\'') { sq = true; word_start = false; continue; }
+        if (c == '#' && word_start) break;
+        if ((c == '&' && s[i + 1] == '&') || (c == '|' && s[i + 1] == '|')) {
+            *op = c == '&' ? 1 : 2;
+            return i;
+        }
+        word_start = is_space(c) || c == ';' || c == '|' || c == '&' ||
+                     c == '(' || c == '<' || c == '>';
+    }
+    return strlen(s);
+}
+
+static void run_segment(char *line);
+
 /* Run one ordinary line - pipelines, redirection, && || ; - which is
- * everything the shell did before control structures existed. */
+ * everything the shell did before control structures existed.
+ *
+ * Each piece between && and || is parsed only when it is about to run.
+ * The whole line used to be parsed - and expanded, and its NAME=value
+ * words assigned - before any of it ran: `[ -n "$HOME" ] || HOME=/root`
+ * set HOME to /root whatever the test said (the desktop's /etc/profile
+ * did exactly that, and every terminal's home became /root), `X=1 &&
+ * echo $X` printed the old X, and a function called on the left of &&
+ * parsed its own body over the words still waiting on the right. */
 static void run_logical_line(char *line)
 {
-    static pipeline_t pipes[MAX_PIPES];
-
     if (line[0] == '#')
         return;
 
-    int np = parse_line(line, pipes, MAX_PIPES);
-    if (np <= 0)
+    size_t len = strlen(line);
+    char *copy = malloc(len + 1);
+    if (!copy) {
+        dprintf(STDERR_FILENO, "sh: out of memory\n");
+        last_status = 1;
         return;
+    }
+    memcpy(copy, line, len + 1);
+
+    link_t link = LINK_NONE;
+    char  *p = copy;
+    while (shell_running && !func_return) {
+        int    op = 0;
+        size_t at = andor_at(p, &op);
+        char   keep = p[at];
+        p[at] = '\0';
+        bool run = !(link == LINK_AND && last_status != 0) &&
+                   !(link == LINK_OR  && last_status == 0);
+        if (run)
+            run_segment(p);
+        if (!op)
+            break;
+        p[at] = keep;
+        link = op == 1 ? LINK_AND : LINK_OR;
+        p += at + 2;
+    }
+    free(copy);
+}
+
+/* One piece of a line with no && or || in it: parse it, now, and run it. */
+static void run_segment(char *line)
+{
+    pipeline_t *pipes = malloc(sizeof(pipeline_t) * MAX_PIPES);
+    if (!pipes) {
+        dprintf(STDERR_FILENO, "sh: out of memory\n");
+        last_status = 1;
+        return;
+    }
+    size_t outer_base = arena_base;
+    arena_base = arena_used;
+
+    int np = parse_line(line, pipes, MAX_PIPES);
 
     for (int i = 0; i < np && shell_running && !func_return; i++) {
         if (pipes[i].link == LINK_AND && last_status != 0) continue;
@@ -3305,6 +3394,10 @@ static void run_logical_line(char *line)
         if (pipes[i].negate)
             last_status = last_status == 0 ? 1 : 0;
     }
+
+    arena_used = arena_base;
+    arena_base = outer_base;
+    free(pipes);
 }
 
 /* ── Control structures ───────────────────────────────────────────────
