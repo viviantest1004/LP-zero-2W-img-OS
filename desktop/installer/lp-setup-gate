@@ -237,6 +237,20 @@ def vt_keyboard_off():
         log("could not take the keyboard from the VT:", e)
 
 
+def virtual_gpu():
+    """A virtual machine's display adapter (the list session-run keeps)."""
+    import glob
+    for card in glob.glob("/sys/class/drm/card[0-9]*"):
+        try:
+            drv = os.path.basename(os.path.realpath(card + "/device/driver"))
+        except OSError:
+            continue
+        if drv in ("virtio_gpu", "virtio-pci", "virtio_pci", "qxl", "bochs-drm", "bochs",
+                   "cirrus", "cirrus-qemu", "vmwgfx", "vboxvideo"):
+            return True
+    return False
+
+
 def gpu_3d():
     """A GPU that draws in 3D: the same test start-desktop makes for the
     session (i915 and friends, or virtio-gpu that the host gave virgl)."""
@@ -376,14 +390,12 @@ def kiosk(mode):
 
     if RENDERER == "pixman":
         env["LIBGL_ALWAYS_SOFTWARE"] = "1"
-    # The pointer on the cursor plane under KVM, as in the session
-    # (session-run says why, and why not under UTM's emulation).
-    try:
-        with open("/sys/devices/system/clocksource/clocksource0/available_clocksource") as f:
-            if "kvm-clock" in f.read():
-                env["WLR_DRM_CURSOR_HOTSPOT"] = "1"
-    except OSError:
-        pass
+    # A software cursor in every virtual machine, as in the session
+    # (session-run says why: on the virtual GPU's cursor plane the host drew
+    # the pointer upside down, and the screen flickered as it moved).
+    if virtual_gpu():
+        env["WLR_NO_HARDWARE_CURSORS"] = "1"
+    env.pop("WLR_DRM_CURSOR_HOTSPOT", None)
     log("kiosk", mode, "scale", output_scale(), "renderer", RENDERER)
     started = time.time()
     with open(LOG, "a") as out:

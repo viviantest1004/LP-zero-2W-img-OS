@@ -102,19 +102,23 @@ if grep -qs '^E:ID_INPUT=1' /run/udev/data/c13:* ; then
 else
     export WLR_LIBINPUT_NO_DEVICES=1
 fi
-# The pointer on the virtual GPU's cursor plane under KVM: the host draws
-# it where the mouse is, the moment it moves. Drawn by the guest instead
-# (a software cursor), it trailed each frame's trip through virgl and the
-# host's GL, and in a KVM window with 3D acceleration it slid past the
-# point where the hand stopped. Linux 6.8+ shows that plane only to a
-# compositor that sets the cursor hotspot, which LP's wlroots does with
-# WLR_DRM_CURSOR_HOTSPOT=1 (desktop/compositor/wlroots-0.15.1-lp.patch).
-# Only where kvm-clock exists, i.e. KVM: under UTM's x86 emulation the host
-# once drew that cursor garbled and warped its own pointer to it, and the
-# pointer wandered - there the software cursor stays.
-if grep -qs kvm-clock /sys/devices/system/clocksource/clocksource0/available_clocksource ; then
-    export WLR_DRM_CURSOR_HOTSPOT=1
-fi
+# The pointer is drawn by the compositor itself (a software cursor) in
+# every virtual machine. LP's wlroots can put it on the virtual GPU's
+# cursor plane instead (WLR_DRM_CURSOR_HOTSPOT=1, desktop/compositor/
+# wlroots-0.15.1-lp.patch), and that was switched on under KVM for a
+# pointer that lagged behind the hand with virgl - but the host then drew
+# the pointer upside down, and the screen flickered while the mouse or a
+# window moved, in KVM as it had in UTM before. So no virtual GPU gets
+# the cursor plane: WLR_NO_HARDWARE_CURSORS keeps the software cursor on
+# every path (atomic or legacy), and real GPUs, where the plane works,
+# keep it. The drivers are the ones virtual_gpu() in lp-autoscale knows.
+for lp_drv in /sys/class/drm/card*/device/driver ; do
+    case $(basename "$(readlink -f "$lp_drv")") in
+        virtio_gpu|virtio-pci|virtio_pci|qxl|bochs-drm|bochs|cirrus|cirrus-qemu|vmwgfx|vboxvideo)
+            export WLR_NO_HARDWARE_CURSORS=1 ;;
+    esac
+done
+unset lp_drv WLR_DRM_CURSOR_HOTSPOT
 export GDK_BACKEND=wayland
 # The pointer's theme and size for everything that loads a cursor itself
 # (Xwayland apps, the compositors' defaults): the same 16 as GTK

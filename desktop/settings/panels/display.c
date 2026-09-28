@@ -282,7 +282,20 @@ static void add_custom_modes(out_t *o)
     if (big_w <= 0 || big_h <= 0) return;
     if (is_virtual(o)) max_mhz = 240000;
 
-    /* Sizes of the same shape, no larger than the display. */
+    /* Sizes of the same shape, no larger than the display - except on a
+     * virtual one, whose "own size" is only the host window's: a VM in a
+     * 1920 x 1080 window on a 2560 x 1440 monitor offered nothing above
+     * 1920 x 1080, and 2560 x 1440 - asked for by name - never showed up.
+     * There the limit is the largest size it lists, or 3840 x 2160,
+     * whichever is more; the host scales what does not fit its window. */
+    gint64 limit = (gint64)big_w * big_h;
+    if (is_virtual(o)) {
+        limit = (gint64)3840 * 2160;
+        for (guint k = 0; k < o->modes->len; k++) {
+            const mode_t_ *m = &g_array_index(o->modes, mode_t_, k);
+            if ((gint64)m->w * m->h > limit) limit = (gint64)m->w * m->h;
+        }
+    }
     double r = (double)big_w / big_h;
     const int (*tab)[2] = NULL;
     size_t n = 0;
@@ -291,7 +304,9 @@ static void add_custom_modes(out_t *o)
     else if (fabs(r - 4.0 / 3) < 0.03)   { tab = SIZES_4_3;   n = G_N_ELEMENTS(SIZES_4_3); }
     else if (fabs(r - 3.0 / 2) < 0.03)   { tab = SIZES_3_2;   n = G_N_ELEMENTS(SIZES_3_2); }
     for (size_t i = 0; i < n; i++)
-        if (tab[i][0] <= big_w && tab[i][1] <= big_h && !has_mode(o, tab[i][0], tab[i][1], -1))
+        if ((is_virtual(o) ? (gint64)tab[i][0] * tab[i][1] <= limit
+                           : tab[i][0] <= big_w && tab[i][1] <= big_h) &&
+            !has_mode(o, tab[i][0], tab[i][1], -1))
             add_custom(o, tab[i][0], tab[i][1], 60000);
 
     /* Rates, for every size now in the list - under wayfire only for the

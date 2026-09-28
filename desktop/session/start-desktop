@@ -124,7 +124,18 @@ for card in /sys/class/drm/card[0-9]*; do
             # got sway here to spare the emulated CPU, and lost the
             # animations for it; the owner wants them, and the cost is
             # now met where it arises - see lp-autoscale's VM mode limit.)
+            #
+            # Except under KVM. There the CPU runs at the host's own speed,
+            # and every wayfire frame's round trip through virgl and the
+            # host's GL is what the person feels: the pointer trailed the
+            # hand, windows dragged, clicks answered late. sway drawing on
+            # the CPU, uploading only what changed, answers at once. KVM is
+            # told apart from UTM's x86 emulation (where the CPU is the
+            # slow part and virgl the fast one) by its clock source.
             if dmesg 2>/dev/null | grep -q 'features: +virgl'; then
+                if grep -qs kvm-clock /sys/devices/system/clocksource/clocksource0/available_clocksource; then
+                    comp=sway; why="virtio-gpu with virgl, under KVM: the CPU draws faster than virgl answers"; break
+                fi
                 comp=wayfire; why="virtio-gpu with virgl"; break
             fi
             why="virtio-gpu without 3D (virgl)" ;;
