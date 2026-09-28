@@ -15,8 +15,10 @@ case "${1:-on}" in
     status)
         if test -e /run/lp-session/safe ; then
             echo "this session: safe mode ($(cat /run/lp-session/safe))"
+        elif test -s /run/lp-session/compositor ; then
+            echo "this session: normal ($(sed -n 1p /run/lp-session/compositor))"
         else
-            echo "this session: normal ($(sed -n 1p /run/lp-session/compositor 2>/dev/null))"
+            echo "this session: no desktop started yet"
         fi
         if test -e /etc/lp/safe-mode-next ; then echo "next boot: safe mode"
         else echo "next boot: normal" ; fi
