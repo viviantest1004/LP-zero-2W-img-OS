@@ -59,7 +59,6 @@ static int fb_fd = -1;
 static u32 fb_bpp, fb_line, fb_xoff, fb_yoff;
 static u32 fb_off[3], fb_len[3];
 static u8 *rowbuf;
-static s64 opened_at;                   /* for the repaints below scr_present */
 
 bool scr_open(void)
 {
@@ -103,13 +102,12 @@ bool scr_open(void)
         return false;
     }
     fb_fd = (int)fd;
-    opened_at = lp_monotonic_ms();
     size_t px = (size_t)SW * (size_t)SH;
     cv_bg = (lpui_canvas_t){ malloc(px * 4), SW, SH, SW };
     cv_base = (lpui_canvas_t){ malloc(px * 4), SW, SH, SW };
     cv_frame = (lpui_canvas_t){ malloc(px * 4), SW, SH, SW };
     logo_scratch = malloc(LPUI_LOGO_SCRATCH);
-    rowbuf = malloc((size_t)SW * 4);
+    rowbuf = malloc((size_t)fb_line * 2 > (size_t)SW * 4 ? (size_t)fb_line * 2 : (size_t)SW * 4);
     if (!cv_bg.px || !cv_base.px || !cv_frame.px || !logo_scratch || !rowbuf)
         return false;
     rlog("screen %dx%d, %u bpp", SW, SH, fb_bpp);
@@ -138,19 +136,6 @@ static const lpui_canvas_t *settle_c;
 static int sx0, sy0, sx1, sy1;          /* union of rows written, or sx1 == 0 */
 static s64 settle_at;
 
-/* ── The whole screen, again, at the start ──
- *
- * In a VM (virtio-gpu, KVM and QEMU alike) the first picture never
- * reached the screen: the menu came up black, and only what was drawn
- * after it - the focus moving - showed, as an island in the black.
- * Writing it twice (the settle above) did not help; something between
- * the kernel console letting go of the framebuffer and the driver's
- * first flushes loses it. So for the first twenty seconds the whole
- * frame is written again now and then. A 1280 x 800 frame is 4 MB. */
-static const int REPAINT_MS[] = { 300, 1000, 2500, 5000, 10000, 20000 };
-#define NREPAINT ((int)(sizeof REPAINT_MS / sizeof REPAINT_MS[0]))
-static int repaint_next;
-
 void scr_present(const lpui_canvas_t *c, int x, int y, int w, int h)
 {
     if (fb_fd < 0 || w <= 0 || h <= 0)
@@ -172,26 +157,52 @@ void scr_present(const lpui_canvas_t *c, int x, int y, int w, int h)
 
 int scr_settle(void)
 {
-    s64 now = lp_monotonic_ms();
-    int wait = -1;
-    if (settle_c && repaint_next < NREPAINT) {
-        if (now >= opened_at + REPAINT_MS[repaint_next]) {
-            fb_put(settle_c, 0, 0, SW, SH);
-            while (repaint_next < NREPAINT && now >= opened_at + REPAINT_MS[repaint_next])
-                repaint_next++;
-        }
-        if (repaint_next < NREPAINT)
-            wait = (int)(opened_at + REPAINT_MS[repaint_next] - now);
-    }
     if (!sx1 || !settle_c)
-        return wait;
-    if (now < settle_at) {
-        int w = (int)(settle_at - now);
-        return (wait < 0 || w < wait) ? w : wait;
-    }
+        return -1;
+    s64 now = lp_monotonic_ms();
+    if (now < settle_at)
+        return (int)(settle_at - now);
     fb_put(settle_c, sx0, sy0, sx1 - sx0, sy1 - sy0);
     sx1 = 0;
-    return wait;
+    return -1;
+}
+
+/* ── Rows that reach the right edge ──
+ *
+ * On the DRM drivers' fbdev emulation (virtio-gpu in every VM - QEMU,
+ * KVM, UTM - and any driver that draws through a shadow buffer) a
+ * write() is shown by a flush of the rectangle it covered, and the
+ * kernel works that rectangle out from the byte range
+ * (drm_fb_helper_memory_range_to_clip). For a write of ONE line that
+ * ends exactly at the end of the line it gets the right edge wrong -
+ * end % line_length is 0, so x2 is 0 - and the rectangle is empty:
+ * nothing is flushed. Every row of the whole picture is such a write,
+ * so the menu came up black, and only what stopped short of the right
+ * edge (the focus box moving) ever showed, as an island in the black.
+ * Writes that span two lines or more are read as whole lines and are
+ * flushed whole. So rows that reach the right edge are sent as whole
+ * lines, two at a time, in one write(). */
+static void put_rows(const lpui_canvas_t *c, int y, int n, bool native, u32 bytes)
+{
+    const u8 *out;
+    if (native && c->stride == SW)
+        out = (const u8 *)(c->px + (u64)y * c->stride);
+    else {
+        for (int j = 0; j < n; j++) {
+            const u32 *src = c->px + (u64)(y + j) * c->stride;
+            u8 *d = rowbuf + (size_t)j * fb_line;
+            for (int i = 0; i < SW; i++) {
+                u32 p = src[i];
+                u32 v = chan((p >> 16) & 255, fb_len[0]) << fb_off[0] |
+                        chan((p >> 8) & 255, fb_len[1]) << fb_off[1] |
+                        chan(p & 255, fb_len[2]) << fb_off[2];
+                memcpy(d + (size_t)i * bytes, &v, bytes);
+            }
+        }
+        out = rowbuf;
+    }
+    lp_lseek(fb_fd, (s64)(y + (int)fb_yoff) * fb_line, 0);
+    lp_write(fb_fd, out, (size_t)n * fb_line);
 }
 
 static void fb_put(const lpui_canvas_t *c, int x, int y, int w, int h)
@@ -206,6 +217,18 @@ static void fb_put(const lpui_canvas_t *c, int x, int y, int w, int h)
         return;
     u32 bytes = fb_bpp / 8;
     bool native = fb_bpp == 32 && fb_off[0] == 16 && fb_off[1] == 8 && fb_off[2] == 0;
+    if (fb_xoff == 0 && (u32)(x + w) * bytes == fb_line && (u32)SW * bytes == fb_line) {
+        /* Whole lines, two to a write (see above); one row alone takes
+         * its neighbour along, which is drawn already and costs nothing
+         * to send again. */
+        if (h == 1) {
+            if (y + 1 < SH) h = 2;
+            else { y--; h = 2; }
+        }
+        for (int j = 0; j < h; j += 2)
+            put_rows(c, j + 2 <= h ? y + j : y + h - 2, 2, native, bytes);
+        return;
+    }
     for (int j = 0; j < h; j++) {
         const u32 *src = c->px + (u64)(y + j) * c->stride + x;
         const u8 *out;
