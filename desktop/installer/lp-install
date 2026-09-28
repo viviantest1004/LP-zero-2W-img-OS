@@ -35,7 +35,8 @@ What an install writes (the disk layout contract, COMMON.md):
           n  LP-ROOT      ext4    as it was this system, copied; the
                                             partition keeps its PARTUUID
           +  the disk's own EFI System Partition gets \\EFI\\LP\\ - no
-             other file on it is touched
+             other file on it is touched; a disk that has none gets
+             LP-ESP (FAT32, 512 MiB) in its free space, or is refused
 
     --free-space  new partitions in the disk's largest unallocated
                   region; nothing that is there now is erased:
@@ -46,7 +47,13 @@ What an install writes (the disk layout contract, COMMON.md):
                   recovery brings its own LP-ESP); when it does not, LP-ROOT
                   alone, started from the disk's EFI partition as a
                   partition install is (with a new LP-ESP in front of it
-                  when the disk has none)
+                  when the disk has none, or its EFI partition is full,
+                  unreadable, or already starts another LP)
+
+    On a disk that already carries LP's partition names (another LP
+    there), what an install names is LP-ROOT-2 and so on, and a
+    free-space install makes no LP-RECOVERY: the recovery system finds
+    its partitions by name, and must not find two.
 
     A partition install makes no LP-RECOVERY: there is no room that is
     LP's to take for it, and the boot menu offers Recovery only on a
@@ -1934,9 +1941,9 @@ def shared_refusal(reason, what, disk):
         "mounted": "%s is mounted; unmount it first" % what,
         "swap": "%s is in use as swap" % what,
         "too-small": "%s is too small: LP needs at least %s" % (what, disk["root_need_text"]),
-        "no-esp": "%s has no EFI System Partition to start LP from; install into its"
-                  " free space instead (a new one is made there), or erase the whole"
-                  " disk" % disk["path"],
+        "no-esp": "%s has no EFI System Partition to start LP from, and no %d MiB of"
+                  " free space to make one in; erase the whole disk instead"
+                  % (disk["path"], ESP_MIB),
         "esp-mounted": "the EFI partition %s is mounted; unmount it first" % disk["esp"],
         "esp-bad": "the EFI partition %s is not FAT or could not be read" % disk["esp"],
         "esp-full": "the EFI partition %s has %s free; LP's boot files need %s"
