@@ -138,8 +138,24 @@ if test -s /etc/lp/compositor; then
         wayfire|sway) comp=$want; why="/etc/lp/compositor ($why)" ;;
     esac
 fi
-printf '%s\n%s\n' "$comp" "$why" > /run/lp-session/compositor
-chmod 644 /run/lp-session/compositor
+
+# Safe mode: sway drawing on the CPU (pixman), whatever the card and
+# whatever anybody chose - the way out of a desktop that hangs or dies in
+# the graphics driver, as Windows' safe mode is. Asked for with `sudo
+# lp-safe-mode` (the next boot only) or lp.safe=1 on the kernel's command
+# line; also taken by itself below when the desktop has died three times
+# in a row at the start.
+rm -f /run/lp-session/safe
+if grep -qw 'lp.safe=1' /proc/cmdline 2>/dev/null || test -e /etc/lp/safe-mode-next; then
+    rm -f /etc/lp/safe-mode-next
+    comp=sway; why="safe mode (asked for)"
+    echo asked > /run/lp-session/safe
+fi
+write_compositor() {
+    printf '%s\n%s\n' "$comp" "$why" > /run/lp-session/compositor
+    chmod 644 /run/lp-session/compositor
+}
+write_compositor
 
 # The desktop account is whoever has uid 1000: "user" in the image as
 # built, the name the person chose once the installer has run (it keeps
@@ -188,6 +204,17 @@ while :; do
         quick=0
     fi
     if test $quick -ge 3; then
+        # Three quick deaths: first try once more in safe mode (a driver
+        # or a 3D path that kills the compositor is the usual cause), and
+        # only give up when that dies too.
+        if ! test -e /run/lp-session/safe; then
+            echo "start-desktop: the session ended three times within 30 s; starting it in safe mode" >> /data/log/session.log
+            comp=sway; why="safe mode (the desktop failed to start three times)"
+            echo auto > /run/lp-session/safe
+            write_compositor
+            quick=0
+            continue
+        fi
         echo "start-desktop: the session ended three times within 30 s; not starting it again" >> /data/log/session.log
         vt_keyboard on
         exit 1

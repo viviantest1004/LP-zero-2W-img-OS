@@ -173,6 +173,18 @@ elif have waybar ; then
     keep panel waybar
 fi
 have lp-dock && keep dock lp-dock
+
+# Safe mode (start-desktop): said once, when the notifications are up, so
+# nobody takes the plain look for the machine being broken.
+if test "${LP_SAFE_MODE:-}" = 1 && have notify-send ; then
+    case "${LANG:-}" in
+        ko*) t="안전 모드"
+             b="그래픽 가속 없이 최소한으로 시작했습니다. 문제가 풀렸으면 다시 시작하면 평소대로 돌아옵니다." ;;
+        *)   t="Safe mode"
+             b="Started with the minimum, without graphics acceleration. Restart to go back to normal once the problem is fixed." ;;
+    esac
+    ( sleep 5; notify-send -u critical -a LP "$t" "$b" ) &
+fi
 have lp-osk && keep osk lp-osk daemon
 # Korean from the laptop keyboard under wayfire (session-run says why):
 # fcitx5 in the foreground, so keep() can bring it back, and without its

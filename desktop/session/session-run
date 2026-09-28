@@ -71,9 +71,14 @@ LP_COMPOSITOR=sway
 if test -s /run/lp-session/compositor ; then
     read -r LP_COMPOSITOR < /run/lp-session/compositor
 fi
-if test -s "$LP_HOME/.config/lp/compositor" ; then
+if test -s "$LP_HOME/.config/lp/compositor" && ! test -e /run/lp-session/safe ; then
     read -r want < "$LP_HOME/.config/lp/compositor"
     case $want in wayfire|sway) LP_COMPOSITOR=$want ;; esac
+fi
+# Safe mode (start-desktop): sway on the CPU, and the person told so.
+if test -e /run/lp-session/safe ; then
+    LP_COMPOSITOR=sway
+    export LP_SAFE_MODE=1
 fi
 command -v wayfire > /dev/null 2>&1 || LP_COMPOSITOR=sway
 # The keyboard, the mouse and the touchscreen from the first moment.
