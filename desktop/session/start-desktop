@@ -104,24 +104,16 @@ for card in /sys/class/drm/card[0-9]*; do
         i915|amdgpu|radeon|nouveau|vmwgfx)
             comp=wayfire; why="$drv"; break ;;
         virtio_gpu|virtio-pci|virtio_pci)
-            # A virtual machine gets sway even when the host gave the
-            # card 3D (virgl: UTM's "GPU Supported" display, QEMU's
-            # virtio-vga-gl). Measured with the pointer circling at
-            # 60 Hz: wayfire on virgl renders a whole GL frame per
-            # motion, about 40% of an emulated CPU, where sway with LP's
-            # wlroots and kernel (single buffer, damage clips) sends the
-            # host a 32x30 patch and uses a third of that. Under UTM on a
-            # Mac, where every guest instruction is emulated, that is the
-            # pointer lag. The pixman path is also the same on every host,
-            # where virgl's GL goes on through the host's own GL (ANGLE
-            # to Metal on a Mac) and misbehaved there in ways QEMU here
-            # does not show (Settings' clicks). /etc/lp/compositor=wayfire
-            # brings wayfire back.
+            # virtio-gpu has 3D only when the host gave it virgl (UTM: a
+            # "GPU Supported" display; QEMU: virtio-vga-gl). Then wayfire,
+            # with its animations, as on real hardware. (For a while a VM
+            # got sway here to spare the emulated CPU, and lost the
+            # animations for it; the owner wants them, and the cost is
+            # now met where it arises - see lp-autoscale's VM mode limit.)
             if dmesg 2>/dev/null | grep -q 'features: +virgl'; then
-                why="virtio-gpu with virgl: a virtual machine, sway draws less"
-            else
-                why="virtio-gpu without 3D (virgl)"
-            fi ;;
+                comp=wayfire; why="virtio-gpu with virgl"; break
+            fi
+            why="virtio-gpu without 3D (virgl)" ;;
         *)  why="$drv: no 3D" ;;
     esac
 done
