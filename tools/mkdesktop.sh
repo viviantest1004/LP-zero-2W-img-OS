@@ -765,6 +765,12 @@ SUBSYSTEM=="input", KERNEL=="event*", OWNER="1000", MODE="0660"
 SUBSYSTEM=="drm", KERNEL=="card[0-9]*|renderD*", OWNER="1000", MODE="0660"
 SUBSYSTEM=="sound", OWNER="1000", MODE="0660"
 RULES
+# Undoing the last update: apt keeps what each run replaces
+# (desktop/system/lp-rollback-save), `sudo lp-rollback` puts it back -
+# on the running system, or from the recovery shell through lp-chroot.
+install -D -m 755 "$D/system/lp-rollback-save" "$ROOT/usr/lib/lp/lp-rollback-save"
+install -D -m 755 "$D/system/lp-rollback" "$ROOT/usr/sbin/lp-rollback"
+install -D -m 644 "$D/system/80lp-rollback" "$ROOT/etc/apt/apt.conf.d/80lp-rollback"
 # thermald, on real Intel hardware only. In a virtual machine there is
 # nothing for it to hold down (no RAPL, no DPTF), it exits, and init
 # would start it again and again; there the line waits instead.
