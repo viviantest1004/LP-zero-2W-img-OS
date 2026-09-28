@@ -899,11 +899,13 @@ static void page_parts(void)
 
 /* A wrapping label asks for the width of its whole text on one line, and
  * the page stack is as wide as its widest page: the confirmation's long
- * notes made every page's card as wide as the screen. They wrap at about
- * the card's own width instead. */
+ * notes made every page's card as wide as the screen. A small natural
+ * width (the "character" is the font's average, which with Hangul in it is
+ * wide) lets the other pages set the card's width; the label still fills
+ * that width and wraps there. */
 static GtkWidget *narrow(GtkWidget *label)
 {
-    gtk_label_set_max_width_chars(GTK_LABEL(label), 96);
+    gtk_label_set_max_width_chars(GTK_LABEL(label), 40);
     return label;
 }
 
