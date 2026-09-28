@@ -32,6 +32,7 @@
 static bool summary_only = false;
 static bool in_bytes     = false;
 static bool human        = false;
+static bool failed       = false;
 
 /* GNU prints 1K blocks and a tab, with no padding: "8\tsub".
  *
@@ -97,8 +98,18 @@ static u64 walk(const char *path, int depth)
     long fd = lp_open(path, O_RDONLY | O_DIRECTORY, 0);
     if (fd < 0) {
         lp_stat_t st;
-        if (lp_stat(path, &st, true) == 0)
-            total = in_bytes ? st.size : st.blocks * 512;
+        if (lp_stat(path, &st, true) != 0) {
+            if (depth == 0) {
+                lp_diag("du", "cannot access", NULL, "no such file", path, 2);
+                failed = true;
+            }
+            return 0;
+        }
+        total = in_bytes ? st.size : st.blocks * 512;
+        /* A file named on the command line gets its line, as in GNU:
+         * `du -h report.tar.gz` printed nothing at all. */
+        if (depth == 0 && !summary_only)
+            show(path, total);
         return total;
     }
 
@@ -204,9 +215,10 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] == '-')
             continue;
+        bool was = failed;
         u64 t = walk(argv[i], 0);
-        if (summary_only)
+        if (summary_only && failed == was)
             show(argv[i], t);
     }
-    return 0;
+    return failed ? 1 : 0;
 }

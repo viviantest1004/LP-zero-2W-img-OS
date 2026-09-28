@@ -458,6 +458,30 @@ static int list_dir(const char *path, bool show_header)
     return 0;
 }
 
+/* Names given on the command line, in the listing's own order: newest
+ * first with -t, largest with -S, by name otherwise. `ls -t a b` printed
+ * them as given, so `ls -t report-* | head -1` was not the newest. */
+static void sort_operands(const char **p, int n)
+{
+    static entry_t a, b;
+    for (int i = 1; i < n; i++) {
+        const char *key = p[i];
+        memset(&a, 0, sizeof a);
+        strlcpy(a.name, key, sizeof a.name);
+        a.have_stat = lp_stat(key, &a.st, false) == 0;
+        int j = i - 1;
+        for (; j >= 0; j--) {
+            memset(&b, 0, sizeof b);
+            strlcpy(b.name, p[j], sizeof b.name);
+            b.have_stat = lp_stat(p[j], &b.st, false) == 0;
+            if (compare(&b, &a) <= 0)
+                break;
+            p[j + 1] = p[j];
+        }
+        p[j + 1] = key;
+    }
+}
+
 static void usage(void)
 {
     printf("usage: ls [-lahtSrRd1] [path]...\n\n");
@@ -513,6 +537,26 @@ int main(int argc, char **argv)
 
     if (npaths == 0)
         return list_one(".");
+
+    /* As GNU: the names that are not there first (their errors), then
+     * the ones that are not directories, then the directories, each
+     * group in the listing's order. */
+    if (npaths > 1) {
+        const char *miss[64], *files[64], *dirs[64];
+        int nm = 0, nf = 0, nd = 0;
+        for (int i = 0; i < npaths; i++) {
+            lp_stat_t st;
+            if (lp_stat(paths[i], &st, false) != 0)      miss[nm++] = paths[i];
+            else if (!opt_dironly && lp_is_dir(paths[i])) dirs[nd++] = paths[i];
+            else                                          files[nf++] = paths[i];
+        }
+        sort_operands(files, nf);
+        sort_operands(dirs, nd);
+        npaths = 0;
+        for (int i = 0; i < nm; i++) paths[npaths++] = miss[i];
+        for (int i = 0; i < nf; i++) paths[npaths++] = files[i];
+        for (int i = 0; i < nd; i++) paths[npaths++] = dirs[i];
+    }
 
     for (int i = 0; i < npaths; i++) {
         if (npaths > 1 && !opt_dironly && lp_is_dir(paths[i]))

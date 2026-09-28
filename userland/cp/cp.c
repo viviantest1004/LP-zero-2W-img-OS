@@ -1,7 +1,7 @@
 /* cp - copy files.
  *
- *   cp [-fnvR] <source> <dest>
- *   cp [-fnvR] <source>... <directory>
+ *   cp [-fnvRLP] <source> <dest>
+ *   cp [-fnvRLP] <source>... <directory>
  *
  * Permissions follow the source. Owner and timestamps do not - there is
  * one user on this system, so they would mean nothing, and GNU only
@@ -39,6 +39,7 @@ static bool no_clobber = false;
 static bool force      = false;
 static bool verbose    = false;
 static bool quiet      = false;      /* -q, see the header */
+static int  deref      = 0;          /* -L: 1, follow every link; -P: -1, none */
 static int  failures   = 0;
 
 /* A missing source under -q is the case the boot script asks us to keep
@@ -184,11 +185,13 @@ static int copy_dir(const char *src, const char *dst, const lp_stat_t *st)
 /* A symlink named on the command line is followed - `cp link out` gives
  * a copy of the file, which is what GNU does and what people expect. A
  * symlink found inside a directory being copied is recreated as a link,
- * which is also what GNU does: -R without -P still preserves them. */
+ * which is also what GNU does: -R without -P still preserves them.
+ * -L follows every link and -P none, as in GNU; scripts written for
+ * GNU cp use `cp -L` (lp-bugreport did, and copied nothing). */
 static int copy_any(const char *src, const char *dst, bool cmdline)
 {
     lp_stat_t st;
-    long r = lp_stat(src, &st, cmdline);
+    long r = lp_stat(src, &st, deref > 0 || (deref == 0 && cmdline));
     if (r < 0) { diag("cannot stat", NULL, "cannot stat", src, r); return 1; }
 
     /* Same file: opening the destination would truncate the source. */
@@ -228,6 +231,8 @@ static void usage(int fd)
     dprintf(fd, "Usage: cp [OPTION]... SOURCE DEST\n"
                 "  or:  cp [OPTION]... SOURCE... DIRECTORY\n"
                 "Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.\n\n"
+                "  -L, --dereference            always follow symbolic links in SOURCE\n"
+                "  -P, --no-dereference         never follow symbolic links in SOURCE\n"
                 "  -f, --force                  if an existing destination file cannot be\n"
                 "                                 opened, remove it and try again\n"
                 "  -n, --no-clobber             do not overwrite an existing file and do not fail\n"
@@ -243,10 +248,11 @@ int main(int argc, char **argv)
     static const lp_lopt_t lo[] = {
         { "force", 0, 'f' }, { "no-clobber", 0, 'n' },
         { "recursive", 0, 'R' }, { "verbose", 0, 'v' },
+        { "dereference", 0, 'L' }, { "no-dereference", 0, 'P' },
         { "help", 0, 'H' }, { 0, 0, 0 }
     };
     lp_getopt_t g;
-    lp_getopt_init(&g, argc, argv, "fnqrRv", lo);
+    lp_getopt_init(&g, argc, argv, "fnqrRvLP", lo);
     for (int c; (c = lp_getopt(&g)) != -1; )
         switch (c) {
         case 'f': force = true; break;
@@ -254,6 +260,8 @@ int main(int argc, char **argv)
         case 'q': quiet = true; break;
         case 'r': case 'R': recursive = true; break;
         case 'v': verbose = true; break;
+        case 'L': deref = 1; break;
+        case 'P': deref = -1; break;
         case 'H': usage(STDOUT_FILENO); return 0;
         default:  lp_getopt_err("cp", &g); return 1;
         }
