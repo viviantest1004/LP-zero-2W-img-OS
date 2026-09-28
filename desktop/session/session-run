@@ -191,6 +191,20 @@ run_sway() {
     export WLR_RENDERER_ALLOW_SOFTWARE=1
     export LIBGL_ALWAYS_SOFTWARE=1
     export GSK_RENDERER=cairo
+    # Two buffers, not one, under KVM with 3D (virgl). LP's wlroots draws
+    # a virtual GPU's screen into the buffer being shown, so only the
+    # damage is uploaded (desktop/compositor/wlroots-0.15.1-lp.patch) -
+    # right for a host that shows a copy (QEMU's own window, UTM), but
+    # virt-manager's SPICE with OpenGL hands the client the very texture
+    # being written, and the screen flickered wherever the mouse or a
+    # window moved. At KVM's CPU speed a whole-frame upload per flip costs
+    # nothing; under UTM's emulation it is what made the pointer lag, so
+    # there the single buffer stays.
+    case $(sed -n 2p /run/lp-session/compositor 2> /dev/null) in
+        *virgl*)
+            grep -qs kvm-clock /sys/devices/system/clocksource/clocksource0/available_clocksource &&
+                export WLR_DRM_SINGLE_BUFFER=0 ;;
+    esac
     exec /usr/bin/sway
 }
 

@@ -396,6 +396,15 @@ def kiosk(mode):
     if virtual_gpu():
         env["WLR_NO_HARDWARE_CURSORS"] = "1"
     env.pop("WLR_DRM_CURSOR_HOTSPOT", None)
+    # Two buffers under KVM with 3D, as in the session (session-run's
+    # run_sway says why: SPICE with OpenGL shows the buffer being drawn).
+    try:
+        with open("/sys/devices/system/clocksource/clocksource0/available_clocksource") as f:
+            kvm = "kvm-clock" in f.read()
+    except OSError:
+        kvm = False
+    if kvm and gpu_3d():
+        env["WLR_DRM_SINGLE_BUFFER"] = "0"
     log("kiosk", mode, "scale", output_scale(), "renderer", RENDERER)
     started = time.time()
     with open(LOG, "a") as out:
