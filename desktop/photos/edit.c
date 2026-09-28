@@ -532,12 +532,9 @@ static gboolean rect_of(app_t *app, double ax, double ay, double bx, double by,
 static PangoLayout *text_layout(app_t *app, cairo_t *cr, const char *text)
 {
     PangoLayout *pl = pango_cairo_create_layout(cr);
-    /* Text becomes pixels of the picture, not of a screen: no subpixel
-     * colour fringes (they would be saved, and turned with the picture),
-     * and no hinting, so the preview at any zoom and the ink at 100% lay
+    /* No hinting: the preview at any zoom and the ink at 100% then lay
      * the glyphs out the same. */
     cairo_font_options_t *fo = cairo_font_options_create();
-    cairo_font_options_set_antialias(fo, CAIRO_ANTIALIAS_GRAY);
     cairo_font_options_set_hint_style(fo, CAIRO_HINT_STYLE_NONE);
     cairo_font_options_set_hint_metrics(fo, CAIRO_HINT_METRICS_OFF);
     pango_cairo_context_set_font_options(pango_layout_get_context(pl), fo);
@@ -563,7 +560,12 @@ static void text_paint(app_t *app, cairo_t *cr, const char *text)
     const double *c = app->rgba;
     cairo_set_source_rgba(cr, c[0], c[1], c[2], 1);
     cairo_move_to(cr, app->tx, text_top(app));
-    pango_cairo_show_layout(cr, pl);
+    /* Filled as outlines rather than shown as glyphs: fontconfig may ask
+     * for subpixel antialiasing whatever the font options say, and its
+     * colour fringes would be saved into the picture. A path is always
+     * plain grey-level antialiased, the same on screen and in the file. */
+    pango_cairo_layout_path(cr, pl);
+    cairo_fill(cr);
     g_object_unref(pl);
 }
 
