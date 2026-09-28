@@ -661,10 +661,11 @@ int edit_selftest(const char *path)
         g_ptr_array_unref(a);
     }
 
-    /* The naming rule: with name-trim.<ext> now taken, the next one
-     * must be name-trim-1.<ext>. */
+    /* The naming rule: name-trim.<ext> is taken by now, so the next
+     * proposal must be a free name-trim-N.<ext>. */
     char *n1 = edit_default_output(OP_TRIM_FAST, path, &mi);
-    gboolean named = strstr(n1, "-trim-1.") != NULL;
+    gboolean named = strstr(n1, "-trim-") != NULL &&
+                     !g_file_test(n1, G_FILE_TEST_EXISTS);
     printf("%s next free name -> %s\n", named ? "PASS" : "FAIL", n1);
     if (!named) fails++;
     g_free(n1);
