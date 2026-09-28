@@ -512,28 +512,41 @@ static void cache_drop(app_t *app)
     app->cache_zoom = 0;
 }
 
+/* The picture (and its ink) shrunk to zoom `z`. GOOD averages every
+ * source pixel under a screen pixel - the expensive, correct filter,
+ * paid once per zoom. Touches nothing but its arguments, so the loader
+ * thread can call it too. */
+static cairo_surface_t *scaled_copy(cairo_surface_t *img, cairo_surface_t *ink, double z)
+{
+    int w = MAX(1, (int)ceil(cairo_image_surface_get_width(img) * z));
+    int h = MAX(1, (int)ceil(cairo_image_surface_get_height(img) * z));
+    cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    cairo_t *cr = cairo_create(s);
+    cairo_scale(cr, z, z);
+    cairo_set_source_surface(cr, img, 0, 0);
+    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+    cairo_paint(cr);
+    if (ink) {
+        cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+        cairo_set_source_surface(cr, ink, 0, 0);
+        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+        cairo_paint(cr);
+    }
+    cairo_destroy(cr);
+    return s;
+}
+
 static void cache_build(app_t *app)
 {
     if (app->cache_timer) { g_source_remove(app->cache_timer); app->cache_timer = 0; }
     cache_drop(app);
     if (!app->img || app->zoom >= 0.999) return;
     gint64 t0 = g_get_monotonic_time();
-    int w = MAX(1, (int)ceil(app->iw * app->zoom));
-    int h = MAX(1, (int)ceil(app->ih * app->zoom));
-    app->cache = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-    cairo_t *cr = cairo_create(app->cache);
-    cairo_scale(cr, app->zoom, app->zoom);
-    cairo_set_source_surface(cr, app->img, 0, 0);
-    /* GOOD averages every source pixel under a screen pixel when
-     * shrinking - the expensive, correct filter, paid once per zoom. */
-    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
-    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-    cairo_paint(cr);
-    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-    paint_ink(app, cr, CAIRO_FILTER_GOOD);
-    cairo_destroy(cr);
+    app->cache = scaled_copy(app->img, app->ann, app->zoom);
     app->cache_zoom = app->zoom;
-    if (app->st_cmds) g_print("cache %dx%d built in %.0f ms\n", w, h, (g_get_monotonic_time() - t0) / 1e3);
+    if (app->st_cmds) g_print("cache %dx%d built in %.0f ms\n", cairo_image_surface_get_width(app->cache),
+                              cairo_image_surface_get_height(app->cache), (g_get_monotonic_time() - t0) / 1e3);
 }
 
 static gboolean cache_timeout(gpointer d)
@@ -788,6 +801,14 @@ static void pinch_scale(GtkGestureZoom *g, double scale, gpointer d)
     zoom_at(app, app->pinch_zoom0 * scale, cx, cy);
 }
 
+/* The self test's pinch: the same arithmetic, with no fingers to ask
+ * where the middle is. */
+static void pinch_fake(app_t *app, double scale)
+{
+    app->pinch_zoom0 = app->zoom;
+    zoom_at(app, app->pinch_zoom0 * scale, cw(app) / 2.0, ch(app) / 2.0);
+}
+
 static gboolean on_scroll(GtkEventControllerScroll *c, double dx, double dy, gpointer d)
 {
     app_t *app = d;
@@ -836,6 +857,9 @@ typedef struct {
     char *fmt_name, *fmt_desc, *err;
     gint64 size;
     double ms;
+    int cw, ch;                  /* canvas size when the load began */
+    cairo_surface_t *cache;      /* the fit-to-window cache, made here too */
+    double cache_zoom;
 } load_t;
 
 static void load_free(gpointer p)
@@ -844,6 +868,7 @@ static void load_free(gpointer p)
     g_free(L->path); g_free(L->fmt_name); g_free(L->fmt_desc); g_free(L->err);
     if (L->anim) g_object_unref(L->anim);
     if (L->surf) cairo_surface_destroy(L->surf);
+    if (L->cache) cairo_surface_destroy(L->cache);
     g_free(L);
 }
 
@@ -888,6 +913,17 @@ static void load_thread(GTask *task, gpointer src, gpointer data, GCancellable *
     if (!L->surf && !L->anim)
         L->err = g_strdup(e ? e->message : "?");
     g_clear_error(&e);
+    /* A big picture shown whole needs its scaled-down copy before the
+     * first frame; making it here, with the same numbers fit_zoom will
+     * come to, keeps that off the main thread as well. */
+    if (L->surf && L->cw > 0 && L->ch > 0) {
+        int w = cairo_image_surface_get_width(L->surf), h = cairo_image_surface_get_height(L->surf);
+        double z = MIN(MIN((double)L->cw / w, (double)L->ch / h), 1.0);
+        if (z < 0.999 && (double)w * h > 4e6) {
+            L->cache = scaled_copy(L->surf, NULL, z);
+            L->cache_zoom = z;
+        }
+    }
     L->ms = (g_get_monotonic_time() - t0) / 1e3;
     g_task_return_boolean(task, TRUE);
 }
@@ -965,6 +1001,11 @@ static void load_done(GObject *src, GAsyncResult *res, gpointer d)
         anim_schedule(app);
     } else if (L->surf) {
         set_image(app, g_steal_pointer(&L->surf), L->alpha);
+        if (L->cache && app->zoom == L->cache_zoom && !app->cache) {
+            app->cache = g_steal_pointer(&L->cache);
+            app->cache_zoom = L->cache_zoom;
+            view_queue(app);
+        }
     } else {
         set_image(app, NULL, FALSE);
         char *base = g_path_get_basename(L->path);
@@ -995,6 +1036,8 @@ static void load_path(app_t *app, const char *path)
     L->app = app;
     L->gen = ++app->load_gen;
     L->path = g_strdup(path);
+    L->cw = cw(app);
+    L->ch = ch(app);
     app->loading = TRUE;
     /* The old picture stays up until the new one is decoded; a spinner
      * says something is happening if that takes a while. */
@@ -1071,7 +1114,9 @@ static void go_index(app_t *app, int idx)
     if (!app->files || app->files->len == 0) return;
     int n = app->files->len;
     idx = ((idx % n) + n) % n;
-    if (app->editing && edit_dirty(app)) {
+    /* Turning a picture in the viewer is an edit too; it is not thrown
+     * away without asking, any more than a drawing would be. */
+    if (edit_dirty(app) && !app->slideshow) {
         ask_unsaved(app, cont_go, GINT_TO_POINTER(idx), NULL);
         return;
     }
@@ -1086,7 +1131,7 @@ static void cont_open(app_t *app, gpointer data)
 
 static void open_path(app_t *app, const char *path)
 {
-    if (app->editing && edit_dirty(app)) {
+    if (edit_dirty(app)) {
         ask_unsaved(app, cont_open, g_strdup(path), g_free);
         return;
     }
@@ -1104,7 +1149,7 @@ static void open_many(app_t *app, GFile **files, int n)
         g_free(p);
         return;
     }
-    if (app->editing && edit_dirty(app)) {
+    if (edit_dirty(app)) {
         char *p = g_file_get_path(files[0]);
         if (p) open_path(app, p);            /* asks; then the folder */
         g_free(p);
@@ -1489,7 +1534,7 @@ static gboolean on_close_request(GtkWindow *w, gpointer d)
 {
     (void)w;
     app_t *app = d;
-    if (app->editing && edit_dirty(app)) {
+    if (edit_dirty(app)) {
         ask_unsaved(app, cont_close, NULL, NULL);
         return TRUE;
     }
@@ -1517,6 +1562,8 @@ static const char *CSS =
     "window.lp-photos-fs .lp-photos-canvas { background-color: #000; }\n"
     ".lp-photos-empty { background-color: #0e161f; color: #eaf2f8; }\n"
     ".lp-photos-empty .dim-label { color: #9fb3c4; }\n"
+    ".lp-photos-title { font-weight: bold; }\n"
+    ".lp-photos-subtitle { font-size: 9pt; color: rgba(234,242,248,0.62); }\n"
     ".lp-photos-h1 { font-size: 17pt; font-weight: bold; }\n"
     ".lp-photos-h2 { font-size: 12.5pt; font-weight: bold; }\n"
     ".lp-photos-empty button { background-color: #f28c28; color: #1a1206; font-weight: 600;"
@@ -1538,6 +1585,9 @@ static const char *CSS =
     "  background-color: #f28c28; color: #1a1206; font-weight: 600; }\n"
     ".lp-photos-osd button.suggested-action:hover, headerbar button.suggested-action:hover,"
     " .lp-photos-textbox button.suggested-action:hover { background-color: #ffa24a; }\n"
+    "headerbar button.suggested-action { padding: 2px 16px; }\n"
+    ".lp-photos-textbox button { padding: 2px 14px; min-height: 30px; }\n"
+    ".lp-photos-textbox entry { min-height: 30px; }\n"
     ".lp-photos-osd button.suggested-action:disabled { background-color: rgba(242,140,40,0.30); color: rgba(255,255,255,0.45); }\n"
     ".lp-photos-osd scale { min-height: 26px; }\n"
     ".lp-photos-osd scale trough { min-height: 4px; border-radius: 2px; background-color: rgba(255,255,255,0.22); }\n"
@@ -1547,6 +1597,9 @@ static const char *CSS =
     ".lp-photos-osd scale value { color: #f1f5f9; min-width: 34px; }\n"
     ".lp-photos-dialog button { padding: 6px 16px; background-color: rgba(127,127,127,0.18); }\n"
     ".lp-photos-dialog button.suggested-action { background-color: #f28c28; color: #1a1206; font-weight: 600; }\n"
+    ".lp-photos-dialog checkbutton check { min-width: 16px; min-height: 16px; border-radius: 4px;"
+    "  border: 1px solid rgba(255,255,255,0.45); background-color: rgba(255,255,255,0.06); }\n"
+    ".lp-photos-dialog checkbutton check:checked { background-color: #f28c28; border-color: #f28c28; color: #1a1206; }\n"
     ".lp-photos-dialog button.destructive-action { background-color: #c01c28; color: #fff; }\n"
     ".lp-photos-toast { background-color: rgba(14,18,24,0.92); color: #fff; border-radius: 10px;"
     "  padding: 8px 16px; margin-top: 14px; }\n"
@@ -1699,11 +1752,12 @@ static void build_window(app_t *app)
     GtkWidget *tb = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_valign(tb, GTK_ALIGN_CENTER);
     app->title = gtk_label_new(T("Photos", "사진"));
-    gtk_widget_add_css_class(app->title, "title");
+    gtk_widget_add_css_class(app->title, "lp-photos-title");
     gtk_label_set_ellipsize(GTK_LABEL(app->title), PANGO_ELLIPSIZE_MIDDLE);
     gtk_label_set_max_width_chars(GTK_LABEL(app->title), 40);
     app->subtitle = gtk_label_new("");
-    gtk_widget_add_css_class(app->subtitle, "subtitle");
+    gtk_widget_add_css_class(app->subtitle, "lp-photos-subtitle");
+    gtk_widget_add_css_class(app->subtitle, "numeric");
     gtk_box_append(GTK_BOX(tb), app->title);
     gtk_box_append(GTK_BOX(tb), app->subtitle);
     gtk_header_bar_set_title_widget(GTK_HEADER_BAR(app->header), tb);
@@ -1905,7 +1959,54 @@ static void st_key(app_t *app, char *arg)
     g_strfreev(p);
 }
 
-/* Accept whatever file chooser is open, as if Save had been pressed. */
+/* The first two spin buttons in `w` (the resize dialog's width, height). */
+static void st_spins(GtkWidget *w, GtkWidget **sb, int *n)
+{
+    if (GTK_IS_SPIN_BUTTON(w) && *n < 2) sb[(*n)++] = w;
+    for (GtkWidget *c = gtk_widget_get_first_child(w); c; c = gtk_widget_get_next_sibling(c))
+        st_spins(c, sb, n);
+}
+
+/* Type a width into the open resize dialog and report the height it
+ * answered with. */
+static void st_spin(app_t *app, double v)
+{
+    GListModel *tl = gtk_window_get_toplevels();
+    for (guint i = 0; i < g_list_model_get_n_items(tl); i++) {
+        GtkWidget *w = g_list_model_get_item(tl, i);
+        g_object_unref(w);
+        if (w == app->win) continue;
+        GtkWidget *sb[2] = { NULL, NULL };
+        int n = 0;
+        st_spins(w, sb, &n);
+        if (n < 2) continue;
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(sb[0]), v);
+        g_print("selftest: resize dialog width=%.0f height=%.0f\n",
+                gtk_spin_button_get_value(GTK_SPIN_BUTTON(sb[0])),
+                gtk_spin_button_get_value(GTK_SPIN_BUTTON(sb[1])));
+        return;
+    }
+}
+
+/* Pick, in every drop-down under `w`, the item whose text has `needle`. */
+static void st_pick(GtkWidget *w, const char *needle)
+{
+    if (GTK_IS_DROP_DOWN(w)) {
+        GListModel *m = gtk_drop_down_get_model(GTK_DROP_DOWN(w));
+        for (guint i = 0; m && i < g_list_model_get_n_items(m); i++) {
+            GObject *o = g_list_model_get_item(m, i);
+            if (GTK_IS_STRING_OBJECT(o) && strstr(gtk_string_object_get_string(GTK_STRING_OBJECT(o)), needle))
+                gtk_drop_down_set_selected(GTK_DROP_DOWN(w), i);
+            g_object_unref(o);
+        }
+    }
+    for (GtkWidget *c = gtk_widget_get_first_child(w); c; c = gtk_widget_get_next_sibling(c))
+        st_pick(c, needle);
+}
+
+/* Accept whatever file chooser is open, as if Save had been pressed:
+ * "chooser:name,JPEG,(70)" also picks those items in its drop-downs,
+ * the way a person would. */
 static void st_chooser(app_t *app, char *arg)
 {
     char **p = g_strsplit(arg, ",", -1);
@@ -1915,9 +2016,11 @@ static void st_chooser(app_t *app, char *arg)
         g_object_unref(w);
         if (w == app->win || !GTK_IS_FILE_CHOOSER(w)) continue;
         G_GNUC_BEGIN_IGNORE_DEPRECATIONS
-        if (p[1] && *p[1]) gtk_file_chooser_set_choice(GTK_FILE_CHOOSER(w), "type", p[1]);
-        if (p[1] && p[2]) gtk_file_chooser_set_choice(GTK_FILE_CHOOSER(w), "quality", p[2]);
+        for (int k = 1; p[k]; k++) st_pick(w, p[k]);
         gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(w), p[0]);
+        g_print("selftest: dialog choice now type=%s quality=%s\n",
+                gtk_file_chooser_get_choice(GTK_FILE_CHOOSER(w), "type"),
+                gtk_file_chooser_get_choice(GTK_FILE_CHOOSER(w), "quality"));
         gtk_dialog_response(GTK_DIALOG(w), GTK_RESPONSE_ACCEPT);
         G_GNUC_END_IGNORE_DEPRECATIONS
         break;
@@ -1953,6 +2056,8 @@ static gboolean st_step(gpointer d)
             if (!strcmp(arg, ST_TOOLS[i])) edit_set_tool(app, i);
     }
     else if (!strcmp(c, "aspect")) edit_set_aspect(app, (int)a[0]);
+    else if (!strcmp(c, "spin")) st_spin(app, a[0]);
+    else if (!strcmp(c, "pinch")) pinch_fake(app, a[0]);
     else if (!strcmp(c, "key") && arg) st_key(app, arg);
     else if (!strcmp(c, "copy")) surface_to_clipboard(app);
     else if (!strcmp(c, "quality")) app->jpeg_quality = (int)a[0];

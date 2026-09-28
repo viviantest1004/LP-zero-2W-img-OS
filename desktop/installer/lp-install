@@ -17,7 +17,11 @@ serial console, from a script in a test, or by a person at a terminal.
                        [--user NAME --fullname "Full Name" --password-stdin]
                        [--hostname NAME] [--timezone Asia/Seoul]
     lp-install install --partition /dev/nvme0n1p3 [same options]
-    lp-install install --free-space /dev/nvme0n1 [--size MiB] [same options]
+    lp-install install --free-space /dev/nvme0n1 [--size MiB] [--no-recovery]
+                       [same options]
+    lp-install install ... --dry-run [--json]
+                                     what would be erased, made and kept,
+                                     partition by partition; nothing written
 
 What an install writes (the disk layout contract, COMMON.md):
 
@@ -33,13 +37,23 @@ What an install writes (the disk layout contract, COMMON.md):
           +  the disk's own EFI System Partition gets \\EFI\\LP\\ - no
              other file on it is touched
 
-    --free-space  the same, in a new partition made in the disk's
-                  largest unallocated region (and a 512 MiB LP-ESP in
-                  front of it when the disk has no EFI partition at all)
+    --free-space  new partitions in the disk's largest unallocated
+                  region; nothing that is there now is erased:
+          +  LP-ESP       FAT32   512 MiB   LP's own start-up partition
+          +  LP-RECOVERY  ext4    ~1.3 GiB  the recovery system
+          +  LP-ROOT      ext4      rest    this system, copied
+                  when the region holds all three (free_layout says why
+                  recovery brings its own LP-ESP); when it does not, LP-ROOT
+                  alone, started from the disk's EFI partition as a
+                  partition install is (with a new LP-ESP in front of it
+                  when the disk has none)
 
-    Neither of the last two makes LP-RECOVERY: there is no room that is
+    A partition install makes no LP-RECOVERY: there is no room that is
     LP's to take for it, and the boot menu offers Recovery only on a
-    disk that has one (\\EFI\\LP\\recovery.ok).
+    disk that has one (\\EFI\\LP\\recovery.ok). Every install names its root
+    by PARTUUID in \\EFI\\LP\\cmdline.txt and its recovery by PARTUUID in
+    recovery.ok, so a disk with several LP partitions, or a stick with
+    the same labels plugged in beside it, boots the one installed.
 
 Why it is built the way it is:
 
@@ -2444,7 +2458,8 @@ def main():
                 for r in d["free"]:
                     print("  %-14s %-9s %-6s %-22s %s" % (
                         "free", r["size_text"], "-",
-                        "+ new EFI partition" if r["new_esp"] else "",
+                        "+".join(["LP-ESP"] * r["new_esp"] + ["LP-RECOVERY"] * r["recovery"]
+                                 + ["LP-ROOT %s" % r["root_size_text"]]),
                         "ok" if r["usable"] else "no: " + r["reason"]))
         return 0
     if args.cmd == "check":

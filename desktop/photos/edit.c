@@ -123,7 +123,30 @@ void undo_clear(app_t *app)
     if (app->undo_btn) edit_update_buttons(app);
 }
 
-gboolean edit_dirty(app_t *app) { return app->upos != app->usaved; }
+/* Unsaved means the picture differs from the file. Turned right and back
+ * left, or flipped twice, it does not: the steps in between are all quarter
+ * turns and flips, and multiplied together (as the 2x2 matrices they are,
+ * y pointing down) they come to nothing - so there is nothing to ask about. */
+gboolean edit_dirty(app_t *app)
+{
+    static const int XM[4][4] = {        /* row-major, indexed by xform_t */
+        { 0, 1, -1, 0 },                 /* XF_ROT_L  */
+        { 0, -1, 1, 0 },                 /* XF_ROT_R  */
+        { -1, 0, 0, 1 },                 /* XF_FLIP_H */
+        { 1, 0, 0, -1 },                 /* XF_FLIP_V */
+    };
+    if (app->upos == app->usaved) return FALSE;
+    if (app->usaved < 0) return TRUE;
+    int m[4] = { 1, 0, 0, 1 };
+    for (int i = MIN(app->upos, app->usaved); i < MAX(app->upos, app->usaved); i++) {
+        if (app->u[i].kind != U_XFORM) return TRUE;
+        const int *o = XM[app->u[i].op];
+        int n[4] = { o[0] * m[0] + o[1] * m[2], o[0] * m[1] + o[1] * m[3],
+                     o[2] * m[0] + o[3] * m[2], o[2] * m[1] + o[3] * m[3] };
+        memcpy(m, n, sizeof m);
+    }
+    return !(m[0] == 1 && m[1] == 0 && m[2] == 0 && m[3] == 1);
+}
 
 static void undo_push(app_t *app, undo_t e)
 {
@@ -621,13 +644,18 @@ static double aspect_value(app_t *app, int i)
     }
 }
 
+/* The box in whole picture pixels, rounded (a drag lands between pixels). */
+static gboolean crop_rect(app_t *app, int *x, int *y, int *w, int *h)
+{
+    return rect_of(app, round(app->cx0), round(app->cy0), round(app->cx1), round(app->cy1), x, y, w, h);
+}
+
 static void crop_update_bar(app_t *app)
 {
     gtk_widget_set_visible(app->crop_bar, app->editing && app->tool == TOOL_CROP && !app->adjusting);
     int x, y, w, h;
     gboolean whole = !app->crop_has ||
-        (rect_of(app, app->cx0, app->cy0, app->cx1, app->cy1, &x, &y, &w, &h)
-         && w == app->iw && h == app->ih);
+        (crop_rect(app, &x, &y, &w, &h) && w == app->iw && h == app->ih);
     gtk_widget_set_sensitive(app->crop_apply, !whole);
 }
 
@@ -746,7 +774,7 @@ static void crop_release(app_t *app)
 void edit_crop_apply(app_t *app)
 {
     int x, y, w, h;
-    if (!app->crop_has || !rect_of(app, app->cx0, app->cy0, app->cx1, app->cy1, &x, &y, &w, &h))
+    if (!app->crop_has || !crop_rect(app, &x, &y, &w, &h))
         return;
     if (w == app->iw && h == app->ih) { crop_update_bar(app); view_queue(app); return; }
     app->fit = TRUE;
@@ -1149,6 +1177,7 @@ static void save_as_response(GtkNativeDialog *nd, int resp, gpointer d)
     const char *fmt = gtk_file_chooser_get_choice(GTK_FILE_CHOOSER(nd), "type");
     const char *qs = gtk_file_chooser_get_choice(GTK_FILE_CHOOSER(nd), "quality");
     gboolean jpeg = !g_strcmp0(fmt, "jpeg");
+    if (app->st_cmds) g_print("selftest: save-as choice type=%s quality=%s\n", fmt, qs);
     if (qs) app->jpeg_quality = atoi(qs);
     if (path) {
         const char *t = type_for_path(path);
@@ -1196,20 +1225,28 @@ void edit_save_as(app_t *app)
     if (dot) *dot = 0;
     char *name = g_strdup_printf("%s-%s%s", base, T("edited", "편집"), ext);
     gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(nd), name);
-    const char *tids[] = { "png", "jpeg", NULL };
-    const char *tlab[] = { T("PNG — exact, larger", "PNG — 손실 없음, 큰 파일"),
-                           T("JPEG — photos, smaller", "JPEG — 사진용, 작은 파일"), NULL };
+    /* Format and JPEG quality are two choices under the file list. The
+     * one to start on goes first: GTK 4.8's own file chooser ignores
+     * gtk_file_chooser_set_choice (it keeps showing the first option), so
+     * the order is what picks the default - and the portal agrees. */
+    gboolean png_first = g_str_has_suffix(name, ".png") || !app->path;
+    const char *png_l = T("PNG — exact, larger", "PNG — 손실 없음, 큰 파일");
+    const char *jpg_l = T("JPEG — photos, smaller", "JPEG — 사진용, 작은 파일");
+    const char *tids[] = { png_first ? "png" : "jpeg", png_first ? "jpeg" : "png", NULL };
+    const char *tlab[] = { png_first ? png_l : jpg_l, png_first ? jpg_l : png_l, NULL };
     gtk_file_chooser_add_choice(GTK_FILE_CHOOSER(nd), "type", T("Format", "형식"), tids, tlab);
-    gtk_file_chooser_set_choice(GTK_FILE_CHOOSER(nd), "type",
-                                g_str_has_suffix(name, ".png") || !app->path ? "png" : "jpeg");
-    const char *qids[] = { "95", "90", "80", "70", "50", NULL };
-    const char *qlab[] = { T("Best (95)", "최고 (95)"), T("High (90)", "높음 (90)"),
-                           T("Good (80)", "좋음 (80)"), T("Medium (70)", "보통 (70)"),
-                           T("Smallest (50)", "가장 작게 (50)"), NULL };
-    gtk_file_chooser_add_choice(GTK_FILE_CHOOSER(nd), "quality", T("JPEG quality", "JPEG 품질"), qids, qlab);
+    static const char *QV[5] = { "95", "90", "80", "70", "50" };
+    const char *QL[5] = { T("Best (95)", "최고 (95)"), T("High (90)", "높음 (90)"),
+                          T("Good (80)", "좋음 (80)"), T("Medium (70)", "보통 (70)"),
+                          T("Smallest (50)", "가장 작게 (50)") };
     int q = app->jpeg_quality > 0 ? app->jpeg_quality : 90;
-    gtk_file_chooser_set_choice(GTK_FILE_CHOOSER(nd), "quality",
-                                q >= 93 ? "95" : q >= 85 ? "90" : q >= 75 ? "80" : q >= 60 ? "70" : "50");
+    int qi = q >= 93 ? 0 : q >= 85 ? 1 : q >= 75 ? 2 : q >= 60 ? 3 : 4;
+    const char *qids[6], *qlab[6];
+    qids[0] = QV[qi]; qlab[0] = QL[qi];
+    for (int i = 0, k = 1; i < 5; i++)
+        if (i != qi) { qids[k] = QV[i]; qlab[k] = QL[i]; k++; }
+    qids[5] = qlab[5] = NULL;
+    gtk_file_chooser_add_choice(GTK_FILE_CHOOSER(nd), "quality", T("JPEG quality", "JPEG 품질"), qids, qlab);
     g_free(name); g_free(base);
     g_signal_connect(nd, "response", G_CALLBACK(save_as_response), app);
     gtk_native_dialog_show(GTK_NATIVE_DIALOG(nd));
@@ -1470,7 +1507,7 @@ void edit_draw_overlay(app_t *app, cairo_t *cr)
         cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
         /* the size it will be, in picture pixels */
         int px, py, pw, ph;
-        if (rect_of(app, app->cx0, app->cy0, app->cx1, app->cy1, &px, &py, &pw, &ph)) {
+        if (crop_rect(app, &px, &py, &pw, &ph)) {
             char buf[48];
             g_snprintf(buf, sizeof buf, "%d × %d", pw, ph);
             PangoLayout *pl = gtk_widget_create_pango_layout(app->canvas, buf);
@@ -1814,6 +1851,7 @@ static void b_redo(GtkButton *b, gpointer d) { (void)b; edit_redo(d); }
 static void b_save(GtkButton *b, gpointer d) { (void)b; cont_drop(d); edit_save(d); }
 static void b_saveas(GtkButton *b, gpointer d) { (void)b; cont_drop(d); edit_save_as(d); }
 static void b_done(GtkButton *b, gpointer d) { (void)b; edit_leave(d); }
+static void b_copy(GtkButton *b, gpointer d) { (void)b; surface_to_clipboard(d); }
 static void b_rotl(GtkButton *b, gpointer d) { (void)b; app_t *a = d; if (!a->adjusting) edit_xform(a, XF_ROT_L); }
 static void b_rotr(GtkButton *b, gpointer d) { (void)b; app_t *a = d; if (!a->adjusting) edit_xform(a, XF_ROT_R); }
 static void b_fliph(GtkButton *b, gpointer d) { (void)b; app_t *a = d; if (!a->adjusting) edit_xform(a, XF_FLIP_H); }
@@ -1888,6 +1926,11 @@ void edit_build_ui(app_t *app)
     GtkWidget *sa = ibtn("document-save-as-symbolic", T("Save as a new file (Ctrl+Shift+S)",
                                                        "다른 이름으로 저장 (Ctrl+Shift+S)"), G_CALLBACK(b_saveas), app);
     gtk_widget_remove_css_class(sa, "flat");
+    /* what is on screen, ink and all, as a PNG for pasting elsewhere */
+    GtkWidget *cp = ibtn("edit-copy-symbolic", T("Copy the edited picture (Ctrl+C)", "편집한 사진 복사 (Ctrl+C)"),
+                         G_CALLBACK(b_copy), app);
+    gtk_widget_remove_css_class(cp, "flat");
+    gtk_box_append(GTK_BOX(app->hb_edit_end), cp);
     app->save_btn = gtk_button_new_with_label(T("Save", "저장"));
     gtk_widget_add_css_class(app->save_btn, "suggested-action");
     gtk_widget_set_tooltip_text(app->save_btn, T("Save over the original (Ctrl+S)", "원본에 저장 (Ctrl+S)"));
@@ -1951,7 +1994,11 @@ void edit_build_ui(app_t *app)
     gtk_box_append(GTK_BOX(bar), app->color_btn);
     gtk_box_append(GTK_BOX(bar), sep());
 
-    const char *wnames[3] = { T("Thin", "가늘게"), T("Medium", "보통"), T("Thick", "굵게") };
+    /* One size control for every tool: line width, text size, how
+     * coarse the mosaic and how strong the blur. */
+    const char *wnames[3] = { T("Small — thin line, small text", "작게 — 가는 선, 작은 글자"),
+                              T("Medium", "보통"),
+                              T("Large — thick line, big text", "크게 — 굵은 선, 큰 글자") };
     first = NULL;
     for (int i = 0; i < 3; i++) {
         GtkWidget *b = gtk_toggle_button_new();

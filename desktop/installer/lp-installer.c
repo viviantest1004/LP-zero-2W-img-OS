@@ -30,7 +30,10 @@
  *   parts      the partitions of that disk, each with its size, what is
  *              on it, and whether LP can go there (greyed, with the
  *              reason, when not). Only when "a partition" was chosen.
- *   confirm    what will be erased, and a tick box before the red button.
+ *   confirm    the disk partition by partition, as lp-install plans it
+ *              (install --dry-run --json): what is erased, what is made
+ *              and how big, what is kept, what goes onto the EFI
+ *              partition - then a tick box before the red button.
  *              No typed confirmation: the person may have no keyboard
  *              yet, and a tick box is as deliberate as typing a name.
  *   progress   the step, and a bar that eases on a spring.
@@ -93,6 +96,8 @@ typedef struct {
     GtkWidget  *confirm_title;
     GtkWidget  *confirm_what, *confirm_warn, *confirm_check, *confirm_go;
     GtkWidget  *confirm_note;
+    GtkWidget  *confirm_plan;       /* one row per partition: erased, made, kept */
+    gboolean    plan_ok;            /* the backend's plan came back */
     /* progress */
     GtkWidget  *step;
     GtkWidget  *percent;
@@ -489,9 +494,10 @@ static void show_modes(void)
     ok = lp_json_bool(d, "part_ok", 0);
     if (ok) {
         en = g_strdup("Choose one partition to erase for LP; the other partitions "
-                      "stay as they are.");
+                      "stay as they are. No recovery system (it needs a partition of "
+                      "its own).");
         ko = g_strdup("LP 를 설치할 파티션 하나를 골라 지웁니다. 나머지 파티션은 "
-                      "그대로 둡니다.");
+                      "그대로 둡니다. 복구 시스템은 없습니다 (따로 파티션이 필요합니다).");
     } else {
         /* The disk's own reason, or the EFI partition's (every partition
          * big enough carries it), or: none is big enough and free. */
@@ -522,17 +528,28 @@ static void show_modes(void)
     if (free && lp_json_len(free) > 0) {
         LpJson *r0 = lp_json_at(free, 0);          /* the largest */
         const char *sz = lp_json_str(r0, "size_text", "");
+        const char *rsz = lp_json_str(r0, "root_size_text", "");
         ok = lp_json_bool(d, "free_ok", 0) && lp_json_bool(r0, "usable", 0);
-        if (ok && lp_json_bool(r0, "new_esp", 0)) {
+        if (ok && lp_json_bool(r0, "recovery", 0)) {
+            en = g_strdup_printf("New partitions in the %s of unallocated space: LP (%s), its "
+                                 "recovery system and its own start-up partition. Nothing "
+                                 "is erased.", sz, rsz);
+            ko = g_strdup_printf("할당되지 않은 빈 공간 %s 에 새 파티션을 만듭니다: LP (%s), "
+                                 "복구 시스템, LP 전용 시작 파티션. 아무것도 지우지 "
+                                 "않습니다.", sz, rsz);
+        } else if (ok && lp_json_bool(r0, "new_esp", 0)) {
             en = g_strdup_printf("A new partition in the %s of unallocated space, and a "
-                                 "512 MB EFI partition to start it; nothing is erased.", sz);
+                                 "512 MB EFI partition to start it; nothing is erased. No "
+                                 "room for the recovery system.", sz);
             ko = g_strdup_printf("할당되지 않은 빈 공간 %s 에 새 파티션과 시작용 512MB EFI "
-                                 "파티션을 만듭니다. 아무것도 지우지 않습니다.", sz);
+                                 "파티션을 만듭니다. 아무것도 지우지 않습니다. 복구 "
+                                 "시스템을 둘 자리는 없습니다.", sz);
         } else if (ok) {
             en = g_strdup_printf("A new partition in the %s of unallocated space; nothing "
-                                 "is erased.", sz);
+                                 "is erased. No room for the recovery system.", sz);
             ko = g_strdup_printf("할당되지 않은 빈 공간 %s 에 새 파티션을 만듭니다. "
-                                 "아무것도 지우지 않습니다.", sz);
+                                 "아무것도 지우지 않습니다. 복구 시스템을 둘 자리는 "
+                                 "없습니다.", sz);
         } else {
             reason_words(lp_json_str(r0, "reason", ""), d, "", &en, &ko);
         }
@@ -848,15 +865,110 @@ static void page_parts(void)
     gtk_stack_add_named(GTK_STACK(A.stack), p.root, "parts");
 }
 
-/* What the confirmation says, for the way chosen: exactly what is
- * erased, and what is not. */
+/* One row of the plan: what the install does to one partition, in the
+ * words of lp-install's own plan (install --dry-run --json) - the list a
+ * person agrees to is the one the backend computed, not a paraphrase. */
+static void plan_row(LpJson *r, gboolean own_esp)
+{
+    const char *act = lp_json_str(r, "action", "keep");
+    const char *dev = lp_json_str(r, "dev", "");
+    const char *name = lp_json_str(r, "name", "");
+    const char *size = lp_json_str(r, "size_text", "");
+    const char *what = lp_json_str(r, "what", "");
+    const char *ten, *tko, *cls;
+    if (!strcmp(act, "erase")) {
+        ten = "Erased"; tko = "지움"; cls = "lp-tag-erase";
+    } else if (!strcmp(act, "new")) {
+        ten = "New"; tko = "새로 만듦"; cls = "lp-tag-new";
+    } else if (!strcmp(act, "esp-add")) {
+        ten = "Adds \\EFI\\LP"; tko = "\\EFI\\LP 추가"; cls = "lp-tag-add";
+    } else if (!strcmp(act, "grow")) {
+        ten = "Grows"; tko = "늘어남"; cls = "lp-tag-new";
+    } else {
+        ten = "Kept"; tko = "그대로"; cls = "lp-tag-keep";
+    }
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
+    gtk_widget_add_css_class(row, "lp-plan-row");
+    GtkWidget *tag = su_label(ten, tko, "lp-plan-tag");
+    gtk_widget_add_css_class(tag, cls);
+    gtk_label_set_wrap(GTK_LABEL(tag), FALSE);
+    gtk_label_set_xalign(GTK_LABEL(tag), 0.5);
+    gtk_widget_set_size_request(tag, 140, -1);
+    gtk_widget_set_valign(tag, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(row), tag);
+
+    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_hexpand(col, TRUE);
+    char *title, *wen, *wko;
+    if (!strcmp(act, "new")) {
+        title = g_strdup_printf("%s  ·  %s", name, size);
+        wen = g_strdup(what);
+        wko = g_strdup(!strcmp(name, "LP-ESP") ? (own_esp ? "FAT32 · LP 전용 EFI 시작 파티션"
+                                                          : "FAT32 · EFI 시작 파티션")
+                       : !strcmp(name, "LP-RECOVERY") ? "ext4 · LP 복구 시스템"
+                       : !strcmp(name, "LP-ROOT") ? "ext4 · LP" : what);
+    } else {
+        title = g_strdup_printf("%s  ·  %s", dev, size);
+        if (!strcmp(act, "erase") && *name) {
+            wen = g_strdup_printf("%s  →  %s", what, name);
+            wko = g_strdup_printf("%s  →  %s", what, name);
+        } else {
+            wen = g_strdup(what);
+            wko = g_strdup(what);
+        }
+    }
+    gtk_box_append(GTK_BOX(col), su_label(title, title, "lp-plan-title"));
+    gtk_box_append(GTK_BOX(col), su_label(wen, wko, "su-choice-detail"));
+    gtk_box_append(GTK_BOX(row), col);
+    gtk_box_append(GTK_BOX(A.confirm_plan), row);
+    g_free(title);
+    g_free(wen);
+    g_free(wko);
+}
+
+/* The last page before anything is written: the backend's plan for the
+ * way chosen - every partition of the disk, erased, made, or kept - and
+ * what LP does to the disk's start-up. Nothing on the disk has been
+ * touched to make it (--dry-run). */
 static void show_confirm(void)
 {
+    GtkWidget *c;
+    while ((c = gtk_widget_get_first_child(A.confirm_plan)))
+        gtk_box_remove(GTK_BOX(A.confirm_plan), c);
+    const char *flag = A.mode == MODE_PART ? "--partition"
+                     : A.mode == MODE_FREE ? "--free-space" : "--disk";
+    const char *where = A.mode == MODE_PART ? A.part : A.disk;
+    const char *argv[] = { backend(), "install", flag, where, "--dry-run", "--json",
+                           "--progress", NULL };
+    char *out = su_run(argv, NULL);
+    LpJson *plan = out && out[0] == '{' ? lp_json_parse(out) : NULL;
+    A.plan_ok = plan != NULL;
+
+    gboolean esp_shared = plan && lp_json_bool(plan, "esp_shared", 0);
+    gboolean fb_other = plan && lp_json_bool(plan, "fallback_other", 0);
+    gboolean recovery = plan && lp_json_bool(plan, "recovery", 0);
+    gboolean had_lp = plan && lp_json_bool(plan, "esp_has_lp", 0);
+    const char *dsk_esp = A.disk_j ? lp_json_str(A.disk_j, "esp", "") : "";
+    const char *esp = plan ? lp_json_str(plan, "esp", "") : "";
+    LpJson *rows = plan ? lp_json_get(plan, "rows") : NULL;
+    gboolean new_esp = FALSE;
+    for (int i = 0; rows && i < lp_json_len(rows); i++)
+        if (!strcmp(lp_json_str(lp_json_at(rows, i), "name", ""), "LP-ESP"))
+            new_esp = TRUE;
+    for (int i = 0; rows && i < lp_json_len(rows); i++)
+        plan_row(lp_json_at(rows, i), A.mode == MODE_FREE && *dsk_esp);
+
     char *wen, *wko, *nen, *nko;
-    const char *esp = A.disk_j ? lp_json_str(A.disk_j, "esp", "") : "";
-    gboolean had_lp = A.disk_j && lp_json_bool(A.disk_j, "esp_has_lp", 0);
-    const char *lp_en = had_lp ? " The LP start-up files already there are replaced." : "";
-    const char *lp_ko = had_lp ? " 그곳에 있던 LP 시작 파일은 새것으로 바뀝니다." : "";
+    const char *lp_en = had_lp && esp_shared ? " The LP start-up files already there are replaced." : "";
+    const char *lp_ko = had_lp && esp_shared ? " 그곳에 있던 LP 시작 파일은 새것으로 바뀝니다." : "";
+    const char *fb_en = fb_other
+        ? " The other system's start-up file (\\EFI\\BOOT\\BOOTX64.EFI) stays as it is; "
+          "the computer gets a start-up entry for LP."
+        : " \\EFI\\BOOT\\BOOTX64.EFI was free, so LP's start-up menu goes there too.";
+    const char *fb_ko = fb_other
+        ? " 다른 시스템의 시작 파일(\\EFI\\BOOT\\BOOTX64.EFI)은 그대로 두고, 컴퓨터에 LP "
+          "시작 항목을 더합니다."
+        : " \\EFI\\BOOT\\BOOTX64.EFI 자리가 비어 있어서 LP 시작 메뉴를 그곳에도 둡니다.";
     /* LP's boot menu starts LP and nothing else, and LP goes first in the
      * firmware's order: the other system is one key away, and the person
      * should know which key before they need it. */
@@ -864,21 +976,25 @@ static void show_confirm(void)
                                           "is in the start-up menu (F12 at power-on)." : "";
     const char *other_ko = A.disk_parts ? " 이제부터는 LP 가 먼저 시작합니다. 다른 시스템은 "
                                           "켤 때 F12 를 누르면 나오는 시작 메뉴에서 고르세요." : "";
+    char *what = g_strdup_printf("%s  ·  %s  ·  %s", A.disk_model, A.disk_size, A.disk);
+    su_retext(A.confirm_what, what, what);
+    g_free(what);
 
     if (A.mode == MODE_PART) {
-        su_retext(A.confirm_what, A.part_en, A.part_ko);
         wen = g_strdup_printf("Everything on %s will be erased. The other partitions "
                               "are left as they are.", A.part_en);
         wko = g_strdup_printf("%s의 내용이 모두 지워집니다. 나머지 파티션은 그대로 "
                               "둡니다.", A.part_ko);
         nen = g_strdup_printf("LP starts from this disk's EFI system partition (%s): it "
-                              "adds its own folder, \\EFI\\LP, and touches nothing else "
-                              "there.%s No recovery partition is made.%s", esp, lp_en,
-                              other_en);
+                              "adds its own folder, \\EFI\\LP, and changes nothing else "
+                              "there.%s%s No recovery partition is made, so LP Recovery is "
+                              "not offered at start-up (the USB stick can reinstall LP).%s",
+                              esp, lp_en, fb_en, other_en);
         nko = g_strdup_printf("LP 는 이 디스크의 EFI 시스템 파티션(%s)에 자기 폴더 "
-                              "\\EFI\\LP 만 더해서 시작하고, 그 밖의 것은 건드리지 "
-                              "않습니다.%s 복구 파티션은 만들지 않습니다.%s", esp, lp_ko,
-                              other_ko);
+                              "\\EFI\\LP 만 더해서 시작하고, 그 밖의 것은 바꾸지 "
+                              "않습니다.%s%s 복구 파티션은 만들지 않으므로 시작할 때 LP 복구는 "
+                              "나오지 않습니다 (USB 로 다시 설치할 수 있습니다).%s", esp,
+                              lp_ko, fb_ko, other_ko);
         su_retext(A.confirm_title, "Erase this partition and install LP?",
                   "이 파티션을 지우고 LP 를 설치할까요?");
         su_retext(A.confirm_check, "I understand that everything on this partition will be erased",
@@ -887,31 +1003,37 @@ static void show_confirm(void)
         gtk_widget_remove_css_class(A.confirm_go, "su-primary");
         gtk_widget_add_css_class(A.confirm_go, "su-danger");
     } else if (A.mode == MODE_FREE) {
-        LpJson *free = lp_json_get(A.disk_j, "free");
-        LpJson *r0 = free && lp_json_len(free) > 0 ? lp_json_at(free, 0) : NULL;
-        const char *sz = r0 ? lp_json_str(r0, "size_text", "") : "";
-        gboolean new_esp = r0 && lp_json_bool(r0, "new_esp", 0);
-        char *what = g_strdup_printf("%s  (%s)", A.disk_model, A.disk_size);
-        su_retext(A.confirm_what, what, what);
-        g_free(what);
-        wen = g_strdup_printf("A new partition for LP is made in the %s of free space on "
+        const char *sz = plan ? lp_json_str(plan, "free", "") : "";
+        wen = g_strdup_printf("New partitions for LP are made in the %s of free space on "
                               "%s. Nothing on the other partitions is erased.", sz, A.disk);
         wko = g_strdup_printf("%s 의 빈 공간 %s 에 LP 용 새 파티션을 만듭니다. 다른 "
                               "파티션의 내용은 지우지 않습니다.", A.disk, sz);
-        if (new_esp) {
+        if (recovery) {
+            nen = g_strdup_printf("LP gets its own start-up partition and its recovery "
+                                  "system%s%s%s", *dsk_esp ? "; the disk's EFI system "
+                                  "partition (" : ".", *dsk_esp ? dsk_esp : "",
+                                  *dsk_esp ? ") is not touched." : "");
+            nko = g_strdup_printf("LP 전용 시작 파티션과 복구 시스템을 함께 만듭니다.%s%s%s",
+                                  *dsk_esp ? " 이 디스크의 EFI 시스템 파티션(" : "",
+                                  *dsk_esp ? dsk_esp : "",
+                                  *dsk_esp ? ")은 건드리지 않습니다." : "");
+            char *e2 = g_strconcat(nen, other_en, NULL), *k2 = g_strconcat(nko, other_ko, NULL);
+            g_free(nen); g_free(nko);
+            nen = e2; nko = k2;
+        } else if (new_esp) {
             nen = g_strdup("The disk has no EFI system partition, so a 512 MB one is made "
-                           "in front of LP's to start it. No recovery partition is made.");
-            nko = g_strdup("이 디스크에는 EFI 시스템 파티션이 없어서, 시작용 512MB 파티션을 "
-                           "LP 파티션 앞에 함께 만듭니다. 복구 파티션은 만들지 않습니다.");
+                           "for LP. There is no room for the recovery system.");
+            nko = g_strdup("이 디스크에는 EFI 시스템 파티션이 없어서 LP 용 512MB 시작 "
+                           "파티션을 만듭니다. 복구 시스템을 둘 자리는 없습니다.");
         } else {
             nen = g_strdup_printf("LP starts from this disk's EFI system partition (%s): it "
-                                  "adds its own folder, \\EFI\\LP, and touches nothing else "
-                                  "there.%s No recovery partition is made.%s", esp, lp_en,
-                                  other_en);
+                                  "adds its own folder, \\EFI\\LP, and changes nothing else "
+                                  "there.%s%s There is no room for the recovery system.%s",
+                                  esp, lp_en, fb_en, other_en);
             nko = g_strdup_printf("LP 는 이 디스크의 EFI 시스템 파티션(%s)에 자기 폴더 "
-                                  "\\EFI\\LP 만 더해서 시작하고, 그 밖의 것은 건드리지 "
-                                  "않습니다.%s 복구 파티션은 만들지 않습니다.%s", esp, lp_ko,
-                                  other_ko);
+                                  "\\EFI\\LP 만 더해서 시작하고, 그 밖의 것은 바꾸지 "
+                                  "않습니다.%s%s 복구 시스템을 둘 자리는 없습니다.%s", esp,
+                                  lp_ko, fb_ko, other_ko);
         }
         su_retext(A.confirm_title, "Install LP in the free space?",
                   "빈 공간에 LP 를 설치할까요?");
@@ -922,9 +1044,6 @@ static void show_confirm(void)
         gtk_widget_remove_css_class(A.confirm_go, "su-danger");
         gtk_widget_add_css_class(A.confirm_go, "su-primary");
     } else {
-        char *en = g_strdup_printf("%s  (%s)", A.disk_model, A.disk_size);
-        su_retext(A.confirm_what, en, en);
-        g_free(en);
         nen = g_strdup("LP uses the whole disk: 512 MB to start up, about 1.3 GB for the "
                        "recovery system, and the rest for LP and your files.");
         nko = g_strdup("LP 가 디스크 전체를 씁니다: 시작용 512MB, 복구 시스템 약 1.3GB, "
@@ -958,8 +1077,21 @@ static void show_confirm(void)
             gtk_widget_add_css_class(A.confirm_go, "su-danger");
         }
     }
+    if (!plan) {
+        /* The backend refused the way chosen, or could not say: nothing
+         * can be agreed to, and its words are what the page shows. */
+        const char *e = out && g_str_has_prefix(out, "ERROR ") ? out + 6 : "";
+        const char *sp = strchr(e, ' ');
+        char *msg = g_strstrip(g_strdup(sp ? sp + 1 : e));
+        g_free(wen); g_free(wko);
+        wen = g_strdup_printf("LP cannot go there: %s", *msg ? msg : "lp-install gave no plan");
+        wko = g_strdup_printf("여기에는 설치할 수 없습니다: %s",
+                              *msg ? msg : "lp-install 이 계획을 내놓지 않았습니다");
+        g_free(msg);
+    }
     su_retext(A.confirm_warn, wen, wko);
     su_retext(A.confirm_note, nen, nko);
+    gtk_widget_set_visible(A.confirm_note, plan != NULL);
     g_free(wen); g_free(wko);
     g_free(nen); g_free(nko);
     char *sen = g_strdup_printf("Account %s  ·  %s  ·  computer name %s",
@@ -971,7 +1103,11 @@ static void show_confirm(void)
     su_retext(A.confirm_who, sen, sko);
     g_free(sen); g_free(sko);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(A.confirm_check), FALSE);
+    gtk_widget_set_sensitive(A.confirm_check, A.plan_ok);
     gtk_widget_set_sensitive(A.confirm_go, FALSE);
+    if (plan)
+        lp_json_free(plan);
+    g_free(out);
 }
 
 /* ── confirm ───────────────────────────────────────────────────────── */
@@ -979,7 +1115,7 @@ static void show_confirm(void)
 static void on_check(GtkCheckButton *c, gpointer d)
 {
     (void)d;
-    gtk_widget_set_sensitive(A.confirm_go, gtk_check_button_get_active(c));
+    gtk_widget_set_sensitive(A.confirm_go, A.plan_ok && gtk_check_button_get_active(c));
 }
 
 static void on_back_disks(GtkButton *b, gpointer d)
@@ -1006,11 +1142,14 @@ static void page_confirm(void)
     gtk_box_append(GTK_BOX(p.body), A.confirm_what);
     A.confirm_warn = su_label("", "", "su-warn");
     gtk_box_append(GTK_BOX(p.body), A.confirm_warn);
-    A.confirm_who = su_label("", "", "su-note");
-    gtk_box_append(GTK_BOX(p.body), A.confirm_who);
-    /* What LP takes, which depends on the way chosen (show_confirm). */
+    /* The disk, partition by partition: erased, made, kept. */
+    gtk_box_append(GTK_BOX(p.body), list_box(&A.confirm_plan, 300));
+    gtk_box_set_spacing(GTK_BOX(A.confirm_plan), 6);
+    /* What LP does to the disk's start-up, which depends on the way chosen. */
     A.confirm_note = su_label("", "", "su-note");
     gtk_box_append(GTK_BOX(p.body), A.confirm_note);
+    A.confirm_who = su_label("", "", "su-note");
+    gtk_box_append(GTK_BOX(p.body), A.confirm_who);
     A.confirm_check = gtk_check_button_new();
     gtk_widget_add_css_class(A.confirm_check, "su-check");
     su_retext(A.confirm_check, "I understand that everything on this disk will be erased",
@@ -1046,7 +1185,8 @@ static void step_text(const char *key)
         return;
     }
     if (!strcmp(key, "partition") && A.mode == MODE_FREE) {
-        su_retext(A.step, "Making a new partition", "새 파티션을 만드는 중");
+        su_retext(A.step, "Making LP's partitions in the free space",
+                  "빈 공간에 LP 파티션을 만드는 중");
         return;
     }
     for (guint i = 0; i < G_N_ELEMENTS(STEPS); i++)
@@ -1259,10 +1399,29 @@ static gboolean on_close(GtkWindow *w, gpointer d)
     return A.proc != NULL;
 }
 
+/* The confirmation's plan rows: a coloured tag per partition - red for
+ * what is erased, the accent for what is made, a quiet one for what is
+ * kept - so the one that goes is found at a glance. */
+static const char PLAN_CSS[] =
+    ".lp-plan-row { padding: 8px 12px; border-radius: 12px;\n"
+    "  background-color: alpha(white, 0.04); }\n"
+    ".lp-plan-tag { font-size: 14px; font-weight: 700; border-radius: 8px;\n"
+    "  padding: 5px 10px; }\n"
+    ".lp-tag-erase { background-color: alpha(#c01c28, 0.45); color: #ffe1dc; }\n"
+    ".lp-tag-new { background-color: alpha(#f28c28, 0.32); color: #ffe6cc; }\n"
+    ".lp-tag-add { background-color: alpha(#3584e4, 0.32); color: #dcebff; }\n"
+    ".lp-tag-keep { background-color: alpha(white, 0.08); color: #9fb3c4; }\n"
+    ".lp-plan-title { font-size: 16px; font-weight: 600; color: #eaf2f8; }\n";
+
 static void activate(GtkApplication *app, gpointer d)
 {
     (void)d;
     su_load_css();
+    GtkCssProvider *css = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(css, PLAN_CSS, -1);
+    gtk_style_context_add_provider_for_display(gdk_display_get_default(),
+        GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 2);
+    g_object_unref(css);
     A.win = gtk_application_window_new(app);
     gtk_widget_add_css_class(A.win, "su-window");
     gtk_window_set_title(GTK_WINDOW(A.win), "Install LP");
