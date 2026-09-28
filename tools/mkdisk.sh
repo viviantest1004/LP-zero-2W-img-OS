@@ -239,7 +239,10 @@ step "root filesystem (ext4, ${ROOT_LABEL})"
 # writing file <아무 파일 이름>" 이라고만 말한다. 그 이름은 마침 마지막
 # 으로 쓰려던 파일일 뿐이라, 읽는 사람은 그 파일이 잘못된 줄 알고 한참
 # 을 엉뚱한 데서 찾는다. 무엇이 부족한지는 여기서 이미 알 수 있다.
-NEED_KB=$(du -skx "$ROOTFS" | cut -f1)
+# Not -x: the desktop's root is an overlay whose files report their
+# layer's device, and -x then counted the upper layer alone - a root, and
+# a recovery partition sized from it, a fraction of what goes in.
+NEED_KB=$(du -sk "$ROOTFS" --exclude=proc --exclude=sys --exclude=dev --exclude=tmp 2>/dev/null | cut -f1)
 ROOT_MB="${LP_ROOT_MB:-$(( NEED_KB * 5 / 4 / 1024 + 256 ))}"
 ROOT_SECTORS=$(( ROOT_MB * 1024 * 1024 / SECTOR ))
 # ext4 자체의 메타데이터에 5% 쯤. 여유가 없으면 마지막에 가서 터진다.
