@@ -857,6 +857,13 @@ static void show_confirm(void)
     gboolean had_lp = A.disk_j && lp_json_bool(A.disk_j, "esp_has_lp", 0);
     const char *lp_en = had_lp ? " The LP start-up files already there are replaced." : "";
     const char *lp_ko = had_lp ? " 그곳에 있던 LP 시작 파일은 새것으로 바뀝니다." : "";
+    /* LP's boot menu starts LP and nothing else, and LP goes first in the
+     * firmware's order: the other system is one key away, and the person
+     * should know which key before they need it. */
+    const char *other_en = A.disk_parts ? " From now on LP starts first; the other system "
+                                          "is in the start-up menu (F12 at power-on)." : "";
+    const char *other_ko = A.disk_parts ? " 이제부터는 LP 가 먼저 시작합니다. 다른 시스템은 "
+                                          "켤 때 F12 를 누르면 나오는 시작 메뉴에서 고르세요." : "";
 
     if (A.mode == MODE_PART) {
         su_retext(A.confirm_what, A.part_en, A.part_ko);
@@ -866,10 +873,12 @@ static void show_confirm(void)
                               "둡니다.", A.part_ko);
         nen = g_strdup_printf("LP starts from this disk's EFI system partition (%s): it "
                               "adds its own folder, \\EFI\\LP, and touches nothing else "
-                              "there.%s No recovery partition is made.", esp, lp_en);
+                              "there.%s No recovery partition is made.%s", esp, lp_en,
+                              other_en);
         nko = g_strdup_printf("LP 는 이 디스크의 EFI 시스템 파티션(%s)에 자기 폴더 "
                               "\\EFI\\LP 만 더해서 시작하고, 그 밖의 것은 건드리지 "
-                              "않습니다.%s 복구 파티션은 만들지 않습니다.", esp, lp_ko);
+                              "않습니다.%s 복구 파티션은 만들지 않습니다.%s", esp, lp_ko,
+                              other_ko);
         su_retext(A.confirm_title, "Erase this partition and install LP?",
                   "이 파티션을 지우고 LP 를 설치할까요?");
         su_retext(A.confirm_check, "I understand that everything on this partition will be erased",
@@ -897,10 +906,12 @@ static void show_confirm(void)
         } else {
             nen = g_strdup_printf("LP starts from this disk's EFI system partition (%s): it "
                                   "adds its own folder, \\EFI\\LP, and touches nothing else "
-                                  "there.%s No recovery partition is made.", esp, lp_en);
+                                  "there.%s No recovery partition is made.%s", esp, lp_en,
+                                  other_en);
             nko = g_strdup_printf("LP 는 이 디스크의 EFI 시스템 파티션(%s)에 자기 폴더 "
                                   "\\EFI\\LP 만 더해서 시작하고, 그 밖의 것은 건드리지 "
-                                  "않습니다.%s 복구 파티션은 만들지 않습니다.", esp, lp_ko);
+                                  "않습니다.%s 복구 파티션은 만들지 않습니다.%s", esp, lp_ko,
+                                  other_ko);
         }
         su_retext(A.confirm_title, "Install LP in the free space?",
                   "빈 공간에 LP 를 설치할까요?");
