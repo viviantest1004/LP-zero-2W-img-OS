@@ -533,9 +533,31 @@ static void show_modes(void)
         only = b;
     }
 
-    /* Free space only where there is some worth offering. */
+    /* Free space: offered where there is enough, and otherwise shown
+     * greyed with what it would take - all three ways are always on the
+     * page, so "why can't I use the empty space?" has an answer. */
     LpJson *free = lp_json_get(d, "free");
-    if (free && lp_json_len(free) > 0) {
+    if (!free || lp_json_len(free) == 0) {
+        const char *r = lp_json_str(d, "shared_reason", "");
+        if (*r) {
+            reason_words(r, d, "", &en, &ko);
+        } else {
+            const char *fneed = lp_json_str(d, "free_need_text", "");
+            const char *big = lp_json_str(d, "free_largest_text", "");
+            if (*big) {
+                en = g_strdup_printf("No unallocated space of %s or more on this disk (the "
+                                     "largest is %s)", fneed, big);
+                ko = g_strdup_printf("이 디스크에는 %s 이상의 할당되지 않은 빈 공간이 "
+                                     "없습니다 (가장 큰 것이 %s)", fneed, big);
+            } else {
+                en = g_strdup_printf("No unallocated space on this disk; LP needs %s", fneed);
+                ko = g_strdup_printf("이 디스크에는 할당되지 않은 빈 공간이 없습니다. LP 는 %s "
+                                     "가 필요합니다", fneed);
+            }
+        }
+        mode_row(MODE_FREE, "Install into free space", "빈 공간에 설치", en, ko, FALSE, &group);
+        g_free(en); g_free(ko);
+    } else {
         LpJson *r0 = lp_json_at(free, 0);          /* the largest */
         const char *sz = lp_json_str(r0, "size_text", "");
         const char *rsz = lp_json_str(r0, "root_size_text", "");
@@ -875,6 +897,16 @@ static void page_parts(void)
     gtk_stack_add_named(GTK_STACK(A.stack), p.root, "parts");
 }
 
+/* A wrapping label asks for the width of its whole text on one line, and
+ * the page stack is as wide as its widest page: the confirmation's long
+ * notes made every page's card as wide as the screen. They wrap at about
+ * the card's own width instead. */
+static GtkWidget *narrow(GtkWidget *label)
+{
+    gtk_label_set_max_width_chars(GTK_LABEL(label), 96);
+    return label;
+}
+
 /* One row of the plan: what the install does to one partition, in the
  * words of lp-install's own plan (install --dry-run --json) - the list a
  * person agrees to is the one the backend computed, not a paraphrase. */
@@ -936,7 +968,7 @@ static void plan_row(LpJson *r, gboolean own_esp)
         }
     }
     gtk_box_append(GTK_BOX(col), su_label(title, title, "lp-plan-title"));
-    gtk_box_append(GTK_BOX(col), su_label(wen, wko, "su-choice-detail"));
+    gtk_box_append(GTK_BOX(col), narrow(su_label(wen, wko, "su-choice-detail")));
     gtk_box_append(GTK_BOX(row), col);
     gtk_box_append(GTK_BOX(A.confirm_plan), row);
     g_free(title);
@@ -1216,13 +1248,13 @@ static void page_confirm(void)
     A.confirm_title = p.title;
     A.confirm_what = su_label("", "", "su-choice-title");
     gtk_box_append(GTK_BOX(p.body), A.confirm_what);
-    A.confirm_warn = su_label("", "", "su-warn");
+    A.confirm_warn = narrow(su_label("", "", "su-warn"));
     gtk_box_append(GTK_BOX(p.body), A.confirm_warn);
     /* The disk, partition by partition: erased, made, kept. */
     gtk_box_append(GTK_BOX(p.body), list_box(&A.confirm_plan, 300));
     gtk_box_set_spacing(GTK_BOX(A.confirm_plan), 6);
     /* What LP does to the disk's start-up, which depends on the way chosen. */
-    A.confirm_note = su_label("", "", "su-note");
+    A.confirm_note = narrow(su_label("", "", "su-note"));
     gtk_box_append(GTK_BOX(p.body), A.confirm_note);
     A.confirm_who = su_label("", "", "su-note");
     gtk_box_append(GTK_BOX(p.body), A.confirm_who);
@@ -1427,7 +1459,7 @@ static void page_failed(void)
     su_page(&p, "The installation did not finish", "설치를 마치지 못했습니다",
             "The disk may be partly written. Nothing on the USB stick was changed.",
             "디스크에 일부만 쓰였을 수 있습니다. USB 에 있는 것은 바뀌지 않았습니다.");
-    A.fail_text = su_label("", "", "su-warn");
+    A.fail_text = narrow(su_label("", "", "su-warn"));
     gtk_label_set_selectable(GTK_LABEL(A.fail_text), TRUE);
     gtk_box_append(GTK_BOX(p.body), A.fail_text);
     GtkWidget *off = su_button("Power off", "전원 끄기", "su-secondary");

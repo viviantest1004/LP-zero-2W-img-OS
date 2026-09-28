@@ -695,6 +695,14 @@ def shared_layout(d, parts, mounts, disk_reason):
                 "usable": reason == "",
                 "reason": reason,
             }))
+    # What a free-space install needs at the least, and the largest
+    # unallocated stretch there is: the window says "no free space of X
+    # or more (the largest is Y)" rather than leaving the way out.
+    fneed = need + (0 if out["esp_usable"] else ESP_MIB * 1024 ** 2)
+    geo = gpt_geometry(d) if table == "gpt" else None
+    largest = max((r[1] for r in free_regions(d)), default=0) * geo[0] if geo else 0
+    out.update(free_need=fneed, free_need_text=human(fneed),
+               free_largest=largest, free_largest_text=human(largest) if largest else "")
     out["part_ok"] = any(p["usable"] for p in out["parts"])
     out["free_ok"] = any(r["usable"] for r in out["free"])
     return out
@@ -2303,9 +2311,10 @@ def install_free_space(a, pwhash, info, disks):
         raise Refused(disk["shared_reason"],
                       shared_refusal(disk["shared_reason"], disk["path"], disk))
     if not disk["free"]:
-        raise Refused("no-free-space", "%s has no unallocated space of %s or more"
-                      % (disk["path"], human(disk["root_need"] + (0 if disk["esp_usable"] else
-                                                                  ESP_MIB * 1024 ** 2))))
+        raise Refused("no-free-space", "%s has no unallocated space of %s or more%s"
+                      % (disk["path"], disk["free_need_text"],
+                         " (the largest is %s)" % disk["free_largest_text"]
+                         if disk["free_largest"] else ""))
     region = disk["free"][0]                    # the largest
     bs = gpt_geometry(name)[0]
     mib = ALIGN // bs
