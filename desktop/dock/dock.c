@@ -86,6 +86,7 @@
 #include "lp-motion.h"
 #include "lp-shell.h"
 #include "lp-toplevel.h"
+#include "lp-wfshell.h"
 
 /* The icons' size: Settings > Appearance > Dock size writes small,
  * medium or large into ~/.config/lp/dock.conf. The dock reads it at start
@@ -931,7 +932,10 @@ static void reserve_room(void)
     int h = gtk_widget_get_allocated_height(GTK_WIDGET(win));
     if (h <= 1)
         return;
-    int zone = dock_away ? 0 : h + DOCK_MARGIN;
+    /* Kept while a window is full screen too: a full-screen window
+     * covers the reserved room anyway, and giving it back made wayfire
+     * re-tile that window - out of full screen again. */
+    int zone = h + DOCK_MARGIN;
     if (gtk_layer_get_exclusive_zone(spacer) != zone)
         gtk_layer_set_exclusive_zone(spacer, zone);
 }
@@ -965,8 +969,15 @@ static double slide_from, slide_to;
 static gint64 slide_start;
 static guint slide_id, leave_id;
 
+/* wayfire says it outright (lp-wfshell.h: its foreign-toplevel state
+ * never carries F11); sway's foreign-toplevel state is right. */
+static gboolean wf_shell;       /* wayfire-shell is there */
+static gboolean wf_fullscreen;  /* a full-screen window covers the output */
+
 static gboolean window_wants_screen(void)
 {
+    if (wf_fullscreen)
+        return TRUE;
     for (GList *l = lp_toplevels(); l; l = l->next) {
         LpToplevel *t = l->data;
         if (t->done && t->activated && !t->minimized && t->fullscreen)
@@ -1026,17 +1037,34 @@ static void slide(double to)
  * a window is full screen the two move up to the overlay layer, and back
  * down after - the rest of the time the dock has no business over the
  * lock screen or a notification. */
+/* Unmapped and mapped again around the change: gtk-layer-shell sends
+ * set_layer to a mapped surface, and wayfire 0.7 reads a surface's layer
+ * only when it is mapped - the dock and the strip stayed under the
+ * full-screen window, and the pointer at the bottom edge reached the
+ * window instead. */
+static void move_to_layer(GtkWindow *w, GtkLayerShellLayer l)
+{
+    if (gtk_layer_get_layer(w) == l)
+        return;
+    gboolean shown = gtk_widget_get_visible(GTK_WIDGET(w));
+    if (shown)
+        gtk_widget_hide(GTK_WIDGET(w));
+    gtk_layer_set_layer(w, l);
+    if (shown)
+        gtk_widget_show(GTK_WIDGET(w));
+}
+
 static void set_layers(gboolean over)
 {
     GtkLayerShellLayer l = over ? GTK_LAYER_SHELL_LAYER_OVERLAY
                                 : GTK_LAYER_SHELL_LAYER_TOP;
-    if (gtk_layer_get_layer(win) != l)
-        gtk_layer_set_layer(win, l);
-    for (guint i = 0; edges && i < edges->len; i++) {
-        GtkWindow *e = g_ptr_array_index(edges, i);
-        if (gtk_layer_get_layer(e) != l)
-            gtk_layer_set_layer(e, l);
-    }
+    move_to_layer(win, l);
+    /* Under wayfire the bottom edge is its hotspot (below), which is
+     * reported over a full-screen window; the strips stay where they are. */
+    if (wf_shell)
+        return;
+    for (guint i = 0; edges && i < edges->len; i++)
+        move_to_layer(g_ptr_array_index(edges, i), l);
 }
 
 static void update_away(void)
@@ -1099,6 +1127,33 @@ static gboolean on_edge_leave(GtkWidget *w, GdkEventCrossing *e, gpointer d)
     if (dock_away && dock_peek && !leave_id)
         leave_id = g_timeout_add(700, go_again, NULL);
     return FALSE;
+}
+
+static void on_wf_fullscreen(GdkMonitor *mon, gboolean fs, gpointer d)
+{
+    (void)mon; (void)d;
+    wf_fullscreen = fs;
+    update_away();
+}
+
+/* The pointer (or a finger) resting at the bottom edge: up over the
+ * full-screen window, and away again a moment after it has left both the
+ * edge and the dock. */
+static void on_wf_hotspot(GdkMonitor *mon, gboolean inside, gpointer d)
+{
+    (void)mon; (void)d;
+    if (inside) {
+        if (leave_id) {
+            g_source_remove(leave_id);
+            leave_id = 0;
+        }
+        if (dock_away && !dock_peek) {
+            dock_peek = TRUE;
+            slide(0.0);
+        }
+    } else if (dock_away && dock_peek && !leave_id) {
+        leave_id = g_timeout_add(700, go_again, NULL);
+    }
 }
 
 static gboolean on_dock_enter(GtkWidget *w, GdkEventCrossing *e, gpointer d)
@@ -1255,6 +1310,15 @@ int main(int argc, char **argv)
 
     if (lp_toplevels_init())
         lp_toplevels_watch(on_toplevels, NULL);
+    wf_shell = lp_wfshell_init();
+    if (wf_shell) {
+        GdkDisplay *d = gdk_display_get_default();
+        for (int i = 0; i < gdk_display_get_n_monitors(d); i++) {
+            GdkMonitor *m = gdk_display_get_monitor(d, i);
+            lp_wfshell_watch_fullscreen(m, on_wf_fullscreen, NULL);
+            lp_wfshell_hotspot(m, LP_WF_EDGE_BOTTOM, 2, 150, on_wf_hotspot, NULL);
+        }
+    }
 
     /* The size, and a watch on it (see icon_px). */
     char *conf = lp_config_path("dock.conf");

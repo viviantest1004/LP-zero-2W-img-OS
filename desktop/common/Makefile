@@ -6,7 +6,8 @@
 # and the build host's are newer. pkg-config is the only way anything is
 # found; there are no hard-coded paths.
 #
-# The two wlroots protocols are compiled from the XML in protocols/ with
+# The wlroots protocols and wayfire's own shell protocol (from wayfire
+# v0.7.4's proto/, the version the base carries) are compiled from the XML in protocols/ with
 # wayland-scanner at build time. The XML is kept in the tree because the
 # base has no wlr-protocols package, and generating from a copy we hold
 # means the build cannot drift with whatever a newer package ships.
@@ -21,7 +22,8 @@ CFLAGS  += -std=gnu11 -Wall -Wextra -Werror -I.
 CFLAGS  += $(shell $(PKG) --cflags $(PKGS))
 
 PROTOS  := wlr-foreign-toplevel-management-unstable-v1 \
-           wlr-input-inhibitor-unstable-v1
+           wlr-input-inhibitor-unstable-v1 \
+           wayfire-shell-unstable-v2
 GEN_H   := $(PROTOS:%=%-client-protocol.h)
 GEN_C   := $(PROTOS:%=%-protocol.c)
 
@@ -29,7 +31,7 @@ GEN_C   := $(PROTOS:%=%-protocol.c)
 # and GTK 4 alike); it is compiled into this archive so that the shell
 # links the same file the applications do.
 OBJS    := lp-shell.o lp-json.o lp-toplevel.o lp-apps.o lp-motion.o \
-           lp-sheet.o $(PROTOS:%=%-protocol.o)
+           lp-sheet.o lp-wfshell.o $(PROTOS:%=%-protocol.o)
 
 all: liblpshell.a
 
