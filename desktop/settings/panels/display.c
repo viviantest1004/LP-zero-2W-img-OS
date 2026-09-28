@@ -231,6 +231,18 @@ static const int SIZES_16_10[][2] = { {3840, 2400}, {2880, 1800}, {2560, 1600}, 
 static const int SIZES_4_3[][2]   = { {2048, 1536}, {1600, 1200}, {1400, 1050}, {1024, 768} };
 static const int SIZES_3_2[][2]   = { {3000, 2000}, {2256, 1504}, {1920, 1280}, {1500, 1000} };
 
+/* wayfire applies a mode by size first: a refresh rate the display does
+ * not list, at a size it does list, comes out as the fastest listed rate
+ * at that size (tested: 1920x1080 at 120 Hz on a screen listing 60 and
+ * 75 became 75, through wlr-randr and through wayfire.ini alike). A size
+ * the display does not list goes in as a real custom mode, at any rate.
+ * sway takes a custom mode as it is given. */
+static gboolean under_wayfire(void)
+{
+    const char *d = g_getenv("XDG_CURRENT_DESKTOP");
+    return d && g_str_has_prefix(d, "Wayfire");
+}
+
 static gboolean has_mode(const out_t *o, int w, int h, int mhz)
 {
     for (guint k = 0; k < o->modes->len; k++) {
@@ -282,7 +294,9 @@ static void add_custom_modes(out_t *o)
         if (tab[i][0] <= big_w && tab[i][1] <= big_h && !has_mode(o, tab[i][0], tab[i][1], -1))
             add_custom(o, tab[i][0], tab[i][1], 60000);
 
-    /* Rates, for every size now in the list. */
+    /* Rates, for every size now in the list - under wayfire only for the
+     * sizes the display does not list (under_wayfire says why). */
+    gboolean wf = under_wayfire();
     guint listed = o->modes->len;
     for (guint k = 0; k < listed; k++) {
         const mode_t_ m = g_array_index(o->modes, mode_t_, k);
@@ -292,6 +306,7 @@ static void add_custom_modes(out_t *o)
             if (e->w == m.w && e->h == m.h) first = FALSE;
         }
         if (!first) continue;
+        if (wf && !m.custom) continue;
         for (size_t i = 0; i < G_N_ELEMENTS(COMMON_HZ); i++) {
             int mhz = COMMON_HZ[i] * 1000;
             if (mhz > max_mhz + 500) continue;

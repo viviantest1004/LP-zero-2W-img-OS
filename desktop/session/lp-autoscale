@@ -38,7 +38,7 @@ sway both implement, so the same program serves the session on a GPU
 (wayfire) and the one without (sway). swaymsg is the fallback for a
 root without wlr-randr.
 """
-import json, os, re, shutil, subprocess, sys, time
+import json, os, re, select, shutil, subprocess, sys, time
 
 CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "lp")
 HOLD_SECS = 60
@@ -416,18 +416,48 @@ def watch():
     apply()
     try:
         p = subprocess.Popen(["udevadm", "monitor", "--kernel", "--subsystem-match=drm"],
-                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError:
         return
-    for line in p.stdout:
-        if " change " in line:
-            if mine is not None and compositor_socket() != mine:
-                log("the compositor this watcher started under is gone; stopping")
-                p.terminate()
+    # And whenever wayfire.ini changes. wayfire re-reads it and applies
+    # each output's `mode` again - and it matches a mode by size first:
+    # 1920x1080@120000 on a screen that lists 1920x1080 at 60 and 75 is
+    # taken as 75. A refresh rate chosen in Settings that the screen does
+    # not list (a custom mode) went back to the listed one at the next
+    # save of any setting; it is put back here, as at every start.
+    ini = os.path.join(os.environ.get("XDG_CONFIG_HOME") or
+                       os.path.expanduser("~/.config"), "wayfire.ini")
+
+    def ini_stamp():
+        try:
+            st = os.stat(ini)
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    seen = ini_stamp()
+    while True:
+        ready, _, _ = select.select([p.stdout], [], [], 2.0)
+        if mine is not None and compositor_socket() != mine:
+            log("the compositor this watcher started under is gone; stopping")
+            p.terminate()
+            return
+        if ready:
+            # Straight from the pipe: a buffered readline() keeps the rest
+            # of what it read to itself, and select() would not wake for it.
+            chunk = os.read(p.stdout.fileno(), 65536)
+            if not chunk:
                 return
-            time.sleep(0.5)
+            if b" change " in chunk:
+                time.sleep(0.5)
+                apply()
+                fit_windows()
+            continue
+        now = ini_stamp()
+        if now != seen:
+            seen = now
+            time.sleep(1.0)        # wayfire applies it first
             apply()
-            fit_windows()
 
 
 if __name__ == "__main__":
