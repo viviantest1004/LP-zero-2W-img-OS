@@ -170,6 +170,10 @@ TYPE_NAMES = {
     "48465300-0000-11AA-AA11-00306543ECAC": "Apple HFS+",
     "7C3457EF-0000-11AA-AA11-00306543ECAC": "Apple APFS",
 }
+# The GPT names of LP's partitions (the layout contract). On a disk that
+# carries them already, a partition or free-space install names its own
+# LP-ROOT-2 and so on (lp_name) rather than a second LP-ROOT.
+LP_NAMES = ("LP-ESP", "LP-RECOVERY", "LP-ROOT")
 # Partition and free-space installs align what they make to 1 MiB, as
 # sfdisk and every partitioning tool of the last fifteen years do.
 ALIGN = 1024 ** 2
@@ -435,6 +439,26 @@ def free_regions(disk):
                 out.append((a, b - a))
         cur = max(cur, e + 1)
     return sorted(out, key=lambda r: -r[1])
+
+
+def partuuid_dev(guid):
+    """The partition, on any disk, whose PARTUUID this is - or ""."""
+    guid = (guid or "").lower()
+    for d in sorted(os.listdir("/sys/block")):
+        if d.startswith(SKIP_PREFIX):
+            continue
+        for n, e in gpt_entries(d).items():
+            if e[1].lower() == guid:
+                return part_path(d, n)
+    return ""
+
+
+def lp_name(base, taken):
+    """base, or base-2, base-3 ... - the first that no partition of the
+    disk is called."""
+    if base not in taken:
+        return base
+    return next("%s-%d" % (base, i) for i in range(2, 100) if "%s-%d" % (base, i) not in taken)
 
 
 def probe_fs(dev):
@@ -1235,14 +1259,17 @@ def configure(root, a, pwhash=None):
     return done
 
 
-def write_fstab(target, root_uuid, esp_uuid):
+def write_fstab(target, root_uuid, esp_uuid, shared=False):
+    """shared: the EFI partition is another system's too (Windows' own).
+    It is still /boot, read-only, but never checked from here (pass 0):
+    repairing another system's start-up partition is not LP's to do."""
     write_atomic(os.path.join(target, "etc/fstab"),
                  "# Written by lp-install. By PARTUUID, which is this disk's alone:\n"
                  "# a label is shared with every other LP disk, the USB stick\n"
                  "# this was installed from among them.\n"
                  "PARTUUID=%s  /      ext4  defaults,errors=remount-ro  0 1\n"
-                 "PARTUUID=%s  /boot  vfat  ro,umask=0077              0 2\n"
-                 % (root_uuid, esp_uuid))
+                 "PARTUUID=%s  /boot  vfat  ro,umask=0077              0 %d\n"
+                 % (root_uuid, esp_uuid, 0 if shared else 2))
 
 
 FALLBACK = "EFI/BOOT/BOOTX64.EFI"
@@ -1339,7 +1366,8 @@ def esp_room(esp_dev, shared):
     read-only for the look, unless it is mounted already (then that is
     the reason). A dict: need and free in bytes, has_lp (an earlier LP's
     \\EFI\\LP\\ is there, and will be replaced), reason ("" when it fits)."""
-    out = {"need": 0, "free": -1, "has_lp": False, "fallback_other": False, "reason": ""}
+    out = {"need": 0, "free": -1, "has_lp": False, "fallback_other": False, "reason": "",
+           "lp_root": ""}
     if mount_point_of(esp_dev):
         out["reason"] = "esp-mounted"
         return out
@@ -1373,6 +1401,12 @@ def esp_room(esp_dev, shared):
             free += st.f_bavail * st.f_frsize
             out.update(need=need, free=free, fallback_other=other,
                        has_lp=os.path.isdir(os.path.join(mnt, "EFI/LP")))
+            # The root the LP already here starts: root=PARTUUID=... in
+            # its command line. When that partition still exists, this
+            # EFI partition is how that LP starts.
+            m = re.search(r"(?:^|\s)root=PARTUUID=([0-9A-Fa-f-]{36})(?:\s|$)",
+                          read(os.path.join(mnt, "EFI/LP/cmdline.txt")))
+            out["lp_root"] = m.group(1) if m else ""
             if free < need:
                 out["reason"] = "esp-full"
         finally:
@@ -1787,7 +1821,7 @@ def install_inplace(a, pwhash, disk):
 # they are the same install, and these are the parts they share - one
 # implementation, so a fix to the copy is a fix to all three.
 
-def fill_root(target, root_guid, esp_guid, a, pwhash):
+def fill_root(target, root_guid, esp_guid, a, pwhash, shared_esp=False):
     """The system, into the empty LP-ROOT mounted at target: the copy,
     the mount points it leaves out, a machine nobody has used, its fstab,
     the person's answers and the first-boot marker. 6..89 percent."""
@@ -1799,7 +1833,7 @@ def fill_root(target, root_guid, esp_guid, a, pwhash):
         os.makedirs(p, exist_ok=True)
         os.chmod(p, mode)
     make_fresh(target)
-    write_fstab(target, root_guid, esp_guid)
+    write_fstab(target, root_guid, esp_guid, shared_esp)
     # The person's answers, into the copy. What was not asked here
     # (a scripted install with no --user) the first boot asks.
     done = configure(target, a, pwhash)
@@ -2353,7 +2387,7 @@ def install_into(a, pwhash, disk, root_no, esp_no, new_esp, mode, t0, rec_no=Non
 
         # 3. The system - the same as a whole-disk install's.
         say("STEP", "copy", "Copying LP")
-        fill_root(target, root_guid, esp_guid, a, pwhash)
+        fill_root(target, root_guid, esp_guid, a, pwhash, shared_esp=not new_esp)
 
         # 4. The recovery system, when there is a partition for it.
         if p_rec:
