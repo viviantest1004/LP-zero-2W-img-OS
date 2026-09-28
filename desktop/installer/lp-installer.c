@@ -315,19 +315,6 @@ static void page_region(void)
 
 /* ── disks ─────────────────────────────────────────────────────────── */
 
-static void on_disk_toggled(GtkToggleButton *b, gpointer d)
-{
-    (void)d;
-    if (!gtk_toggle_button_get_active(b))
-        return;
-    g_strlcpy(A.disk, g_object_get_data(G_OBJECT(b), "path"), sizeof A.disk);
-    g_strlcpy(A.disk_model, g_object_get_data(G_OBJECT(b), "model"), sizeof A.disk_model);
-    g_strlcpy(A.disk_size, g_object_get_data(G_OBJECT(b), "size"), sizeof A.disk_size);
-    A.disk_parts = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "parts"));
-    A.disk_inplace = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "inplace"));
-    gtk_widget_set_sensitive(A.disk_next, TRUE);
-}
-
 static const char *transport_name(const char *t, gboolean ko)
 {
     if (!strcmp(t, "nvme")) return "NVMe SSD";
@@ -338,12 +325,244 @@ static const char *transport_name(const char *t, gboolean ko)
     return ko ? "디스크" : "Disk";
 }
 
+/* Why a whole disk cannot be erased for LP (list_disks' "reason"). */
+static void disk_reason_words(const char *r, const char **en, const char **ko)
+{
+    *en = !strcmp(r, "running") ? "LP is running from this disk"
+        : !strcmp(r, "mounted") ? "In use: it has mounted partitions"
+        : !strcmp(r, "in-use")  ? "In use (encrypted or LVM)"
+        : !strcmp(r, "read-only") ? "Read-only" : r;
+    *ko = !strcmp(r, "running") ? "지금 LP 가 돌고 있는 디스크입니다"
+        : !strcmp(r, "mounted") ? "사용 중: 마운트된 파티션이 있습니다"
+        : !strcmp(r, "in-use")  ? "사용 중 (암호화 또는 LVM)"
+        : !strcmp(r, "read-only") ? "읽기 전용" : r;
+}
+
+/* Why a partition, or a disk's free space, cannot take LP: the keys
+ * lp-install's shared_layout() gives. Both strings are the caller's. */
+static void reason_words(const char *r, LpJson *disk, const char *mount,
+                         char **en, char **ko)
+{
+    const char *need = lp_json_str(disk, "root_need_text", "");
+    if (!strcmp(r, "running")) {
+        *en = g_strdup("LP is running from this disk");
+        *ko = g_strdup("지금 LP 가 돌고 있는 디스크입니다");
+    } else if (!strcmp(r, "in-use")) {
+        *en = g_strdup("In use (encrypted or LVM)");
+        *ko = g_strdup("사용 중 (암호화 또는 LVM)");
+    } else if (!strcmp(r, "read-only")) {
+        *en = g_strdup("Read-only");
+        *ko = g_strdup("읽기 전용");
+    } else if (!strcmp(r, "not-gpt") && !*lp_json_str(disk, "table", "")) {
+        *en = g_strdup("The disk has no partitions yet");
+        *ko = g_strdup("이 디스크에는 아직 파티션이 없습니다");
+    } else if (!strcmp(r, "not-gpt")) {
+        *en = g_strdup("An MBR disk: LP can share only a GPT disk");
+        *ko = g_strdup("MBR 디스크입니다. 다른 시스템과 함께 쓰려면 GPT 디스크여야 합니다");
+    } else if (!strcmp(r, "esp")) {
+        *en = g_strdup("The EFI system partition the computer starts from: LP only "
+                       "adds its start-up files to it");
+        *ko = g_strdup("컴퓨터가 시작하는 EFI 시스템 파티션입니다. LP 는 여기에 시작 "
+                       "파일만 더합니다");
+    } else if (!strcmp(r, "mounted")) {
+        *en = g_strdup_printf("In use: mounted at %s", mount);
+        *ko = g_strdup_printf("사용 중: %s 에 마운트되어 있습니다", mount);
+    } else if (!strcmp(r, "swap")) {
+        *en = g_strdup("In use as swap");
+        *ko = g_strdup("스왑으로 쓰고 있습니다");
+    } else if (!strcmp(r, "too-small")) {
+        *en = g_strdup_printf("Too small: LP needs %s or more", need);
+        *ko = g_strdup_printf("너무 작습니다. LP 는 %s 이상이 필요합니다", need);
+    } else if (!strcmp(r, "no-esp")) {
+        *en = g_strdup("The disk has no EFI system partition to start LP from");
+        *ko = g_strdup("이 디스크에는 LP 를 시작할 EFI 시스템 파티션이 없습니다");
+    } else if (!strcmp(r, "esp-mounted")) {
+        *en = g_strdup("The disk's EFI system partition is mounted");
+        *ko = g_strdup("이 디스크의 EFI 시스템 파티션이 마운트되어 있습니다");
+    } else if (!strcmp(r, "esp-bad")) {
+        *en = g_strdup("The disk's EFI system partition cannot be read");
+        *ko = g_strdup("이 디스크의 EFI 시스템 파티션을 읽을 수 없습니다");
+    } else if (!strcmp(r, "esp-full")) {
+        double fr = lp_json_num(disk, "esp_free", 0);
+        char *f = g_format_size((guint64)MAX(0.0, fr));
+        char *n = g_format_size((guint64)lp_json_num(disk, "esp_need", 0));
+        *en = g_strdup_printf("The EFI system partition is too full: %s free, LP's "
+                              "start-up files need %s", f, n);
+        *ko = g_strdup_printf("EFI 시스템 파티션에 자리가 모자랍니다: %s 남았고, LP 시작 "
+                              "파일에 %s 가 필요합니다", f, n);
+        g_free(f);
+        g_free(n);
+    } else {
+        *en = g_strdup(r);
+        *ko = g_strdup(r);
+    }
+}
+
 /* Reveal the rows one after another, 40 ms apart: the list assembles
  * rather than appearing in one flash. */
 static gboolean reveal_one(gpointer data)
 {
     gtk_revealer_set_reveal_child(GTK_REVEALER(data), TRUE);
     return G_SOURCE_REMOVE;
+}
+
+static GtkWidget *revealed(GtkWidget *child, int i)
+{
+    GtkWidget *rv = gtk_revealer_new();
+    gtk_revealer_set_transition_type(GTK_REVEALER(rv),
+        lp_motion_reduced() ? GTK_REVEALER_TRANSITION_TYPE_CROSSFADE
+                            : GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+    gtk_revealer_set_transition_duration(GTK_REVEALER(rv),
+        lp_motion_reduced() ? 90 : lp_spring_ms(LP_SPRING_INSERT, FALSE));
+    gtk_revealer_set_child(GTK_REVEALER(rv), child);
+    g_timeout_add(200 + 40 * i, reveal_one, rv);
+    return rv;
+}
+
+static void on_mode_toggled(GtkToggleButton *b, gpointer d)
+{
+    if (!gtk_toggle_button_get_active(b))
+        return;
+    A.mode = GPOINTER_TO_INT(d);
+    gtk_widget_set_sensitive(A.disk_next, TRUE);
+}
+
+static GtkWidget *mode_row(int mode, const char *en, const char *ko,
+                           const char *den, const char *dko, gboolean ok,
+                           GtkWidget **group)
+{
+    GtkWidget *b = su_choice(en, ko, den, dko, NULL);
+    gtk_widget_set_sensitive(b, ok);
+    if (*group)
+        gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(b), GTK_TOGGLE_BUTTON(*group));
+    else
+        *group = b;
+    g_signal_connect(b, "toggled", G_CALLBACK(on_mode_toggled), GINT_TO_POINTER(mode));
+    gtk_box_append(GTK_BOX(A.mode_box), b);
+    return b;
+}
+
+/* Under the chosen disk: how LP goes on it. The whole disk, erased - the
+ * install LP always had; one partition of it, erased, the others kept;
+ * or its unallocated space, nothing erased. A way that is not open on
+ * this disk is shown greyed with the reason, so "why can't I keep
+ * Windows?" has an answer on the screen. Nothing is preselected while
+ * there is a choice: which one erases what is the person's decision. */
+static void show_modes(void)
+{
+    GtkWidget *c;
+    while ((c = gtk_widget_get_first_child(A.mode_box)))
+        gtk_box_remove(GTK_BOX(A.mode_box), c);
+    A.mode = MODE_NONE;
+    LpJson *d = A.disk_j;
+    if (!d || A.disk_inplace) {
+        /* Installed where it runs: one way, and nothing erased. */
+        A.mode = A.disk_inplace ? MODE_WHOLE : MODE_NONE;
+        gtk_revealer_set_reveal_child(GTK_REVEALER(A.mode_reveal), FALSE);
+        gtk_widget_set_sensitive(A.disk_next, A.mode != MODE_NONE);
+        return;
+    }
+    GtkWidget *group = NULL, *only = NULL;
+    int n_ok = 0;
+    char *en, *ko;
+
+    gboolean ok = lp_json_bool(d, "usable", 0);
+    if (ok) {
+        en = g_strdup_printf("Everything on the disk is erased; LP gets all %s, with "
+                             "its recovery system.", A.disk_size);
+        ko = g_strdup_printf("디스크의 모든 것을 지우고 %s 전체를 LP 가 씁니다. 복구 "
+                             "시스템도 함께 설치합니다.", A.disk_size);
+    } else {
+        const char *wen, *wko;
+        disk_reason_words(lp_json_str(d, "reason", ""), &wen, &wko);
+        en = g_strdup(wen);
+        ko = g_strdup(wko);
+    }
+    GtkWidget *b = mode_row(MODE_WHOLE, "Erase the whole disk", "디스크 전체에 설치 (모두 지움)",
+                            en, ko, ok, &group);
+    g_free(en); g_free(ko);
+    if (ok) {
+        n_ok++;
+        only = b;
+    }
+
+    ok = lp_json_bool(d, "part_ok", 0);
+    if (ok) {
+        en = g_strdup("Choose one partition to erase for LP; the other partitions "
+                      "stay as they are.");
+        ko = g_strdup("LP 를 설치할 파티션 하나를 골라 지웁니다. 나머지 파티션은 "
+                      "그대로 둡니다.");
+    } else {
+        /* The disk's own reason, or the EFI partition's (every partition
+         * big enough carries it), or: none is big enough and free. */
+        const char *r = lp_json_str(d, "shared_reason", "");
+        LpJson *parts = lp_json_get(d, "parts");
+        for (int i = 0; !*r && parts && i < lp_json_len(parts); i++) {
+            const char *pr = lp_json_str(lp_json_at(parts, i), "reason", "");
+            if (g_str_has_prefix(pr, "esp-") || !strcmp(pr, "no-esp"))
+                r = pr;
+        }
+        if (*r) {
+            reason_words(r, d, "", &en, &ko);
+        } else {
+            const char *need = lp_json_str(d, "root_need_text", "");
+            en = g_strdup_printf("No partition here is free to use and %s or larger", need);
+            ko = g_strdup_printf("쓸 수 있는 %s 이상의 파티션이 없습니다", need);
+        }
+    }
+    b = mode_row(MODE_PART, "Install into a partition", "파티션에 설치", en, ko, ok, &group);
+    g_free(en); g_free(ko);
+    if (ok) {
+        n_ok++;
+        only = b;
+    }
+
+    /* Free space only where there is some worth offering. */
+    LpJson *free = lp_json_get(d, "free");
+    if (free && lp_json_len(free) > 0) {
+        LpJson *r0 = lp_json_at(free, 0);          /* the largest */
+        const char *sz = lp_json_str(r0, "size_text", "");
+        ok = lp_json_bool(d, "free_ok", 0) && lp_json_bool(r0, "usable", 0);
+        if (ok && lp_json_bool(r0, "new_esp", 0)) {
+            en = g_strdup_printf("A new partition in the %s of unallocated space, and a "
+                                 "512 MB EFI partition to start it; nothing is erased.", sz);
+            ko = g_strdup_printf("할당되지 않은 빈 공간 %s 에 새 파티션과 시작용 512MB EFI "
+                                 "파티션을 만듭니다. 아무것도 지우지 않습니다.", sz);
+        } else if (ok) {
+            en = g_strdup_printf("A new partition in the %s of unallocated space; nothing "
+                                 "is erased.", sz);
+            ko = g_strdup_printf("할당되지 않은 빈 공간 %s 에 새 파티션을 만듭니다. "
+                                 "아무것도 지우지 않습니다.", sz);
+        } else {
+            reason_words(lp_json_str(r0, "reason", ""), d, "", &en, &ko);
+        }
+        b = mode_row(MODE_FREE, "Install into free space", "빈 공간에 설치", en, ko, ok, &group);
+        g_free(en); g_free(ko);
+        if (ok) {
+            n_ok++;
+            only = b;
+        }
+    }
+    gtk_widget_set_sensitive(A.disk_next, FALSE);
+    /* One way open is no choice: it is taken, as a single usable disk is.
+     * The confirmation still names what is erased before anything is. */
+    if (n_ok == 1)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(only), TRUE);
+    gtk_revealer_set_reveal_child(GTK_REVEALER(A.mode_reveal), TRUE);
+}
+
+static void on_disk_toggled(GtkToggleButton *b, gpointer d)
+{
+    (void)d;
+    if (!gtk_toggle_button_get_active(b))
+        return;
+    g_strlcpy(A.disk, g_object_get_data(G_OBJECT(b), "path"), sizeof A.disk);
+    g_strlcpy(A.disk_model, g_object_get_data(G_OBJECT(b), "model"), sizeof A.disk_model);
+    g_strlcpy(A.disk_size, g_object_get_data(G_OBJECT(b), "size"), sizeof A.disk_size);
+    A.disk_parts = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "parts"));
+    A.disk_inplace = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "inplace"));
+    A.disk_j = g_object_get_data(G_OBJECT(b), "json");
+    show_modes();
 }
 
 static void show_disks(void)
@@ -353,11 +572,17 @@ static void show_disks(void)
         gtk_box_remove(GTK_BOX(A.disk_box), c);
     A.disk[0] = '\0';
     A.disk_group = NULL;
+    A.disk_j = NULL;
+    A.disk_inplace = FALSE;
+    show_modes();
+    if (A.list)
+        lp_json_free(A.list);
+    A.list = NULL;
     gtk_widget_set_sensitive(A.disk_next, FALSE);
 
     const char *argv[] = { backend(), "list", "--json", NULL };
     char *out = su_run(argv, NULL);
-    LpJson *j = out ? lp_json_parse(out) : NULL;
+    LpJson *j = A.list = out ? lp_json_parse(out) : NULL;
     int n = j ? lp_json_len(j) : 0;
     int usable = 0;
     GtkWidget *only = NULL;
@@ -370,6 +595,8 @@ static void show_disks(void)
         int parts = (int)lp_json_num(d, "partitions", 0);
         gboolean ok = lp_json_bool(d, "usable", 0);
         gboolean here = lp_json_bool(d, "inplace", 0);
+        /* Not to be erased, but with a partition or free space for LP. */
+        gboolean shared = lp_json_bool(d, "part_ok", 0) || lp_json_bool(d, "free_ok", 0);
         const char *need = lp_json_str(d, "inplace_need_text", "");
 
         char *den = g_strdup_printf("%s  ·  %s  ·  %s", size, transport_name(tran, FALSE),
@@ -393,16 +620,12 @@ static void show_disks(void)
             g_free(den); g_free(dko);
             den = e2; dko = k2;
         } else if (!ok) {
-            const char *wen = !strcmp(reason, "running") ? "LP is running from this disk"
-                            : !strcmp(reason, "mounted") ? "In use: it has mounted partitions"
-                            : !strcmp(reason, "in-use")  ? "In use (encrypted or LVM)"
-                            : !strcmp(reason, "read-only") ? "Read-only" : reason;
-            const char *wko = !strcmp(reason, "running") ? "지금 LP 가 돌고 있는 디스크입니다"
-                            : !strcmp(reason, "mounted") ? "사용 중: 마운트된 파티션이 있습니다"
-                            : !strcmp(reason, "in-use")  ? "사용 중 (암호화 또는 LVM)"
-                            : !strcmp(reason, "read-only") ? "읽기 전용" : reason;
-            char *e2 = g_strdup_printf("%s  —  %s", den, wen);
-            char *k2 = g_strdup_printf("%s  —  %s", dko, wko);
+            const char *wen, *wko;
+            disk_reason_words(reason, &wen, &wko);
+            char *e2 = g_strdup_printf(shared ? "%s  —  %s; a partition or free space on "
+                                                "it can still take LP" : "%s  —  %s", den, wen);
+            char *k2 = g_strdup_printf(shared ? "%s  —  %s. 파티션이나 빈 공간에는 설치할 "
+                                                "수 있습니다" : "%s  —  %s", dko, wko);
             g_free(den); g_free(dko);
             den = e2; dko = k2;
         }
@@ -410,27 +633,20 @@ static void show_disks(void)
                                  !strcmp(tran, "usb") ? "drive-removable-media"
                                                       : "drive-harddisk");
         g_free(den); g_free(dko);
+        ok = ok || here || shared;
         gtk_widget_set_sensitive(b, ok);
         g_object_set_data_full(G_OBJECT(b), "path", g_strdup(lp_json_str(d, "path", "")), g_free);
         g_object_set_data_full(G_OBJECT(b), "model", g_strdup(model), g_free);
         g_object_set_data_full(G_OBJECT(b), "size", g_strdup(size), g_free);
         g_object_set_data(G_OBJECT(b), "parts", GINT_TO_POINTER(parts));
         g_object_set_data(G_OBJECT(b), "inplace", GINT_TO_POINTER(here));
+        g_object_set_data(G_OBJECT(b), "json", d);
         if (A.disk_group)
             gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(b), GTK_TOGGLE_BUTTON(A.disk_group));
         else
             A.disk_group = b;
         g_signal_connect(b, "toggled", G_CALLBACK(on_disk_toggled), NULL);
-
-        GtkWidget *rv = gtk_revealer_new();
-        gtk_revealer_set_transition_type(GTK_REVEALER(rv),
-            lp_motion_reduced() ? GTK_REVEALER_TRANSITION_TYPE_CROSSFADE
-                                : GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
-        gtk_revealer_set_transition_duration(GTK_REVEALER(rv),
-            lp_motion_reduced() ? 90 : lp_spring_ms(LP_SPRING_INSERT, FALSE));
-        gtk_revealer_set_child(GTK_REVEALER(rv), b);
-        gtk_box_append(GTK_BOX(A.disk_box), rv);
-        g_timeout_add(200 + 40 * i, reveal_one, rv);
+        gtk_box_append(GTK_BOX(A.disk_box), revealed(b, i));
         if (ok && ++usable == 1)
             only = b;
     }
@@ -442,48 +658,299 @@ static void show_disks(void)
     if (n == 0)
         gtk_box_append(GTK_BOX(A.disk_box), su_label("No disks were found.",
                                                      "디스크를 찾지 못했습니다.", "su-warn"));
-    if (j)
-        lp_json_free(j);
     g_free(out);
 }
+
+static void show_parts(void);
+static void show_confirm(void);
 
 static void on_disk_next(GtkButton *b, gpointer d)
 {
     (void)b; (void)d;
-    char *en = g_strdup_printf("%s  (%s)", A.disk_model, A.disk_size);
-    su_retext(A.confirm_what, en, en);
-    g_free(en);
-    char *wen, *wko;
-    if (A.disk_inplace) {
-        wen = g_strdup_printf(
-            "LP is installed on %s, the disk it is running from. Nothing is "
-            "erased: LP grows to fill the disk and becomes the installed system.", A.disk);
-        wko = g_strdup_printf(
-            "지금 LP 가 도는 디스크 %s 에 설치합니다. 아무것도 지우지 않습니다: "
-            "LP 가 디스크 전체로 늘어나 설치된 시스템이 됩니다.", A.disk);
-        su_retext(A.confirm_title, "Install LP on this disk?", "이 디스크에 LP 를 설치할까요?");
-        su_retext(A.confirm_check, "I understand that LP will be installed on this disk",
-                  "이 디스크에 LP 가 설치된다는 것을 이해했습니다");
+    if (A.mode == MODE_PART) {
+        show_parts();
+        su_go(A.stack, "parts", TRUE);
+    } else if (A.mode != MODE_NONE) {
+        show_confirm();
+        su_go(A.stack, "confirm", TRUE);
+    }
+}
+
+static GtkWidget *list_box(GtkWidget **box, int max_height)
+{
+    GtkWidget *sw = gtk_scrolled_window_new();
+    gtk_widget_add_css_class(sw, "su-list");
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_NEVER,
+                                   GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(sw), TRUE);
+    gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(sw), max_height);
+    gtk_scrolled_window_set_kinetic_scrolling(GTK_SCROLLED_WINDOW(sw), TRUE);
+    *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), *box);
+    return sw;
+}
+
+static void page_disks(void)
+{
+    SuPage p;
+    su_page(&p, "Where should LP go?", "LP 를 어디에 설치할까요?",
+            "Choose the disk, then how: all of it, erased for LP - or one partition "
+            "or its free space, with the rest of the disk left as it is.",
+            "디스크를 고른 다음 설치 방법을 고르세요. 디스크 전체를 지우고 설치하거나, "
+            "파티션 하나나 빈 공간에 설치하고 나머지는 그대로 둘 수 있습니다.");
+    /* Room for three disks; the ways to install go under the list, not
+     * inside it, so they are never scrolled out of sight. */
+    gtk_box_append(GTK_BOX(p.body), list_box(&A.disk_box, 250));
+
+    GtkWidget *modes = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_box_append(GTK_BOX(modes), su_label("How should LP go on this disk?",
+                                            "이 디스크에 어떻게 설치할까요?", "su-caption"));
+    A.mode_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_box_append(GTK_BOX(modes), A.mode_box);
+    A.mode_reveal = gtk_revealer_new();
+    gtk_revealer_set_transition_type(GTK_REVEALER(A.mode_reveal),
+        lp_motion_reduced() ? GTK_REVEALER_TRANSITION_TYPE_CROSSFADE
+                            : GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+    gtk_revealer_set_transition_duration(GTK_REVEALER(A.mode_reveal),
+        lp_motion_reduced() ? 90 : lp_spring_ms(LP_SPRING_INSERT, FALSE));
+    gtk_revealer_set_child(GTK_REVEALER(A.mode_reveal), modes);
+    gtk_box_append(GTK_BOX(p.body), A.mode_reveal);
+
+    GtkWidget *back = su_button("Back", "뒤로", "su-secondary");
+    g_signal_connect(back, "clicked", G_CALLBACK(on_back_region), NULL);
+    gtk_box_append(GTK_BOX(p.left), back);
+    A.disk_next = su_button("Next", "다음", "su-primary");
+    g_signal_connect(A.disk_next, "clicked", G_CALLBACK(on_disk_next), NULL);
+    gtk_box_append(GTK_BOX(p.right), A.disk_next);
+    gtk_stack_add_named(GTK_STACK(A.stack), p.root, "disks");
+}
+
+/* ── parts ─────────────────────────────────────────────────────────── */
+
+static void on_part_toggled(GtkToggleButton *b, gpointer d)
+{
+    (void)d;
+    if (!gtk_toggle_button_get_active(b))
+        return;
+    g_strlcpy(A.part, g_object_get_data(G_OBJECT(b), "dev"), sizeof A.part);
+    g_free(A.part_en);
+    g_free(A.part_ko);
+    A.part_en = g_strdup(g_object_get_data(G_OBJECT(b), "en"));
+    A.part_ko = g_strdup(g_object_get_data(G_OBJECT(b), "ko"));
+    gtk_widget_set_sensitive(A.part_next, TRUE);
+}
+
+/* The partitions of the chosen disk, in table order. What each holds is
+ * said the way a person knows it - its filesystem and label, "Windows
+ * recovery" rather than a type GUID - because the row tapped here is the
+ * one erased. The ones LP cannot go into are shown greyed with the
+ * reason: a Windows disk where only the EFI partition is listed would
+ * leave the person wondering where their C: went. Nothing preselected. */
+static void show_parts(void)
+{
+    GtkWidget *c;
+    while ((c = gtk_widget_get_first_child(A.part_box)))
+        gtk_box_remove(GTK_BOX(A.part_box), c);
+    A.part[0] = '\0';
+    A.part_group = NULL;
+    gtk_widget_set_sensitive(A.part_next, FALSE);
+
+    LpJson *parts = A.disk_j ? lp_json_get(A.disk_j, "parts") : NULL;
+    int n = parts ? lp_json_len(parts) : 0;
+    for (int i = 0; i < n; i++) {
+        LpJson *p = lp_json_at(parts, i);
+        const char *dev = lp_json_str(p, "dev", "");
+        const char *fs = lp_json_str(p, "fstype", "");
+        const char *label = lp_json_str(p, "label", "");
+        const char *tname = lp_json_str(p, "type_name", "");
+        const char *size = lp_json_str(p, "size_text", "");
+        gboolean ok = lp_json_bool(p, "usable", 0);
+        if (!*label)
+            label = lp_json_str(p, "partlabel", "");
+
+        /* ntfs "Data" - what the confirmation and the row both say. */
+        char *qlabel = *label ? g_strdup_printf(" \"%s\"", label) : g_strdup("");
+        char *what_en = g_strdup_printf("%s%s", *fs ? fs : "no file system", qlabel);
+        char *what_ko = g_strdup_printf("%s%s", *fs ? fs : "파일 시스템 없음", qlabel);
+        GString *en = g_string_new(what_en), *ko = g_string_new(what_ko);
+        if (*tname) {
+            g_string_append_printf(en, "  ·  %s", tname);
+            g_string_append_printf(ko, "  ·  %s", tname);
+        }
+        if (ok) {
+            g_string_append(en, "  —  LP can go here");
+            g_string_append(ko, "  —  여기에 설치할 수 있습니다");
+        } else {
+            char *ren, *rko;
+            reason_words(lp_json_str(p, "reason", ""), A.disk_j,
+                         lp_json_str(p, "mount", ""), &ren, &rko);
+            g_string_append_printf(en, "  —  %s", ren);
+            g_string_append_printf(ko, "  —  %s", rko);
+            g_free(ren); g_free(rko);
+        }
+        char *title = g_strdup_printf("%s  ·  %s", lp_json_str(p, "name", ""), size);
+        GtkWidget *b = su_choice(title, title, en->str, ko->str, NULL);
+        gtk_widget_set_sensitive(b, ok);
+        g_object_set_data_full(G_OBJECT(b), "dev", g_strdup(dev), g_free);
+        g_object_set_data_full(G_OBJECT(b), "en",
+                               g_strdup_printf("%s (%s, %s)", dev, size, what_en), g_free);
+        g_object_set_data_full(G_OBJECT(b), "ko",
+                               g_strdup_printf("%s (%s, %s)", dev, size, what_ko), g_free);
+        if (A.part_group)
+            gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(b), GTK_TOGGLE_BUTTON(A.part_group));
+        else
+            A.part_group = b;
+        g_signal_connect(b, "toggled", G_CALLBACK(on_part_toggled), NULL);
+        gtk_box_append(GTK_BOX(A.part_box), revealed(b, i));
+        g_free(title);
+        g_string_free(en, TRUE);
+        g_string_free(ko, TRUE);
+        g_free(what_en);
+        g_free(what_ko);
+        g_free(qlabel);
+    }
+    if (n == 0)
+        gtk_box_append(GTK_BOX(A.part_box), su_label("This disk has no partitions.",
+                                                     "이 디스크에는 파티션이 없습니다.",
+                                                     "su-warn"));
+}
+
+static void on_parts_back(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    su_go(A.stack, "disks", FALSE);
+}
+
+static void on_parts_next(GtkButton *b, gpointer d)
+{
+    (void)b; (void)d;
+    if (!A.part[0])
+        return;
+    show_confirm();
+    su_go(A.stack, "confirm", TRUE);
+}
+
+static void page_parts(void)
+{
+    SuPage p;
+    su_page(&p, "Which partition should LP go into?", "어느 파티션에 설치할까요?",
+            "The partition you choose is erased and becomes LP's. The other partitions "
+            "on the disk stay as they are.",
+            "고른 파티션의 내용은 지워지고 그 자리에 LP 가 설치됩니다. 디스크의 나머지 "
+            "파티션은 그대로 둡니다.");
+    gtk_box_append(GTK_BOX(p.body), list_box(&A.part_box, 420));
+    GtkWidget *back = su_button("Back", "뒤로", "su-secondary");
+    g_signal_connect(back, "clicked", G_CALLBACK(on_parts_back), NULL);
+    gtk_box_append(GTK_BOX(p.left), back);
+    A.part_next = su_button("Next", "다음", "su-primary");
+    g_signal_connect(A.part_next, "clicked", G_CALLBACK(on_parts_next), NULL);
+    gtk_box_append(GTK_BOX(p.right), A.part_next);
+    gtk_stack_add_named(GTK_STACK(A.stack), p.root, "parts");
+}
+
+/* What the confirmation says, for the way chosen: exactly what is
+ * erased, and what is not. */
+static void show_confirm(void)
+{
+    char *wen, *wko, *nen, *nko;
+    const char *esp = A.disk_j ? lp_json_str(A.disk_j, "esp", "") : "";
+    gboolean had_lp = A.disk_j && lp_json_bool(A.disk_j, "esp_has_lp", 0);
+    const char *lp_en = had_lp ? " The LP start-up files already there are replaced." : "";
+    const char *lp_ko = had_lp ? " 그곳에 있던 LP 시작 파일은 새것으로 바뀝니다." : "";
+
+    if (A.mode == MODE_PART) {
+        su_retext(A.confirm_what, A.part_en, A.part_ko);
+        wen = g_strdup_printf("Everything on %s will be erased. The other partitions "
+                              "are left as they are.", A.part_en);
+        wko = g_strdup_printf("%s의 내용이 모두 지워집니다. 나머지 파티션은 그대로 "
+                              "둡니다.", A.part_ko);
+        nen = g_strdup_printf("LP starts from this disk's EFI system partition (%s): it "
+                              "adds its own folder, \\EFI\\LP, and touches nothing else "
+                              "there.%s No recovery partition is made.", esp, lp_en);
+        nko = g_strdup_printf("LP 는 이 디스크의 EFI 시스템 파티션(%s)에 자기 폴더 "
+                              "\\EFI\\LP 만 더해서 시작하고, 그 밖의 것은 건드리지 "
+                              "않습니다.%s 복구 파티션은 만들지 않습니다.", esp, lp_ko);
+        su_retext(A.confirm_title, "Erase this partition and install LP?",
+                  "이 파티션을 지우고 LP 를 설치할까요?");
+        su_retext(A.confirm_check, "I understand that everything on this partition will be erased",
+                  "이 파티션의 내용이 모두 지워진다는 것을 이해했습니다");
+        su_retext(A.confirm_go, "Erase and install", "지우고 설치");
+        gtk_widget_remove_css_class(A.confirm_go, "su-primary");
+        gtk_widget_add_css_class(A.confirm_go, "su-danger");
+    } else if (A.mode == MODE_FREE) {
+        LpJson *free = lp_json_get(A.disk_j, "free");
+        LpJson *r0 = free && lp_json_len(free) > 0 ? lp_json_at(free, 0) : NULL;
+        const char *sz = r0 ? lp_json_str(r0, "size_text", "") : "";
+        gboolean new_esp = r0 && lp_json_bool(r0, "new_esp", 0);
+        char *what = g_strdup_printf("%s  (%s)", A.disk_model, A.disk_size);
+        su_retext(A.confirm_what, what, what);
+        g_free(what);
+        wen = g_strdup_printf("A new partition for LP is made in the %s of free space on "
+                              "%s. Nothing on the other partitions is erased.", sz, A.disk);
+        wko = g_strdup_printf("%s 의 빈 공간 %s 에 LP 용 새 파티션을 만듭니다. 다른 "
+                              "파티션의 내용은 지우지 않습니다.", A.disk, sz);
+        if (new_esp) {
+            nen = g_strdup("The disk has no EFI system partition, so a 512 MB one is made "
+                           "in front of LP's to start it. No recovery partition is made.");
+            nko = g_strdup("이 디스크에는 EFI 시스템 파티션이 없어서, 시작용 512MB 파티션을 "
+                           "LP 파티션 앞에 함께 만듭니다. 복구 파티션은 만들지 않습니다.");
+        } else {
+            nen = g_strdup_printf("LP starts from this disk's EFI system partition (%s): it "
+                                  "adds its own folder, \\EFI\\LP, and touches nothing else "
+                                  "there.%s No recovery partition is made.", esp, lp_en);
+            nko = g_strdup_printf("LP 는 이 디스크의 EFI 시스템 파티션(%s)에 자기 폴더 "
+                                  "\\EFI\\LP 만 더해서 시작하고, 그 밖의 것은 건드리지 "
+                                  "않습니다.%s 복구 파티션은 만들지 않습니다.", esp, lp_ko);
+        }
+        su_retext(A.confirm_title, "Install LP in the free space?",
+                  "빈 공간에 LP 를 설치할까요?");
+        su_retext(A.confirm_check, "I understand that LP will be installed in the free "
+                  "space of this disk", "이 디스크의 빈 공간에 LP 가 설치된다는 것을 "
+                  "이해했습니다");
         su_retext(A.confirm_go, "Install", "설치");
         gtk_widget_remove_css_class(A.confirm_go, "su-danger");
         gtk_widget_add_css_class(A.confirm_go, "su-primary");
     } else {
-        wen = g_strdup_printf(
-            "Everything on %s will be deleted%s. This cannot be undone.", A.disk,
-            A.disk_parts ? ", including the partitions on it now" : "");
-        wko = g_strdup_printf(
-            "%s 의 모든 것이 지워집니다%s. 되돌릴 수 없습니다.", A.disk,
-            A.disk_parts ? " (지금 있는 파티션 포함)" : "");
-        su_retext(A.confirm_title, "Erase this disk and install LP?",
-                  "이 디스크를 지우고 LP 를 설치할까요?");
-        su_retext(A.confirm_check, "I understand that everything on this disk will be erased",
-                  "이 디스크의 모든 것이 지워진다는 것을 이해했습니다");
-        su_retext(A.confirm_go, "Erase and install", "지우고 설치");
-        gtk_widget_remove_css_class(A.confirm_go, "su-primary");
-        gtk_widget_add_css_class(A.confirm_go, "su-danger");
+        char *en = g_strdup_printf("%s  (%s)", A.disk_model, A.disk_size);
+        su_retext(A.confirm_what, en, en);
+        g_free(en);
+        nen = g_strdup("LP uses the whole disk: 512 MB to start up, about 1.3 GB for the "
+                       "recovery system, and the rest for LP and your files.");
+        nko = g_strdup("LP 가 디스크 전체를 씁니다: 시작용 512MB, 복구 시스템 약 1.3GB, "
+                       "나머지는 LP 와 내 파일에 씁니다.");
+        if (A.disk_inplace) {
+            wen = g_strdup_printf(
+                "LP is installed on %s, the disk it is running from. Nothing is "
+                "erased: LP grows to fill the disk and becomes the installed system.", A.disk);
+            wko = g_strdup_printf(
+                "지금 LP 가 도는 디스크 %s 에 설치합니다. 아무것도 지우지 않습니다: "
+                "LP 가 디스크 전체로 늘어나 설치된 시스템이 됩니다.", A.disk);
+            su_retext(A.confirm_title, "Install LP on this disk?", "이 디스크에 LP 를 설치할까요?");
+            su_retext(A.confirm_check, "I understand that LP will be installed on this disk",
+                      "이 디스크에 LP 가 설치된다는 것을 이해했습니다");
+            su_retext(A.confirm_go, "Install", "설치");
+            gtk_widget_remove_css_class(A.confirm_go, "su-danger");
+            gtk_widget_add_css_class(A.confirm_go, "su-primary");
+        } else {
+            wen = g_strdup_printf(
+                "Everything on %s will be deleted%s. This cannot be undone.", A.disk,
+                A.disk_parts ? ", including the partitions on it now" : "");
+            wko = g_strdup_printf(
+                "%s 의 모든 것이 지워집니다%s. 되돌릴 수 없습니다.", A.disk,
+                A.disk_parts ? " (지금 있는 파티션 포함)" : "");
+            su_retext(A.confirm_title, "Erase this disk and install LP?",
+                      "이 디스크를 지우고 LP 를 설치할까요?");
+            su_retext(A.confirm_check, "I understand that everything on this disk will be erased",
+                      "이 디스크의 모든 것이 지워진다는 것을 이해했습니다");
+            su_retext(A.confirm_go, "Erase and install", "지우고 설치");
+            gtk_widget_remove_css_class(A.confirm_go, "su-primary");
+            gtk_widget_add_css_class(A.confirm_go, "su-danger");
+        }
     }
     su_retext(A.confirm_warn, wen, wko);
+    su_retext(A.confirm_note, nen, nko);
     g_free(wen); g_free(wko);
+    g_free(nen); g_free(nko);
     char *sen = g_strdup_printf("Account %s  ·  %s  ·  computer name %s",
                                 su_account_login(&A.acct), su_region_timezone(&A.region),
                                 su_region_hostname(&A.region));
@@ -494,35 +961,6 @@ static void on_disk_next(GtkButton *b, gpointer d)
     g_free(sen); g_free(sko);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(A.confirm_check), FALSE);
     gtk_widget_set_sensitive(A.confirm_go, FALSE);
-    su_go(A.stack, "confirm", TRUE);
-}
-
-static void page_disks(void)
-{
-    SuPage p;
-    su_page(&p, "Where should LP go?", "LP 를 어디에 설치할까요?",
-            "Choose the disk. It will be erased and used for LP alone - or, when "
-            "the disk LP is running from is big enough, LP stays on it.",
-            "디스크를 고르세요. 그 디스크는 지워지고 LP 만 쓰게 됩니다. LP 가 돌고 "
-            "있는 디스크가 충분히 크면 지우지 않고 그대로 설치할 수도 있습니다.");
-    GtkWidget *sw = gtk_scrolled_window_new();
-    gtk_widget_add_css_class(sw, "su-list");
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_NEVER,
-                                   GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(sw), TRUE);
-    gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(sw), 420);
-    gtk_scrolled_window_set_kinetic_scrolling(GTK_SCROLLED_WINDOW(sw), TRUE);
-    A.disk_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), A.disk_box);
-    gtk_box_append(GTK_BOX(p.body), sw);
-
-    GtkWidget *back = su_button("Back", "뒤로", "su-secondary");
-    g_signal_connect(back, "clicked", G_CALLBACK(on_back_region), NULL);
-    gtk_box_append(GTK_BOX(p.left), back);
-    A.disk_next = su_button("Next", "다음", "su-primary");
-    g_signal_connect(A.disk_next, "clicked", G_CALLBACK(on_disk_next), NULL);
-    gtk_box_append(GTK_BOX(p.right), A.disk_next);
-    gtk_stack_add_named(GTK_STACK(A.stack), p.root, "disks");
 }
 
 /* ── confirm ───────────────────────────────────────────────────────── */
@@ -536,7 +974,7 @@ static void on_check(GtkCheckButton *c, gpointer d)
 static void on_back_disks(GtkButton *b, gpointer d)
 {
     (void)b; (void)d;
-    su_go(A.stack, "disks", FALSE);
+    su_go(A.stack, A.mode == MODE_PART ? "parts" : "disks", FALSE);
 }
 
 static void start_install(void);
@@ -559,11 +997,9 @@ static void page_confirm(void)
     gtk_box_append(GTK_BOX(p.body), A.confirm_warn);
     A.confirm_who = su_label("", "", "su-note");
     gtk_box_append(GTK_BOX(p.body), A.confirm_who);
-    gtk_box_append(GTK_BOX(p.body), su_label(
-        "LP uses the whole disk: 512 MB to start up, about 1.3 GB for the "
-        "recovery system, and the rest for LP and your files.",
-        "LP 가 디스크 전체를 씁니다: 시작용 512MB, 복구 시스템 약 1.3GB, 나머지는 "
-        "LP 와 내 파일에 씁니다.", "su-note"));
+    /* What LP takes, which depends on the way chosen (show_confirm). */
+    A.confirm_note = su_label("", "", "su-note");
+    gtk_box_append(GTK_BOX(p.body), A.confirm_note);
     A.confirm_check = gtk_check_button_new();
     gtk_widget_add_css_class(A.confirm_check, "su-check");
     su_retext(A.confirm_check, "I understand that everything on this disk will be erased",
@@ -593,6 +1029,15 @@ static void step_text(const char *key)
         { "boot",      "Making the disk start up",    "시작 준비를 하는 중" },
         { "finish",    "Finishing",                   "마무리하는 중" },
     };
+    /* Into a partition, the table is not remade: one entry is named. */
+    if (!strcmp(key, "partition") && A.mode == MODE_PART) {
+        su_retext(A.step, "Preparing the partition", "파티션을 준비하는 중");
+        return;
+    }
+    if (!strcmp(key, "partition") && A.mode == MODE_FREE) {
+        su_retext(A.step, "Making a new partition", "새 파티션을 만드는 중");
+        return;
+    }
     for (guint i = 0; i < G_N_ELEMENTS(STEPS); i++)
         if (!strcmp(key, STEPS[i].key))
             su_retext(A.step, STEPS[i].en, STEPS[i].ko);
@@ -670,12 +1115,16 @@ static void start_install(void)
     su_go(A.stack, "progress", TRUE);
 
     GError *err = NULL;
+    /* Where: the whole disk, one partition of it, or its free space. */
+    const char *flag = A.mode == MODE_PART ? "--partition"
+                     : A.mode == MODE_FREE ? "--free-space" : "--disk";
+    const char *where = A.mode == MODE_PART ? A.part : A.disk;
     /* The answers as options, the password on stdin: an argument is
      * readable by every process on the machine through /proc. */
     A.proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDIN_PIPE |
                               G_SUBPROCESS_FLAGS_STDOUT_PIPE |
                               G_SUBPROCESS_FLAGS_STDERR_MERGE, &err,
-                              backend(), "install", "--disk", A.disk, "--yes",
+                              backend(), "install", flag, where, "--yes",
                               "--progress", "--lang",
                               su_korean ? "ko_KR.UTF-8" : "en_US.UTF-8",
                               "--user", su_account_login(&A.acct),
@@ -825,6 +1274,7 @@ static void activate(GtkApplication *app, gpointer d)
     page_account();
     page_region();
     page_disks();
+    page_parts();
     page_confirm();
     page_progress();
     page_done();
@@ -859,7 +1309,7 @@ static void activate(GtkApplication *app, gpointer d)
     const char *page = g_getenv("LP_SETUP_PAGE");
     if (page && *page) {
         if (!strcmp(page, "disks") || !strcmp(page, "confirm") ||
-            !strcmp(page, "progress")) {
+            !strcmp(page, "progress") || !strcmp(page, "parts")) {
             /* Filled in as a person would have, for the screenshots. */
             gtk_editable_set_text(GTK_EDITABLE(A.acct.fullname), "Vivian Kim");
             gtk_editable_set_text(GTK_EDITABLE(A.acct.pw1), "example");
@@ -869,7 +1319,11 @@ static void activate(GtkApplication *app, gpointer d)
         }
         if (!strcmp(page, "region"))
             su_region_suggest_host(&A.region, "vivian");
-        if (!strcmp(page, "confirm") && A.disk[0])
+        if (!strcmp(page, "parts") && A.disk_j && lp_json_bool(A.disk_j, "part_ok", 0)) {
+            A.mode = MODE_PART;
+            show_parts();
+        }
+        if (!strcmp(page, "confirm") && A.disk[0] && A.mode != MODE_NONE)
             on_disk_next(NULL, NULL);
         else
             gtk_stack_set_visible_child_name(GTK_STACK(A.stack), page);
