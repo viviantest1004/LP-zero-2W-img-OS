@@ -575,8 +575,12 @@ def shared_layout(d, parts, mounts, disk_reason):
         "esp_free": -1,
         "esp_need": 0,
         "esp_has_lp": False,
+        "esp_lp_dev": "",
         "esp_fallback_other": False,
         "esp_reason": "",
+        "esp_usable": False,
+        "esp_new": [],
+        "lp_names": sorted({e[2] for e in gpt.values()} & set(LP_NAMES)),
         "part_ok": False,
         "free_ok": False,
     }
@@ -586,17 +590,36 @@ def shared_layout(d, parts, mounts, disk_reason):
     esp_no = next((n for n in sorted(gpt) if gpt[n][0] == TYPE_ESP), None)
     esp_reason = ""
     if esp_no is None:
+        # A partition install on a disk with no EFI partition makes one,
+        # LP-ESP, in the smallest stretch of free space that holds it -
+        # and is refused when there is none.
         esp_reason = "no-esp"
+        if not disk_reason:
+            geo = gpt_geometry(d)
+            bs = geo[0] if geo else 512
+            fits = [r for r in free_regions(d) if r[1] * bs >= ESP_MIB * 1024 ** 2]
+            if fits:
+                out["esp_new"] = list(min(fits, key=lambda r: r[1]))
+                esp_reason = ""
     elif not disk_reason:
         esp_dev = part_path(d, esp_no)
         out["esp"] = esp_dev
         room = esp_room(esp_dev, shared=True)
         out.update(esp_free=room["free"], esp_need=room["need"], esp_has_lp=room["has_lp"],
-                   esp_fallback_other=room["fallback_other"])
+                   esp_fallback_other=room["fallback_other"],
+                   esp_lp_dev=partuuid_dev(room["lp_root"]) if room["lp_root"] else "")
         esp_reason = room["reason"]
     else:
         out["esp"] = part_path(d, esp_no)
     out["esp_reason"] = esp_reason
+    # Whether a free-space install may start LP from the disk's own EFI
+    # partition: it is there, has room, and no other LP starts from it -
+    # \EFI\LP\ holds one LP's boot files, and a second install would take
+    # them from the first. Otherwise the free space gets an LP-ESP of its
+    # own, which also means a full 100 MB Windows EFI partition never
+    # stands in the way.
+    out["esp_usable"] = bool(out["esp"]) and not disk_reason and not esp_reason \
+        and not out["esp_lp_dev"]
     for p in parts:
         dev = "/dev/" + p["name"]
         t, g, name = (gpt.get(p["number"]) or ("", "", "", 0, 0))[:3]
@@ -633,12 +656,13 @@ def shared_layout(d, parts, mounts, disk_reason):
         geo = gpt_geometry(d)
         bs = geo[0] if geo else 512
         for start, n in free_regions(d):
-            lay = free_layout(n * bs, need, esp_no is not None)
+            # No LP-RECOVERY where LP's names are taken already: the
+            # recovery system finds its partitions by name on its disk,
+            # and two of each would leave it to pick one.
+            lay = free_layout(n * bs, need, out["esp_usable"], recovery=not out["lp_names"])
             if not lay:
                 continue
-            # A region that gets LP's own EFI partition does not need the
-            # disk's: a full or unreadable one does not stand in its way.
-            reason = disk_reason or ("" if lay["new_esp"] else esp_reason)
+            reason = disk_reason
             out["free"].append(dict(lay, **{
                 "start": start,
                 "sectors": n,

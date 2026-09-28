@@ -1566,8 +1566,8 @@ static const char *CSS =
     ".lp-photos-subtitle { font-size: 9pt; color: rgba(234,242,248,0.62); }\n"
     ".lp-photos-h1 { font-size: 17pt; font-weight: bold; }\n"
     ".lp-photos-h2 { font-size: 12.5pt; font-weight: bold; }\n"
-    ".lp-photos-empty button { background-color: #f28c28; color: #1a1206; font-weight: 600;"
-    "  padding: 8px 26px; border-radius: 999px; }\n"
+    ".lp-photos-empty button { background-color: #f28c28; background-image: none; color: #1a1206;"
+    "  font-weight: 600; padding: 8px 26px; border-radius: 999px; }\n"
     ".lp-photos-empty button:hover { background-color: #ffa24a; }\n"
     ".lp-photos-osd { background-color: rgba(14,18,24,0.88); color: #f1f5f9;"
     "  border-radius: 14px; padding: 4px; border: 1px solid rgba(255,255,255,0.08); }\n"
@@ -1582,7 +1582,7 @@ static const char *CSS =
     ".lp-photos-osd button.text-button:checked { background-color: rgba(242,140,40,0.30); color: #ffb36b; }\n"
     ".lp-photos-osd button.suggested-action, headerbar button.suggested-action,"
     " .lp-photos-textbox button.suggested-action {"
-    "  background-color: #f28c28; color: #1a1206; font-weight: 600; }\n"
+    "  background-color: #f28c28; background-image: none; color: #1a1206; font-weight: 600; }\n"
     ".lp-photos-osd button.suggested-action:hover, headerbar button.suggested-action:hover,"
     " .lp-photos-textbox button.suggested-action:hover { background-color: #ffa24a; }\n"
     "headerbar button.suggested-action { padding: 2px 16px; }\n"
@@ -1596,7 +1596,8 @@ static const char *CSS =
     "  background-color: #f4f4f6; border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.5); }\n"
     ".lp-photos-osd scale value { color: #f1f5f9; min-width: 34px; }\n"
     ".lp-photos-dialog button { padding: 6px 16px; background-color: rgba(127,127,127,0.18); }\n"
-    ".lp-photos-dialog button.suggested-action { background-color: #f28c28; color: #1a1206; font-weight: 600; }\n"
+    ".lp-photos-dialog button.suggested-action { background-color: #f28c28; background-image: none;"
+    "  color: #1a1206; font-weight: 600; }\n"
     ".lp-photos-dialog checkbutton check { min-width: 16px; min-height: 16px; border-radius: 4px;"
     "  border: 1px solid rgba(255,255,255,0.45); background-color: rgba(255,255,255,0.06); }\n"
     ".lp-photos-dialog checkbutton check:checked { background-color: #f28c28; border-color: #f28c28; color: #1a1206; }\n"
@@ -2006,7 +2007,8 @@ static void st_pick(GtkWidget *w, const char *needle)
 
 /* Accept whatever file chooser is open, as if Save had been pressed:
  * "chooser:name,JPEG,(70)" also picks those items in its drop-downs,
- * the way a person would. */
+ * the way a person would. An Open dialog is given a whole path to
+ * select instead: "chooser:/dir/picture.jpg". */
 static void st_chooser(app_t *app, char *arg)
 {
     char **p = g_strsplit(arg, ",", -1);
@@ -2016,6 +2018,15 @@ static void st_chooser(app_t *app, char *arg)
         g_object_unref(w);
         if (w == app->win || !GTK_IS_FILE_CHOOSER(w)) continue;
         G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+        if (gtk_file_chooser_get_action(GTK_FILE_CHOOSER(w)) == GTK_FILE_CHOOSER_ACTION_OPEN) {
+            GFile *f = g_file_new_for_path(p[0]);
+            gtk_file_chooser_set_file(GTK_FILE_CHOOSER(w), f, NULL);
+            g_object_unref(f);
+            g_print("selftest: open dialog selects %s\n", p[0]);
+            gtk_dialog_response(GTK_DIALOG(w), GTK_RESPONSE_ACCEPT);
+            G_GNUC_END_IGNORE_DEPRECATIONS
+            break;
+        }
         for (int k = 1; p[k]; k++) st_pick(w, p[k]);
         gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(w), p[0]);
         g_print("selftest: dialog choice now type=%s quality=%s\n",
