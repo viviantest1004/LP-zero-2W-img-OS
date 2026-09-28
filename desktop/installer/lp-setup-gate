@@ -415,6 +415,7 @@ def kiosk(mode):
         env.pop("WLR_NO_HARDWARE_CURSORS", None)
         env["WLR_DRM_CURSOR_HOTSPOT"] = "1"
         env["WLR_DRM_MIN_DAMAGE"] = "1"
+        env["WLR_DRM_CURSOR_DIRECT"] = "1"
     else:
         env.pop("WLR_DRM_CURSOR_HOTSPOT", None)
         if virtual_gpu():

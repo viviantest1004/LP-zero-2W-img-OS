@@ -119,23 +119,13 @@ for card in /sys/class/drm/card[0-9]*; do
             comp=wayfire; why="$drv"; break ;;
         virtio_gpu|virtio-pci|virtio_pci)
             # virtio-gpu has 3D only when the host gave it virgl (UTM: a
-            # "GPU Supported" display; QEMU: virtio-vga-gl). Then wayfire,
-            # with its animations, as on real hardware. (For a while a VM
-            # got sway here to spare the emulated CPU, and lost the
-            # animations for it; the owner wants them, and the cost is
-            # now met where it arises - see lp-autoscale's VM mode limit.)
-            #
-            # Except under KVM. There the CPU runs at the host's own speed,
-            # and every wayfire frame's round trip through virgl and the
-            # host's GL is what the person feels: the pointer trailed the
-            # hand, windows dragged, clicks answered late. sway drawing on
-            # the CPU, uploading only what changed, answers at once. KVM is
-            # told apart from UTM's x86 emulation (where the CPU is the
-            # slow part and virgl the fast one) by its clock source.
+            # "GPU Supported" display; QEMU/KVM: virtio-vga-gl, virt-manager's
+            # "3D acceleration"). Then wayfire, with its animations, as on
+            # real hardware - under KVM too: for a while KVM got sway here,
+            # because the pointer trailed the hand and the screen flickered
+            # where it moved; the pointer is now on the GPU's cursor plane
+            # and drawn by the host (session-run), which is what that was.
             if dmesg 2>/dev/null | grep -q 'features: +virgl'; then
-                if grep -qs kvm-clock /sys/devices/system/clocksource/clocksource0/available_clocksource; then
-                    comp=sway; why="virtio-gpu with virgl, under KVM: the CPU draws faster than virgl answers"; break
-                fi
                 comp=wayfire; why="virtio-gpu with virgl"; break
             fi
             why="virtio-gpu without 3D (virgl)" ;;

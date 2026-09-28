@@ -79,6 +79,24 @@ Built by build-wlroots.sh; see README-wlroots.md.
    for on virtual GPUs whose FB stays the same (single buffer, 5.): a
    commit with a new FB is a full upload there regardless.
 
+7. A cursor image drawn upside down on purpose (LP-only,
+   WLR_DRM_CURSOR_FLIP_Y=1). Through virgl the host reads the cursor
+   plane's buffer back with virglrenderer, which flips every image it
+   reads (it takes a GL texture's bottom-up rows for granted); one that
+   wayfire drew with OpenGL showed the pointer upside down at the bottom
+   of its 64x64 square. The whole buffer is drawn flipped vertically, so
+   the host's flip puts it back, hotspot and all. pixman's cursors
+   (sway) arrive upright and are left alone.
+
+8. The cursor plane moved by itself (LP-only, WLR_DRM_CURSOR_DIRECT=1).
+   0.15 moves the cursor plane in the next frame, and asks the
+   compositor for one; wayfire then renders a whole new frame into its
+   other buffer, and on virtio-gpu every motion of the mouse was a flush
+   of the whole screen for the host to redraw. With the variable set, a
+   pointer motion is an atomic commit of the cursor plane's CRTC_X/Y
+   alone (nonblocking, no event); when the plane is not up or a page flip
+   is pending, the frame is asked for as before.
+
 ---
 diff --git a/backend/drm/atomic.c b/backend/drm/atomic.c
 --- a/backend/drm/atomic.c
@@ -230,6 +248,59 @@ diff --git a/backend/drm/drm.c b/backend/drm/drm.c
  
  	int ret = drmGetCap(drm->fd, DRM_CAP_TIMESTAMP_MONOTONIC, &cap);
  	drm->clock = (ret == 0 && cap == 1) ? CLOCK_MONOTONIC : CLOCK_REALTIME;
+@@ -841,6 +858,42 @@
+ 	return true;
+ }
+ 
++/*
++ * LP: WLR_DRM_CURSOR_DIRECT=1 - move the cursor plane on its own, with a
++ * commit of nothing else. Otherwise a pointer motion asks the compositor
++ * for a frame, and wayfire answers with a whole new frame in its other
++ * buffer: on virtio-gpu that is a flush of the whole screen for every
++ * motion of the mouse, which the host (virt-manager's SPICE with OpenGL)
++ * redraws - where GNOME's pointer sends nothing but the cursor's place.
++ * When the plane is not up, or a page flip is still pending (EBUSY), the
++ * frame is asked for as before, and it carries the position.
++ */
++static bool move_cursor_plane_now(struct wlr_drm_connector *conn) {
++	static int want = -1;
++	if (want < 0) {
++		const char *env = getenv("WLR_DRM_CURSOR_DIRECT");
++		want = env != NULL && strcmp(env, "1") == 0;
++	}
++	struct wlr_drm_backend *drm = conn->backend;
++	struct wlr_drm_plane *plane = conn->crtc ? conn->crtc->cursor : NULL;
++	if (!want || drm->iface != &atomic_iface || plane == NULL ||
++			plane->current_fb == NULL || plane->props.crtc_x == 0 ||
++			plane->props.crtc_y == 0 || !drm_connector_is_cursor_visible(conn)) {
++		return false;
++	}
++	drmModeAtomicReq *req = drmModeAtomicAlloc();
++	if (req == NULL) {
++		return false;
++	}
++	bool ok = drmModeAtomicAddProperty(req, plane->id, plane->props.crtc_x,
++			(uint64_t)(int64_t)conn->cursor_x) >= 0 &&
++		drmModeAtomicAddProperty(req, plane->id, plane->props.crtc_y,
++			(uint64_t)(int64_t)conn->cursor_y) >= 0 &&
++		drmModeAtomicCommit(drm->fd, req, DRM_MODE_ATOMIC_NONBLOCK, NULL) == 0;
++	drmModeAtomicFree(req);
++	return ok;
++}
++
+ static bool drm_connector_move_cursor(struct wlr_output *output,
+ 		int x, int y) {
+ 	struct wlr_drm_connector *conn = get_drm_connector_from_output(output);
+@@ -867,6 +920,9 @@
+ 	conn->cursor_x = box.x;
+ 	conn->cursor_y = box.y;
+ 
++	if (move_cursor_plane_now(conn)) {
++		return true;
++	}
+ 	wlr_output_update_needs_frame(output);
+ 	return true;
+ }
 diff --git a/backend/drm/properties.c b/backend/drm/properties.c
 --- a/backend/drm/properties.c
 +++ b/backend/drm/properties.c
@@ -420,4 +491,36 @@ diff --git a/types/output/render.c b/types/output/render.c
 +
  	wlr_swapchain_destroy(output->swapchain);
  	output->swapchain = swapchain;
+ 
+diff --git a/types/output/cursor.c b/types/output/cursor.c
+--- a/types/output/cursor.c
++++ b/types/output/cursor.c
+@@ -1,6 +1,7 @@
+ #include <assert.h>
+ #include <drm_fourcc.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <wlr/interfaces/wlr_output.h>
+ #include <wlr/render/wlr_renderer.h>
+ #include <wlr/types/wlr_matrix.h>
+@@ -307,6 +308,20 @@
+ 			- tr_size.height / 2.0);
+ 	}
+ 
++	// LP: WLR_DRM_CURSOR_FLIP_Y=1 - the host reads a virtio-gpu cursor
++	// back upside down when the image was drawn with OpenGL (virglrenderer
++	// flips every cursor it reads, taking GL's bottom-up rows for granted),
++	// so the whole buffer is drawn upside down here and arrives upright.
++	const char *flip_y = getenv("WLR_DRM_CURSOR_FLIP_Y");
++	if (flip_y != NULL && strcmp(flip_y, "1") == 0) {
++		float flip[9] = {
++			1.0f, 0.0f, 0.0f,
++			0.0f, -1.0f, (float)buffer->height,
++			0.0f, 0.0f, 1.0f,
++		};
++		wlr_matrix_multiply(output_matrix, flip, output_matrix);
++	}
++
+ 	float matrix[9];
+ 	wlr_matrix_project_box(matrix, &cursor_box, transform, 0, output_matrix);
  

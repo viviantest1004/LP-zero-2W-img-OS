@@ -179,47 +179,58 @@ cd "$LP_HOME"
 # A wayfire that dies within 20 seconds of starting did not start (a
 # driver the check in start-desktop thought had 3D, and has not); the
 # session then goes on under sway, and ~/.cache/lp/wayfire.log says why.
+under_kvm() {
+    grep -qs kvm-clock /sys/devices/system/clocksource/clocksource0/available_clocksource
+}
+
+# Under KVM, on virtio-gpu (with 3D or without): the pointer on the GPU's
+# cursor plane, drawn by the host, as it is for GNOME - moving it sends
+# no frame of the screen at all - and one pixel of damage for a commit
+# where only the pointer moved (desktop/compositor/wlroots-0.15.1-lp.patch,
+# 6.-8.). With the software cursor every motion of the mouse was a new
+# frame, and virt-manager's SPICE with OpenGL showed the screen flickering
+# with trails where the pointer or a window moved.
+#
+# $1 is the renderer. An image wayfire draws with OpenGL reaches the host
+# upside down (virglrenderer flips every cursor it reads back), so it is
+# drawn flipped (WLR_DRM_CURSOR_FLIP_Y); pixman's (sway) arrives upright.
+# UTM keeps the software cursor: its host moved its own pointer after the
+# plane, which moved the guest's.
+kvm_cursor_plane() {
+    under_kvm || return 0
+    for lp_drv in /sys/class/drm/card*/device/driver ; do
+        case $(basename "$(readlink -f "$lp_drv")") in
+            virtio_gpu|virtio-pci|virtio_pci)
+                unset WLR_NO_HARDWARE_CURSORS
+                export WLR_DRM_CURSOR_HOTSPOT=1 WLR_DRM_MIN_DAMAGE=1 WLR_DRM_CURSOR_DIRECT=1
+                if test "$1" = gl; then
+                    export WLR_DRM_CURSOR_FLIP_Y=1
+                else
+                    unset WLR_DRM_CURSOR_FLIP_Y
+                fi ;;
+        esac
+    done
+    unset lp_drv
+}
+
 run_sway() {
     export XDG_CURRENT_DESKTOP=sway:wlroots
     # The CPU draws every frame here: the shell's springs become short
     # fades (lp-motion's reduced motion), which is most of the smoothness
-    # a slow machine or an emulated one can actually show.
-    export LP_REDUCE_MOTION=1
+    # a slow machine or an emulated one can actually show. Under KVM the
+    # CPU is the host's own, and the shell keeps its motion.
+    under_kvm || export LP_REDUCE_MOTION=1
     export WLR_RENDERER=pixman
     export WLR_RENDERER_ALLOW_SOFTWARE=1
     export LIBGL_ALWAYS_SOFTWARE=1
     export GSK_RENDERER=cairo
-    # Under KVM, on virtio-gpu (with 3D or without): the pointer on the
-    # GPU's cursor plane, one buffer for the screen, and one pixel of
-    # damage for a commit where only the pointer moved.
-    #
-    # With the software cursor every motion of the mouse was a new frame
-    # of the whole screen's buffer, and virt-manager's SPICE with OpenGL
-    # showed the screen flickering, with trails where the pointer or a
-    # window moved - whether that frame went out as damage (one buffer)
-    # or whole (two). On the cursor plane the host draws the pointer
-    # itself, as it does for GNOME: moving it sends no frame at all
-    # (desktop/compositor/wlroots-0.15.1-lp.patch, 6.: WLR_DRM_MIN_DAMAGE),
-    # and the screen changes only where a window does. Drawn on the CPU
-    # (pixman), the cursor image reaches the host upright - it was upside
-    # down only when wayfire drew it with OpenGL. UTM keeps the software
-    # cursor: its host moved its own pointer after the plane, which moved
-    # the guest's.
-    if grep -qs kvm-clock /sys/devices/system/clocksource/clocksource0/available_clocksource; then
-        for lp_drv in /sys/class/drm/card*/device/driver ; do
-            case $(basename "$(readlink -f "$lp_drv")") in
-                virtio_gpu|virtio-pci|virtio_pci)
-                    unset WLR_NO_HARDWARE_CURSORS
-                    export WLR_DRM_CURSOR_HOTSPOT=1 WLR_DRM_MIN_DAMAGE=1 ;;
-            esac
-        done
-        unset lp_drv
-    fi
+    kvm_cursor_plane pixman
     exec /usr/bin/sway
 }
 
 run_compositor() {
     if test "$LP_COMPOSITOR" = wayfire ; then
+        kvm_cursor_plane gl
         mkdir -p "$XDG_CACHE_HOME/lp"
         log="$XDG_CACHE_HOME/lp/wayfire.log"
         test -f "$log" && mv -f "$log" "$log.old"
