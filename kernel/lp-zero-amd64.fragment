@@ -215,6 +215,15 @@ CONFIG_SYSVIPC=y
 CONFIG_TMPFS=y
 CONFIG_TMPFS_POSIX_ACL=y
 CONFIG_SHMEM=y
+#
+# Flatpak (the Software app's Flathub applications) runs every program
+# in a bubblewrap sandbox, and Debian's bubblewrap is not setuid: it
+# builds the sandbox in an unprivileged user namespace. The document
+# portal - how a sandboxed program gets the one file somebody picked in
+# the file chooser - is a FUSE filesystem. The Pi's config turns FUSE
+# off to save space; a desktop cannot do without either.
+CONFIG_USER_NS=y
+CONFIG_FUSE_FS=y
 
 # ── input ──
 # A keyboard and a pointer from all three places they arrive: the PS/2

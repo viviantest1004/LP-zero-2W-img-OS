@@ -43,6 +43,13 @@ dbus-x11
 xdg-desktop-portal
 xdg-desktop-portal-gtk
 xdg-desktop-portal-wlr
+# Flatpak, for the applications Debian does not package (Discord,
+# Spotify, Zoom, Chrome, VS Code, Steam ...) and newer versions of the
+# ones it does: the Software app installs them from Flathub through
+# lp-privd. bubblewrap, which it pulls in, is its sandbox; that needs
+# the kernel's user namespaces, and the document portal needs FUSE
+# (kernel/lp-zero-amd64.fragment).
+flatpak
 xdg-utils
 desktop-file-utils
 shared-mime-info
