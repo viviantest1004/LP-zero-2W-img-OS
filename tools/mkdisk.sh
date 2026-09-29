@@ -104,6 +104,16 @@ REC_LABEL="LP-RECOVERY"
 #                                the default 8x16 font there is too small
 #                                to read; boot messages, the rescue shell
 #                                on tty1 and any text fallback all use it
+#   i915.enable_psr=0            no Panel Self Refresh. With PSR the Intel
+#                                GPU stops sending frames while the screen
+#                                is still and the panel repeats its last
+#                                one from its own memory; entering and
+#                                leaving that state is a known cause of
+#                                flicker and of stale patches around what
+#                                just changed on Intel laptop panels. It
+#                                saves a fraction of a watt at idle, and a
+#                                screen that flickers is not worth it. A
+#                                machine without i915 ignores the option
 #
 # Not here, on purpose: i915.fastboot (6.12 has no such parameter - it
 # always reads back the firmware's mode), preempt=full (the kernel is
@@ -118,7 +128,7 @@ REC_LABEL="LP-RECOVERY"
 # loglevel= and the rest the last one given wins. So the recovery entry
 # passes root=PARTLABEL=LP-RECOVERY lp.mode=recovery and gets exactly
 # that, and initrd=\EFI\LP\initrd.img there is read by the EFI stub.
-KERNEL_CMDLINE="root=LABEL=${ROOT_LABEL} rw console=tty0 console=ttyS0,115200 quiet loglevel=3 vt.global_cursor_default=0 fbcon=font:TER16x32 mem_sleep_default=deep"
+KERNEL_CMDLINE="root=LABEL=${ROOT_LABEL} rw console=tty0 console=ttyS0,115200 quiet loglevel=3 vt.global_cursor_default=0 fbcon=font:TER16x32 mem_sleep_default=deep i915.enable_psr=0"
 
 # The same label the RAM-live images use, because /etc/rc mounts /boot by
 # label and there is no reason for this image to be the exception - the

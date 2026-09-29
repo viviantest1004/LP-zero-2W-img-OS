@@ -72,7 +72,7 @@
  *
  *   lid_on_battery=suspend|nothing|poweroff      (suspend)
  *   lid_on_ac=suspend|nothing|poweroff           (suspend)
- *   power_button=suspend|poweroff|nothing        (suspend)
+ *   power_button=suspend|poweroff|nothing        (suspend; poweroff in a VM)
  *   lock_before_suspend=yes|no                   (yes)
  *   idle_suspend_minutes_battery=N               (15; 0 = never)
  *   idle_suspend_minutes_ac=N                    (0)
@@ -658,11 +658,39 @@ typedef struct {
     int  idle_bat, idle_ac;
 } conf_t;
 
+/* Running in a virtual machine: the CPU says so (the hypervisor flag
+ * every x86 hypervisor sets, KVM, UTM and QEMU's emulator included), or
+ * the firmware's maker does (/sys/class/dmi/id). */
+static bool virtual_machine(void)
+{
+    static int known = -1;
+    if (known >= 0)
+        return known;
+    char p[512], buf[4096];
+    rooted("/proc/cpuinfo", p, sizeof p);
+    known = proc_read(p, buf, sizeof buf) > 0 && strstr(buf, " hypervisor") != NULL;
+    static const char *const makers[] = {
+        "QEMU", "VMware", "innotek", "Xen", "Parallels", "Bochs", NULL
+    };
+    char v[128];
+    if (!known && rd("/sys/class/dmi/id/sys_vendor", v, sizeof v))
+        for (int i = 0; makers[i]; i++)
+            if (strstr(v, makers[i]))
+                known = 1;
+    if (!known && rd("/sys/class/dmi/id/product_name", v, sizeof v) &&
+        strstr(v, "Virtual Machine"))              /* Hyper-V */
+        known = 1;
+    return known;
+}
+
 static void conf_defaults(conf_t *c)
 {
     strlcpy(c->lid_bat, "suspend", sizeof c->lid_bat);
     strlcpy(c->lid_ac,  "suspend", sizeof c->lid_ac);
-    strlcpy(c->power,   "suspend", sizeof c->power);
+    /* In a virtual machine the power button is how the host asks the
+     * guest to shut down (virsh shutdown, UTM's and VirtualBox's "ACPI
+     * shutdown"): suspending there left the VM paused, never off. */
+    strlcpy(c->power, virtual_machine() ? "poweroff" : "suspend", sizeof c->power);
     c->lock = true;
     c->idle_bat = 15;
     c->idle_ac = 0;
