@@ -30,6 +30,28 @@ import uuid
 import zlib
 import struct
 
+
+# What a PC started in Legacy (BIOS/CSM) mode runs from this disk: the
+# MBR's boot code. LP boots with UEFI only, and a BIOS that finds nothing
+# here showed a blank screen or "no bootable device", which says nothing
+# about what to change. So the code prints that, and stops. UEFI never
+# runs it (it reads the GPT; the protective entry stays non-bootable, as
+# the UEFI spec wants). 16-bit real mode, assembled by hand:
+#   cli; xor ax,ax; mov ds,ax; mov es,ax; mov ss,ax; mov sp,0x7c00; sti
+#   mov si,msg
+#   next: lodsb; test al,al; jz stop
+#         mov ah,0x0e; mov bx,7; int 0x10; jmp next    (BIOS teletype)
+#   stop: hlt; jmp stop
+LEGACY_MSG = (b"\r\nLP starts in UEFI mode only - this PC started it in Legacy mode.\r\n"
+              b"\r\nIn the BIOS setup (F2 on a Dell):\r\n"
+              b"  Boot Sequence > Boot List Option: UEFI\r\n"
+              b"  Secure Boot: Disabled\r\n"
+              b"\r\nThen press F12 at power-on and pick the UEFI entry of this disk.\r\n")
+LEGACY_STUB = (bytes.fromhex("fa31c08ed88ec08ed0bc007cfb" "be217c"
+                             "ac84c07409b40ebb0700cd10ebf2" "f4ebfd")
+               + LEGACY_MSG + b"\x00")
+assert len(LEGACY_STUB) <= 440
+
 SECTOR = 512
 ENTRIES = 128
 ENTRY_SIZE = 128
@@ -99,6 +121,7 @@ def main(argv):
     # so a tool that only knows MBR sees the disk as full rather than
     # empty and does not offer to "initialise" it.
     mbr = bytearray(SECTOR)
+    mbr[:len(LEGACY_STUB)] = LEGACY_STUB
     size = min(total - 1, 0xffffffff)
     mbr[446:462] = struct.pack("<B3sB3sII", 0, b"\x00\x02\x00", 0xee,
                                b"\xff\xff\xff", 1, size)
