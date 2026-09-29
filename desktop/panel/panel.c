@@ -316,28 +316,48 @@ static void on_clock(GtkButton *btn, gpointer d)
 
 /* ── status: Wi-Fi, volume, battery ─────────────────────────────── */
 
+/* Each of these touches the bar only when what it shows changes. The
+ * polls below come every 15 and 30 seconds and nearly always bring the
+ * same answer, and setting an icon again - even the same one - redraws
+ * the bar: a new frame of the whole screen from the compositor every 15
+ * seconds on a desktop nobody touched, which under KVM went to the host
+ * as a new screen each time. */
+static void show_icon(GtkWidget *w, const char *name)
+{
+    const char *cur = NULL;
+    if (gtk_image_get_storage_type(GTK_IMAGE(w)) == GTK_IMAGE_ICON_NAME)
+        gtk_image_get_icon_name(GTK_IMAGE(w), &cur, NULL);
+    if (g_strcmp0(cur, name) != 0)
+        gtk_image_set_from_icon_name(GTK_IMAGE(w), name, GTK_ICON_SIZE_BUTTON);
+}
+
+static void show_class(GtkWidget *w, const char *cls, gboolean on)
+{
+    GtkStyleContext *sc = gtk_widget_get_style_context(w);
+    if (gtk_style_context_has_class(sc, cls) == on)
+        return;
+    if (on)
+        gtk_style_context_add_class(sc, cls);
+    else
+        gtk_style_context_remove_class(sc, cls);
+}
+
 static void paint_status(void)
 {
     for (GList *l = bars; l; l = l->next) {
         Bar *b = l->data;
-        gtk_image_set_from_icon_name(GTK_IMAGE(b->wifi_icon),
-            wifi_icon_name ? wifi_icon_name : "network-wireless-offline-symbolic",
-            GTK_ICON_SIZE_BUTTON);
-        gtk_image_set_from_icon_name(GTK_IMAGE(b->vol_icon),
-            vol_icon_name ? vol_icon_name : "audio-volume-muted-symbolic",
-            GTK_ICON_SIZE_BUTTON);
+        show_icon(b->wifi_icon,
+            wifi_icon_name ? wifi_icon_name : "network-wireless-offline-symbolic");
+        show_icon(b->vol_icon,
+            vol_icon_name ? vol_icon_name : "audio-volume-muted-symbolic");
         gtk_widget_set_visible(b->bat_icon, bat_icon_name != NULL);
         gtk_widget_set_visible(b->bat_label, bat_text != NULL);
         if (bat_icon_name)
-            gtk_image_set_from_icon_name(GTK_IMAGE(b->bat_icon), bat_icon_name,
-                                         GTK_ICON_SIZE_BUTTON);
-        if (bat_text)
+            show_icon(b->bat_icon, bat_icon_name);
+        if (bat_text && g_strcmp0(gtk_label_get_text(GTK_LABEL(b->bat_label)), bat_text) != 0)
             gtk_label_set_text(GTK_LABEL(b->bat_label), bat_text);
-        GtkStyleContext *sc = gtk_widget_get_style_context(b->bat_label);
-        gtk_style_context_remove_class(sc, "lp-warn");
-        gtk_style_context_remove_class(sc, "lp-bad");
-        if (bat_state)
-            gtk_style_context_add_class(sc, bat_state == 2 ? "lp-bad" : "lp-warn");
+        show_class(b->bat_label, "lp-warn", bat_state == 1);
+        show_class(b->bat_label, "lp-bad", bat_state == 2);
     }
 }
 
