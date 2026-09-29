@@ -11,11 +11,19 @@
 # interruption and it carries on where it stopped.
 #
 # Works on macOS and Linux: curl, and shasum or sha256sum.
+#
+# LP_EDITION=8g fetches the image for an 8GB USB stick instead (about 6GB
+# unpacked; the same installer, a recovery system without the reinstall
+# payload) - dist/desktop-8g/get.sh runs this with it set.
 set -eu
 
-BASE="${LP_BASE:-https://raw.githubusercontent.com/viviantest1004/LP-zero-2W-img-OS/refs/heads/claude/hohho-xvzof5/dist/desktop}"
-NAME="linux-LP_desktop.img.xz"
-DIR="${LP_DIR:-LP-desktop-image}"
+case "${LP_EDITION:-}" in
+    "") SUB=desktop;    NAME="linux-LP_desktop.img.xz";    DIR_DEFAULT=LP-desktop-image ;;
+    8g) SUB=desktop-8g; NAME="linux-LP_desktop-8g.img.xz"; DIR_DEFAULT=LP-desktop-8g ;;
+    *)  echo "get.sh: LP_EDITION=${LP_EDITION}: the only edition is 8g" >&2; exit 1 ;;
+esac
+BASE="${LP_BASE:-https://raw.githubusercontent.com/viviantest1004/LP-zero-2W-img-OS/refs/heads/claude/hohho-xvzof5/dist/$SUB}"
+DIR="${LP_DIR:-$DIR_DEFAULT}"
 
 if command -v sha256sum >/dev/null 2>&1; then
     sha() { sha256sum "$1" | cut -d' ' -f1; }
@@ -75,14 +83,14 @@ fi
 # Unpacked, because a VM (UTM) or dd needs the raw disk, not the .xz: given
 # the .xz the firmware finds no partitions and drops to the UEFI shell.
 # macOS has no xz; its python3 has lzma, so that is the second way.
-IMG=linux-LP_desktop.img
-if [ -f "$IMG" ] && [ "$(wc -c < "$IMG" | tr -d ' ')" -gt 5000000000 ] && [ "$IMG" -nt "$NAME" ]; then
+IMG="${NAME%.xz}"
+if [ -f "$IMG" ] && [ "$(wc -c < "$IMG" | tr -d ' ')" -gt 4000000000 ] && [ "$IMG" -nt "$NAME" ]; then
     echo "==> $IMG is already unpacked"
 elif command -v xz >/dev/null 2>&1; then
-    echo "==> unpacking with xz (about 8GB, mostly empty space)"
+    echo "==> unpacking with xz (6 to 9GB, mostly empty space)"
     xz -d -k -f "$NAME"
 elif command -v python3 >/dev/null 2>&1 && python3 -c "import lzma" 2>/dev/null; then
-    echo "==> unpacking with python3 (about 8GB; a few minutes)"
+    echo "==> unpacking with python3 (6 to 9GB; a few minutes)"
     python3 - "$NAME" "$IMG" <<'PY'
 import lzma, shutil, sys
 with lzma.open(sys.argv[1]) as src, open(sys.argv[2] + ".part", "wb") as dst:
@@ -117,6 +125,17 @@ echo "Done: $(pwd)/$IMG  - use THIS file as the VM's disk, not the .xz"
 # The empty disk is first in the boot order: until something is
 # installed on it the firmware passes it by and starts the stick, and
 # after that it starts LP from the disk without anybody changing a thing.
+if [ "$(uname -s)" = Darwin ] && [ "${LP_EDITION:-}" = 8g ]; then
+    # The 8GB edition is for a stick; the Mac is only what writes it.
+    echo
+    echo "USB stick (8GB or more) on this Mac:"
+    echo "  diskutil list external             the stick is /dev/diskN"
+    echo "  diskutil unmountDisk /dev/diskN"
+    echo "  sudo dd if=$IMG of=/dev/rdiskN bs=4m"
+    echo "  (or balenaEtcher: Flash from file -> $IMG)"
+    echo "Then 'diskutil list external' shows GUID_partition_scheme and EFI LPZERO."
+    exit 0
+fi
 if [ "$(uname -s)" = Darwin ]; then
     VM=LP.utm
     if [ -e "$VM" ]; then
@@ -297,7 +316,7 @@ PLIST
 fi
 
 echo
-echo "USB stick:  sudo dd if=linux-LP_desktop.img of=/dev/<stick> bs=4M conv=fsync status=progress"
+echo "USB stick:  sudo dd if=$IMG of=/dev/<stick> bs=4M conv=fsync status=progress"
 echo "QEMU:       UEFI, x86_64, q35, 2+ cores, 4GB+ RAM; the image as a USB disk and an"
 echo "            empty disk of 16GB or more (NVMe) to install LP onto."
 echo "            UTM: leave \"hardware OpenGL acceleration\" OFF (display virtio-vga)."

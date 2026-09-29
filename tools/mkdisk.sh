@@ -63,6 +63,10 @@ ESP_MB=512
 # of it) and a 30MB recovery system. It used to be a fixed 6GiB, which
 # with a 4GiB margin on the root kept LP off a 16GB disk.
 RECOVERY_MB="${LP_RECOVERY_MB:-}"
+# LP_NO_PAYLOAD=1: the recovery system without its reinstall payload
+# (tools/mkrecovery.sh --no-payload) - about 100MB instead of 1.4GB. The
+# 8GB stick's image (mkdesktop.sh, LP_EDITION=8g).
+NO_PAYLOAD="${LP_NO_PAYLOAD:-0}"
 ESP_START=2048                          # 1MiB in, where every tool aligns
 ESP_SECTORS=$(( ESP_MB * 1024 * 1024 / SECTOR ))
 REC_START=$(( ESP_START + ESP_SECTORS ))
@@ -137,7 +141,7 @@ KERNEL_CMDLINE="root=LABEL=${ROOT_LABEL} rw console=tty0 console=ttyS0,115200 qu
 ESP_LABEL="LPZERO"
 
 OUT_DIR="${REPO_ROOT}/sdcard"
-IMAGE="${OUT_DIR}/linux-LP_desktop.img"
+IMAGE="${OUT_DIR}/${LP_IMAGE_NAME:-linux-LP_desktop.img}"
 # LP_ROOTFS_OVERRIDE points at a root built somewhere else - the merged
 # Debian-plus-ours tree that mkdesktop.sh makes. Without it this builds
 # the console image from our userland alone, which is the same image and
@@ -293,7 +297,9 @@ if (( NEED_KB * 105 / 100 > ROOT_MB * 1024 )); then
 fi
 # The backup GPT sits in the last 33 sectors; a MiB of tail keeps the
 # root aligned and clear of it.
-if [[ -z "$RECOVERY_MB" ]]; then
+if [[ -z "$RECOVERY_MB" && "$NO_PAYLOAD" == 1 ]]; then
+    RECOVERY_MB=256
+elif [[ -z "$RECOVERY_MB" ]]; then
     RECOVERY_MB=$(( NEED_KB * 3 / 10 / 1024 + 384 ))
     RECOVERY_MB=$(( (RECOVERY_MB + 63) / 64 * 64 ))
 fi
@@ -340,9 +346,11 @@ rm -rf "$REC_TREE"
 mkdir -p "$REC_TREE"
 MKREC="${REPO_ROOT}/tools/mkrecovery.sh"
 REC_HAS_SYSTEM=0
+MKREC_ARGS=()
+[[ "$NO_PAYLOAD" == 1 ]] && MKREC_ARGS+=(--no-payload)
 if [[ -x "$MKREC" && "${LP_NO_RECOVERY:-0}" != 1 ]]; then
     "$MKREC" --root "$ROOTFS" --out "$REC_TREE" --kernel "${KERNEL_OUT}/bzImage" \
-        --cmdline "$KERNEL_CMDLINE" || die "tools/mkrecovery.sh failed"
+        --cmdline "$KERNEL_CMDLINE" "${MKREC_ARGS[@]}" || die "tools/mkrecovery.sh failed"
     REC_HAS_SYSTEM=1
     log "tools/mkrecovery.sh: $(du -sh "$REC_TREE" | cut -f1)"
 else
@@ -503,6 +511,13 @@ dd if="$ESP_IMG" of="$IMAGE" bs=1M seek=$(( ESP_START / 2048 )) conv=notrunc,spa
 rm -f "$ESP_IMG"
 
 step "result"
+# LP_MAX_BYTES: the stick it has to fit on. An "8GB" stick holds between
+# 7.2 and 8 billion bytes, and an image even a sector too big is cut off
+# at the end by dd and refused outright by Etcher - which leaves the
+# stick as it was, and a PC then offers it only as a Legacy disk.
+if [[ -n "${LP_MAX_BYTES:-}" ]] && (( $(stat -c%s "$IMAGE") > LP_MAX_BYTES )); then
+    die "$(stat -c%s "$IMAGE") bytes is more than LP_MAX_BYTES=${LP_MAX_BYTES}"
+fi
 log "$(( $(stat -c%s "$IMAGE") / 1024 / 1024 ))MiB (sparse; $(du -m "$IMAGE" | cut -f1)MiB on disk)  ${IMAGE}"
 log ""
 log "  GPT"

@@ -47,6 +47,8 @@ dist/linux-LP_desktop.img.xz.sha256
 # ... and is published instead as 45MB pieces under dist/desktop/,
 # with SHA256SUMS and get.sh, which fetches and joins them.
 !dist/desktop/
+# The same for the 8GB stick's edition (tools/mkdesktop.sh, LP_EDITION=8g).
+!dist/desktop-8g/
 
 # tools/build-sdk.sh 가 만든다 (userland/libc 에서 뽑아낸 것뿐)
 sdk/

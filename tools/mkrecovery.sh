@@ -3,6 +3,13 @@
 # mkrecovery.sh - build the tree of the LP-RECOVERY partition.
 #
 #   tools/mkrecovery.sh --root ROOTFS --out TREE --kernel BZIMAGE [--cmdline LINE]
+#                       [--no-payload]
+#
+# --no-payload leaves /reinstall empty: the recovery system and its shell,
+# without the 1.2GB copy of the root to reinstall from. That is the 8GB
+# stick's image (mkdesktop.sh, LP_EDITION=8g), which has no room for it;
+# the recovery menu then says the partition carries no installation
+# files (LPS_R_NO_PAYLOAD) instead of offering a reinstall.
 #
 # tools/mkdisk.sh calls this with the root it has just packed and turns
 # TREE into the ext4 of p2. lp-install copies that partition to the disk
@@ -39,9 +46,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 log()  { printf '  %s\n' "$*"; }
 die()  { printf 'mkrecovery: %s\n' "$*" >&2; exit 1; }
 
-ROOTFS= OUT= KERNEL= CMDLINE=
+ROOTFS= OUT= KERNEL= CMDLINE= PAYLOAD=1
 while (($#)); do
     case "$1" in
+        --no-payload) PAYLOAD=0; shift ;;
         --root)    ROOTFS=$2; shift 2 ;;
         --out)     OUT=$2; shift 2 ;;
         --kernel)  KERNEL=$2; shift 2 ;;
@@ -50,7 +58,7 @@ while (($#)); do
     esac
 done
 [[ -d "$ROOTFS" && -n "$OUT" && -f "$KERNEL" ]] ||
-    die "usage: $0 --root ROOTFS --out TREE --kernel BZIMAGE [--cmdline LINE]"
+    die "usage: $0 --root ROOTFS --out TREE --kernel BZIMAGE [--cmdline LINE] [--no-payload]"
 
 OURS="${REPO_ROOT}/userland/rootfs-amd64"
 MENU="${REPO_ROOT}/recovery/bin-amd64/lp-recovery"
@@ -193,6 +201,14 @@ if [[ $(id -u) = 0 ]]; then
             die "$t does not run inside the recovery tree"
     done
     log "every tool runs inside the tree"
+fi
+
+if [[ $PAYLOAD = 0 ]]; then
+    rmdir reinstall/esp reinstall
+    printf 'LP recovery partition: the recovery system, without a reinstall payload.\n' > README.txt
+    log "no payload (--no-payload)"
+    log "tree: $(du -sh "$OUT" | cut -f1)"
+    exit 0
 fi
 
 # ── the reinstall payload ────────────────────────────────────────────

@@ -24,6 +24,8 @@
 #   sudo ./tools/mkdesktop.sh            the image (calls mkdisk.sh)
 #   LP_CHECK_ONLY=1 ./tools/mkdesktop.sh assemble and check, no image
 #   LP_DEB=/path ./tools/mkdesktop.sh    a Debian base somewhere else
+#   LP_EDITION=8g ./tools/mkdesktop.sh   the same installer, for an 8GB
+#                                        stick: sdcard/linux-LP_desktop-8g.img
 #
 # ── The root is assembled in an overlay, not a copy ──
 #
@@ -82,6 +84,10 @@ log()  { printf '  %s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
 warn() { printf '  warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+case "${LP_EDITION:-}" in
+    ""|8g) ;;
+    *) die "LP_EDITION=${LP_EDITION}: the only edition is 8g" ;;
+esac
 
 # ── outside the namespace: preconditions, then go in ─────────────────
 if [[ "${1:-}" != "--inside" ]]; then
@@ -903,7 +909,21 @@ chmod 1777 "$ROOT/tmp"
 # The root partition: what is there, a quarter again for ext4 and for
 # the first updates, and 2GB for the person's files on the stick. (An
 # installed system gets the whole disk; this is only the stick.)
-ROOT_MB=$(( SIZE_MB * 5 / 4 + 2048 ))
+#
+# LP_EDITION=8g is the same system and the same installer for a stick of
+# 8GB, which the image above (about 9GB) does not fit on: half a GB for
+# files on the stick instead of 2GB, and a recovery partition without the
+# reinstall payload - the recovery menu and its shell are there, on the
+# stick and on every disk installed from it, but "Reinstall LP" says the
+# partition carries no installation files. About 6GB in all.
+EDITION_ENV=()
+if [[ "${LP_EDITION:-}" == 8g ]]; then
+    ROOT_MB=$(( SIZE_MB * 5 / 4 + 512 ))
+    EDITION_ENV=(LP_NO_PAYLOAD=1 LP_IMAGE_NAME=linux-LP_desktop-8g.img
+                 LP_MAX_BYTES=7000000000)
+else
+    ROOT_MB=$(( SIZE_MB * 5 / 4 + 2048 ))
+fi
 step "the disk image"
-LP_ROOTFS_OVERRIDE="$ROOT" LP_ROOT_MB="$ROOT_MB" LP_DESKTOP=1 \
+env "${EDITION_ENV[@]}" LP_ROOTFS_OVERRIDE="$ROOT" LP_ROOT_MB="$ROOT_MB" LP_DESKTOP=1 \
     "${REPO_ROOT}/tools/mkdisk.sh"
