@@ -97,6 +97,19 @@ Built by build-wlroots.sh; see README-wlroots.md.
    alone (nonblocking, no event); when the plane is not up or a page flip
    is pending, the frame is asked for as before.
 
+9. Frame events paced to the refresh rate on GPUs without vblank
+   (LP-only; WLR_DRM_FRAME_PACE=1/0 forces it on/off). virtio-gpu, qxl,
+   bochs, cirrus, vmwgfx, vboxvideo, hyperv_drm and simpledrm complete a
+   page flip as soon as the commit is queued for the host, so the frame
+   event after it came at once, and a compositor with anything moving
+   drew as fast as the CPU allowed: hundreds of frames a second queued up
+   for a host that shows sixty, the compositor blocked on the full queue
+   and not reading input meanwhile. Under KVM with SPICE and OpenGL that
+   was flicker, and a pointer, clicks and new windows that lagged behind.
+   drm.c holds the next frame event until one refresh period (the mode's;
+   60 Hz without one) after the previous one, as mutter's frame clock
+   does. A real GPU's flip completes at vblank and never waits there.
+
 ---
 diff --git a/backend/drm/atomic.c b/backend/drm/atomic.c
 --- a/backend/drm/atomic.c
@@ -301,6 +314,144 @@ diff --git a/backend/drm/drm.c b/backend/drm/drm.c
  	wlr_output_update_needs_frame(output);
  	return true;
  }
+@@ -1449,6 +1505,92 @@
+ 	return 1000000000000LL / mhz;
+ }
+ 
++/*
++ * LP: frame events at most once a refresh period on GPUs without vblank.
++ *
++ * virtio-gpu (and the other virtual GPUs below) have no vblank: the
++ * kernel sends the page-flip event as soon as the commit has been queued
++ * for the host, not when the host has shown it. The frame event that
++ * follows it then came at once, and a compositor with anything moving -
++ * an animation, a window being dragged, the pointer drawn in software -
++ * drew as fast as the CPU could: hundreds of frames a second that the
++ * host could not show, queued behind each other in the virtqueue, the
++ * compositor blocked on a full queue and not reading input meanwhile.
++ * Under KVM with SPICE and OpenGL that was the screen flickering, and the
++ * pointer, clicks and new windows all lagging behind. mutter paces its
++ * frames with its own clock at the mode's refresh rate; this does the
++ * same here: the next frame event is held until one refresh period after
++ * the previous one. A real GPU's flip completes at vblank, so it never
++ * waits here. WLR_DRM_FRAME_PACE=1/0 forces it on/off.
++ */
++static bool want_frame_pacing(struct wlr_drm_backend *drm) {
++	if (drm->frame_pace == 0) {
++		drm->frame_pace = 1;
++		const char *env = getenv("WLR_DRM_FRAME_PACE");
++		if (env != NULL && env[0] != '\0') {
++			drm->frame_pace = strcmp(env, "1") == 0 ? 2 : 1;
++		} else {
++			static const char *const virtual_gpus[] = {
++				"virtio_gpu", "qxl", "bochs-drm", "bochs", "cirrus",
++				"cirrus-qemu", "vmwgfx", "vboxvideo", "hyperv_drm",
++				"simpledrm", NULL,
++			};
++			drmVersion *version = drmGetVersion(drm->fd);
++			for (size_t i = 0; version != NULL && virtual_gpus[i] != NULL; i++) {
++				if (strcmp(version->name, virtual_gpus[i]) == 0) {
++					drm->frame_pace = 2;
++				}
++			}
++			drmFreeVersion(version);
++		}
++		if (drm->frame_pace == 2) {
++			wlr_log(WLR_INFO, "Frame events paced to the refresh rate");
++		}
++	}
++	return drm->frame_pace == 2;
++}
++
++static int handle_frame_pace_timer(void *data) {
++	struct wlr_drm_connector *conn = data;
++	clock_gettime(CLOCK_MONOTONIC, &conn->last_frame);
++	if (conn->backend->session->active &&
++			conn->status == WLR_DRM_CONN_CONNECTED && conn->crtc != NULL) {
++		wlr_output_send_frame(&conn->output);
++	}
++	return 0;
++}
++
++static void send_frame(struct wlr_drm_connector *conn) {
++	struct wlr_drm_backend *drm = conn->backend;
++	if (!want_frame_pacing(drm)) {
++		wlr_output_send_frame(&conn->output);
++		return;
++	}
++	int refresh = conn->output.refresh > 0 ? conn->output.refresh : 60000;
++	int64_t period = 1000000000000LL / refresh;
++	struct timespec now;
++	clock_gettime(CLOCK_MONOTONIC, &now);
++	int64_t since = (int64_t)(now.tv_sec - conn->last_frame.tv_sec) * 1000000000LL +
++		(now.tv_nsec - conn->last_frame.tv_nsec);
++	if (since >= period) {
++		conn->last_frame = now;
++		wlr_output_send_frame(&conn->output);
++		return;
++	}
++	if (conn->frame_pace_timer == NULL) {
++		conn->frame_pace_timer = wl_event_loop_add_timer(
++			wl_display_get_event_loop(drm->display),
++			handle_frame_pace_timer, conn);
++		if (conn->frame_pace_timer == NULL) {
++			conn->last_frame = now;
++			wlr_output_send_frame(&conn->output);
++			return;
++		}
++	}
++	int ms = (int)((period - since + 999999) / 1000000);
++	wl_event_source_timer_update(conn->frame_pace_timer, ms > 0 ? ms : 1);
++}
++
+ static void handle_page_flip(int fd, unsigned seq,
+ 		unsigned tv_sec, unsigned tv_usec, unsigned crtc_id, void *data) {
+ 	struct wlr_drm_backend *drm = data;
+@@ -1511,7 +1653,7 @@
+ 	wlr_output_send_present(&conn->output, &present_event);
+ 
+ 	if (drm->session->active) {
+-		wlr_output_send_frame(&conn->output);
++		send_frame(conn);
+ 	}
+ }
+ 
+@@ -1544,6 +1686,9 @@
+ 
+ void destroy_drm_connector(struct wlr_drm_connector *conn) {
+ 	disconnect_drm_connector(conn);
++	if (conn->frame_pace_timer != NULL) {
++		wl_event_source_remove(conn->frame_pace_timer);
++	}
+ 
+ 	wl_list_remove(&conn->link);
+ 	free(conn);
+diff --git a/include/backend/drm/drm.h b/include/backend/drm/drm.h
+--- a/include/backend/drm/drm.h
++++ b/include/backend/drm/drm.h
+@@ -87,6 +87,10 @@
+ 	uint64_t cursor_width, cursor_height;
+ 
+ 	struct wlr_drm_format_set mgpu_formats;
++
++	/* LP: frame events paced to the refresh rate (drm.c, send_frame):
++	 * 0 not decided yet, 1 no, 2 yes. */
++	int frame_pace;
+ };
+ 
+ enum wlr_drm_connector_status {
+@@ -140,6 +144,11 @@
+ 	 * they're sent.
+ 	 */
+ 	uint32_t pending_page_flip_crtc;
++
++	/* LP: when the last frame event went out, and the timer that holds
++	 * the next one back until a refresh period has passed. */
++	struct timespec last_frame;
++	struct wl_event_source *frame_pace_timer;
+ };
+ 
+ struct wlr_drm_backend *get_drm_backend_from_backend(
 diff --git a/backend/drm/properties.c b/backend/drm/properties.c
 --- a/backend/drm/properties.c
 +++ b/backend/drm/properties.c
