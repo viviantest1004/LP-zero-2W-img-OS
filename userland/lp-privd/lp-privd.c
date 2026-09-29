@@ -260,6 +260,36 @@ static bool debian_name_ok(const char *s)
            s[0] != '.' && s[0] != '+';
 }
 
+/* A Flatpak application ID: reverse DNS, at least three parts (org.gimp.GIMP,
+ * com.discordapp.Discord, us.zoom.Zoom). Each part is letters, digits, _
+ * and -, and does not start with a digit or a dash - the D-Bus rules
+ * Flatpak holds application IDs to. Never an option: it cannot start with
+ * a dash, and it never contains a slash, so it cannot name a ref or a
+ * path either. */
+static bool flatpak_id_ok(const char *s)
+{
+    size_t n = strlen(s), parts = 1;
+    if (n < 5 || n > 255)
+        return false;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        bool first = i == 0 || s[i - 1] == '.';
+        if (c == '.') {
+            if (first || i == n - 1)
+                return false;
+            parts++;
+        } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+            continue;
+        } else if ((c >= '0' && c <= '9') || c == '-') {
+            if (first)
+                return false;
+        } else {
+            return false;
+        }
+    }
+    return parts >= 3;
+}
+
 /* Our own package names are file names in /data/pkg/db. */
 static bool lp_name_ok(const char *s)
 {
@@ -1171,12 +1201,167 @@ static void feed(linebuf_t *lb, const char *data, long n,
     }
 }
 
+/* flatpak has no status pipe. Given -y but not --noninteractive, and no
+ * terminal, it prints its plan first - one numbered row per ref, in the
+ * order it will work through them:
+ *     1.\t    \tnet.example.App\tstable\ti\tflathub\t< 45.7 MB
+ * - and then, for the row it is on, lines like
+ *     Installing… ████▌   93%  3.0 MB/s  00:01
+ * The percentage is that row's alone. A bare "Installing…" starts the next
+ * row, and so does the percentage falling back; the sizes in the plan
+ * weigh the rows, so a 250 MB runtime moves the bar more than the 5 MB
+ * application that needed it. */
+#define FP_ROWS 64
+static bool flatpak_job;
+static int fp_rows, fp_row, fp_last;
+static bool fp_next;
+static long fp_kb[FP_ROWS];
+static char fp_name[FP_ROWS][72];
+static char fp_error[200];
+
+static void flatpak_begin(void)
+{
+    flatpak_job = true;
+    fp_rows = fp_row = 0;
+    fp_last = 0;
+    fp_next = false;
+    fp_error[0] = '\0';
+}
+
+static bool has_digit(const char *s)
+{
+    for (; *s; s++)
+        if (*s >= '0' && *s <= '9')
+            return true;
+    return false;
+}
+
+/* "< 45.7 MB" in kilobytes - flatpak puts a no-break space before the
+ * unit. One decimal is all it ever prints. */
+static long fp_size_kb(const char *s)
+{
+    while (*s && (*s < '0' || *s > '9'))
+        s++;
+    long whole = 0, tenth = 0;
+    while (*s >= '0' && *s <= '9')
+        whole = whole * 10 + (*s++ - '0');
+    if (*s == '.' && s[1] >= '0' && s[1] <= '9') {
+        tenth = s[1] - '0';
+        s += 2;
+        while (*s >= '0' && *s <= '9')
+            s++;
+    }
+    while (*s == ' ' || (unsigned char)*s == 0xc2 || (unsigned char)*s == 0xa0)
+        s++;
+    long tenths = whole * 10 + tenth;
+    switch (*s) {
+    case 'k': return tenths / 10;
+    case 'M': return tenths * 100;
+    case 'G': return tenths * 100000;
+    default:  return tenths / 10000;
+    }
+}
+
+/* A row of the plan: "N.\t" and tab-separated fields - status, ref,
+ * branch, op, remote, size. The first non-blank field is the ref. */
+static bool fp_plan_row(const char *s)
+{
+    long n = 0;
+    const char *p = s;
+    while (*p >= '0' && *p <= '9')
+        n = n * 10 + (*p++ - '0');
+    if (p == s || p[0] != '.' || p[1] != '\t' || n != fp_rows + 1 || fp_rows >= FP_ROWS)
+        return false;
+    p += 2;
+    fp_name[fp_rows][0] = '\0';
+    fp_kb[fp_rows] = 0;
+    while (*p) {
+        const char *t = strchr(p, '\t');
+        size_t len = t ? (size_t)(t - p) : strlen(p);
+        char f[80];
+        if (len >= sizeof f) len = sizeof f - 1;
+        memcpy(f, p, len);
+        f[len] = '\0';
+        char *v = f;
+        while (*v == ' ') v++;
+        if (*v) {
+            if (!fp_name[fp_rows][0])
+                strlcpy(fp_name[fp_rows], v, sizeof fp_name[0]);
+            else if (strchr(v, 'B') && has_digit(v))
+                fp_kb[fp_rows] = fp_size_kb(v);
+        }
+        if (!t) break;
+        p = t + 1;
+    }
+    fp_rows++;
+    return true;
+}
+
+static void flatpak_line(const char *s)
+{
+    if (starts(s, "Error: ")) {
+        strlcpy(fp_error, s + 7, sizeof fp_error);
+        return;
+    }
+    if (*s >= '0' && *s <= '9' && fp_plan_row(s))
+        return;
+    /* "Installing…", "Updating…", "Uninstalling…": a verb, and maybe a bar. */
+    const char *dots = strstr(s, "\xe2\x80\xa6");
+    if (!dots || fp_rows == 0)
+        return;
+    const char *pc = strchr(dots, '%');
+    if (!pc) {
+        fp_next = true;
+        return;
+    }
+    const char *d = pc;
+    while (d > dots && d[-1] >= '0' && d[-1] <= '9')
+        d--;
+    if (d == pc)
+        return;
+    int pct = atoi(d);
+    if (pct > 100) pct = 100;
+    if (fp_row == 0 || fp_next || pct + 5 < fp_last) {
+        if (fp_row < fp_rows)
+            fp_row++;
+        fp_next = false;
+    }
+    fp_last = pct;
+
+    long long total = 0, before = 0;
+    for (int i = 0; i < fp_rows; i++) {
+        long w = fp_kb[i] > 0 ? fp_kb[i] : 1000;
+        total += w;
+        if (i < fp_row - 1)
+            before += w;
+    }
+    long cur = fp_kb[fp_row - 1] > 0 ? fp_kb[fp_row - 1] : 1000;
+    int all = (int)((before * 100 + (long long)cur * pct) / total);
+
+    /* What the bar is on, and how fast: "org.freedesktop.Platform (2/6)  3.0 MB/s". */
+    const char *speed = pc + 1;
+    while (*speed == ' ') speed++;
+    int sl = 0;
+    while (speed[sl] && speed[sl] != ' ') sl++;
+    const char *unit = speed + sl;
+    while (*unit == ' ') unit++;
+    int ul = 0;
+    while (unit[ul] && unit[ul] != ' ') ul++;
+    char text[160];
+    snprintf(text, sizeof text, "%s (%d/%d)  %.*s %.*s", fp_name[fp_row - 1],
+             fp_row, fp_rows, sl, speed, ul, unit);
+    progress(all, text);
+}
+
 static void out_line(char *s)
 {
     /* Drop the blank-ish noise mkfs prints between phases. */
     while (*s == ' ') s++;
-    if (*s)
-        say(s);
+    if (!*s)
+        return;
+    if (flatpak_job)
+        flatpak_line(s);
+    say(s);
 }
 
 /* Run one program to the end: argv[0] is an absolute path. Its stdout
@@ -1512,6 +1697,104 @@ static void pkg_run(const char *verb, char **names, int n, const char *ok)
 }
 
 static void v_pkg_update(char **a, int n)  { (void)a; (void)n; pkg_run("update", NULL, 0, "index updated"); }
+
+/* ── Flatpak ────────────────────────────────────────────────────────
+ *
+ * Applications from Flathub, installed system-wide (/var/lib/flatpak),
+ * for every account, the way apt installs. Flathub is added the first
+ * time it is needed, from its own .flatpakrepo (which carries the signing
+ * key), so an image that never installs anything from it never asks
+ * Flathub for anything either. -y answers what flatpak would ask - yes to
+ * the runtimes an application needs - and stdin is /dev/null, so nothing
+ * waits for a terminal; --noninteractive is left off because it also
+ * turns off the progress lines the Software app's bar is drawn from. */
+
+#define FLATHUB_REPO "https://dl.flathub.org/repo/flathub.flatpakrepo"
+
+static bool flatpak_ready(char *fp, size_t n)
+{
+    if (!need_tool("flatpak", "flatpak", fp, n))
+        return false;
+    char *argv[] = { fp, "remote-add", "--system", "--if-not-exists",
+                     "flathub", FLATHUB_REPO, NULL };
+    if (run(argv, STAT_NONE) != 0) {
+        failed("failed", "could not add Flathub - is the computer online?");
+        return false;
+    }
+    return true;
+}
+
+static void flatpak_with(const char *what, const char *const *opts,
+                         char **ids, int n, const char *ok)
+{
+    char fp[64];
+    if (!flatpak_ready(fp, sizeof fp))
+        return;
+    char *argv[MAX_FIELDS + 16];
+    int a = 0;
+    argv[a++] = fp;
+    for (int i = 0; opts[i]; i++)
+        argv[a++] = (char *)opts[i];
+    for (int i = 0; i < n; i++)
+        argv[a++] = ids[i];
+    argv[a] = NULL;
+    progress(0, what);
+    flatpak_begin();
+    int rc = run(argv, STAT_NONE);
+    flatpak_job = false;
+    if (rc == 0) {
+        progress(100, ok);
+        done(ok);
+    } else {
+        char msg[240];
+        if (fp_error[0])
+            strlcpy(msg, fp_error, sizeof msg);
+        else
+            snprintf(msg, sizeof msg, "flatpak %s exited with %d", what, rc);
+        failed("failed", msg);
+    }
+}
+
+/* The catalogue the Software app searches and draws its icons from
+ * (/var/lib/flatpak/appstream). Changes nothing anybody runs, so any
+ * account may ask for it, like reading apt's lists. */
+static void v_flatpak_refresh(char **a, int n)
+{
+    (void)a; (void)n;
+    static const char *const o[] = { "update", "--system", "--appstream",
+                                     "--noninteractive", "flathub", NULL };
+    flatpak_with("update --appstream", o, NULL, 0, "Flathub catalogue updated");
+}
+
+static void v_flatpak_install(char **a, int n)
+{
+    static const char *const o[] = { "install", "--system", "-y",
+                                     "flathub", NULL };
+    flatpak_with("install", o, a, n, "installed");
+}
+
+/* The runtimes nothing uses any more go with the last application that
+ * needed them: a runtime is hundreds of megabytes nobody would otherwise
+ * know to remove. */
+static void v_flatpak_remove(char **a, int n)
+{
+    static const char *const o[] = { "uninstall", "--system", "-y", NULL };
+    flatpak_with("uninstall", o, a, n, "removed");
+    if (job_rc != 0)
+        return;
+    char fp[64];
+    if (tool("flatpak", fp, sizeof fp)) {
+        char *argv[] = { fp, "uninstall", "--system", "-y", "--noninteractive",
+                         "--unused", NULL };
+        run(argv, STAT_NONE);
+    }
+}
+
+static void v_flatpak_update(char **a, int n)
+{
+    static const char *const o[] = { "update", "--system", "-y", NULL };
+    flatpak_with("update", o, a, n, n ? "updated" : "everything is up to date");
+}
 static void v_pkg_install(char **a, int n) { pkg_run("install", a, n, "installed"); }
 static void v_pkg_remove(char **a, int n)  { pkg_run("remove", a, n, "removed"); }
 
@@ -2421,8 +2704,8 @@ static void answer_auth(u32 uid, const char *user, const char *who,
  * The table of verbs
  * ═══════════════════════════════════════════════════════════════════ */
 
-typedef enum { ARG_DEBIAN, ARG_LPPKG, ARG_DEV, ARG_DISK, ARG_PART, ARG_FS,
-               ARG_SIZE, ARG_LABEL, ARG_HEX } argkind_t;
+typedef enum { ARG_DEBIAN, ARG_LPPKG, ARG_FLATPAK, ARG_DEV, ARG_DISK, ARG_PART,
+               ARG_FS, ARG_SIZE, ARG_LABEL, ARG_HEX } argkind_t;
 
 typedef struct {
     const char *verb;
@@ -2448,6 +2731,10 @@ static const verb_t VERBS[] = {
     { "pkg-update",  true,  false, 0, 0,  {0}, v_pkg_update, "refresh our own package index" },
     { "pkg-install", true,  false, 1, 16, {ARG_LPPKG}, v_pkg_install, "install our own packages" },
     { "pkg-remove",  true,  false, 1, 16, {ARG_LPPKG}, v_pkg_remove, "remove our own packages" },
+    { "flatpak-refresh", false, false, 0, 0,  {0}, v_flatpak_refresh, "download Flathub's catalogue" },
+    { "flatpak-install", true,  false, 1, 16, {ARG_FLATPAK}, v_flatpak_install, "install applications from Flathub" },
+    { "flatpak-remove",  true,  false, 1, 16, {ARG_FLATPAK}, v_flatpak_remove, "remove Flathub applications" },
+    { "flatpak-update",  true,  false, 0, 16, {ARG_FLATPAK}, v_flatpak_update, "update everything from Flathub, or the named applications" },
     { "mount",       true,  true,  1, 1,  {ARG_DEV}, v_mount, "mount a partition under /media" },
     { "unmount",     true,  true,  1, 1,  {ARG_DEV}, v_unmount, "unmount it again" },
     { "eject",       true,  true,  1, 1,  {ARG_DISK}, v_eject, "unmount a whole drive and power it down" },
@@ -2474,6 +2761,10 @@ static bool arg_ok(argkind_t k, const char *s, fstype_t fs, char *why,
     case ARG_LPPKG:
         if (lp_name_ok(s)) return true;
         snprintf(why, whyn, "not a package name");
+        return false;
+    case ARG_FLATPAK:
+        if (flatpak_id_ok(s)) return true;
+        snprintf(why, whyn, "not a Flatpak application ID");
         return false;
     case ARG_DEV:
     case ARG_DISK:

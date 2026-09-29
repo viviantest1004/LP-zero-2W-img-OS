@@ -43,7 +43,11 @@ if grep -qx 'toggle_fullscreen = <super> KEY_F' "$XDG_CONFIG_HOME/wayfire.ini" 2
 fi
 # 런처가 앱 목록을 여기서 읽는다. 비워 두면 fuzzel 이 아무것도 찾지
 # 못하고 빈 창이 뜬다.
-export XDG_DATA_DIRS=/usr/local/share:/usr/share
+# Flatpak's exports come after /usr/local/share (LP's own overrides stay
+# first) and before /usr/share: an application installed from Flathub
+# through the Software app shows up in the app grid and the dock, with
+# its icon, the moment it is installed (both watch GAppInfoMonitor).
+export XDG_DATA_DIRS=/usr/local/share:/var/lib/flatpak/exports/share:/usr/share
 export XDG_CONFIG_DIRS=/etc/xdg
 export GTK_THEME=LP
 # Every GTK window draws its own title bar - the same minimise, maximise

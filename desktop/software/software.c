@@ -50,6 +50,7 @@
 #include "lp-kit.h"
 
 #include <gio/gdesktopappinfo.h>
+#include <glib/gstdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/statvfs.h>
@@ -66,6 +67,10 @@
 #define LP_INDEX    "/data/pkg/index"
 #define LP_DB       "/data/pkg/db"
 #define LP_REPO     "/data/pkg/repo"
+/* Flathub's catalogue, as lp-privd's flatpak-refresh downloads it: the
+ * appstream data `flatpak search` reads, and an icon per application. */
+#define FLATHUB_AS    "/var/lib/flatpak/appstream/flathub/x86_64/active"
+#define FLATHUB_ICONS FLATHUB_AS "/icons/128x128"
 
 #define SEARCH_MAX  150      /* apt-cache search answers are cut here */
 #define LOG_MAX     4000     /* lines kept in the job log */
@@ -74,7 +79,7 @@
  * A package, as every page shows it
  * ═══════════════════════════════════════════════════════════════════ */
 
-typedef enum { SRC_DEBIAN, SRC_LP } PkgSource;
+typedef enum { SRC_DEBIAN, SRC_LP, SRC_FLATPAK } PkgSource;
 typedef enum { ST_IDLE, ST_QUEUED, ST_WORKING } PkgState;
 
 #define LPS_TYPE_PKG (lps_pkg_get_type())
@@ -165,9 +170,24 @@ static void dpkg_info_free(gpointer d)
 }
 
 typedef struct {
+    char   *name;
+    char   *version;
+    gint64  size_kib;
+} FlatpakInfo;
+
+static void flatpak_info_free(gpointer d)
+{
+    FlatpakInfo *i = d;
+    g_free(i->name);
+    g_free(i->version);
+    g_free(i);
+}
+
+typedef struct {
     GHashTable *dpkg;          /* package -> DpkgInfo (installed or half) */
     GHashTable *desktop_pkg;   /* desktop id -> package */
     GHashTable *lp_installed;  /* LP package -> version text */
+    GHashTable *flatpak;       /* Flathub application ID -> FlatpakInfo */
 } Facts;
 
 static void facts_free(Facts *f)
@@ -177,6 +197,7 @@ static void facts_free(Facts *f)
     g_clear_pointer(&f->dpkg, g_hash_table_unref);
     g_clear_pointer(&f->desktop_pkg, g_hash_table_unref);
     g_clear_pointer(&f->lp_installed, g_hash_table_unref);
+    g_clear_pointer(&f->flatpak, g_hash_table_unref);
     g_free(f);
 }
 
@@ -293,6 +314,53 @@ static GHashTable *read_lp_installed(void)
     return h;
 }
 
+/* "123.4 MB", "980 kB", "1.2 GB" (GLib's g_format_size, which puts a
+ * no-break space between the number and the unit) -> KiB, or -1. */
+static gint64 size_text_kib(const char *s)
+{
+    char *end = NULL;
+    double v = g_ascii_strtod(s, &end);
+    if (!end || end == s)
+        return -1;
+    while (*end == ' ' || (guchar)*end == 0xc2 || (guchar)*end == 0xa0)
+        end++;
+    double mul = g_str_has_prefix(end, "kB") ? 1e3 : g_str_has_prefix(end, "MB") ? 1e6 :
+                 g_str_has_prefix(end, "GB") ? 1e9 : g_str_has_prefix(end, "TB") ? 1e12 : 1;
+    return (gint64)(v * mul / 1024);
+}
+
+/* The Flathub applications installed for everybody. `flatpak list`
+ * separates the columns it was asked for with tabs when it is not
+ * talking to a terminal. No flatpak, or nothing installed: an empty
+ * table. */
+static GHashTable *read_flatpak_installed(void)
+{
+    GHashTable *h = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                          flatpak_info_free);
+    char *argv[] = { "flatpak", "list", "--system", "--app",
+                     "--columns=application,name,version,size", NULL };
+    char *out = NULL;
+    if (!g_spawn_sync(NULL, argv, NULL,
+                      G_SPAWN_SEARCH_PATH | G_SPAWN_STDERR_TO_DEV_NULL,
+                      NULL, NULL, &out, NULL, NULL, NULL))
+        return h;
+    char **lines = g_strsplit(out ? out : "", "\n", 0);
+    for (int i = 0; lines[i]; i++) {
+        char **f = g_strsplit(lines[i], "\t", 0);
+        if (f[0] && f[1] && strchr(f[0], '.') && !strchr(f[0], ' ')) {
+            FlatpakInfo *fi = g_new0(FlatpakInfo, 1);
+            fi->name = g_strdup(f[1]);
+            fi->version = g_strdup(f[2] ? f[2] : "");
+            fi->size_kib = f[2] && f[3] ? size_text_kib(f[3]) : -1;
+            g_hash_table_replace(h, g_strdup(f[0]), fi);
+        }
+        g_strfreev(f);
+    }
+    g_strfreev(lines);
+    g_free(out);
+    return h;
+}
+
 static void facts_thread(GTask *task, gpointer src, gpointer data, GCancellable *c)
 {
     (void)src; (void)data; (void)c;
@@ -300,6 +368,7 @@ static void facts_thread(GTask *task, gpointer src, gpointer data, GCancellable 
     f->dpkg = read_dpkg_status();
     f->desktop_pkg = read_desktop_owners();
     f->lp_installed = read_lp_installed();
+    f->flatpak = read_flatpak_installed();
     g_task_return_pointer(task, f, (GDestroyNotify)facts_free);
 }
 
@@ -308,7 +377,7 @@ static void facts_thread(GTask *task, gpointer src, gpointer data, GCancellable 
  * ═══════════════════════════════════════════════════════════════════ */
 
 typedef enum { OP_INSTALL, OP_REMOVE, OP_UPGRADE, OP_UPGRADE_ALL,
-               OP_REFRESH } OpKind;
+               OP_REFRESH, OP_FLAT_REFRESH, OP_FLAT_UPGRADE_ALL } OpKind;
 
 typedef struct {
     OpKind  kind;
@@ -344,6 +413,7 @@ typedef struct {
     GListStore *lp_store;      /* LP's own packages */
     GtkWidget  *installed_stack;
     GListStore *updates_store;
+    guint       updates_gen;   /* which check the lists belong to */
     GtkWidget  *updates_title;
     GtkWidget  *update_all;
     GtkWidget  *sources_box;
@@ -471,6 +541,37 @@ static const Featured FEATURED[] = {
       "Digital painting", "디지털 페인팅" },
 };
 
+/* What people ask for by name and Debian does not carry, or carries old:
+ * Flathub's. Installed for everybody through lp-privd, as the Debian ones
+ * are; `pkg` is the Flathub application ID, and the icon comes from
+ * Flathub's catalogue once it has been downloaded (flatpak-refresh). */
+static const Featured POPULAR[] = {
+    { "com.discordapp.Discord", NULL, "Discord", "디스코드",
+      "Voice, video and text chat", "음성, 영상, 텍스트 채팅" },
+    { "com.spotify.Client", NULL, "Spotify", "스포티파이",
+      "Music and podcasts", "음악과 팟캐스트" },
+    { "us.zoom.Zoom", NULL, "Zoom", "줌",
+      "Video meetings", "화상 회의" },
+    { "com.google.Chrome", NULL, "Google Chrome", "구글 크롬",
+      "Google's web browser", "구글 웹 브라우저" },
+    { "com.visualstudio.code", NULL, "Visual Studio Code", "비주얼 스튜디오 코드",
+      "Code editor", "코드 편집기" },
+    { "com.valvesoftware.Steam", NULL, "Steam", "스팀",
+      "Games and the store", "게임과 게임 상점" },
+    { "com.obsproject.Studio", NULL, "OBS Studio", "OBS 스튜디오",
+      "Record the screen and stream", "화면 녹화와 방송" },
+    { "org.telegram.desktop", NULL, "Telegram", "텔레그램",
+      "Messaging", "메신저" },
+    { "com.slack.Slack", NULL, "Slack", "슬랙",
+      "Team chat", "팀 채팅" },
+    { "md.obsidian.Obsidian", NULL, "Obsidian", "옵시디언",
+      "Notes and a knowledge base", "메모와 지식 정리" },
+    { "com.brave.Browser", NULL, "Brave", "브레이브",
+      "Private web browser", "개인정보를 지키는 브라우저" },
+    { "org.blender.Blender", NULL, "Blender", "블렌더",
+      "3D modelling and animation", "3D 모델링과 애니메이션" },
+};
+
 /* ═══════════════════════════════════════════════════════════════════
  * One row, used by every list
  * ═══════════════════════════════════════════════════════════════════ */
@@ -487,23 +588,38 @@ typedef struct {
     gulong     handler;
 } Row;
 
-static GtkWidget *icon_tile(const char *icon, int px)
+/* An icon is a theme name, or - for a Flathub application not installed
+ * yet - the path of the PNG in Flathub's catalogue. */
+static void set_icon(GtkWidget *img, const char *icon)
 {
     GtkIconTheme *th = gtk_icon_theme_get_for_display(gdk_display_get_default());
-    GtkWidget *img;
-    if (icon && gtk_icon_theme_has_icon(th, icon))
-        img = gtk_image_new_from_icon_name(icon);
+    if (icon && icon[0] == '/')
+        gtk_image_set_from_file(GTK_IMAGE(img), icon);
     else
-        img = gtk_image_new_from_icon_name("package-x-generic");
+        gtk_image_set_from_icon_name(GTK_IMAGE(img),
+            (icon && gtk_icon_theme_has_icon(th, icon)) ? icon : "package-x-generic");
+}
+
+static GtkWidget *icon_tile(const char *icon, int px)
+{
+    GtkWidget *img = gtk_image_new();
+    set_icon(img, icon);
     gtk_image_set_pixel_size(GTK_IMAGE(img), px);
     return img;
 }
 
-static void set_icon(GtkWidget *img, const char *icon)
+/* A Flathub application's icon: its own, exported into the icon theme,
+ * once it is installed; the catalogue's before that; none without either. */
+static char *flatpak_icon(const char *id)
 {
     GtkIconTheme *th = gtk_icon_theme_get_for_display(gdk_display_get_default());
-    gtk_image_set_from_icon_name(GTK_IMAGE(img),
-        (icon && gtk_icon_theme_has_icon(th, icon)) ? icon : "package-x-generic");
+    if (gtk_icon_theme_has_icon(th, id))
+        return g_strdup(id);
+    char *png = g_strdup_printf("%s/%s.png", FLATHUB_ICONS, id);
+    if (g_file_test(png, G_FILE_TEST_EXISTS))
+        return png;
+    g_free(png);
+    return NULL;
 }
 
 /* The button says what a tap will do, and nothing else - "Install",
@@ -550,6 +666,7 @@ static void row_fill(Row *r, gboolean updates_page)
     else {
         char *sz = size_line(p);
         const char *src = p->src == SRC_LP ? T("LP package", "LP 패키지") :
+                          p->src == SRC_FLATPAK ? "Flathub" :
                           strcmp(p->title, p->name) == 0 ? T("Debian package", "데비안 패키지") :
                           p->name;
         meta = *sz ? g_strdup_printf("%s · %s", src, sz) : g_strdup(src);
@@ -776,7 +893,25 @@ static void fill_apps(void)
         if (!id)
             continue;
         const char *pkg = g_hash_table_lookup(A->facts->desktop_pkg, id);
-        LpsPkg *p = pkg_new(SRC_DEBIAN, pkg ? pkg : id);
+        /* An entry exported by Flatpak is a Flathub application, removed
+         * by its application ID (the file name without .desktop). */
+        const char *file = G_IS_DESKTOP_APP_INFO(ai) ?
+            g_desktop_app_info_get_filename(G_DESKTOP_APP_INFO(ai)) : NULL;
+        gboolean flat = file && strstr(file, "/flatpak/exports/share/applications/");
+        LpsPkg *p;
+        if (flat) {
+            char *appid = g_str_has_suffix(id, ".desktop") ?
+                g_strndup(id, strlen(id) - 8) : g_strdup(id);
+            p = pkg_new(SRC_FLATPAK, appid);
+            FlatpakInfo *fi = g_hash_table_lookup(A->facts->flatpak, appid);
+            if (fi) {
+                p->size_kib = fi->size_kib;
+                p->version = g_strdup(fi->version);
+            }
+            g_free(appid);
+        } else {
+            p = pkg_new(SRC_DEBIAN, pkg ? pkg : id);
+        }
         g_free(p->title);
         p->title = g_strdup(g_app_info_get_display_name(ai));
         const char *d = g_app_info_get_description(ai);
@@ -789,7 +924,9 @@ static void fill_apps(void)
         }
         p->desktop_id = g_strdup(id);
         p->installed = TRUE;
-        if (pkg) {
+        if (flat) {
+            /* the size and version came from `flatpak list` above */
+        } else if (pkg) {
             DpkgInfo *di = g_hash_table_lookup(A->facts->dpkg, pkg);
             if (di) {
                 p->size_kib = di->size_kib;
@@ -920,6 +1057,38 @@ static void refresh_pkg(LpsPkg *p)
     }
     if (p->src == SRC_LP) {
         p->installed = g_hash_table_contains(A->facts->lp_installed, p->name);
+    } else if (p->src == SRC_FLATPAK) {
+        FlatpakInfo *fi = g_hash_table_lookup(A->facts->flatpak, p->name);
+        p->installed = fi != NULL;
+        if (fi) {
+            if (fi->size_kib >= 0)
+                p->size_kib = fi->size_kib;
+            g_free(p->version);
+            p->version = g_strdup(fi->version);
+        } else {
+            /* Flathub's catalogue has no sizes, and what the application
+             * takes is the least of it - the runtime under it can be a
+             * gigabyte. No number is better than a wrong one. */
+            p->size_kib = -1;
+        }
+        /* Its application entry, for "Open", once Flatpak has exported
+         * it; its icon, from the catalogue or from the installed app. */
+        g_clear_pointer(&p->desktop_id, g_free);
+        if (p->installed) {
+            char *did = g_strconcat(p->name, ".desktop", NULL);
+            GDesktopAppInfo *ai = g_desktop_app_info_new(did);
+            if (ai) {
+                p->desktop_id = did;
+                g_object_unref(ai);
+            } else {
+                g_free(did);
+            }
+        }
+        char *ic = flatpak_icon(p->name);
+        if (ic) {
+            g_free(p->icon);
+            p->icon = ic;
+        }
     } else {
         DpkgInfo *di = g_hash_table_lookup(A->facts->dpkg, p->name);
         gboolean was = p->installed;
@@ -1097,9 +1266,52 @@ static int by_rank(gconstpointer a, gconstpointer b)
     return d ? d : strcmp(x->name, y->name);
 }
 
+/* One search, two sources: Flathub's catalogue (`flatpak search`, no
+ * privilege needed, nothing when it has not been downloaded) and then
+ * apt-cache. The Flathub answers wait here for apt's. */
+typedef struct {
+    char      *q;
+    GPtrArray *flat;          /* LpsPkg, from Flathub */
+} Search;
+
+/* Flathub matches by what a person reads - the application's name - not
+ * by the ID: "discord" is Discord before it is anything that merely
+ * mentions Discord in its description. */
+static int flat_rank(LpsPkg *p, const char *q)
+{
+    char *t = g_utf8_strdown(p->title, -1);
+    int r = strcmp(t, q) == 0 ? 0 : g_str_has_prefix(t, q) ? 1 : strstr(t, q) ? 2 :
+            strstr(p->name, q) ? 3 : 4;
+    g_free(t);
+    return r;
+}
+
+static int by_flat_rank(gconstpointer a, gconstpointer b)
+{
+    LpsPkg *x = *(LpsPkg **)a, *y = *(LpsPkg **)b;
+    int d = flat_rank(x, search_q) - flat_rank(y, search_q);
+    return d ? d : g_utf8_collate(x->title, y->title);
+}
+
+/* Shared libraries (libuuid1, liblz4-1), headers and documentation:
+ * what other packages pull in, never what anybody means by an app. A
+ * search that asks for them by name ("libuuid", "-dev") still gets them. */
+static gboolean plumbing(const char *name, const char *q)
+{
+    size_t n = strlen(name);
+    if (g_str_has_prefix(q, "lib") || strchr(q, '-'))
+        return FALSE;
+    if (g_str_has_prefix(name, "lib") && !g_str_has_prefix(name, "libreoffice") &&
+        n > 3 && g_ascii_isdigit(name[n - 1]))
+        return TRUE;
+    return g_str_has_suffix(name, "-dev") || g_str_has_suffix(name, "-doc") ||
+           g_str_has_suffix(name, "-dbgsym") || strstr(name, "t64") != NULL;
+}
+
 static void on_search_out(const char *out, gboolean ok, gpointer data)
 {
-    char *q = data;
+    Search *sr = data;
+    char *q = sr->q;
     (void)ok;
     GPtrArray *arr = g_ptr_array_new_with_free_func(g_object_unref);
     /* LP's own packages first: they are few and they are ours. */
@@ -1110,6 +1322,15 @@ static void on_search_out(const char *out, gboolean ok, gpointer data)
         else
             g_object_unref(p);
     }
+    /* Then Flathub's, best match first and at most 40 of them: apt's
+     * answers are what somebody scrolls through, these are what they
+     * came for. */
+    search_q = q;
+    g_ptr_array_sort(sr->flat, by_flat_rank);
+    for (guint i = 0; i < sr->flat->len && i < 40; i++)
+        g_ptr_array_add(arr, g_object_ref(g_ptr_array_index(sr->flat, i)));
+    g_ptr_array_unref(sr->flat);
+    g_free(sr);
     guint lp_n = arr->len;
     char **lines = g_strsplit(out, "\n", 0);
     for (int i = 0; lines[i]; i++) {
@@ -1117,6 +1338,8 @@ static void on_search_out(const char *out, gboolean ok, gpointer data)
         if (!sep)
             continue;
         *sep = '\0';
+        if (plumbing(lines[i], q))
+            continue;
         LpsPkg *p = pkg_new(SRC_DEBIAN, lines[i]);
         p->summary = g_strdup(sep + 3);
         p->icon = g_strdup(lines[i]);
@@ -1159,6 +1382,42 @@ static void on_search_out(const char *out, gboolean ok, gpointer data)
     g_free(q);
 }
 
+/* "com.discordapp.Discord<TAB>Discord<TAB>Messaging, Voice, and Video
+ * Client", one application per line (tabs: not talking to a terminal). */
+static void on_flat_search_out(const char *out, gboolean ok, gpointer data)
+{
+    Search *sr = data;
+    (void)ok;
+    sr->flat = g_ptr_array_new_with_free_func(g_object_unref);
+    GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
+    char **lines = g_strsplit(out, "\n", 0);
+    for (int i = 0; lines[i]; i++) {
+        char **f = g_strsplit(lines[i], "\t", 0);
+        if (f[0] && f[1] && strchr(f[0], '.') && !strchr(f[0], ' ') &&
+            !g_hash_table_contains(seen, f[0])) {
+            LpsPkg *p = pkg_new(SRC_FLATPAK, f[0]);
+            g_hash_table_add(seen, p->name);
+            g_free(p->title);
+            p->title = g_strdup(f[1]);
+            p->summary = g_strdup(f[2] ? f[2] : "");
+            p->icon = flatpak_icon(f[0]);
+            FlatpakInfo *fi = A->facts ? g_hash_table_lookup(A->facts->flatpak, f[0]) : NULL;
+            if (fi) {
+                p->installed = TRUE;
+                p->size_kib = fi->size_kib;
+                p->version = g_strdup(fi->version);
+                refresh_pkg(p);
+            }
+            g_ptr_array_add(sr->flat, p);
+        }
+        g_strfreev(f);
+    }
+    g_strfreev(lines);
+    g_hash_table_unref(seen);
+    const char *argv[] = { "apt-cache", "search", "--", sr->q, NULL };
+    run_cmd(argv, A->search_cancel, on_search_out, sr);
+}
+
 static gboolean do_search(gpointer d)
 {
     (void)d;
@@ -1180,8 +1439,11 @@ static gboolean do_search(gpointer d)
     gtk_list_box_unselect_all(GTK_LIST_BOX(A->sidebar));
     lp_kit_stack_show(GTK_STACK(A->stack), "search");
     A->search_cancel = g_cancellable_new();
-    const char *argv[] = { "apt-cache", "search", "--", q, NULL };
-    run_cmd(argv, A->search_cancel, on_search_out, q);
+    Search *sr = g_new0(Search, 1);
+    sr->q = q;
+    const char *argv[] = { "flatpak", "search",
+                           "--columns=application,name,description", "--", q, NULL };
+    run_cmd(argv, A->search_cancel, on_flat_search_out, sr);
     return G_SOURCE_REMOVE;
 }
 
@@ -1197,9 +1459,12 @@ static void on_search_changed(GtkEditable *e, gpointer d)
 /* ── updates ──────────────────────────────────────────────────────── */
 
 /* "name/bookworm-updates 1.2-3 amd64 [upgradable from: 1.2-2]" */
+static void on_flat_updates(const char *out, gboolean ok, gpointer data);
+static void updates_counted(void);
+
 static void on_upgradable(const char *out, gboolean ok, gpointer data)
 {
-    (void)ok; (void)data;
+    (void)ok;
     GPtrArray *arr = g_ptr_array_new_with_free_func(g_object_unref);
     char **lines = g_strsplit(out, "\n", 0);
     for (int i = 0; lines[i]; i++) {
@@ -1225,9 +1490,55 @@ static void on_upgradable(const char *out, gboolean ok, gpointer data)
         g_strfreev(f);
     }
     g_strfreev(lines);
+    if (GPOINTER_TO_UINT(data) != A->updates_gen) {
+        g_ptr_array_unref(arr);
+        return;
+    }
     g_list_store_remove_all(A->updates_store);
     g_list_store_splice(A->updates_store, 0, 0, arr->pdata, arr->len);
-    guint n = arr->len;
+    g_ptr_array_unref(arr);
+    updates_counted();
+    /* Flathub's, added to the same list when they arrive: `remote-ls`
+     * asks Flathub itself, and offline it just adds nothing. */
+    if (A->facts && g_hash_table_size(A->facts->flatpak) > 0) {
+        const char *argv[] = { "flatpak", "remote-ls", "--system", "--updates",
+                               "--app", "--columns=application,name,version", NULL };
+        run_cmd(argv, NULL, on_flat_updates, data);
+    }
+}
+
+static void on_flat_updates(const char *out, gboolean ok, gpointer data)
+{
+    (void)ok;
+    if (GPOINTER_TO_UINT(data) != A->updates_gen)
+        return;
+    char **lines = g_strsplit(out, "\n", 0);
+    for (int i = 0; lines[i]; i++) {
+        char **f = g_strsplit(lines[i], "\t", 0);
+        FlatpakInfo *fi = f[0] && A->facts ? g_hash_table_lookup(A->facts->flatpak, f[0]) : NULL;
+        if (fi) {
+            LpsPkg *p = pkg_new(SRC_FLATPAK, f[0]);
+            g_free(p->title);
+            p->title = g_strdup(fi->name);
+            p->version = g_strdup(fi->version);
+            p->new_version = g_strdup(f[1] && f[2] && *f[2] ? f[2] : "");
+            p->summary = g_strdup("");
+            p->installed = TRUE;
+            p->icon = flatpak_icon(f[0]);
+            g_list_store_append(A->updates_store, p);
+            g_object_unref(p);
+        }
+        g_strfreev(f);
+    }
+    g_strfreev(lines);
+    updates_counted();
+}
+
+/* The title, the "Update all" button and the sidebar badge, from what
+ * the list holds now. */
+static void updates_counted(void)
+{
+    guint n = g_list_model_get_n_items(G_LIST_MODEL(A->updates_store));
     char *t = n ? g_strdup_printf(lp_korean() ? "업데이트 %u개" :
                                   (n == 1 ? "%u update available" : "%u updates available"), n)
                 : g_strdup(T("Everything is up to date", "모두 최신입니다"));
@@ -1238,13 +1549,14 @@ static void on_upgradable(const char *out, gboolean ok, gpointer data)
     gtk_label_set_text(GTK_LABEL(A->updates_badge), b);
     gtk_widget_set_visible(A->updates_badge, n > 0);
     g_free(b);
-    g_ptr_array_unref(arr);
 }
 
 static void load_updates(void)
 {
+    /* A newer check makes the answers to an older one stale. */
+    A->updates_gen++;
     const char *argv[] = { "apt", "list", "--upgradable", NULL };
-    run_cmd(argv, NULL, on_upgradable, NULL);
+    run_cmd(argv, NULL, on_upgradable, GUINT_TO_POINTER(A->updates_gen));
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -1254,11 +1566,15 @@ static void load_updates(void)
 static const char *op_verb(Op *op)
 {
     switch (op->kind) {
-    case OP_INSTALL:     return op->pkg->src == SRC_LP ? "pkg-install" : "apt-install";
-    case OP_REMOVE:      return op->pkg->src == SRC_LP ? "pkg-remove" : "apt-remove";
-    case OP_UPGRADE:     return "apt-upgrade";
+    case OP_INSTALL:     return op->pkg->src == SRC_LP ? "pkg-install" :
+                                op->pkg->src == SRC_FLATPAK ? "flatpak-install" : "apt-install";
+    case OP_REMOVE:      return op->pkg->src == SRC_LP ? "pkg-remove" :
+                                op->pkg->src == SRC_FLATPAK ? "flatpak-remove" : "apt-remove";
+    case OP_UPGRADE:     return op->pkg->src == SRC_FLATPAK ? "flatpak-update" : "apt-upgrade";
     case OP_UPGRADE_ALL: return "apt-upgrade";
     case OP_REFRESH:     return "apt-update";
+    case OP_FLAT_REFRESH:     return "flatpak-refresh";
+    case OP_FLAT_UPGRADE_ALL: return "flatpak-update";
     }
     return "ping";
 }
@@ -1273,6 +1589,8 @@ static char *op_title(Op *op, gboolean done, gboolean ok)
         case OP_UPGRADE: return g_strdup_printf(T("Updating %s", "%s 업데이트 중"), n);
         case OP_UPGRADE_ALL: return g_strdup(T("Updating everything", "모두 업데이트 중"));
         case OP_REFRESH: return g_strdup(T("Checking for updates", "업데이트 확인 중"));
+        case OP_FLAT_REFRESH: return g_strdup(T("Getting Flathub's catalogue", "Flathub 목록 받는 중"));
+        case OP_FLAT_UPGRADE_ALL: return g_strdup(T("Updating Flathub apps", "Flathub 앱 업데이트 중"));
         }
     }
     if (!ok) {
@@ -1282,6 +1600,8 @@ static char *op_title(Op *op, gboolean done, gboolean ok)
         case OP_UPGRADE: return g_strdup_printf(T("%s was not updated", "%s 을(를) 업데이트하지 못했습니다"), n);
         case OP_UPGRADE_ALL: return g_strdup(T("The update did not finish", "업데이트를 마치지 못했습니다"));
         case OP_REFRESH: return g_strdup(T("Could not check for updates", "업데이트를 확인하지 못했습니다"));
+        case OP_FLAT_REFRESH: return g_strdup(T("Could not reach Flathub", "Flathub 에 연결하지 못했습니다"));
+        case OP_FLAT_UPGRADE_ALL: return g_strdup(T("The Flathub update did not finish", "Flathub 업데이트를 마치지 못했습니다"));
         }
     }
     switch (op->kind) {
@@ -1290,6 +1610,8 @@ static char *op_title(Op *op, gboolean done, gboolean ok)
     case OP_UPGRADE: return g_strdup_printf(T("%s is up to date", "%s 최신"), n);
     case OP_UPGRADE_ALL: return g_strdup(T("Everything is up to date", "모두 최신입니다"));
     case OP_REFRESH: return g_strdup(T("Package lists are up to date", "패키지 목록을 새로 받았습니다"));
+    case OP_FLAT_REFRESH: return g_strdup(T("Flathub's catalogue is up to date", "Flathub 목록을 새로 받았습니다"));
+    case OP_FLAT_UPGRADE_ALL: return g_strdup(T("Flathub apps are up to date", "Flathub 앱이 모두 최신입니다"));
     }
     return g_strdup("");
 }
@@ -1385,9 +1707,12 @@ static void on_job_done(gboolean ok, const char *why, const char *text, gpointer
         A->last_fail = g_strdup(title);
         /* The daemon's own sentence: "libgtk-4-1 is part of the desktop
          * itself" says more than any rewording of it here. */
+        if (text && strstr(text, "Not enough disk space"))
+            text = T("Not enough free space on the disk",
+                     "디스크에 남은 공간이 부족합니다");
         char *msg = g_strdup_printf("%s%s%s", text ? text : "",
                                     why && strcmp(why, "failed") == 0 ?
-                                    T(" - the log has apt's reason", " - 로그에 apt 가 남긴 이유가 있습니다") : "",
+                                    T(" - the log has the reason", " - 로그에 이유가 있습니다") : "",
                                     "");
         gtk_label_set_text(GTK_LABEL(A->job_detail), msg);
         g_free(msg);
@@ -1463,7 +1788,8 @@ static void run_next(void)
     g_free(head);
 
     const char *fields[4] = { op_verb(op), NULL, NULL, NULL };
-    if (op->pkg && op->kind != OP_UPGRADE_ALL && op->kind != OP_REFRESH)
+    if (op->pkg && op->kind != OP_UPGRADE_ALL && op->kind != OP_REFRESH &&
+        op->kind != OP_FLAT_REFRESH && op->kind != OP_FLAT_UPGRADE_ALL)
         fields[1] = op->pkg->name;
     lp_priv_run(win(), fields, op_why(op), on_job_line, on_job_done, NULL);
 }
@@ -1532,6 +1858,7 @@ static GtkWidget *page_head(const char *title, const char *sub)
 
 typedef struct {
     LpsPkg    *pkg;
+    GtkWidget *icon;
     GtkWidget *size;
     GtkWidget *action;
     GtkWidget *open;
@@ -1540,6 +1867,7 @@ typedef struct {
 static void card_fill(Card *c)
 {
     LpsPkg *p = c->pkg;
+    set_icon(c->icon, p->icon);
     char *s = size_line(p);
     gtk_label_set_text(GTK_LABEL(c->size), *s ? s : " ");
     g_free(s);
@@ -1578,8 +1906,8 @@ static GtkWidget *card_new(LpsPkg *p)
     g_object_set_data_full(G_OBJECT(box), "card", c, g_free);
 
     GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
-    GtkWidget *ic = icon_tile(p->icon, 56);
-    gtk_box_append(GTK_BOX(top), ic);
+    c->icon = icon_tile(p->icon, 56);
+    gtk_box_append(GTK_BOX(top), c->icon);
     GtkWidget *tx = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
     gtk_widget_set_valign(tx, GTK_ALIGN_CENTER);
     gtk_widget_set_hexpand(tx, TRUE);
@@ -1625,6 +1953,42 @@ static GtkWidget *card_new(LpsPkg *p)
     return box;
 }
 
+/* A heading and its cards. A grid of three, not a GtkFlowBox: 4.8's
+ * homogeneous flow box under-measures its height for wrapped two-line
+ * labels, and the last rows were cut off inside the scrolled window. */
+static GtkWidget *explore_section(const char *title, const char *sub,
+                                  const Featured *list, guint n, PkgSource src)
+{
+    GtkWidget *sec = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    GtkWidget *h = gtk_label_new(title);
+    gtk_widget_add_css_class(h, "lps-h2");
+    gtk_label_set_xalign(GTK_LABEL(h), 0);
+    gtk_box_append(GTK_BOX(sec), h);
+    if (sub) {
+        GtkWidget *s = gtk_label_new(sub);
+        gtk_widget_add_css_class(s, "lps-sub");
+        gtk_label_set_xalign(GTK_LABEL(s), 0);
+        gtk_label_set_wrap(GTK_LABEL(s), TRUE);
+        gtk_box_append(GTK_BOX(sec), s);
+    }
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_column_homogeneous(GTK_GRID(grid), TRUE);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 12);
+    for (guint i = 0; i < n; i++) {
+        const Featured *f = &list[i];
+        LpsPkg *p = pkg_new(src, f->pkg);
+        g_free(p->title);
+        p->title = g_strdup(T(f->en, f->ko));
+        p->summary = g_strdup(T(f->sum_en, f->sum_ko));
+        p->icon = src == SRC_FLATPAK ? flatpak_icon(f->pkg) : g_strdup(f->icon);
+        g_ptr_array_add(A->featured, p);
+        gtk_grid_attach(GTK_GRID(grid), card_new(p), (int)(i % 3), (int)(i / 3), 1, 1);
+    }
+    gtk_box_append(GTK_BOX(sec), grid);
+    return sec;
+}
+
 static GtkWidget *build_explore(void)
 {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
@@ -1634,23 +1998,14 @@ static GtkWidget *build_explore(void)
           "everybody needs them. One tap installs.",
           "모두에게 필요하지는 않아서 처음부터 들어 있지 않은 앱들입니다. "
           "한 번 누르면 설치됩니다.")));
-    /* A grid of three, not a GtkFlowBox: 4.8's homogeneous flow box
-     * under-measures its height for wrapped two-line labels, and the
-     * last rows were cut off inside the scrolled window. */
-    GtkWidget *flow = gtk_grid_new();
-    gtk_grid_set_column_homogeneous(GTK_GRID(flow), TRUE);
-    gtk_grid_set_column_spacing(GTK_GRID(flow), 12);
-    gtk_grid_set_row_spacing(GTK_GRID(flow), 12);
-    for (guint i = 0; i < G_N_ELEMENTS(FEATURED); i++) {
-        const Featured *f = &FEATURED[i];
-        LpsPkg *p = pkg_new(SRC_DEBIAN, f->pkg);
-        g_free(p->title);
-        p->title = g_strdup(T(f->en, f->ko));
-        p->summary = g_strdup(T(f->sum_en, f->sum_ko));
-        p->icon = g_strdup(f->icon);
-        g_ptr_array_add(A->featured, p);
-        gtk_grid_attach(GTK_GRID(flow), card_new(p), (int)(i % 3), (int)(i / 3), 1, 1);
-    }
+    gtk_box_append(GTK_BOX(box), explore_section(
+        T("Popular apps", "인기 앱"),
+        T("From Flathub - the apps Debian does not carry, and the newest "
+          "versions of many it does.",
+          "Flathub에서 받습니다. 데비안에 없는 앱과, 있어도 더 새 버전인 앱들입니다."),
+        POPULAR, G_N_ELEMENTS(POPULAR), SRC_FLATPAK));
+    GtkWidget *flow = explore_section(T("From Debian", "데비안에서"), NULL,
+        FEATURED, G_N_ELEMENTS(FEATURED), SRC_DEBIAN);
     A->featured_box = flow;
     gtk_box_append(GTK_BOX(box), flow);
     return lp_kit_scroller(box, FALSE);
@@ -1719,16 +2074,24 @@ static GtkWidget *build_installed(void)
     return box;
 }
 
+static gboolean have_flatpaks(void)
+{
+    return A->facts && g_hash_table_size(A->facts->flatpak) > 0;
+}
+
 static void on_check_updates(GtkButton *b, gpointer d)
 {
     (void)b; (void)d;
     queue_op(OP_REFRESH, NULL);
+    queue_op(OP_FLAT_REFRESH, NULL);
 }
 
 static void on_update_all(GtkButton *b, gpointer d)
 {
     (void)b; (void)d;
     queue_op(OP_UPGRADE_ALL, NULL);
+    if (have_flatpaks())
+        queue_op(OP_FLAT_UPGRADE_ALL, NULL);
 }
 
 static GtkWidget *build_updates(void)
@@ -2018,6 +2381,13 @@ static void on_ping(gboolean ok, const char *why, const char *text, gpointer d)
         pkg_changed(g_ptr_array_index(A->featured, i));
     refresh_store(A->apps_store);
     load_updates();
+    /* Flathub's catalogue - the popular apps' icons, and what search finds
+     * there - is fetched when there is none or it is a day old. Any
+     * account may ask for it; it asks for no password. */
+    GStatBuf st;
+    if (g_stat(FLATHUB_AS "/appstream.xml.gz", &st) != 0 ||
+        g_get_real_time() / G_USEC_PER_SEC - st.st_mtime > 24 * 3600)
+        queue_op(OP_FLAT_REFRESH, NULL);
 }
 
 static void on_banner_button(GtkButton *b, gpointer d)
@@ -2025,6 +2395,7 @@ static void on_banner_button(GtkButton *b, gpointer d)
     (void)b; (void)d;
     gtk_revealer_set_reveal_child(GTK_REVEALER(A->banner), FALSE);
     queue_op(OP_REFRESH, NULL);
+    queue_op(OP_FLAT_REFRESH, NULL);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -2088,7 +2459,7 @@ static void build_window(const char *start)
     GtkWidget *hb = gtk_header_bar_new();
     A->search = gtk_search_entry_new();
     g_object_set(A->search, "placeholder-text",
-                 T("Search Debian and LP packages", "데비안과 LP 패키지 검색"), NULL);
+                 T("Search Flathub, Debian and LP", "Flathub, 데비안, LP에서 검색"), NULL);
     gtk_widget_add_css_class(A->search, "lps-search");
     gtk_widget_set_name(A->search, "search");
     g_signal_connect(A->search, "search-changed", G_CALLBACK(on_search_changed), NULL);
