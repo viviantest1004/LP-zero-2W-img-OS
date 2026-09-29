@@ -196,6 +196,29 @@ thermald
 acpi
 powertop
 
+# ── firmware for every other machine ─────────────────────────────────
+# What the modules of kernel/lp-desktop-amd64.fragment load from
+# /lib/firmware: Radeon and Intel graphics (i915's also goes into the
+# kernel's initramfs, tools/mkdisk.sh), NVIDIA for nouveau, the Wi-Fi and
+# Bluetooth of Intel, Realtek, MediaTek, Qualcomm/Atheros, Broadcom and
+# Marvell, the laptop speaker amplifiers (Cirrus), and Intel's sound DSP.
+# From bookworm-backports (tools/apply-packages.sh pins firmware-* there).
+# Left out: server NICs, Qualcomm phone SoCs, capture cards.
+firmware-amd-graphics
+firmware-intel-graphics
+firmware-nvidia-graphics
+firmware-iwlwifi
+firmware-realtek
+firmware-mediatek
+firmware-atheros
+firmware-brcm80211
+firmware-libertas
+firmware-cirrus
+firmware-intel-sound
+firmware-intel-misc
+firmware-misc-nonfree
+firmware-sof-signed
+
 # ── disks: what the installer runs, and what a person mounts ─────────
 # lp-install partitions with sfdisk (fdisk), makes the EFI partition
 # with mkfs.vfat (dosfstools) and copies the root with rsync. efibootmgr

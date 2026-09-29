@@ -179,6 +179,18 @@ log "$(du -sh "$TINY" | cut -f1)  ($TINY)"
 # for a byte-identical result.
 step "커널 (디스크 루트용)"
 BZ_EXISTING="${KERNEL_OUT}/bzImage"
+# The desktop image's kernel is the PC config plus the drivers for every
+# other machine, as modules (kernel/lp-desktop-amd64.fragment), with
+# i915's firmware from the root's /usr/lib/firmware in its initramfs:
+# from Tiger Lake on, i915 needs its GuC blob at probe, before the root
+# is mounted. The console image has no module loader and keeps the PC
+# config alone.
+KCONFIG_EXTRA=""
+EARLY_FW_ROOT=""
+if [[ "${LP_DESKTOP:-0}" == 1 ]]; then
+    KCONFIG_EXTRA="${REPO_ROOT}/kernel/lp-desktop-amd64.fragment"
+    [[ -d "${ROOTFS}/usr/lib/firmware/i915" ]] && EARLY_FW_ROOT="${ROOTFS}/usr/lib/firmware"
+fi
 # 커널 안에 든 프로그램은 preinit 하나다. 그래서 다시 지어야 하는지는
 # preinit 의 **내용**이 바뀌었는지로 정한다.
 #
@@ -208,12 +220,18 @@ if [[ -f "$PREINIT" ]]; then
                     "${REPO_ROOT}/kernel/linux.commit" \
                     "${REPO_ROOT}/kernel/build.sh" \
                     "${REPO_ROOT}/tools/fetch-pc-fw.sh" \
-                    "${REPO_ROOT}"/kernel/patches/*.patch
+                    "${REPO_ROOT}"/kernel/patches/*.patch \
+                    ${KCONFIG_EXTRA:+"$KCONFIG_EXTRA"}
+                  [[ -n "$EARLY_FW_ROOT" ]] &&
+                      ( cd "$EARLY_FW_ROOT" && find -L i915 -type f | sort | xargs sha256sum )
                   printf '%s' "$KERNEL_CMDLINE"; } | sha256sum | cut -d' ' -f1)"
 fi
 OLD_SUM="$(cat "$STAMP" 2>/dev/null || true)"
 
-if [[ -f "$BZ_EXISTING" && -n "$NOW_SUM" && "$NOW_SUM" == "$OLD_SUM" ]]; then
+# A desktop kernel is only whole with its modules beside it.
+HAVE_MODULES=1
+[[ -n "$KCONFIG_EXTRA" && ! -d "${KERNEL_OUT}/modules/lib/modules" ]] && HAVE_MODULES=0
+if [[ -f "$BZ_EXISTING" && -n "$NOW_SUM" && "$NOW_SUM" == "$OLD_SUM" && "$HAVE_MODULES" == 1 ]]; then
     log "이미 있는 것을 씁니다 ($(stat -c%s "$BZ_EXISTING") bytes)"
     log "다시 빌드하려면 지우십시오: rm ${BZ_EXISTING}"
 elif [[ -f "$BZ_EXISTING" && -z "$OLD_SUM" && \
@@ -227,6 +245,8 @@ LP_ROOTFS_DIR="$(python3 -c "import os,sys;print(os.path.relpath(sys.argv[1], os
 LP_BUILD_DIR="${LPZERO_WORK}/build-amd64-disk" \
 LP_OUT_SUBDIR=out-amd64-disk \
 LP_CMDLINE="$KERNEL_CMDLINE" \
+LP_KCONFIG_EXTRA="$KCONFIG_EXTRA" \
+LP_EARLY_FW_ROOT="$EARLY_FW_ROOT" LP_EARLY_FW_DIRS=i915 \
     "${REPO_ROOT}/kernel/build.sh"
 fi
 
@@ -234,6 +254,17 @@ BZIMAGE="${KERNEL_OUT}/bzImage"
 [[ -f "$BZIMAGE" ]] || die "${BZIMAGE} 가 만들어지지 않았습니다"
 [[ -n "$NOW_SUM" ]] && printf '%s\n' "$NOW_SUM" > "${KERNEL_OUT}/preinit.sha256"
 log "$(stat -c%s "$BZIMAGE") bytes"
+
+# The modules go into the root, whole (kernel/build.sh made the tree with
+# depmod's indexes); udev loads what the hardware asks for.
+if [[ -n "$KCONFIG_EXTRA" ]]; then
+    MODTREE="${KERNEL_OUT}/modules/lib/modules"
+    [[ -d "$MODTREE" ]] || die "no modules in ${MODTREE} (kernel/build.sh)"
+    rm -rf "${ROOTFS}/usr/lib/modules"
+    mkdir -p "${ROOTFS}/usr/lib/modules"
+    cp -a "${MODTREE}/." "${ROOTFS}/usr/lib/modules/"
+    log "modules: $(find "${ROOTFS}/usr/lib/modules" -name '*.ko*' | wc -l), $(du -sh "${ROOTFS}/usr/lib/modules" | cut -f1)"
+fi
 
 # ── 3. the root filesystem ───────────────────────────────────────
 #

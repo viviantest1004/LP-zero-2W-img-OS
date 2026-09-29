@@ -189,8 +189,30 @@ if [[ "$LP_ARCH" == "amd64" && " ${LP_CMDLINE:-} " == *" root="* ]]; then
                 echo "dir /${d} 0755 0 0"
             done
             echo "file /lib/firmware/${f} ${FW_DIR}/${f} 0644 0 0"
-        done | awk '!seen[$0]++'
-    } > "$EARLY_FW_LIST"
+        done
+        # LP_EARLY_FW_ROOT + LP_EARLY_FW_DIRS: whole firmware directories
+        # from the root being built (the desktop image: Debian's
+        # /usr/lib/firmware), for built-in drivers on machines other
+        # than the XPS. i915 is the one: from Gen12 (Tiger Lake) on it
+        # submits work through GuC and loads it at probe, before the
+        # root is there, so without its blob there the GPU draws
+        # nothing. Files the pinned set above already has are left to
+        # it; links are followed, since the initramfs gets the bytes.
+        if [[ -n "${LP_EARLY_FW_ROOT:-}" ]]; then
+            for sub in ${LP_EARLY_FW_DIRS:-}; do
+                [[ -d "${LP_EARLY_FW_ROOT}/${sub}" ]] || continue
+                echo "dir /lib 0755 0 0"
+                echo "dir /lib/firmware 0755 0 0"
+                ( cd "$LP_EARLY_FW_ROOT" && find -L "$sub" -type d | sort ) |
+                    while read -r d; do echo "dir /lib/firmware/${d} 0755 0 0"; done
+                ( cd "$LP_EARLY_FW_ROOT" && find -L "$sub" -type f | sort ) |
+                    while read -r f; do
+                        [[ -f "${FW_DIR}/${f}" ]] && continue
+                        echo "file /lib/firmware/${f} $(readlink -f "${LP_EARLY_FW_ROOT}/${f}") 0644 0 0"
+                    done
+            done
+        fi
+    } | awk '!seen[$0]++' > "$EARLY_FW_LIST"
     echo "    $(grep -c '^file ' "$EARLY_FW_LIST")개 파일, $(du -ch $(awk '/^file /{print $3}' "$EARLY_FW_LIST") | tail -1 | cut -f1)"
 fi
 
@@ -232,8 +254,17 @@ GEN="${BUILD_DIR}/lp-zero-generated.config"
     fi
 } > "$GEN"
 
+# LP_KCONFIG_EXTRA: more fragments on top, space-separated - the desktop
+# image's own (kernel/lp-desktop-amd64.fragment, from tools/mkdisk.sh).
+EXTRA_FRAGMENTS=()
+for f in ${LP_KCONFIG_EXTRA:-}; do
+    [[ -f "$f" ]] || die "설정 조각이 없습니다: $f"
+    EXTRA_FRAGMENTS+=("$f")
+done
+(( ${#EXTRA_FRAGMENTS[@]} )) && echo "    + ${EXTRA_FRAGMENTS[*]##*/}"
+
 "${LINUX_SRC}/scripts/kconfig/merge_config.sh" -m -O "$BUILD_DIR" \
-    "${BUILD_DIR}/.config" "$FRAGMENT" "$GEN" >/dev/null
+    "${BUILD_DIR}/.config" "$FRAGMENT" "${EXTRA_FRAGMENTS[@]}" "$GEN" >/dev/null
 
 # merge_config 는 의존성을 풀지 않는다. olddefconfig 가 정리한다.
 make "${MAKE_ARGS[@]}" olddefconfig >/dev/null
@@ -278,19 +309,19 @@ while read -r line; do
             MISSED=$((MISSED + 1))
         fi
         ;;
-    y)
-        grep -qx "${sym}=y" "${BUILD_DIR}/.config" 2>/dev/null || {
-            echo "    미반영      ${sym} (=y 를 원했음)"
+    y|m)
+        grep -qx "${sym}=${want}" "${BUILD_DIR}/.config" 2>/dev/null || {
+            echo "    미반영      ${sym} (=${want} 를 원했음)"
             MISSED=$((MISSED + 1))
         }
         ;;
     esac
-done < <(grep -E '^CONFIG_[A-Z0-9_]+=(y|n)$' "$FRAGMENT" | awk -F= '
+done < <(cat "$FRAGMENT" "${EXTRA_FRAGMENTS[@]}" | grep -E '^CONFIG_[A-Z0-9_]+=(y|m|n)$' | awk -F= '
             !($1 in last) { order[++n] = $1 }
             { last[$1] = $2 }
             END { for (i = 1; i <= n; i++) print order[i] "=" last[order[i]] }')
 
-TOTAL=$(grep -E '^CONFIG_[A-Z0-9_]+=(y|n)$' "$FRAGMENT" | cut -d= -f1 | sort -u | wc -l)
+TOTAL=$(cat "$FRAGMENT" "${EXTRA_FRAGMENTS[@]}" | grep -E '^CONFIG_[A-Z0-9_]+=(y|m|n)$' | cut -d= -f1 | sort -u | wc -l)
 if [[ "$MISSED" == "0" ]]; then
     echo "    전부 반영됨 (${TOTAL}개)"
 else
@@ -354,6 +385,29 @@ if [[ "$LP_ARCH" == "amd64" ]]; then
     step "결과"
     cp "${BUILD_DIR}/arch/x86/boot/bzImage" "${OUT_DIR}/bzImage"
     echo "  bzImage  $(stat -c%s "${OUT_DIR}/bzImage") bytes"
+
+    # The drivers for machines other than the XPS (kernel/lp-desktop-
+    # amd64.fragment): built, stripped, signed with this build's key
+    # (certs/signing_key.pem, made by the kernel build on first use and
+    # kept in the build directory, never in the repo), compressed, and
+    # put under OUT_DIR/modules/lib/modules/<release> with depmod's
+    # indexes - the tree tools/mkdisk.sh copies into the root. Always the
+    # whole tree: a module left over from an earlier config would carry
+    # another build's signature and never load.
+    rm -rf "${OUT_DIR}/modules"
+    if grep -q '^CONFIG_MODULES=y' "${BUILD_DIR}/.config"; then
+        step "모듈"
+        command -v depmod >/dev/null || die "depmod 가 없습니다 (apt install kmod)"
+        time make "${MAKE_ARGS[@]}" -j"$JOBS" modules
+        make "${MAKE_ARGS[@]}" INSTALL_MOD_PATH="${OUT_DIR}/modules" \
+            INSTALL_MOD_STRIP=1 modules_install >/dev/null
+        KREL=$(cat "${BUILD_DIR}/include/config/kernel.release")
+        rm -f "${OUT_DIR}/modules/lib/modules/${KREL}/build" \
+              "${OUT_DIR}/modules/lib/modules/${KREL}/source"
+        [[ -s "${OUT_DIR}/modules/lib/modules/${KREL}/modules.alias" ]] \
+            || die "modules_install left no modules.alias (depmod)"
+        echo "  모듈 $(find "${OUT_DIR}/modules" -name '*.ko*' | wc -l)개, $(du -sh "${OUT_DIR}/modules" | cut -f1), ${KREL}"
+    fi
     echo
     echo "완료: ${OUT_DIR}"
     exit 0

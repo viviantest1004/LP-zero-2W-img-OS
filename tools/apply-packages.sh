@@ -163,6 +163,30 @@ in_base() {
         DEBIAN_FRONTEND=noninteractive "$@"
 }
 
+# Firmware from bookworm-backports, and nothing else from there.
+# bookworm's own firmware-nonfree is from February 2023: no Wi-Fi 7
+# (Intel BE200), no MediaTek MT7925, no Meteor Lake or Lunar Lake sound
+# and graphics blobs, none for the newest Radeons. Backports carries a
+# current linux-firmware in the same packages. The pin keeps every other
+# package on bookworm: backports is priority 100 already (never chosen
+# over bookworm's version), and firmware-* is raised to bookworm's 500,
+# where the newer version wins. The image keeps both files, so the
+# Software app's updates keep the firmware current too.
+BPO_LIST="$DEB/etc/apt/sources.list.d/lp-firmware-backports.list"
+BPO_PIN="$DEB/etc/apt/preferences.d/lp-firmware-backports"
+if [[ ! -f "$BPO_LIST" || ! -f "$BPO_PIN" ]]; then
+    printf '%s\n' \
+        "# LP: firmware from bookworm-backports (tools/apply-packages.sh)." \
+        "deb https://deb.debian.org/debian bookworm-backports non-free-firmware" \
+        > "$BPO_LIST"
+    printf '%s\n' \
+        "# LP: only firmware-* comes from backports (tools/apply-packages.sh)." \
+        "Package: *" "Pin: release n=bookworm-backports" "Pin-Priority: 100" "" \
+        "Package: firmware-*" "Pin: release n=bookworm-backports" "Pin-Priority: 500" \
+        > "$BPO_PIN"
+    log "bookworm-backports (firmware-* 만)"
+fi
+
 step "apt-get update"
 in_base apt-get "${APT_OPTS[@]}" -q update 2>&1 | tail -4
 
