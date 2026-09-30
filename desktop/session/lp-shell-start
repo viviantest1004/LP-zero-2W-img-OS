@@ -111,7 +111,8 @@ else
     fi
 fi
 if test $lp_lock_now = 1 ; then
-    have lp-lock && lp-lock > "$LOGDIR/lock.log" 2>&1 &
+    # --login: the lock screen worded as signing in (lp-lockscreen).
+    have lp-lock && lp-lock --login > "$LOGDIR/lock.log" 2>&1 &
 fi
 
 # Animations: on under wayfire, where the graphics card draws them. Under
