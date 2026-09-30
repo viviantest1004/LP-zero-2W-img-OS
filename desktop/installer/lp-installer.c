@@ -495,7 +495,25 @@ static void show_modes(void)
 
     ok = lp_json_bool(d, "part_ok", 0);
     LpJson *esp_new = lp_json_get(d, "esp_new");
-    if (ok && esp_new && lp_json_len(esp_new) > 0) {
+    /* A partition that makes LP's own EFI partition inside itself: the
+     * disk's cannot start LP (full, unreadable, mounted, or none). */
+    gboolean own_esp = FALSE;
+    LpJson *dparts = lp_json_get(d, "parts");
+    for (int i = 0; dparts && i < lp_json_len(dparts); i++) {
+        LpJson *p = lp_json_at(dparts, i);
+        if (lp_json_bool(p, "usable", 0) && lp_json_bool(p, "own_esp", 0))
+            own_esp = TRUE;
+    }
+    if (ok && own_esp) {
+        en = g_strdup("Choose one partition to erase for LP; the other partitions stay as "
+                      "they are. The disk's EFI system partition cannot start LP, so LP "
+                      "makes its own start-up partition (512 MB) inside the one you choose, "
+                      "and its recovery system when there is room.");
+        ko = g_strdup("LP 를 설치할 파티션 하나를 골라 지웁니다. 나머지 파티션은 그대로 "
+                      "둡니다. 이 디스크의 EFI 시스템 파티션으로는 LP 를 시작할 수 없어서, "
+                      "고른 파티션 안에 LP 전용 시작 파티션(512MB)을 만들고 자리가 있으면 "
+                      "복구 시스템도 만듭니다.");
+    } else if (ok && esp_new && lp_json_len(esp_new) > 0) {
         en = g_strdup("Choose one partition to erase for LP; the other partitions "
                       "stay as they are. The disk has no EFI system partition, so a "
                       "512 MB one is made in its free space. No recovery system.");
@@ -526,7 +544,13 @@ static void show_modes(void)
             ko = g_strdup_printf("쓸 수 있는 %s 이상의 파티션이 없습니다", need);
         }
     }
-    b = mode_row(MODE_PART, "Install into a partition", "파티션에 설치", en, ko, ok, &group);
+    /* Openable whenever the disk has partitions, even when none can take
+     * LP: the next page lists every one with what stops it. A greyed row
+     * with one sentence left "where is my partition?" unanswered. */
+    gboolean can_look = !ok && dparts && lp_json_len(dparts) > 0 &&
+                        !lp_json_bool(d, "running", 0);
+    b = mode_row(MODE_PART, "Install into a partition", "파티션에 설치", en, ko,
+                 ok || can_look, &group);
     g_free(en); g_free(ko);
     if (ok) {
         n_ok++;
@@ -683,7 +707,9 @@ static void show_disks(void)
                                                       : "drive-harddisk");
         g_free(den); g_free(dko);
         ok = ok || here || shared;
-        gtk_widget_set_sensitive(b, ok);
+        /* A disk with partitions opens even when nothing on it can take
+         * LP, so its partitions can be seen with the reason for each. */
+        gtk_widget_set_sensitive(b, ok || (parts > 0 && strcmp(reason, "running")));
         g_object_set_data_full(G_OBJECT(b), "path", g_strdup(lp_json_str(d, "path", "")), g_free);
         g_object_set_data_full(G_OBJECT(b), "model", g_strdup(model), g_free);
         g_object_set_data_full(G_OBJECT(b), "size", g_strdup(size), g_free);
@@ -826,16 +852,28 @@ static void show_parts(void)
             g_string_append_printf(en, "  ·  %s", tname);
             g_string_append_printf(ko, "  ·  %s", tname);
         }
-        if (ok) {
+        const char *pr = lp_json_str(p, "reason", "");
+        if (ok && lp_json_bool(p, "own_esp", 0)) {
+            g_string_append(en, "  —  LP can go here, with its own 512 MB start-up "
+                                "partition made inside it");
+            g_string_append(ko, "  —  여기에 설치할 수 있습니다. 이 안에 LP 전용 512MB 시작 "
+                                "파티션을 만듭니다");
+        } else if (ok) {
             g_string_append(en, "  —  LP can go here");
             g_string_append(ko, "  —  여기에 설치할 수 있습니다");
         } else {
             char *ren, *rko;
-            reason_words(lp_json_str(p, "reason", ""), A.disk_j,
-                         lp_json_str(p, "mount", ""), &ren, &rko);
+            reason_words(pr, A.disk_j, lp_json_str(p, "mount", ""), &ren, &rko);
             g_string_append_printf(en, "  —  %s", ren);
             g_string_append_printf(ko, "  —  %s", rko);
             g_free(ren); g_free(rko);
+            /* Big enough for LP, not for LP and its own EFI partition. */
+            if (g_str_has_prefix(pr, "esp-") || !strcmp(pr, "no-esp")) {
+                g_string_append(en, ". 512 MB more and LP would make its own start-up "
+                                    "partition inside it");
+                g_string_append(ko, ". 512MB 더 크면 이 안에 LP 전용 시작 파티션을 만들 수 "
+                                    "있습니다");
+            }
         }
         char *title = g_strdup_printf("%s  ·  %s", lp_json_str(p, "name", ""), size);
         GtkWidget *b = su_choice(title, title, en->str, ko->str, NULL);
@@ -1039,12 +1077,37 @@ static void show_confirm(void)
     su_retext(A.confirm_what, what, what);
     g_free(what);
 
+    gboolean split = plan && lp_json_bool(plan, "split", 0);
     if (A.mode == MODE_PART) {
         wen = g_strdup_printf("Everything on %s will be erased. The other partitions "
                               "are left as they are.", A.part_en);
         wko = g_strdup_printf("%s의 내용이 모두 지워집니다. 나머지 파티션은 그대로 "
                               "둡니다.", A.part_ko);
-        if (new_esp) {
+        if (split) {
+            /* The disk's EFI partition cannot start LP: LP's own go where
+             * the chosen partition was. */
+            const char *een = !strcmp(why, "esp-full")
+                ? "The disk's EFI system partition is too full for LP's start-up files"
+                : !strcmp(why, "esp-mounted") ? "The disk's EFI system partition is in use"
+                : !strcmp(why, "esp-bad") ? "The disk's EFI system partition cannot be read"
+                : "The disk has no EFI system partition";
+            const char *eko = !strcmp(why, "esp-full")
+                ? "이 디스크의 EFI 시스템 파티션에는 LP 시작 파일을 둘 자리가 없습니다"
+                : !strcmp(why, "esp-mounted") ? "이 디스크의 EFI 시스템 파티션이 사용 중입니다"
+                : !strcmp(why, "esp-bad") ? "이 디스크의 EFI 시스템 파티션을 읽을 수 없습니다"
+                : "이 디스크에는 EFI 시스템 파티션이 없습니다";
+            nen = g_strdup_printf("%s, so in its place LP makes a 512 MB start-up partition of "
+                                  "its own%s and LP itself; the disk's EFI partition is not "
+                                  "touched.%s%s", een,
+                                  recovery ? ", its recovery system" : "",
+                                  recovery ? "" : " There is no room for the recovery system.",
+                                  other_en);
+            nko = g_strdup_printf("%s. 그래서 이 파티션 자리에 LP 전용 512MB 시작 "
+                                  "파티션%s과 LP 를 만듭니다. 디스크의 EFI 파티션은 건드리지 "
+                                  "않습니다.%s%s", eko, recovery ? ", 복구 시스템" : "",
+                                  recovery ? "" : " 복구 시스템을 둘 자리는 없습니다.",
+                                  other_ko);
+        } else if (new_esp) {
             nen = g_strdup_printf("This disk has no EFI system partition, so a 512 MB one "
                                   "is made for LP in its free space. No recovery partition is "
                                   "made, so LP Recovery is not offered at start-up (the USB "
