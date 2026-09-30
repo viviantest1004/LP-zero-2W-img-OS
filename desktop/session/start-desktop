@@ -115,7 +115,10 @@ for card in /sys/class/drm/card[0-9]*; do
     test -e "$card/device/driver" || continue
     drv=$(basename "$(readlink -f "$card/device/driver")")
     case $drv in
-        i915|amdgpu|radeon|nouveau|vmwgfx)
+        # xe: Intel's driver for Lunar Lake and the Arc B-series, which
+        # i915 does not drive. Its OpenGL is Mesa 25's, from backports
+        # (tools/apply-packages.sh); bookworm's Mesa 22.3 had none.
+        i915|xe|amdgpu|radeon|nouveau|vmwgfx)
             comp=wayfire; why="$drv"; break ;;
         virtio_gpu|virtio-pci|virtio_pci)
             # virtio-gpu has 3D only when the host gave it virgl (UTM: a

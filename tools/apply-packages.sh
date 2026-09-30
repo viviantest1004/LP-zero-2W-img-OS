@@ -163,29 +163,41 @@ in_base() {
         DEBIAN_FRONTEND=noninteractive "$@"
 }
 
-# Firmware from bookworm-backports, and nothing else from there.
+# Firmware and the graphics drivers from bookworm-backports, and nothing
+# else from there.
+#
 # bookworm's own firmware-nonfree is from February 2023: no Wi-Fi 7
 # (Intel BE200), no MediaTek MT7925, no Meteor Lake or Lunar Lake sound
 # and graphics blobs, none for the newest Radeons. Backports carries a
-# current linux-firmware in the same packages. The pin keeps every other
-# package on bookworm: backports is priority 100 already (never chosen
-# over bookworm's version), and firmware-* is raised to bookworm's 500,
-# where the newer version wins. The image keeps both files, so the
-# Software app's updates keep the firmware current too.
+# current linux-firmware in the same packages.
+#
+# bookworm's Mesa is 22.3, which knows nothing of the xe kernel driver:
+# on the Intel graphics xe drives (Lunar Lake, Arc B-series) there was no
+# OpenGL at all, and the desktop fell back to drawing on the CPU. Its
+# RADV and radeonsi also predate the newest Radeons. Backports has Mesa
+# 25 and the libdrm it needs; the two source packages are pinned, and
+# their binaries (libgl1-mesa-dri, libgbm1, mesa-vulkan-drivers, ...)
+# come from there.
+#
+# The pin keeps every other package on bookworm: backports is priority
+# 100 already (never chosen over bookworm's version), and what is named
+# here is raised to bookworm's 500, where the newer version wins. The
+# image keeps both files, so the Software app's updates keep firmware
+# and Mesa current too. Rewritten on every run, so a base made before a
+# line was added here gets it.
 BPO_LIST="$DEB/etc/apt/sources.list.d/lp-firmware-backports.list"
 BPO_PIN="$DEB/etc/apt/preferences.d/lp-firmware-backports"
-if [[ ! -f "$BPO_LIST" || ! -f "$BPO_PIN" ]]; then
-    printf '%s\n' \
-        "# LP: firmware from bookworm-backports (tools/apply-packages.sh)." \
-        "deb https://deb.debian.org/debian bookworm-backports non-free-firmware" \
-        > "$BPO_LIST"
-    printf '%s\n' \
-        "# LP: only firmware-* comes from backports (tools/apply-packages.sh)." \
-        "Package: *" "Pin: release n=bookworm-backports" "Pin-Priority: 100" "" \
-        "Package: firmware-*" "Pin: release n=bookworm-backports" "Pin-Priority: 500" \
-        > "$BPO_PIN"
-    log "bookworm-backports (firmware-* 만)"
-fi
+printf '%s\n' \
+    "# LP: firmware and Mesa from bookworm-backports (tools/apply-packages.sh)." \
+    "deb https://deb.debian.org/debian bookworm-backports main non-free-firmware" \
+    > "$BPO_LIST"
+printf '%s\n' \
+    "# LP: only firmware-* and Mesa come from backports (tools/apply-packages.sh)." \
+    "Package: *" "Pin: release n=bookworm-backports" "Pin-Priority: 100" "" \
+    "Package: firmware-*" "Pin: release n=bookworm-backports" "Pin-Priority: 500" "" \
+    "Package: src:mesa src:libdrm" "Pin: release n=bookworm-backports" "Pin-Priority: 500" \
+    > "$BPO_PIN"
+log "bookworm-backports (firmware-*, Mesa, libdrm)"
 
 step "apt-get update"
 in_base apt-get "${APT_OPTS[@]}" -q update 2>&1 | tail -4
@@ -221,6 +233,25 @@ if (( ${#NEW[@]} )); then
     grep -Ev '^(Get:|Selecting|Preparing|Unpacking|Setting up|Processing|\(Reading)' \
         "$APT_LOG" | tail -25 | sed 's/^/    /' || true
     log "전체 기록: $APT_LOG (apt-get 종료 코드 $rc)"
+fi
+
+# What is installed already and now has a newer pinned version in
+# backports (Mesa and libdrm the first time, firmware as it moves on):
+# installing only what is missing would leave the old ones in place.
+step "backports 로 올릴 것"
+UP=()
+while read -r name _; do
+    [[ -n "$name" ]] && UP+=("${name%%/*}")
+done < <(in_base apt list --upgradable 2>/dev/null | grep -- '-backports' || true)
+if (( ${#UP[@]} )); then
+    log "올림: ${UP[*]}"
+    rc=0
+    in_base apt-get "${APT_OPTS[@]}" -y -q --no-install-recommends \
+        install "${UP[@]}" > "${LPZERO_WORK}/apply-packages-bpo.log" 2>&1 || rc=$?
+    tail -3 "${LPZERO_WORK}/apply-packages-bpo.log" | sed 's/^/    /'
+    (( rc == 0 )) || die "apt-get install (backports) 실패: ${LPZERO_WORK}/apply-packages-bpo.log"
+else
+    log "없음"
 fi
 
 # Everything on the list is marked manual, so a later autoremove cannot

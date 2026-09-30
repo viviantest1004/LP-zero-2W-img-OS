@@ -270,7 +270,7 @@ def gpu_3d():
             drv = os.path.basename(os.path.realpath(card + "/device/driver"))
         except OSError:
             continue
-        if drv in ("i915", "amdgpu", "radeon", "nouveau", "vmwgfx"):
+        if drv in ("i915", "xe", "amdgpu", "radeon", "nouveau", "vmwgfx"):
             return True
         if drv in ("virtio_gpu", "virtio-pci", "virtio_pci"):
             try:

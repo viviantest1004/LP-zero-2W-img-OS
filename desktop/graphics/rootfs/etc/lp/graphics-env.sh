@@ -79,7 +79,7 @@ for lp_gfx_c in /sys/class/drm/card*; do
     lp_gfx_d=$(readlink "$lp_gfx_c/device/driver")
     lp_gfx_d=${lp_gfx_d##*/}
     case "$lp_gfx_d" in
-    i915|amdgpu|radeon|nouveau) ;;
+    i915|xe|amdgpu|radeon|nouveau) ;;
     *) continue ;;
     esac
     lp_gfx_b=0
