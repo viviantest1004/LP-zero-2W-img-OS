@@ -14,7 +14,7 @@ PKGS    := gtk4
 
 BIN     := lp-video
 SRC     := video.c edit.c
-HDR     := edit.h mpv-min.h
+HDR     := edit.h mpv-min.h ../common/lp-fit.h
 DESKTOP := lp-video.desktop
 
 CFLAGS  ?= -O2 -g

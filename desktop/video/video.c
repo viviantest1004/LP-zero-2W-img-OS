@@ -45,6 +45,7 @@
 #include <unistd.h>
 
 #include "lp-i18n.h"
+#include "lp-fit.h"
 #include "mpv-min.h"
 #include "edit.h"
 
@@ -2242,7 +2243,7 @@ static void build_window(GtkApplication *gapp)
 
     A.win = gtk_application_window_new(gapp);
     gtk_window_set_title(GTK_WINDOW(A.win), T("Videos", "동영상"));
-    gtk_window_set_default_size(GTK_WINDOW(A.win), 1100, 700);
+    lp_fit_default_size(GTK_WINDOW(A.win), 1100, 700);
     gtk_widget_set_size_request(A.win, 560, 400);
 
     A.header = gtk_header_bar_new();

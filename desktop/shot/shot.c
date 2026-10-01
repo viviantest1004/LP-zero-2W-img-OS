@@ -32,6 +32,7 @@
 
 #include <gtk/gtk.h>
 #include "lp-i18n.h"
+#include "lp-fit.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -326,7 +327,7 @@ static void activate(GtkApplication *gapp, gpointer data)
     app->win = gtk_application_window_new(gapp);
     gtk_window_set_title(GTK_WINDOW(app->win),
                          T("Screenshot", "스크린샷"));
-    gtk_window_set_default_size(GTK_WINDOW(app->win), 620, 560);
+    lp_fit_default_size(GTK_WINDOW(app->win), 620, 560);
 
     GtkWidget *head = gtk_header_bar_new();
     gtk_window_set_titlebar(GTK_WINDOW(app->win), head);

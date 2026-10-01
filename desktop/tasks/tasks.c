@@ -65,6 +65,7 @@
  */
 #define _GNU_SOURCE 1
 #include "lp-kit.h"
+#include "lp-fit.h"
 
 #include <gio/gdesktopappinfo.h>
 #include <ifaddrs.h>
@@ -2699,8 +2700,11 @@ static void update_apps(void)
     for (guint i = 0; i < gone->len; i++) {
         AppRow *r = g_ptr_array_index(gone, i);
         g_hash_table_steal(A->app_rows, r->id);
-        lp_kit_reveal_out(r->rev, G_CALLBACK(approw_gone), NULL);
+        /* The row's data first: with motion reduced the reveal ends at
+         * once, approw_gone frees the revealer, and the row set on it
+         * after that was set on freed memory. */
         g_object_set_data_full(G_OBJECT(r->rev), "approw-free", r, approw_free);
+        lp_kit_reveal_out(r->rev, G_CALLBACK(approw_gone), NULL);
     }
     g_ptr_array_unref(gone);
     gtk_widget_set_visible(A->apps_empty, g_hash_table_size(live) == 0);
@@ -3220,8 +3224,11 @@ static void update_mem_top(void)
     g_hash_table_iter_init(&it, procs);
     while (g_hash_table_iter_next(&it, &k, &v))
         g_ptr_array_add(arr, v);
-    g_ptr_array_sort_with_data(arr, (GCompareDataFunc)(void *)NULL == NULL ? NULL : NULL, NULL);
-    /* Top five by resident memory; a tiny selection, done by hand. */
+    /* Top five by resident memory; a tiny selection, done by hand -
+     * no sort first (an earlier sort here was handed no comparison
+     * function, and the Memory page crashed the program the moment
+     * it was opened, and on every start after, the page being the one
+     * remembered). */
     LptProc *top[5] = { 0 };
     for (guint i = 0; i < arr->len; i++) {
         LptProc *p = g_ptr_array_index(arr, i);
@@ -4025,7 +4032,7 @@ static void on_activate(GtkApplication *app, gpointer d)
     A->gapp = app;
     A->win = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(A->win), T("Task Manager", "작업 관리자"));
-    gtk_window_set_default_size(GTK_WINDOW(A->win), WINDOW_W, WINDOW_H);
+    lp_fit_default_size(GTK_WINDOW(A->win), WINDOW_W, WINDOW_H);
     gtk_window_set_icon_name(GTK_WINDOW(A->win), "utilities-system-monitor");
 
     static const GActionEntry acts[] = {

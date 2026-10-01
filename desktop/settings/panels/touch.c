@@ -16,6 +16,7 @@
  *     mouse_cursor_speed = 0.000000          -1 .. 1
  *     disable_touchpad_while_typing = true
  *     left_handed_mode = false
+ *     click_method = clickfinger             or button-areas
  *
  * Under sway (the fallback session, and the headless test rig) the same
  * change is also sent with `swaymsg input type:touchpad ...`, because
@@ -143,6 +144,35 @@ static void on_left_handed(GtkWidget *seg, int i, gpointer p)
                            : T("The left button is now the primary one", "이제 왼쪽 버튼이 주 버튼입니다"));
 }
 
+/* The secondary (right) click on a touchpad with no buttons of its own:
+ * two fingers pressed down anywhere, as on a Mac and on Windows' precision
+ * touchpads, or the bottom-right corner pressed (libinput's "button
+ * areas", its own default on most PC clickpads - where a two-finger press
+ * is a plain left click, and the right button seemed not to exist).
+ * A two-finger tap is a right click either way while tapping is on. */
+static int click_method_index(void)
+{
+    char *ini = wayfire_ini();
+    char *v = ini_get(ini, "input", "click_method");
+    g_free(ini);
+    int r = v && !strcmp(v, "button-areas") ? 1 : 0;
+    g_free(v);
+    return r;
+}
+
+static void on_click_method(GtkWidget *seg, int i, gpointer p)
+{
+    (void)seg; (void)p;
+    wf_set("click_method", i == 1 ? "button-areas" : "clickfinger");
+    const char *a[] = { "input", "type:touchpad", "click_method",
+                        i == 1 ? "button_areas" : "clickfinger", NULL };
+    lp_swaymsg(a);
+    lp_toast(FALSE, i == 1 ? T("Right click: press the bottom-right corner",
+                               "오른쪽 클릭: 오른쪽 아래 모서리를 누르기")
+                           : T("Right click: press with two fingers",
+                               "오른쪽 클릭: 두 손가락으로 누르기"));
+}
+
 /* ── touchscreen ────────────────────────────────────────────────────── */
 
 static void apply_touchscreen(gboolean on)
@@ -215,6 +245,12 @@ static GtkWidget *build(void)
                  "입력하는 동안 손바닥이 닿아도 포인터가 움직이지 않습니다"),
                wf_bool("disable_touchpad_while_typing", TRUE),
                G_CALLBACK(on_wf_switch), (gpointer)"disable_touchpad_while_typing|touchpad dwt");
+    const char *clicks[] = { T("Two fingers", "두 손가락으로 누르기"),
+                             T("Bottom-right corner", "오른쪽 아래 모서리"), NULL };
+    row_segmented(tp, T("Right click", "오른쪽 클릭"),
+                  T("Tapping with two fingers is a right click too",
+                    "두 손가락으로 톡 쳐도 오른쪽 클릭입니다"),
+                  clicks, click_method_index(), G_CALLBACK(on_click_method), NULL);
     GtkWidget *r = row_scale(tp, T("Touchpad speed", "터치패드 속도"), NULL, -1, 1, 0.05,
                              wf_num("touchpad_cursor_speed", 0), G_CALLBACK(on_speed), (gpointer)"touchpad");
     g_object_set_data(G_OBJECT(row_control(r)), "lp-fmt", (gpointer)speed_words);

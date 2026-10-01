@@ -52,6 +52,7 @@
  */
 #define _GNU_SOURCE 1
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "lp-apps.h"
@@ -397,12 +398,31 @@ static void on_frame(GtkWidget *w, gpointer d)
 
 /* ── showing and hiding ──────────────────────────────────────────── */
 
+/* The tiles stop above the dock, which floats over the grid's bottom
+ * edge: as much room as the dock reserves for windows (it says how much
+ * in $XDG_RUNTIME_DIR/lp-dock-zone), or a dock's worth without it. */
+static void keep_clear_of_dock(void)
+{
+    int zone = 96;
+    char *p = g_build_filename(g_get_user_runtime_dir(), "lp-dock-zone", NULL);
+    char *s = NULL;
+    if (g_file_get_contents(p, &s, NULL, NULL)) {
+        int z = atoi(s);
+        if (z > 0 && z < 400)
+            zone = z;
+        g_free(s);
+    }
+    g_free(p);
+    gtk_widget_set_margin_bottom(G.scroll, zone);
+}
+
 static void map_now(void)
 {
     if (gtk_widget_get_visible(GTK_WIDGET(G.win)))
         return;
     if (G.dirty)
         fill();
+    keep_clear_of_dock();
     gtk_widget_show_all(GTK_WIDGET(G.win));
     gtk_widget_set_visible(G.empty, FALSE);
     tell(TRUE);
@@ -499,9 +519,13 @@ int main(int argc, char **argv)
 
     G.win = lp_layer_window("lp-appgrid", GTK_LAYER_SHELL_LAYER_TOP,
                             LP_EDGE_TOP | LP_EDGE_BOTTOM | LP_EDGE_LEFT | LP_EDGE_RIGHT);
-    /* Exclusive zone 0: the grid fills what the bar and the dock leave,
-     * so both stay on screen and in reach while it is open. */
-    gtk_layer_set_exclusive_zone(G.win, 0);
+    /* Exclusive zone -1: the whole screen, as Launchpad has it, the top
+     * bar under it too. With 0 it filled only what the bar and the dock
+     * leave, and stopped short of the bottom edge: a band of wallpaper
+     * around the dock under the grid's backdrop. The dock goes over the
+     * grid while it is open (it is told, below - tell()), and the tiles
+     * keep clear of it (keep_clear_of_dock). */
+    gtk_layer_set_exclusive_zone(G.win, -1);
     gtk_layer_set_keyboard_mode(G.win, GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE);
     g_signal_connect(G.win, "key-press-event", G_CALLBACK(on_key), NULL);
 
@@ -520,7 +544,7 @@ int main(int argc, char **argv)
     gtk_entry_set_placeholder_text(GTK_ENTRY(G.search), T("Type to search", "검색하려면 입력하세요"));
     gtk_style_context_add_class(gtk_widget_get_style_context(G.search), "lp-search");
     gtk_widget_set_halign(G.search, GTK_ALIGN_CENTER);
-    gtk_widget_set_margin_top(G.search, 28);
+    gtk_widget_set_margin_top(G.search, 56);
     gtk_widget_set_margin_bottom(G.search, 20);
     g_signal_connect(G.search, "search-changed", G_CALLBACK(on_search), NULL);
     g_signal_connect(G.search, "activate", G_CALLBACK(on_search_go), NULL);

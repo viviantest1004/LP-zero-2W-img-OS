@@ -413,6 +413,8 @@ GtkWindow *lp_layer_window(const char *ns, GtkLayerShellLayer layer, int edges)
 typedef struct {
     LpHoldFn fn;
     gpointer data;
+    gboolean held;      /* a finger has been held; the menu comes when it lifts */
+    double   hx, hy;
 } Hold;
 
 static void hold_fire(GtkWidget *w, double x, double y, Hold *h)
@@ -421,14 +423,43 @@ static void hold_fire(GtkWidget *w, double x, double y, Hold *h)
     h->fn(w, x, y, h->data);
 }
 
+/* The finger held long enough: the menu is due, but it opens when the
+ * finger lifts, not now. Opened now, from the timer, a GtkMenu has no
+ * event to take its opening time from, and the finger's lift a moment
+ * later - outside any item, half a second after the touch - was taken as
+ * the end of a press-drag-release: the menu shut as the finger came up,
+ * and a long press seemed to do nothing (WAYLAND_DEBUG showed the popup
+ * made, drawn, and destroyed on wl_touch.up). Opened on the lift, as the
+ * right button's menu is (below), there is no lift left to close it. */
 static void on_long_press(GtkGestureLongPress *g, double x, double y,
                           gpointer d)
 {
+    Hold *h = d;
     GtkWidget *w = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
     /* Claiming the sequence takes it away from the button's own click
      * gesture, so lifting the finger does not also activate the item. */
     gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
-    hold_fire(w, x, y, d);
+    g_object_set_data(G_OBJECT(w), "lp-hold-consumed", GINT_TO_POINTER(1));
+    h->held = TRUE;
+    h->hx = x;
+    h->hy = y;
+}
+
+static void on_long_end(GtkGesture *g, GdkEventSequence *seq, gpointer d)
+{
+    (void)seq;
+    Hold *h = d;
+    if (!h->held)
+        return;
+    h->held = FALSE;
+    GtkWidget *w = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+    hold_fire(w, h->hx, h->hy, h);
+}
+
+static void on_long_cancel(GtkGesture *g, GdkEventSequence *seq, gpointer d)
+{
+    (void)g; (void)seq;
+    ((Hold *)d)->held = FALSE;
 }
 
 /* The right button asks for the menu when it comes up, not when it goes
@@ -483,6 +514,8 @@ void lp_on_hold(GtkWidget *w, LpHoldFn fn, gpointer data)
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(lp),
                                                GTK_PHASE_CAPTURE);
     g_signal_connect(lp, "pressed", G_CALLBACK(on_long_press), h);
+    g_signal_connect(lp, "end", G_CALLBACK(on_long_end), h);
+    g_signal_connect(lp, "cancel", G_CALLBACK(on_long_cancel), h);
     g_object_set_data_full(G_OBJECT(w), "lp-hold-lp", lp, g_object_unref);
 
     GtkGesture *rc = gtk_gesture_multi_press_new(w);

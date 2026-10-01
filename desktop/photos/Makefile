@@ -15,7 +15,7 @@ PKGS    := gtk4
 
 BIN     := lp-photos
 SRC     := photos.c edit.c
-HDR     := photos.h ../common/lp-i18n.h
+HDR     := photos.h ../common/lp-i18n.h ../common/lp-fit.h
 DESKTOP := lp-photos.desktop
 
 CFLAGS  ?= -O2 -g

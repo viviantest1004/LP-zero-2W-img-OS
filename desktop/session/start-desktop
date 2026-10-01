@@ -193,6 +193,12 @@ run_session() {
         dropprivs 1000:1000 /bin/session-run
     fi
 }
+# The boot screen (/bin/splash: the PC maker's logo, ours under it and a
+# spinner) holds until it is told the desktop is coming; told here, just
+# before the compositor takes the screen. It returns once the splash has
+# stopped drawing, leaving its last frame up for the compositor to replace.
+test -x /bin/splash && /bin/splash stop
+
 quick=0
 while :; do
     read -r t0 _ < /proc/uptime

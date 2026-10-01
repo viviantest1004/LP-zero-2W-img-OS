@@ -359,6 +359,9 @@ SPLASH_LAYOUT = [
     ("SPIN_Y", 78, "the spinner's centre, % down the screen"),
     ("SPIN_R", 80, "the spinner's radius (to the stroke's centre), per mille of the mark"),
     ("SPIN_W", 18, "the spinner's stroke, per mille of the mark's height"),
+    ("OEM_MARK_H", 6, "under a PC maker's logo (ACPI BGRT): the mark's height, % of the screen's"),
+    ("OEM_CENTRE_Y", 84, "...its centre, % down the screen - near the bottom, as Ubuntu's"),
+    ("OEM_SPIN_Y", 70, "...the spinner, when the maker's logo has no known bottom"),
 ]
 
 # The splash's motion, from the design system's table (design/feel.md §2,

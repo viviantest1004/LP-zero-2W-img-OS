@@ -473,6 +473,10 @@ done
 # The lock screen checks passwords through PAM, as its own service.
 [[ -f "$D/lockscreen/pam.lp-lockscreen" ]] &&
     install -D -m 644 "$D/lockscreen/pam.lp-lockscreen" "$ROOT/etc/pam.d/lp-lockscreen"
+# Sound: WirePlumber without logind (the file says why it must be).
+[[ -f "$D/session/wireplumber-no-logind.lua" ]] &&
+    install -D -m 644 "$D/session/wireplumber-no-logind.lua" \
+        "$ROOT/etc/wireplumber/bluetooth.lua.d/80-lp-no-logind.lua"
 for f in "$D"/*/lp-*.desktop; do
     [[ -f "$f" ]] && cp -a "$f" "$ROOT/usr/local/share/applications/"
 done

@@ -21,6 +21,7 @@
  */
 #include <gtk/gtk.h>
 #include "lp-i18n.h"
+#include "lp-fit.h"
 #include <sys/statvfs.h>
 #include <glib/gstdio.h>
 #include <stdio.h>
@@ -1506,12 +1507,24 @@ static gboolean refill_usb(gpointer data)
     GFileMonitor *mm = g_object_get_data(G_OBJECT(usb), "lp-media-monitor");
     App *app = mm ? g_object_get_data(G_OBJECT(mm), "lp-app") : NULL;
     g_object_set_data(G_OBJECT(usb), "lp-refill", NULL);
-    if (!app)
+    /* The window closed in the half second since the mount: the box is
+     * held (below) but no longer in a window, and the App is gone. */
+    if (!app || !gtk_widget_get_root(usb))
         return G_SOURCE_REMOVE;
+    /* The rows about to go are also in app->places, which marks the
+     * current place on every move. Left there, the next move set a class
+     * on a freed button - a stick ejected or plugged in, then any click
+     * in the sidebar, and Files could close on the spot. */
+    for (guint i = app->places->len; i-- > 0;) {
+        Place *p = g_ptr_array_index(app->places, i);
+        if (gtk_widget_is_ancestor(p->row, usb))
+            g_ptr_array_remove_index(app->places, i);
+    }
     GtkWidget *c;
     while ((c = gtk_widget_get_first_child(usb)))
         gtk_box_remove(GTK_BOX(usb), c);
     add_usb_rows(app, usb);
+    update_places(app);
     return G_SOURCE_REMOVE;
 }
 
@@ -1522,7 +1535,8 @@ static void on_media_changed(GFileMonitor *m, GFile *f, GFile *o,
     /* A mount is a burst of events; one refill a moment later. */
     if (!g_object_get_data(G_OBJECT(data), "lp-refill")) {
         g_object_set_data(G_OBJECT(data), "lp-refill", GINT_TO_POINTER(1));
-        g_timeout_add(500, refill_usb, data);
+        g_timeout_add_full(G_PRIORITY_DEFAULT, 500, refill_usb,
+                           g_object_ref(data), g_object_unref);
     }
 }
 
@@ -2860,6 +2874,31 @@ static void on_right_click(GtkGestureClick *gesture, int n_press,
     popup_menu(app, over, x, y);
 }
 
+/* 터치스크린에는 오른쪽 버튼이 없다: 손가락으로 길게 누르면 같은 메뉴.
+ * 시퀀스를 가져가야 손을 뗄 때 그 항목이 열리지 않는다. */
+static void on_long_press(GtkGestureLongPress *gesture, double x, double y,
+                          gpointer data)
+{
+    App *app = data;
+    GtkWidget *over = gtk_event_controller_get_widget(
+        GTK_EVENT_CONTROLLER(gesture));
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+    select_under(app, over, x, y);
+    popup_menu(app, over, x, y);
+}
+
+/* 메뉴는 보기(view)에 붙어 있다. 창을 닫으면 보기가 먼저 사라지고
+ * free_app 은 창이 끝날 때 돌아서, 거기서 메뉴를 떼면 이미 해제된 보기를
+ * 건드렸다. 보기가 사라질 때 같이 뗀다. */
+static void on_view_destroy(GtkWidget *view, gpointer data)
+{
+    App *app = data;
+    if (app->menu && gtk_widget_get_parent(app->menu) == view) {
+        gtk_widget_unparent(app->menu);
+        app->menu = NULL;
+    }
+}
+
 /* 오른쪽 버튼과 Menu 키 둘 다. 키보드만 쓰는 사람에게 메뉴가 없으면
  * 복사와 삭제는 단축키를 외운 사람만 쓸 수 있는 기능이 된다. */
 static void attach_menu(App *app, GtkWidget *view)
@@ -2868,6 +2907,16 @@ static void attach_menu(App *app, GtkWidget *view)
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_SECONDARY);
     g_signal_connect(click, "pressed", G_CALLBACK(on_right_click), app);
     gtk_widget_add_controller(view, GTK_EVENT_CONTROLLER(click));
+    g_signal_connect(view, "destroy", G_CALLBACK(on_view_destroy), app);
+
+    /* 터치만: 마우스로 누르고 있는 것은 끌기의 시작이다. 캡처 단계라야
+     * 목록의 항목이 누름을 먼저 가져가기 전에 본다. */
+    GtkGesture *hold = gtk_gesture_long_press_new();
+    gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(hold), TRUE);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(hold),
+                                               GTK_PHASE_CAPTURE);
+    g_signal_connect(hold, "pressed", G_CALLBACK(on_long_press), app);
+    gtk_widget_add_controller(view, GTK_EVENT_CONTROLLER(hold));
 }
 
 /* ------------------------------------------------------------------ */
@@ -3250,7 +3299,11 @@ static const GActionEntry ACTIONS[] = {
     { "properties", act_properties, NULL, NULL, NULL, { 0 } },
     { "extract",    act_extract,    NULL, NULL, NULL, { 0 } },
     { "open",       act_open,       NULL, NULL, NULL, { 0 } },
-    { "deep-search", act_deep_search, NULL, "false", NULL, { 0 } },
+    /* A boolean state with its handler as change_state: activating it
+     * then toggles the state and hands over the new value. As the
+     * activate handler it was called with no value at all, and "Search
+     * sub-folders too" never turned on. */
+    { "deep-search", NULL, NULL, "false", act_deep_search, { 0 } },
 };
 
 static void open_window(GtkApplication *application, const char *start)
@@ -3261,7 +3314,7 @@ static void open_window(GtkApplication *application, const char *start)
     app->places  = g_ptr_array_new_with_free_func(free_place);
 
     app->window = GTK_WINDOW(gtk_application_window_new(application));
-    gtk_window_set_default_size(app->window, WINDOW_WIDTH, WINDOW_HEIGHT);
+    lp_fit_default_size(app->window, WINDOW_WIDTH, WINDOW_HEIGHT);
     gtk_widget_add_css_class(GTK_WIDGET(app->window), "lp-window");
 
     g_action_map_add_action_entries(G_ACTION_MAP(app->window), ACTIONS,

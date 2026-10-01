@@ -924,6 +924,18 @@ static void edge_for(GdkMonitor *mon)
  * height and the gap under it: windows stop above the dock. */
 static GtkWindow *spacer;
 static gboolean dock_away;      /* slid away: the focused window is full screen */
+static GtkWidget *dock_bar;     /* the visible bar, inside its shadow's room */
+
+/* The app grid covers the whole screen and keeps its tiles out of this
+ * much at the bottom, where the dock floats over it. */
+static void publish_zone(int zone)
+{
+    char *p = g_build_filename(g_get_user_runtime_dir(), "lp-dock-zone", NULL);
+    char n[16];
+    g_snprintf(n, sizeof n, "%d\n", zone);
+    g_file_set_contents(p, n, -1, NULL);
+    g_free(p);
+}
 
 static void reserve_room(void)
 {
@@ -932,12 +944,25 @@ static void reserve_room(void)
     int h = gtk_widget_get_allocated_height(GTK_WIDGET(win));
     if (h <= 1)
         return;
+    /* The bar's own height and the gap under it, not the surface's: the
+     * surface is taller by the room above the bar for its shadow, and a
+     * maximised window stopped that far above the dock - a strip of
+     * wallpaper between the two. It meets the bar's top edge now. */
+    if (dock_bar) {
+        GtkBorder m = { 0 };
+        GtkStyleContext *sc = gtk_widget_get_style_context(dock_bar);
+        gtk_style_context_get_margin(sc, gtk_style_context_get_state(sc), &m);
+        if (m.top > 0 && m.top < h)
+            h -= m.top;
+    }
     /* Kept while a window is full screen too: a full-screen window
      * covers the reserved room anyway, and giving it back made wayfire
      * re-tile that window - out of full screen again. */
     int zone = h + DOCK_MARGIN;
-    if (gtk_layer_get_exclusive_zone(spacer) != zone)
+    if (gtk_layer_get_exclusive_zone(spacer) != zone) {
         gtk_layer_set_exclusive_zone(spacer, zone);
+        publish_zone(zone);
+    }
 }
 
 static void spacer_realized(GtkWidget *w, gpointer d)
@@ -1067,6 +1092,12 @@ static void set_layers(gboolean over)
         move_to_layer(g_ptr_array_index(edges, i), l);
 }
 
+/* The app grid is open: it covers the whole screen, as Launchpad does,
+ * and the dock stays over it - on the overlay layer, as over a
+ * full-screen window, since the grid is on the top layer too and was
+ * put above the dock each time it opened. */
+static gboolean grid_open;
+
 static void update_away(void)
 {
     gboolean away = window_wants_screen();
@@ -1079,7 +1110,7 @@ static void update_away(void)
         leave_id = 0;
     }
     reserve_room();
-    set_layers(away);
+    set_layers(away || grid_open);
     slide(away ? 1.0 : 0.0);
 }
 
@@ -1236,10 +1267,12 @@ static void on_command(int argc, char **argv, gpointer d)
     else if (argc >= 4 && strcmp(argv[1], "open") == 0 &&
              strcmp(argv[2], "grid") == 0) {
         GtkStyleContext *sc = gtk_widget_get_style_context(grid_button);
-        if (strcmp(argv[3], "1") == 0)
+        grid_open = strcmp(argv[3], "1") == 0;
+        if (grid_open)
             gtk_style_context_add_class(sc, "lp-open");
         else
             gtk_style_context_remove_class(sc, "lp-open");
+        set_layers(dock_away || grid_open);
     }
 }
 
@@ -1284,6 +1317,7 @@ int main(int argc, char **argv)
     GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_style_context_add_class(gtk_widget_get_style_context(outer), "lp-dock");
     gtk_container_add(GTK_CONTAINER(win), outer);
+    dock_bar = outer;
 
     /* The items sit straight in the bar, which is as wide as they are.
      * (A GtkScrolledWindow around them, for a dock wider than the

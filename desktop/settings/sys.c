@@ -532,6 +532,11 @@ static void admin_validated(int st, const char *out, const char *err, gpointer p
 {
     (void)out;
     admin_t *a = p;
+    /* Cancelled while sudo was checking, and the sheet is on its way
+     * out: the answer is not wanted (admin_dialog_gone reports the
+     * cancel when the window goes). */
+    if (g_object_get_data(G_OBJECT(lp_dialog_window(a->dlg)), "lp-closing"))
+        return;
     lp_dialog_busy(a->dlg, FALSE);
 
     if (st != 0) {
@@ -566,7 +571,12 @@ static void admin_forgot(int st, const char *out, const char *err, gpointer p)
     admin_t *a = p;
     char *in = g_strconcat(a->pw, "\n", NULL);
     static const char *const v[] = { "sudo", "-S", "-p", "", "-v", NULL };
-    lp_run_async(v, in, NULL, admin_validated, a);
+    /* Owned by the password sheet, as the -k before it: closed while
+     * sudo was checking (Cancel, Escape), the sheet's going frees `a`,
+     * and an answer that still came to admin_validated used it - and
+     * a->dlg, NULL by then - and Settings closed. An owned job whose
+     * owner is gone does not call back. */
+    lp_run_async(v, in, lp_dialog_window(a->dlg), admin_validated, a);
     memset(in, 0, strlen(in));
     g_free(in);
 }
@@ -589,7 +599,7 @@ static void admin_dialog_ok(lp_dialog_t *d, gpointer p)
     /* -k first: a timestamp left by a terminal's sudo must not make the
      * check below pass without looking at the password. */
     static const char *const k[] = { "sudo", "-k", NULL };
-    lp_run_async(k, NULL, NULL, admin_forgot, a);
+    lp_run_async(k, NULL, lp_dialog_window(d), admin_forgot, a);
 }
 
 /* Closed without an answer: the action did not happen, and the caller

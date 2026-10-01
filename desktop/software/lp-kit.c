@@ -286,6 +286,10 @@ void lp_kit_context(GtkWidget *w, LpKitContextFn cb, gpointer data)
      * or a rubber band, not asking for a menu. */
     GtkGesture *lp = gtk_gesture_long_press_new();
     gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(lp), TRUE);
+    /* Capture: a list's rows take a touch for their own click and
+     * drag first, and in the bubble phase the hold never got to see it. */
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(lp),
+                                               GTK_PHASE_CAPTURE);
     g_signal_connect(lp, "pressed", G_CALLBACK(ctx_long), c);
     gtk_widget_add_controller(w, GTK_EVENT_CONTROLLER(lp));
 
@@ -888,6 +892,8 @@ typedef struct {
     guint        wait_timer;
     int          wait_left;
     int          asked;
+    gboolean     authing;    /* a password is with lp-privd, auth_end to come */
+    gboolean     cancelled;  /* ... and the sheet was closed meanwhile */
 } Job;
 
 static void job_free(Job *j)
@@ -1018,8 +1024,13 @@ static void pw_wait(Job *j, int secs)
 static void auth_end(const char *last, gpointer data)
 {
     Job *j = data;
+    j->authing = FALSE;
+    if (j->cancelled) {   /* the dialog was cancelled meanwhile */
+        job_free(j);
+        return;
+    }
     if (!j->pw)
-        return;           /* the dialog was cancelled meanwhile */
+        return;
     lp_kit_dialog_busy(j->pw, FALSE);
     if (!last) {
         lp_kit_dialog_error(j->pw, T("The system service lp-privd is not running.",
@@ -1064,6 +1075,18 @@ static void pw_response(LpKitDialog *d, int response, gpointer data)
     if (response != LP_KIT_OK) {
         j->pw = NULL;
         lp_kit_dialog_close(d);
+        if (j->authing) {
+            /* Escape while the password is being checked: the caller
+             * hears now, but the Job stays until lp-privd answers -
+             * auth_end has it as its data, and freed here it read freed
+             * memory when the answer came. */
+            j->cancelled = TRUE;
+            if (j->on_done)
+                j->on_done(FALSE, "cancelled", T("Cancelled", "취소했습니다"), j->data);
+            j->on_done = NULL;
+            j->on_line = NULL;
+            return;
+        }
         job_finish(j, FALSE, "cancelled", T("Cancelled", "취소했습니다"));
         return;
     }
@@ -1086,6 +1109,7 @@ static void pw_response(LpKitDialog *d, int response, gpointer data)
     gtk_editable_set_text(GTK_EDITABLE(j->entry), "");
     lp_kit_dialog_error(d, NULL);
     lp_kit_dialog_busy(d, TRUE);
+    j->authing = TRUE;
     talk(req, NULL, auth_end, j);
 }
 

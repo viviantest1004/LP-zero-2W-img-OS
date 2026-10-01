@@ -422,8 +422,17 @@ static void switch_drop_drag(GtkWidget *sw)
     GListModel *cs = gtk_widget_observe_controllers(sw);
     for (guint i = g_list_model_get_n_items(cs); i-- > 0;) {
         GtkEventController *c = g_list_model_get_item(cs, i);
-        if (GTK_IS_GESTURE_PAN(c))
+        if (GTK_IS_GESTURE_PAN(c)) {
+            /* Kept alive, though off the switch: GtkSwitch holds the pan
+             * by a bare pointer and denies it on every press beside the
+             * knob (gtkswitch.c, click_gesture_pressed). Removed and
+             * freed, every tap there wrote into freed memory - which
+             * could close Settings at any later moment. Kept, the call
+             * finds a gesture with no touches, and does nothing. */
+            g_object_set_data_full(G_OBJECT(sw), "lp-pan-kept",
+                                   g_object_ref(c), g_object_unref);
             gtk_widget_remove_controller(sw, c);
+        }
         g_object_unref(c);
     }
     g_object_unref(cs);

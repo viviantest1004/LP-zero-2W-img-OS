@@ -271,18 +271,40 @@ typedef struct {
     int   step;
     char *pw;                 /* for the chpasswd step of "add" */
     gboolean admin;
-    lp_dialog_t *dlg;
+    /* The sheet the job came from, by its window and weakly: the person
+     * can close it while useradd or usermod runs, and a plain pointer to
+     * it was then used after it was freed - Settings closed when the
+     * command answered. job_dlg() is the sheet, or NULL once it is gone
+     * or going. */
+    GWeakRef dlgwin;
     /* The account's own dialog, under the "Remove?" one: it closes too
      * when the account is gone, or it stays up offering to change an
      * account that no longer exists. Weak - it may be closed first. */
     GWeakRef parent;
 } job_t;
 
+static lp_dialog_t *job_dlg(job_t *j)
+{
+    GObject *w = g_weak_ref_get(&j->dlgwin);
+    if (!w)
+        return NULL;
+    lp_dialog_t *d = g_object_get_data(w, "lp-closing") ? NULL
+                   : g_object_get_data(w, "lp-dialog");
+    g_object_unref(w);      /* the window lives on: it is on the screen */
+    return d;
+}
+
+static void job_set_dlg(job_t *j, lp_dialog_t *d)
+{
+    g_weak_ref_init(&j->dlgwin, d ? G_OBJECT(lp_dialog_window(d)) : NULL);
+}
+
 static void job_free(job_t *j)
 {
     if (j->pw) { memset(j->pw, 0, strlen(j->pw)); g_free(j->pw); }
     g_free(j->name); g_free(j->ok);
     g_weak_ref_clear(&j->parent);
+    g_weak_ref_clear(&j->dlgwin);
     g_free(j);
 }
 
@@ -291,7 +313,8 @@ static void acct_done(int st, const char *out, const char *err, gpointer p)
     job_t *j = p;
     if (st == 0) {
         lp_toast(FALSE, "%s", j->ok);
-        if (j->dlg) lp_dialog_close(j->dlg);
+        lp_dialog_t *d = job_dlg(j);
+        if (d) lp_dialog_close(d);
         GObject *pw = g_weak_ref_get(&j->parent);
         if (pw) {
             lp_dialog_t *pd = g_object_get_data(pw, "lp-dialog");
@@ -300,10 +323,12 @@ static void acct_done(int st, const char *out, const char *err, gpointer p)
         }
         lp_refresh();
     } else if (st == -2) {
-        if (j->dlg) lp_dialog_busy(j->dlg, FALSE);
+        lp_dialog_t *d = job_dlg(j);
+        if (d) lp_dialog_busy(d, FALSE);
     } else {
         char *why = lp_first_line(err, out);
-        if (j->dlg) { lp_dialog_busy(j->dlg, FALSE); lp_dialog_error(j->dlg, why); }
+        lp_dialog_t *d = job_dlg(j);
+        if (d) { lp_dialog_busy(d, FALSE); lp_dialog_error(d, why); }
         else lp_toast(TRUE, "%s", why);
         g_free(why);
     }
@@ -314,7 +339,8 @@ static const char *WHY_ADMIN;
 
 static void run_acct(const char *const *argv, const char *in, job_t *j)
 {
-    if (j->dlg) lp_dialog_busy(j->dlg, TRUE);
+    lp_dialog_t *d = job_dlg(j);
+    if (d) lp_dialog_busy(d, TRUE);
     lp_admin_run(argv, in, WHY_ADMIN, NULL, acct_done, j);
 }
 
@@ -353,7 +379,7 @@ static void add_ok(lp_dialog_t *d, gpointer p)
     job_t *j = g_new0(job_t, 1);
     j->name = g_strdup(name);
     j->pw = g_strdup(a);
-    j->dlg = d;
+    job_set_dlg(j, d);
     j->ok = g_strdup_printf(T("Added %s", "%s 을(를) 만들었습니다"), name);
     /* The name is the last word: without it useradd answers with its
      * usage text, and the dialog showed that text's last line. */
@@ -390,7 +416,7 @@ static void set_pw_ok(lp_dialog_t *d, gpointer p)
     if (bad) { lp_dialog_error(d, bad); return; }
     job_t *j = g_new0(job_t, 1);
     j->name = g_strdup(name);
-    j->dlg = d;
+    job_set_dlg(j, d);
     j->ok = g_strdup_printf(T("New password for %s", "%s 의 비밀번호를 바꿨습니다"), name);
     char *line = g_strdup_printf("%s:%s\n", name, a);
     static const char *const v[] = { "chpasswd", NULL };
@@ -412,7 +438,7 @@ static void remove_ok(lp_dialog_t *d, gpointer p)
     gboolean files = gtk_check_button_get_active(GTK_CHECK_BUTTON(lp_dialog_get_data(d, "lp-files")));
     job_t *j = g_new0(job_t, 1);
     j->name = g_strdup(name);
-    j->dlg = d;
+    job_set_dlg(j, d);
     j->ok = g_strdup_printf(files ? T("Removed %s and their files", "%s 과(와) 그 파일을 지웠습니다")
                                   : T("Removed %s; their files are kept", "%s 을(를) 지웠습니다. 파일은 남겨 두었습니다"), name);
     GObject *parent = g_weak_ref_get(lp_dialog_get_data(d, "lp-parent"));
@@ -455,7 +481,7 @@ static void on_manage_type(GtkWidget *seg, int i, gpointer p)
     j->name = g_strdup(m->name);
     j->ok = g_strdup_printf(want_admin ? T("%s is now an administrator", "%s 이(가) 이제 관리자입니다")
                                        : T("%s is now a standard account", "%s 이(가) 이제 표준 계정입니다"), m->name);
-    j->dlg = d;
+    job_set_dlg(j, d);
     if (want_admin) {
         const char *v[] = { "usermod", "--append", "--groups", "sudo", m->name, NULL };
         run_acct(v, NULL, j);

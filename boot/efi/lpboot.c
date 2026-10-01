@@ -758,11 +758,14 @@ static void boot(int choice)
     errtext[0] = 0;
     redraw_lines();
     present_all();
-    /* Fade to the bare gradient the kernel's splash starts from, in the
-     * menu spring's exit time (0.7 x 180 ms). */
+    /* Fade to black, in the menu spring's exit time (0.7 x 180 ms): the
+     * kernel's splash starts from black, with the PC maker's logo back
+     * where the firmware showed it and ours small under it, as Ubuntu's
+     * boot does (userland/splash, scene_init_oem). It used to start from
+     * this menu's gradient; from that, the maker's logo coming back on
+     * black was a jump. */
     lpui_copy_rect(&base, &frame, 0, 0, W, H);
-    fade_from(&bg, 120, true);
-    blt(&bg, 0, 0, W, H);
+    fade_from(0, 120, true);
 
     EFI_STATUS st = start_kernel(choice);
 

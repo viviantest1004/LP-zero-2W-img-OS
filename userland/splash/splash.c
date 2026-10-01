@@ -99,6 +99,7 @@
  */
 #define FBIOGET_VSCREENINFO  0x4600
 #define FBIOGET_FSCREENINFO  0x4602
+#define FBIOPAN_DISPLAY      0x4606
 
 #define VAR_SIZE        160
 #define VAR_XRES          0
@@ -131,10 +132,14 @@ typedef struct {
     u32 off[3], len[3];             /* red, green, blue */
 } fb_t;
 
+/* The variable screen info as the kernel last described it: FBIOPAN_DISPLAY
+ * takes it back (see show_fb). */
+static u8 fb_var[VAR_SIZE];
+
 static bool fb_query(int fd, fb_t *fb)
 {
-    u8 var[VAR_SIZE], fix[FIX_SIZE];
-    memset(var, 0, sizeof(var));
+    u8 *var = fb_var, fix[FIX_SIZE];
+    memset(var, 0, VAR_SIZE);
     memset(fix, 0, sizeof(fix));
 
     if (lp_ioctl(fd, FBIOGET_VSCREENINFO, var) < 0) return false;
@@ -191,6 +196,133 @@ static void on_term(int sig) { (void)sig; if (!stop_req) stop_req = STOP_DESKTOP
 static void on_usr1(int sig) { (void)sig; stop_req = STOP_CONSOLE; }
 
 static bool trace;
+
+/* ── The PC maker's logo (ACPI BGRT) ─────────────────────────────────
+ *
+ * A PC's firmware shows its maker's logo from the moment it is switched
+ * on - Dell's, on the XPS - and tells the system where, in the BGRT
+ * table: /sys/firmware/acpi/bgrt has the picture (a BMP), the place it
+ * was drawn at, and whether it was drawn at all. When it was, the boot
+ * screen keeps it, as Ubuntu's does: black, the maker's logo where the
+ * firmware put it, our own logo small near the bottom and the spinner
+ * between the two (scene_init_oem). The logo is drawn again by us rather
+ * than left alone, because the screen we draw on may be a new one - the
+ * graphics driver's - which starts out black.
+ *
+ * Its offsets are for the screen mode the firmware drew in. When the
+ * screen now has another size (a virtual machine's card replacing the
+ * firmware's), the logo goes where the firmware convention puts it:
+ * centred across, its middle 38.2% of the way down. */
+#define BGRT_DIR "/sys/firmware/acpi/bgrt/"
+#define OEM_MAX_BYTES (8u << 20)
+static u8 oem_bmp[OEM_MAX_BYTES];
+static struct {
+    bool ok, top_down;
+    u32  w, h, bpp, stride, data;
+    s32  fx, fy;                    /* where the firmware drew it */
+    s32  x, y;                      /* where it goes on this screen */
+} oem;
+
+static long read_num(const char *path)
+{
+    char b[32];
+    long n = proc_read(path, b, sizeof b - 1);
+    if (n <= 0)
+        return -1;
+    b[n] = 0;
+    return strtol(b, NULL, 10);
+}
+
+static u32 le16(const u8 *p) { return (u32)p[0] | (u32)p[1] << 8; }
+static u32 le32(const u8 *p) { return le16(p) | le16(p + 2) << 16; }
+
+static void oem_load(void)
+{
+    oem.ok = false;
+    long st = read_num(BGRT_DIR "status");
+    if (st < 0 || !(st & 1))
+        return;                     /* no table, or the firmware did not show it */
+    long fd = lp_open(BGRT_DIR "image", O_RDONLY, 0);
+    if (fd < 0)
+        return;
+    u32 n = 0;
+    for (;;) {
+        long got = lp_read((int)fd, oem_bmp + n, OEM_MAX_BYTES - n);
+        if (got <= 0)
+            break;
+        n += (u32)got;
+        if (n == OEM_MAX_BYTES)
+            break;
+    }
+    lp_close((int)fd);
+    if (n < 54 || oem_bmp[0] != 'B' || oem_bmp[1] != 'M' || le32(oem_bmp + 14) < 40)
+        return;
+    s32 w = (s32)le32(oem_bmp + 18), h = (s32)le32(oem_bmp + 22);
+    u32 bpp = le16(oem_bmp + 28), comp = le32(oem_bmp + 30);
+    oem.top_down = h < 0;
+    if (h < 0)
+        h = -h;
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192 || le16(oem_bmp + 26) != 1 ||
+        (bpp != 24 && bpp != 32) || (comp != 0 && !(comp == 3 && bpp == 32)))
+        return;
+    oem.w = (u32)w;
+    oem.h = (u32)h;
+    oem.bpp = bpp;
+    oem.stride = ((u32)w * bpp + 31) / 32 * 4;
+    oem.data = le32(oem_bmp + 10);
+    if (oem.data >= n || (u64)oem.stride * oem.h > (u64)(n - oem.data))
+        return;
+    oem.fx = (s32)read_num(BGRT_DIR "xoffset");
+    oem.fy = (s32)read_num(BGRT_DIR "yoffset");
+    oem.ok = true;
+}
+
+/* Where the logo goes on a W x H screen; false if it does not fit. */
+static bool oem_place(u32 W, u32 H)
+{
+    if (!oem.ok || oem.w > W || oem.h > H)
+        return false;
+    s32 x = oem.fx, y = oem.fy;
+    s32 centred = (s32)(W - oem.w) / 2;
+    bool same_mode = x >= 0 && y >= 0 && x + (s32)oem.w <= (s32)W &&
+                     y + (s32)oem.h <= (s32)H && sc_iabs(centred - x) <= (s32)W / 50 + 2;
+    if (!same_mode) {
+        x = centred;
+        y = (s32)(H * 382 / 1000) - (s32)oem.h / 2;
+        if (y < 0)
+            y = 0;
+    }
+    oem.x = x;
+    oem.y = y;
+    return true;
+}
+
+/* The maker's logo at (px, py), 8.8 per channel; false outside it. */
+static bool oem_pixel(u32 px, u32 py, u32 c[3])
+{
+    s32 dx = (s32)px - oem.x, dy = (s32)py - oem.y;
+    if (dx < 0 || dy < 0 || dx >= (s32)oem.w || dy >= (s32)oem.h)
+        return false;
+    u32 r = oem.top_down ? (u32)dy : oem.h - 1 - (u32)dy;
+    const u8 *p = oem_bmp + oem.data + r * oem.stride + (u32)dx * (oem.bpp / 8);
+    c[0] = (u32)p[2] << 8;
+    c[1] = (u32)p[1] << 8;
+    c[2] = (u32)p[0] << 8;
+    return true;
+}
+
+static bool oem_on;                 /* the maker's logo is part of this screen */
+
+/* Lay the scene out for this screen: under the maker's logo when there is
+ * one that fits, else the full-screen splash. */
+static void scene_for_screen(void)
+{
+    oem_on = oem_place(fb.xres, fb.yres);
+    if (oem_on)
+        scene_init_oem(&scene, fb.xres, fb.yres, LP_OS_NAME, oem.y + (s32)oem.h);
+    else
+        scene_init(&scene, fb.xres, fb.yres, LP_OS_NAME);
+}
 
 /* ── Time ─────────────────────────────────────────────────────────── */
 
@@ -298,10 +430,12 @@ static void draw_full(u32 logo)
 {
     for (u32 y = 0; y < fb.yres && !fb_lost; y++) {
         bool in_box = (s32)y >= scene.by0 && (s32)y <= scene.by1;
+        bool in_oem = oem_on && (s32)y >= oem.y && (s32)y < oem.y + (s32)oem.h;
         u32 rsq = scene_rowsq(&scene, y);
         for (u32 x = 0; x < fb.xres; x++) {
             u32 c[3];
-            scene_bg_row(&scene, x, rsq, c);
+            if (!(in_oem && oem_pixel(x, y, c)))
+                scene_bg_row(&scene, x, rsq, c);
             if (logo && in_box && (s32)x >= scene.bx0 && (s32)x <= scene.bx1) {
                 u32 bg[3] = { c[0], c[1], c[2] }, fg[3] = { c[0], c[1], c[2] };
                 scene_logo(&scene, x, y, fg);
@@ -393,7 +527,7 @@ static bool open_fb(int wait_ms)
         if (fbfd >= 0) {
             if (fb_query((int)fbfd, &fb)) {
                 fb_lost = false;
-                scene_init(&scene, fb.xres, fb.yres, LP_OS_NAME);
+                scene_for_screen();
                 return true;
             }
             lp_close((int)fbfd);
@@ -402,6 +536,26 @@ static bool open_fb(int wait_ms)
         lp_sleep_ms(50);
     }
     return false;
+}
+
+/* Put what we drew on the screen.
+ *
+ * On a DRM driver's framebuffer emulation - simpledrm early on, i915 or
+ * amdgpu or virtio-gpu after - /dev/fb0 is a buffer of its own, and the
+ * screen goes on showing whatever the firmware left until something
+ * makes that buffer the one on the screen. The console does that when
+ * it takes over; with the console deferred and quiet, nothing did, and
+ * the whole boot showed the firmware's logo and nothing of ours. A pan
+ * to where the buffer already is commits it: the next frame on the
+ * screen is ours. On efifb the buffer is the screen, and the pan is
+ * refused, harmlessly. */
+static void show_fb(void)
+{
+    *(u32 *)(fb_var + VAR_XOFFSET) = fb.xoff;
+    *(u32 *)(fb_var + VAR_YOFFSET) = fb.yoff;
+    long r = lp_ioctl((int)fbfd, FBIOPAN_DISPLAY, fb_var);
+    if (trace)
+        dprintf(2, "splash: pan %ld\n", r);
 }
 
 static long vtfd = -1;
@@ -561,7 +715,12 @@ int main(int argc, char **argv)
         else
             fbdev = argv[i];
     }
-    hold = hold_flag || cmdline_says_hold();
+    /* The desktop image holds without being told: its start script
+     * says `splash stop` just before the compositor takes the screen
+     * (desktop/session/start-desktop, desktop/installer/lp-setup-gate). */
+    hold = hold_flag || cmdline_says_hold() ||
+           lp_exists("/usr/lib/lp/start-desktop.session");
+    oem_load();
 
     lp_signal_handler(SIGTERM, on_term);
     lp_signal_handler(SIGUSR1, on_usr1);
@@ -582,6 +741,7 @@ int main(int argc, char **argv)
 
     s64 t_draw = now_us();
     draw_full(0);
+    show_fb();
     cache_logo();
     if (trace)
         dprintf(2, "splash: %ux%u@%u, first frame %ld us, logo box %dx%d, spinner box %dx%d\n",
@@ -614,6 +774,7 @@ int main(int argc, char **argv)
             if (!open_fb(3000))
                 break;
             draw_full(256);
+            show_fb();
             cache_logo();
             logo.x = logo.target = ONE;
             logo.v = 0;

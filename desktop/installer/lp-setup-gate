@@ -423,6 +423,7 @@ def kiosk(mode):
     log("kiosk", mode, "scale", output_scale(), "renderer", RENDERER)
     started = time.time()
     with open(LOG, "a") as out:
+        splash_stop()
         p = subprocess.Popen(["/usr/bin/sway", "-c", cfg], env=env, preexec_fn=child,
                              stdout=out, stderr=out, stdin=subprocess.DEVNULL)
         p.wait()
@@ -462,6 +463,17 @@ def boot_ok():
     if exe:
         subprocess.run([exe, "--boot-ok"], stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL)
+
+
+def splash_stop():
+    """The boot screen holds until told; told just before sway takes the
+    screen (start-desktop does the same for the desktop)."""
+    if os.access("/bin/splash", os.X_OK):
+        try:
+            subprocess.run(["/bin/splash", "stop"], timeout=5,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 
 def main():

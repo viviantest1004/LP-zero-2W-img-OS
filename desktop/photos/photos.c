@@ -25,6 +25,7 @@
  */
 
 #include "photos.h"
+#include "lp-fit.h"
 #include <math.h>
 #include <string.h>
 #include <strings.h>
@@ -1750,7 +1751,7 @@ static void build_window(app_t *app)
     g_object_unref(css);
 
     app->win = gtk_application_window_new(app->gapp);
-    gtk_window_set_default_size(GTK_WINDOW(app->win), 1100, 740);
+    lp_fit_default_size(GTK_WINDOW(app->win), 1100, 740);
     gtk_widget_add_css_class(app->win, "lp-photos");
 
     /* header */

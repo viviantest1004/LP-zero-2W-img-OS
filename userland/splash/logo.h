@@ -131,6 +131,9 @@ static const u16 LP_GRAD[LP_GRAD_N][3] = {
 #define LP_LAYOUT_SPIN_Y        78   /* the spinner's centre, % down the screen */
 #define LP_LAYOUT_SPIN_R        80   /* the spinner's radius (to the stroke's centre), per mille of the mark */
 #define LP_LAYOUT_SPIN_W        18   /* the spinner's stroke, per mille of the mark's height */
+#define LP_LAYOUT_OEM_MARK_H     6   /* under a PC maker's logo (ACPI BGRT): the mark's height, % of the screen's */
+#define LP_LAYOUT_OEM_CENTRE_Y    84   /* ...its centre, % down the screen - near the bottom, as Ubuntu's */
+#define LP_LAYOUT_OEM_SPIN_Y    70   /* ...the spinner, when the maker's logo has no known bottom */
 
 /* Motion (mark.py SPLASH_MOTION; design/feel.md §2). */
 #define LP_MOTION_LOGO_IN_MS        400   /* the logo fading in */

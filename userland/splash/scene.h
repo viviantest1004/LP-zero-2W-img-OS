@@ -55,6 +55,7 @@ typedef struct {
 
 typedef struct {
     u32      W, H;
+    u8       plain;                 /* black, not the gradient: the firmware's logo is up (scene_init_oem) */
     s32      mark_h;                /* the mark's height in pixels */
     placed_t prims[MAXPRIM];
     int      nprims;
@@ -193,17 +194,55 @@ static inline s32 sc_distance(const placed_t *p, s32 px, s32 py)
  * hangs under it. The spinner is further down, well clear of both, so
  * that when it goes the logo is left exactly as the desktop's first
  * frame draws it. */
+/* The mark's height on this screen at `pct` per cent of its height. */
+static inline s32 sc_mark_h(u32 W, u32 H, u32 pct)
+{
+    s32 mark_h = (s32)(H * pct / 100);
+    if (mark_h > (s32)(W * LP_LAYOUT_MARK_MAXW / 100)) mark_h = (s32)(W * LP_LAYOUT_MARK_MAXW / 100);
+    if (mark_h < LP_LAYOUT_MARK_MIN) mark_h = LP_LAYOUT_MARK_MIN;
+    return mark_h;
+}
+
+static inline void sc_layout(scene_t *s, u32 W, u32 H, const char *name,
+                             s32 mark_h, s32 cy, s32 spin_mark_h, s32 spin_cy);
+
 static inline void scene_init(scene_t *s, u32 W, u32 H, const char *name)
+{
+    s32 mark_h = sc_mark_h(W, H, LP_LAYOUT_MARK_H);
+    s->plain = 0;
+    sc_layout(s, W, H, name, mark_h, (s32)H * SUB * LP_LAYOUT_CENTRE_Y / 100,
+              mark_h, (s32)H * SUB * LP_LAYOUT_SPIN_Y / 100);
+}
+
+/* The screen when the firmware's own logo is up (ACPI BGRT - the
+ * maker's logo a PC shows from power-on): that logo stays where it is,
+ * on black, as Ubuntu leaves it; ours goes small near the bottom edge,
+ * and the spinner sits between the two. `oem_bottom` is the row under
+ * the firmware's logo, or -1 when it is not known. The spinner keeps the
+ * size it has on the full-screen splash. */
+static inline void scene_init_oem(scene_t *s, u32 W, u32 H, const char *name, s32 oem_bottom)
+{
+    s32 mark_h = sc_mark_h(W, H, LP_LAYOUT_OEM_MARK_H);
+    s->plain = 1;
+    /* the spinner's place depends on where the logo lands: lay out once
+     * to find the logo's top, then again with the spinner there */
+    sc_layout(s, W, H, name, mark_h, (s32)H * SUB * LP_LAYOUT_OEM_CENTRE_Y / 100,
+              sc_mark_h(W, H, LP_LAYOUT_MARK_H), (s32)H * SUB * LP_LAYOUT_OEM_SPIN_Y / 100);
+    if (oem_bottom >= 0 && oem_bottom < s->by0) {
+        s32 mid = (oem_bottom + s->by0) / 2;
+        sc_layout(s, W, H, name, mark_h, (s32)H * SUB * LP_LAYOUT_OEM_CENTRE_Y / 100,
+                  sc_mark_h(W, H, LP_LAYOUT_MARK_H), mid * SUB);
+    }
+}
+
+static inline void sc_layout(scene_t *s, u32 W, u32 H, const char *name,
+                             s32 mark_h, s32 cy, s32 spin_mark_h, s32 spin_cy)
 {
     s->W = W;
     s->H = H;
     s->nprims = 0;
-
-    s32 mark_h = (s32)(H * LP_LAYOUT_MARK_H / 100);
-    if (mark_h > (s32)(W * LP_LAYOUT_MARK_MAXW / 100)) mark_h = (s32)(W * LP_LAYOUT_MARK_MAXW / 100);
-    if (mark_h < LP_LAYOUT_MARK_MIN) mark_h = LP_LAYOUT_MARK_MIN;
     s->mark_h = mark_h;
-    s32 cx = (s32)W * SUB / 2, cy = (s32)H * SUB * LP_LAYOUT_CENTRE_Y / 100;
+    s32 cx = (s32)W * SUB / 2;
 
     s32 m_num = mark_h * SUB, m_den = LP_MARK_Y1 - LP_MARK_Y0;
     s32 m_ox = cx - (LP_MARK_X0 + LP_MARK_X1) * m_num / m_den / 2;
@@ -258,9 +297,9 @@ static inline void scene_init(scene_t *s, u32 W, u32 H, const char *name)
      * thinner than a pixel and a half - below that a turning stroke
      * flickers instead of moving. */
     s->sp_cx = cx;
-    s->sp_cy = (s32)H * SUB * LP_LAYOUT_SPIN_Y / 100;
-    s->sp_r  = mark_h * SUB * LP_LAYOUT_SPIN_R / 1000;
-    s->sp_hw = mark_h * SUB * LP_LAYOUT_SPIN_W / 1000 / 2;
+    s->sp_cy = spin_cy;
+    s->sp_r  = spin_mark_h * SUB * LP_LAYOUT_SPIN_R / 1000;
+    s->sp_hw = spin_mark_h * SUB * LP_LAYOUT_SPIN_W / 1000 / 2;
     if (s->sp_hw < SUB * 3 / 4) s->sp_hw = SUB * 3 / 4;
     if (s->sp_r < s->sp_hw * 3) s->sp_r = s->sp_hw * 3;
     s32 reach = s->sp_r + s->sp_hw;
@@ -312,6 +351,10 @@ static inline u32 scene_rowsq(const scene_t *s, u32 y)
 
 static inline void scene_bg_row(const scene_t *s, u32 x, u32 rowsq, u32 c[3])
 {
+    if (s->plain) {
+        c[0] = c[1] = c[2] = 0;
+        return;
+    }
     u32 idx = (u32)(((u64)(s->colsq[x] + rowsq) * s->recip) >> 32);
     if (idx >= LUT_N) idx = LUT_N - 1;
     c[0] = s->lut[idx][0];

@@ -35,7 +35,7 @@ BIN     ?= lp-tasks
 PROTO   := wlr-foreign-toplevel-management-unstable-v1
 SRC     := tasks.c ../software/lp-kit.c ../common/lp-motion.c \
            ../common/lp-toplevel.c ../common/lp-apps.c
-HDRS    := ../software/lp-kit.h ../common/lp-motion.h ../common/lp-i18n.h \
+HDRS    := ../software/lp-kit.h ../common/lp-motion.h ../common/lp-i18n.h ../common/lp-fit.h \
            ../common/lp-toplevel.h ../common/lp-apps.h ../theme/motion.css \
            $(PROTO)-client-protocol.h
 DESKTOP := lp-tasks.desktop

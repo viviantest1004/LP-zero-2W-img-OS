@@ -48,6 +48,7 @@
  */
 #define _GNU_SOURCE 1
 #include "lp-kit.h"
+#include "lp-fit.h"
 
 #include <gio/gdesktopappinfo.h>
 #include <glib/gstdio.h>
@@ -2452,7 +2453,7 @@ static void build_window(const char *start)
 {
     A->win = gtk_application_window_new(A->gapp);
     gtk_window_set_title(GTK_WINDOW(A->win), T("Software", "소프트웨어"));
-    gtk_window_set_default_size(GTK_WINDOW(A->win), WINDOW_W, WINDOW_H);
+    lp_fit_default_size(GTK_WINDOW(A->win), WINDOW_W, WINDOW_H);
     gtk_window_set_icon_name(GTK_WINDOW(A->win), "system-software-install");
     g_signal_connect(A->win, "close-request", G_CALLBACK(on_close_request), NULL);
 

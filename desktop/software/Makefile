@@ -20,7 +20,7 @@ PKGS    := gtk4 gio-unix-2.0
 
 BIN     ?= lp-software
 SRC     := software.c lp-kit.c ../common/lp-motion.c
-HDRS    := lp-kit.h ../common/lp-motion.h ../common/lp-i18n.h ../theme/motion.css
+HDRS    := lp-kit.h ../common/lp-motion.h ../common/lp-i18n.h ../common/lp-fit.h ../theme/motion.css
 DESKTOP := lp-software.desktop
 
 CFLAGS  ?= -O2 -g
