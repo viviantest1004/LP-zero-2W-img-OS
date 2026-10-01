@@ -470,6 +470,9 @@ for f in "$D"/*/lp-*; do
     case "$f" in "$D"/installer/*|"$D"/firstboot/*|"$D"/session/*) continue ;; esac
     cp -a "$f" "$ROOT/usr/local/bin/"; n=$((n + 1))
 done
+# The session's loading cover is one level deeper than the rest.
+[[ -x "$D/branding/lp-splash-fade/lp-splash-fade" ]] &&
+    cp -a "$D/branding/lp-splash-fade/lp-splash-fade" "$ROOT/usr/local/bin/"
 # The lock screen checks passwords through PAM, as its own service.
 [[ -f "$D/lockscreen/pam.lp-lockscreen" ]] &&
     install -D -m 644 "$D/lockscreen/pam.lp-lockscreen" "$ROOT/etc/pam.d/lp-lockscreen"

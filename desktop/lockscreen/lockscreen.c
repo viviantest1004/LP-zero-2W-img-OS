@@ -93,6 +93,7 @@ static struct {
     Screen     *primary;
     GtkWidget  *card;         /* the one card, moved to the primary */
     GtkWidget  *entry, *go, *msg, *caps, *hint;
+    GtkWidget  *go_stack, *spin;  /* the go button's arrow, or a spinner while checking */
     GtkWidget  *shake;        /* the box the shake moves */
     GdkPixbuf  *wall;
     char       *user;
@@ -262,6 +263,50 @@ static void set_msg(const char *text, const char *cls)
     gtk_label_set_text(GTK_LABEL(L.msg), text ? text : "");
 }
 
+/* The go button turns into a spinner while the password is checked, and
+ * stays one through the fade on success: signing in is the last of the
+ * boot's waiting, and it should look like it, not like a frozen arrow. */
+/* Drawn here rather than GtkSpinner, whose look is the icon theme's: the
+ * boot screen's spinner (userland/splash) - a faint ring, and a bright
+ * stroke going round it - in the go button's white. */
+static guint spin_tick_id;
+
+static gboolean spin_draw(GtkWidget *w, cairo_t *cr, gpointer d)
+{
+    (void)d;
+    double W = gtk_widget_get_allocated_width(w), H = gtk_widget_get_allocated_height(w);
+    double r = MIN(W, H) / 2.0 - 2.0, lw = MAX(2.0, r / 3.5);
+    gint64 t = g_get_monotonic_time() / 1000;
+    double a0 = (t % 1300) / 1300.0 * 2 * G_PI - G_PI / 2;
+    cairo_set_line_width(cr, lw);
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+    cairo_set_source_rgba(cr, 1, 1, 1, 0.25);
+    cairo_arc(cr, W / 2, H / 2, r, 0, 2 * G_PI);
+    cairo_stroke(cr);
+    cairo_set_source_rgba(cr, 1, 1, 1, 1);
+    cairo_arc(cr, W / 2, H / 2, r, a0, a0 + G_PI * 0.6);
+    cairo_stroke(cr);
+    return TRUE;
+}
+
+static gboolean spin_tick(GtkWidget *w, GdkFrameClock *fc, gpointer d)
+{
+    (void)fc; (void)d;
+    gtk_widget_queue_draw(w);
+    return G_SOURCE_CONTINUE;
+}
+
+static void go_busy(gboolean busy)
+{
+    gtk_stack_set_visible_child(GTK_STACK(L.go_stack), busy ? L.spin : gtk_stack_get_child_by_name(GTK_STACK(L.go_stack), "arrow"));
+    if (busy && !spin_tick_id)
+        spin_tick_id = gtk_widget_add_tick_callback(L.spin, spin_tick, NULL, NULL);
+    else if (!busy && spin_tick_id) {
+        gtk_widget_remove_tick_callback(L.spin, spin_tick_id);
+        spin_tick_id = 0;
+    }
+}
+
 static void checked(GObject *src, GAsyncResult *res, gpointer data)
 {
     (void)src; (void)data;
@@ -273,6 +318,7 @@ static void checked(GObject *src, GAsyncResult *res, gpointer data)
         return;
     }
     L.fails++;
+    go_busy(FALSE);
     gtk_widget_set_sensitive(L.entry, TRUE);
     gtk_widget_set_sensitive(L.go, TRUE);
     gtk_entry_set_text(GTK_ENTRY(L.entry), "");
@@ -295,8 +341,11 @@ static void submit(void)
     }
     L.checking = TRUE;
     gtk_widget_set_sensitive(L.entry, FALSE);
-    gtk_widget_set_sensitive(L.go, FALSE);
-    set_msg(T("Checking…", "확인하는 중…"), "lp-lock-busy");
+    /* The button stays lit, with the spinner in it; a second press while
+     * checking does nothing (L.checking, above). */
+    go_busy(TRUE);
+    set_msg(L.login ? T("Signing in…", "로그인하는 중…") : T("Checking…", "확인하는 중…"),
+            "lp-lock-busy");
     GTask *t = g_task_new(NULL, NULL, checked, NULL);
     g_task_set_task_data(t, g_strdup(pw), (GDestroyNotify)wipe);
     g_task_run_in_thread(t, check_thread);
@@ -519,7 +568,19 @@ static GtkWidget *build_card(void)
     gtk_widget_set_hexpand(L.entry, TRUE);
     g_signal_connect(L.entry, "activate", G_CALLBACK(on_activate), NULL);
     gtk_container_add(GTK_CONTAINER(row), L.entry);
-    L.go = gtk_button_new_from_icon_name("go-next-symbolic", GTK_ICON_SIZE_BUTTON);
+    L.go = gtk_button_new();
+    L.go_stack = gtk_stack_new();
+    gtk_stack_set_transition_type(GTK_STACK(L.go_stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
+    gtk_stack_set_transition_duration(GTK_STACK(L.go_stack), 150);
+    gtk_stack_add_named(GTK_STACK(L.go_stack),
+                        gtk_image_new_from_icon_name("go-next-symbolic", GTK_ICON_SIZE_BUTTON), "arrow");
+    L.spin = gtk_drawing_area_new();
+    gtk_widget_set_size_request(L.spin, 18, 18);
+    gtk_widget_set_halign(L.spin, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(L.spin, GTK_ALIGN_CENTER);
+    g_signal_connect(L.spin, "draw", G_CALLBACK(spin_draw), NULL);
+    gtk_stack_add_named(GTK_STACK(L.go_stack), L.spin, "spin");
+    gtk_container_add(GTK_CONTAINER(L.go), L.go_stack);
     gtk_widget_set_tooltip_text(L.go, L.login ? T("Sign in", "로그인") : T("Unlock", "잠금 해제"));
     gtk_style_context_add_class(gtk_widget_get_style_context(L.go), "lp-lock-go");
     g_signal_connect(L.go, "clicked", G_CALLBACK(on_go), NULL);
@@ -720,6 +781,52 @@ static GdkPixbuf *load_wallpaper(void)
     return pb;
 }
 
+/* ── arriving ─────────────────────────────────────────────────────
+ * Signing in at boot, the screen under this one is the boot's loading
+ * cover (lp-splash-fade: the maker's logo, ours, the spinner), and the
+ * sign-in screen fades in over it - then the cover is told it can go,
+ * underneath, unseen. A lock of a running session comes up at once. */
+static void cover_done(void)
+{
+    const char *argv[] = { "lp-splash-fade", "done", NULL };
+    g_spawn_async(NULL, (char **)argv, NULL, G_SPAWN_SEARCH_PATH |
+                  G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
+                  NULL, NULL, NULL, NULL);
+}
+
+static gboolean arrive_tick(GtkWidget *w, GdkFrameClock *fc, gpointer d)
+{
+    (void)w; (void)d;
+    static gint64 t0;
+    gint64 now = gdk_frame_clock_get_frame_time(fc);
+    if (!t0)
+        t0 = now;
+    double t = (now - t0) / 260000.0;
+    double a = t >= 1.0 ? 1.0 : 1.0 - (1.0 - t) * (1.0 - t);
+    for (guint i = 0; i < L.screens->len; i++) {
+        Screen *s = g_ptr_array_index(L.screens, i);
+        gtk_widget_set_opacity(s->root, a);
+    }
+    if (t >= 1.0) {
+        cover_done();
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static gboolean arrive_anyway(gpointer d)
+{
+    /* the frame clock never ran (an output off): show it as it is */
+    (void)d;
+    for (guint i = 0; i < L.screens->len; i++) {
+        Screen *s = g_ptr_array_index(L.screens, i);
+        if (gtk_widget_get_opacity(s->root) < 1.0)
+            gtk_widget_set_opacity(s->root, 1.0);
+    }
+    cover_done();
+    return G_SOURCE_REMOVE;
+}
+
 int main(int argc, char **argv)
 {
     for (int i = 1; i < argc; i++)
@@ -771,6 +878,15 @@ int main(int argc, char **argv)
 
     tick_clock(NULL);
     g_timeout_add_seconds(1, tick_clock, NULL);
+    if (L.login) {
+        for (guint i = 0; i < L.screens->len; i++) {
+            Screen *s = g_ptr_array_index(L.screens, i);
+            gtk_widget_set_opacity(s->root, 0.0);
+        }
+        gtk_widget_add_tick_callback(L.primary->root, arrive_tick, NULL, NULL);
+        g_timeout_add(1500, arrive_anyway, NULL);
+    } else
+        cover_done();
     gtk_main();
     /* gtk_main returns only if every window went away, which is not an
      * unlock: lp-lock starts this again. */

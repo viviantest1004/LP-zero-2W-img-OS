@@ -79,9 +79,11 @@ typedef int64_t  s64;
 typedef struct {
     GtkWidget       *win;
     cairo_surface_t *img;           /* the splash, at the output's pixel size */
+    scene_t         *sc;            /* its layout: the spinner is drawn from it every frame */
     LpSpring         fade;          /* 1 = the splash, 0 = gone */
     LpMotion        *motion;
     int              scale;
+    gint64           spin_t0;       /* when the spinner started */
 } Cover;
 
 static GPtrArray  *covers;
@@ -89,15 +91,54 @@ static const char *os_name = "linux-LP";
 static char       *pid_path;
 static gboolean    fading;
 static gboolean    trace;           /* LP_MOTION_TRACE: time each frame */
+static gboolean    reduced;         /* reduced motion: the spinner breathes, as the splash's does */
+
+/* The PC maker's logo, as the boot splash drew it (scene.h, ACPI BGRT):
+ * the splash put it back on black with ours under it, so the session's
+ * first frame has to as well. */
+static scene_oem_t oem;
+static s32         oem_fx, oem_fy;
+static gchar      *oem_buf;
+
+static long bgrt_num(const char *name)
+{
+    g_autofree char *p = g_build_filename("/sys/firmware/acpi/bgrt", name, NULL);
+    g_autofree char *t = NULL;
+    if (!g_file_get_contents(p, &t, NULL, NULL))
+        return -1;
+    return strtol(t, NULL, 10);
+}
+
+static void oem_load(void)
+{
+    long st = bgrt_num("status");
+    gsize n = 0;
+    if (st < 0 || !(st & 1) ||
+        !g_file_get_contents("/sys/firmware/acpi/bgrt/image", &oem_buf, &n, NULL))
+        return;
+    if (!scene_oem_parse(&oem, (const u8 *)oem_buf, (u32)n))
+        return;
+    oem_fx = (s32)bgrt_num("xoffset");
+    oem_fy = (s32)bgrt_num("yoffset");
+}
 
 /* ── the picture ──────────────────────────────────────────────────── */
 
 typedef struct {
     const scene_t *sc;
+    const scene_oem_t *oem;         /* the maker's logo, placed; NULL without */
     u32           *px;
     int            stride;          /* in u32 */
     u32            y0, y1;
 } Band;
+
+static inline u32 pack(const u32 c[3], u32 x, u32 y)
+{
+    return 0xFF000000u |
+           scene_quantise(c[0], 8, x, y, 0) << 16 |
+           scene_quantise(c[1], 8, x, y, 1) << 8 |
+           scene_quantise(c[2], 8, x, y, 2);
+}
 
 /* One band of rows, exactly as splash.c draws a 32-bit framebuffer:
  * the gradient, the logo over it, each channel dithered to 8 bits. */
@@ -110,23 +151,25 @@ static void *draw_band(void *arg)
         u32 *row = b->px + (size_t)y * (size_t)b->stride;
         for (u32 x = 0; x < s->W; x++) {
             u32 c[3];
-            scene_bg_row(s, x, rsq, c);
+            if (!(b->oem && scene_oem_pixel(b->oem, x, y, c)))
+                scene_bg_row(s, x, rsq, c);
             scene_logo(s, x, y, c);
-            row[x] = 0xFF000000u |
-                     scene_quantise(c[0], 8, x, y, 0) << 16 |
-                     scene_quantise(c[1], 8, x, y, 1) << 8 |
-                     scene_quantise(c[2], 8, x, y, 2);
+            row[x] = pack(c, x, y);
         }
     }
     return NULL;
 }
 
-static cairo_surface_t *render(int w, int h, int scale)
+static cairo_surface_t *render(scene_t *sc, int w, int h, int scale)
 {
-    static scene_t sc;              /* 60KB of tables: not on the stack */
     if (w <= 0 || h <= 0 || w > SCENE_MAX_W)
         return NULL;
-    scene_init(&sc, (u32)w, (u32)h, os_name);
+    const scene_oem_t *o = NULL;
+    if (scene_oem_place(&oem, (u32)w, (u32)h, oem_fx, oem_fy)) {
+        scene_init_oem(sc, (u32)w, (u32)h, os_name, oem.y + (s32)oem.h);
+        o = &oem;
+    } else
+        scene_init(sc, (u32)w, (u32)h, os_name);
 
     cairo_surface_t *img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
     if (cairo_surface_status(img) != CAIRO_STATUS_SUCCESS)
@@ -139,7 +182,7 @@ static cairo_surface_t *render(int w, int h, int scale)
     pthread_t th[N];
     Band band[N];
     for (int i = 0; i < N; i++) {
-        band[i] = (Band){ &sc, px, stride, (u32)h * i / N, (u32)h * (i + 1) / N };
+        band[i] = (Band){ sc, o, px, stride, (u32)h * i / N, (u32)h * (i + 1) / N };
         if (pthread_create(&th[i], NULL, draw_band, &band[i]) != 0) {
             draw_band(&band[i]);
             th[i] = 0;
@@ -220,6 +263,61 @@ static gboolean fade_direct(cairo_t *cr, cairo_surface_t *img, double a)
     return TRUE;
 }
 
+/* ── the spinner ──────────────────────────────────────────────────────
+ * The splash's spinner, turning, while the session assembles itself
+ * under the cover: the boot is not over until the desktop - or the
+ * sign-in screen - is up, and a picture that stands still for those
+ * seconds looks like a machine that stopped. Only the spinner's box is
+ * drawn again each frame, into the picture itself, and only that box is
+ * redrawn on the screen. */
+static gboolean spin_tick(GtkWidget *w, GdkFrameClock *fc, gpointer data)
+{
+    Cover *c = data;
+    if (!c->img || !c->sc)
+        return G_SOURCE_CONTINUE;
+    const scene_t *s = c->sc;
+    gint64 now = gdk_frame_clock_get_frame_time(fc);
+    if (!c->spin_t0)
+        c->spin_t0 = now;
+    s64 t = (now - c->spin_t0) / 1000;           /* ms */
+    /* arriving: the splash's spinner-in time, eased out */
+    u32 a = t >= LP_MOTION_SPIN_IN_MS ? 256
+          : (u32)(256 - (256 - t * 256 / LP_MOTION_SPIN_IN_MS) *
+                        (256 - t * 256 / LP_MOTION_SPIN_IN_MS) / 256);
+    u32 head = (u32)(t % LP_MOTION_SPIN_TURN_MS * 65536 / LP_MOTION_SPIN_TURN_MS);
+    if (reduced) {
+        u32 p = (u32)(t % LP_MOTION_PULSE_MS), half = LP_MOTION_PULSE_MS / 2;
+        u32 u = p < half ? p * 64 / half : (LP_MOTION_PULSE_MS - p) * 64 / half;
+        a = a * (90 + (u32)((166 * (u64)LP_WAVE[u > 64 ? 64 : u]) >> 16)) / 256;
+    }
+    static const u8 rgb[3] = LP_RGB_WORD;
+    u32 ink[3] = { (u32)rgb[0] << 8, (u32)rgb[1] << 8, (u32)rgb[2] << 8 };
+    s32 hx, hy;
+    scene_spin_head(s, head, &hx, &hy);
+    cairo_surface_flush(c->img);
+    u32 *px = (u32 *)cairo_image_surface_get_data(c->img);
+    int stride = cairo_image_surface_get_stride(c->img) / 4;
+    const scene_oem_t *o = s->plain ? &oem : NULL;
+    for (s32 y = s->sy0; y <= s->sy1; y++) {
+        u32 rsq = scene_rowsq(s, (u32)y);
+        for (s32 x = s->sx0; x <= s->sx1; x++) {
+            u32 bg[3], out[3];
+            if (!(o && scene_oem_pixel(o, (u32)x, (u32)y, bg)))
+                scene_bg_row(s, (u32)x, rsq, bg);
+            scene_logo(s, (u32)x, (u32)y, bg);
+            u32 k = scene_spin(s, (u32)x, (u32)y, head, hx, hy, reduced) * a / 256;
+            scene_mix(out, bg, ink, k);
+            px[(size_t)y * (size_t)stride + (size_t)x] = pack(out, (u32)x, (u32)y);
+        }
+    }
+    cairo_surface_mark_dirty_rectangle(c->img, s->sx0, s->sy0,
+                                       s->sx1 - s->sx0 + 1, s->sy1 - s->sy0 + 1);
+    int sc = c->scale > 0 ? c->scale : 1;
+    gtk_widget_queue_draw_area(w, s->sx0 / sc - 1, s->sy0 / sc - 1,
+                               (s->sx1 - s->sx0) / sc + 3, (s->sy1 - s->sy0) / sc + 3);
+    return G_SOURCE_CONTINUE;
+}
+
 /* ── the surface ──────────────────────────────────────────────────── */
 
 static gboolean on_draw(GtkWidget *w, cairo_t *cr, gpointer data)
@@ -283,7 +381,9 @@ static void cover_render(Cover *c, int lw, int lh, int scale)
     if (c->img)
         cairo_surface_destroy(c->img);
     gint64 t = g_get_monotonic_time();
-    c->img = render(lw * scale, lh * scale, scale);
+    if (!c->sc)
+        c->sc = g_new0(scene_t, 1);     /* 60KB of tables: not on the stack */
+    c->img = render(c->sc, lw * scale, lh * scale, scale);
     c->scale = scale;
     if (trace)
         fprintf(stderr, "lp-splash-fade: %dx%d rendered in %.1f ms\n", lw * scale, lh * scale,
@@ -354,6 +454,7 @@ static Cover *cover_new(GdkMonitor *mon)
     g_signal_connect(c->win, "draw", G_CALLBACK(on_draw), c);
     g_signal_connect(c->win, "size-allocate", G_CALLBACK(on_size), c);
     g_signal_connect(c->win, "realize", G_CALLBACK(on_realize), c);
+    gtk_widget_add_tick_callback(c->win, spin_tick, c, NULL);
     gtk_widget_show(c->win);
     return c;
 }
@@ -441,7 +542,9 @@ int main(int argc, char **argv)
 {
     int timeout = DEFAULT_TIMEOUT;
     trace = g_getenv("LP_MOTION_TRACE") != NULL;
+    reduced = g_getenv("LP_REDUCE_MOTION") != NULL;
     read_os_name();
+    oem_load();
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "done") == 0)
             return send_done();

@@ -20,6 +20,8 @@
 lp_pw=$(/usr/bin/passwd -S "$(id -un)" 2> /dev/null | awk '{ print $2 }')
 if test -n "$lp_pw" && test "$lp_pw" != P ; then
     echo "lp-lock: $(id -un) has no password to unlock with ($lp_pw); not locking" >&2
+    # the boot's loading cover waits for a sign-in screen that will not come
+    command -v lp-splash-fade > /dev/null 2>&1 && lp-splash-fade done
     exit 0
 fi
 
@@ -67,4 +69,6 @@ set -- -f --show-failed-attempts --indicator-idle-visible \
     --indicator-radius 90 --indicator-thickness 8 \
     --font "Pretendard Variable"
 test -r "$WALL" && set -- "$@" -i "$WALL" -s fill
+# swaylock does not tell the boot's loading cover it is up; told here.
+command -v lp-splash-fade > /dev/null 2>&1 && lp-splash-fade done
 exec swaylock "$@"

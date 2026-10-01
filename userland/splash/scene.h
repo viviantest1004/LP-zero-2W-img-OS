@@ -512,6 +512,88 @@ static inline u32 scene_quantise(u32 c, u32 len, u32 x, u32 y, int k)
     return v > max ? max : v;
 }
 
+/* ── The PC maker's logo (ACPI BGRT) ────────────────────────────────
+ * /sys/firmware/acpi/bgrt/image is the BMP the firmware showed at
+ * power-on, xoffset and yoffset where it showed it. Parsing and placing
+ * it are here, not in splash.c, for the reason everything else is: the
+ * session's first frame (lp-splash-fade) must put it on the same pixels.
+ *
+ * The offsets are for the mode the firmware drew in. When the screen
+ * now has another size (a virtual machine's card replacing the
+ * firmware's), the logo goes where the firmware convention puts it:
+ * centred across, its middle 38.2% of the way down. */
+typedef struct {
+    bool       ok, top_down;
+    const u8  *bmp;
+    u32        n, w, h, bpp, stride, data;
+    s32        x, y;                /* on this screen */
+} scene_oem_t;
+
+static inline u32 sc_le16(const u8 *p) { return (u32)p[0] | (u32)p[1] << 8; }
+static inline u32 sc_le32(const u8 *p) { return sc_le16(p) | sc_le16(p + 2) << 16; }
+
+/* An uncompressed 24- or 32-bit BMP, bottom-up or top-down. */
+static inline bool scene_oem_parse(scene_oem_t *o, const u8 *buf, u32 n)
+{
+    o->ok = false;
+    if (n < 54 || buf[0] != 'B' || buf[1] != 'M' || sc_le32(buf + 14) < 40)
+        return false;
+    s32 w = (s32)sc_le32(buf + 18), h = (s32)sc_le32(buf + 22);
+    u32 bpp = sc_le16(buf + 28), comp = sc_le32(buf + 30);
+    o->top_down = h < 0;
+    if (h < 0)
+        h = -h;
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192 || sc_le16(buf + 26) != 1 ||
+        (bpp != 24 && bpp != 32) || (comp != 0 && !(comp == 3 && bpp == 32)))
+        return false;
+    o->bmp = buf;
+    o->n = n;
+    o->w = (u32)w;
+    o->h = (u32)h;
+    o->bpp = bpp;
+    o->stride = ((u32)w * bpp + 31) / 32 * 4;
+    o->data = sc_le32(buf + 10);
+    if (o->data >= n || (u64)o->stride * o->h > (u64)(n - o->data))
+        return false;
+    o->ok = true;
+    return true;
+}
+
+/* Where it goes on a W x H screen, from where the firmware put it;
+ * false if it does not fit. */
+static inline bool scene_oem_place(scene_oem_t *o, u32 W, u32 H, s32 fx, s32 fy)
+{
+    if (!o->ok || o->w > W || o->h > H)
+        return false;
+    s32 x = fx, y = fy;
+    s32 centred = (s32)(W - o->w) / 2;
+    bool same_mode = x >= 0 && y >= 0 && x + (s32)o->w <= (s32)W &&
+                     y + (s32)o->h <= (s32)H && sc_iabs(centred - x) <= (s32)W / 50 + 2;
+    if (!same_mode) {
+        x = centred;
+        y = (s32)(H * 382 / 1000) - (s32)o->h / 2;
+        if (y < 0)
+            y = 0;
+    }
+    o->x = x;
+    o->y = y;
+    return true;
+}
+
+/* Its colour at (px, py), 8.8 per channel; false outside it. */
+static inline bool scene_oem_pixel(const scene_oem_t *o, u32 px, u32 py, u32 c[3])
+{
+    s32 dx = (s32)px - o->x, dy = (s32)py - o->y;
+    if (dx < 0 || dy < 0 || dx >= (s32)o->w || dy >= (s32)o->h)
+        return false;
+    u32 r = o->top_down ? (u32)dy : o->h - 1 - (u32)dy;
+    const u8 *p = o->bmp + o->data + r * o->stride + (u32)dx * (o->bpp / 8);
+    c[0] = (u32)p[2] << 8;
+    c[1] = (u32)p[1] << 8;
+    c[2] = (u32)p[0] << 8;
+    return true;
+}
+
 /* Blend fg over bg at alpha (0..256), 8.8 per channel. */
 static inline void scene_mix(u32 c[3], const u32 bg[3], const u32 fg[3], u32 alpha)
 {
