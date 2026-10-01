@@ -181,6 +181,12 @@ iputils-tracepath
 iputils-ping
 iw
 rfkill
+# WPA3. LP's own daemon (userland/wpa) does WPA2-PSK's handshake; a
+# network that takes only WPA3 (SAE) or requires protected management
+# frames is handed, for that one connection, to Debian's wpa_supplicant,
+# which does both (wpa.c, "WPA3"). Around Korean homes most networks are
+# WPA3 now - phones' hotspots, the ISPs' routers.
+wpasupplicant
 
 # ── hardware and power ───────────────────────────────────────────────
 pciutils

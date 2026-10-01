@@ -200,7 +200,7 @@ static int step_of(const char *code)
         { "wpa3_only", S_SCAN }, { "enterprise", S_SCAN }, { "wep", S_SCAN },
         { "wpa1", S_SCAN }, { "mfp_required", S_SCAN }, { "cipher", S_SCAN },
         { "connect_refused", S_JOIN }, { "assoc_rejected", S_JOIN },
-        { "assoc_timeout", S_JOIN },
+        { "assoc_timeout", S_JOIN }, { "wpa3_failed", S_JOIN },
         { "no_msg1", S_M1 }, { "handshake", S_M1 },
         { "wrong_password", S_M3 }, { "no_msg3", S_M3 },
         { "set_key", S_M4 }, { "authorize", S_M4 },

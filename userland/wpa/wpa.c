@@ -355,6 +355,11 @@ typedef struct {
     bool open;
     bool have_pmk;
     u8   pmk[WPA_PMK_LEN];
+    /* The passphrase itself, kept only because WPA3 needs it: SAE proves
+     * knowledge of the password, not of a PMK, so a WPA3-only network
+     * cannot be joined from the hash alone (see "WPA3" below). */
+    bool have_pass;
+    char pass[64];
     int  priority;
     bool hidden;
     bool disabled;          /* a forgotten boot-card network: skip it   */
@@ -451,6 +456,10 @@ static int conf_load(const char *path, bool provisioned)
                                      cur.pmk) != WPA_PSK_OK)
                     continue;
                 cur.have_pmk = true;
+                if (!cur.have_pass) {
+                    strlcpy(cur.pass, psk_text, sizeof cur.pass);
+                    cur.have_pass = true;
+                }
             }
             wpa_wipe(psk_text, sizeof psk_text);
             if (!cur.open && !cur.have_pmk && !cur.disabled)
@@ -495,6 +504,14 @@ static int conf_load(const char *path, bool provisioned)
             } else {
                 bad = true;
             }
+        } else if (strncmp(p, "sae_password=\"", 14) == 0) {
+            const char *end = strrchr(p + 14, '"');
+            size_t len = end ? (size_t)(end - (p + 14)) : 0;
+            if (end && len > 0 && len < sizeof cur.pass) {
+                memcpy(cur.pass, p + 14, len);
+                cur.pass[len] = '\0';
+                cur.have_pass = true;
+            }
         } else if (strncmp(p, "key_mgmt=", 9) == 0) {
             key_none = strncmp(p + 9, "NONE", 4) == 0;
         } else if (strncmp(p, "priority=", 9) == 0) {
@@ -525,7 +542,10 @@ static bool conf_save(char *why, size_t whyn)
         "# succeeds (lp-net connect) and by lp-net forget; read by wpa at\n"
         "# start, and by wpa_supplicant as it is when the fallback is on.\n"
         "# psk is the 64-hex key the passphrase maps to, not the passphrase.\n"
-        "# A hand-written psk=\"passphrase\" is accepted too.\n");
+        "# A hand-written psk=\"passphrase\" is accepted too. sae_password is\n"
+        "# the passphrase itself, which WPA3 (SAE) cannot do without; it is\n"
+        "# kept for every network joined with a typed password, so a router\n"
+        "# switched to WPA3 later is still joined.\n");
 
     for (int i = 0; i < NN && o + 400 < sizeof text; i++) {
         const net_t *n = &NETS[i];
@@ -558,6 +578,9 @@ static bool conf_save(char *why, size_t whyn)
                                   "\tkey_mgmt=WPA-PSK\n\tpsk=%s\n", h);
             wpa_wipe(h, sizeof h);
         }
+        if (!n->open && n->have_pass)
+            o += (size_t)snprintf(text + o, sizeof text - o,
+                                  "\tsae_password=\"%s\"\n", n->pass);
         if (n->priority)
             o += (size_t)snprintf(text + o, sizeof text - o,
                                   "\tpriority=%d\n", n->priority);
@@ -885,12 +908,107 @@ static void attempt_wipe(void)
     wpa_wipe(&C.net, sizeof C.net);
 }
 
+/* ══ WPA3: one connection handed to wpa_supplicant ═══════════════════
+ *
+ * Our handshake is WPA2-PSK's four messages. A network that takes only
+ * WPA3 (SAE: the password proved by an elliptic-curve exchange before
+ * the association, no PSK at all) or that requires protected management
+ * frames is joined instead by Debian's wpa_supplicant, which does both -
+ * for that one connection, with a one-network configuration written for
+ * it. Everything else stays here: the scan and the list the desktop
+ * shows, the request, the state and its messages, saving the network,
+ * the address (dhcp waits for the link to go "up", which wpa_supplicant
+ * does the same way we do). While it holds the link our handshake keeps
+ * out of the way: CONNECT and DISCONNECT events are only watched, EAPOL
+ * frames are left to it. It stops when the link is left for any reason
+ * (drop_link) - another network, Disconnect, the radio, the daemon
+ * stopping - and ends its own connection on the way out.
+ *
+ * Around routers, WPA3-only is now common (phones' hotspots, recent
+ * ISP routers' 5 GHz networks); this was the reason Wi-Fi "did not
+ * work" next to them. */
+#define SAE_SUPPLICANT "/usr/sbin/wpa_supplicant"
+#define SAE_CONF       "/run/lp-net-sae.conf"
+#define SAE_CTRL       "/run/lp-net-sae"
+#define SAE_LOG        "/run/lp-net-sae.log"
+#define SAE_JOIN_MS    30000          /* SAE's exchange, then the four messages */
+
+static struct {
+    bool on;
+    long pid;
+    int  rejects;                     /* refusals seen meanwhile */
+} DG;
+
+static bool sae_capable(void) { return lp_exists(SAE_SUPPLICANT); }
+
+/* A network our own handshake cannot do, and the delegate can. */
+static bool delegatable(const bss_t *b)
+{
+    return b->refuse && (strcmp(b->refuse, "wpa3_only") == 0 ||
+                         strcmp(b->refuse, "mfp_required") == 0) &&
+           sae_capable();
+}
+
+/* ...with the key it needs: SAE the passphrase, PSK with 802.11w the PMK. */
+static bool delegate_has_key(const bss_t *b, const net_t *n)
+{
+    return strcmp(b->refuse, "wpa3_only") == 0 ? n->have_pass : n->have_pmk;
+}
+
+static void stop_delegate(const char *why)
+{
+    if (!DG.on)
+        return;
+    DG.on = false;
+    JLOG("stopping wpa_supplicant (%s)", why);
+    /* it leaves the access point on its way out: that DISCONNECT is ours */
+    expect_disconnect = true;
+    lp_kill((pid_t)DG.pid, SIGTERM_);
+    int st = 0;
+    for (int i = 0; i < 40 && DG.pid > 0; i++) {
+        if (lp_waitpid((pid_t)DG.pid, &st, WNOHANG) == (pid_t)DG.pid)
+            DG.pid = 0;
+        else
+            lp_sleep_ms(50);
+    }
+    if (DG.pid > 0) {
+        lp_kill((pid_t)DG.pid, 9);
+        lp_waitpid((pid_t)DG.pid, &st, 0);
+        DG.pid = 0;
+    }
+    lp_unlink(SAE_CONF);
+    /* it put the link mode back to the default as it left */
+    if (IFX)
+        rtnl_setlink(IFX, 1, -1);
+}
+
+/* How many times wpa_supplicant's log says this. Two verdicts there are
+ * worth reading before the clock runs out, both a wrong password said as
+ * such: SAE's confirm refused by the access point (CTRL-EVENT-AUTH-REJECT
+ * with auth_type=3, SAE, auth_transaction=2, the confirm - the commit
+ * went through, so the AP is there and speaks SAE, and what it did not
+ * accept is the proof of the password), and "WRONG_KEY" from a four-way
+ * handshake that failed the same way. */
+static int sae_log_count(const char *what)
+{
+    static char buf[16384];
+    long n = proc_read(SAE_LOG, buf, sizeof buf - 1);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+    int k = 0;
+    for (const char *p = buf; (p = strstr(p, what)) != NULL; p++)
+        k++;
+    return k;
+}
+
 /* Leave the current association, if there is one, and say that the
  * DISCONNECT event this causes is ours and not news. */
 static void drop_link(u16 reason)
 {
     if (!IFN[0])
         return;
+    stop_delegate("leaving the network");
     if (nl_disconnect(&NL, reason))
         expect_disconnect = true;
 }
@@ -979,6 +1097,7 @@ static void detach(const char *why)
     if (!IFN[0])
         return;
     JNOTE("letting go of %s: %s", IFN, why);
+    stop_delegate(why);
     rtnl_setlink(IFX, 0, -1);
     eapol_close(&EP);
     nl_close(&NL);
@@ -1181,6 +1300,144 @@ static void begin_connect(const bss_t *b, const net_t *n, bool trial, u32 uid)
     }
 }
 
+/* Hand this one connection to wpa_supplicant (see "WPA3" above). */
+static void begin_delegate(const bss_t *b, const net_t *n, bool trial, u32 uid)
+{
+    memset(&C, 0, sizeof C);
+    C.net = *n;
+    C.trial = trial;
+    C.uid = uid;
+    C.bss = *b;
+    memcpy(C.bssid, b->b.bssid, 6);
+    ssid_str(n->ssid, n->ssid_len, C.ssid, sizeof C.ssid);
+    C.signal = bss_signal(&b->b);
+    eapol_flush(&EP);
+    expect_disconnect = false;
+    DG.rejects = 0;
+    bool sae = strcmp(b->refuse, "wpa3_only") == 0;
+
+    lp_mkdir(SAE_CTRL, 0700);
+    lp_unlink(SAE_LOG);
+    long fd = lp_open(SAE_CONF, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        fail("internal", "could not write " SAE_CONF, NULL);
+        return;
+    }
+    char h[2 * NL_SSID_MAX + 1];
+    wpa_hex_encode(n->ssid, n->ssid_len, h);
+    /* sae_pwe=2: either way of deriving the password element, the old
+     * looping one and hash-to-element, whichever the router does. */
+    dprintf((int)fd, "ctrl_interface=%s\nupdate_config=0\nsae_pwe=2\n\n"
+                     "network={\n\tssid=%s\n", SAE_CTRL, h);
+    if (n->hidden)
+        dprintf((int)fd, "\tscan_ssid=1\n");
+    if (sae) {
+        dprintf((int)fd, "\tkey_mgmt=SAE\n\tieee80211w=2\n\tsae_password=\"%s\"\n",
+                n->pass);
+    } else {
+        char k[2 * WPA_PMK_LEN + 1];
+        wpa_hex_encode(n->pmk, WPA_PMK_LEN, k);
+        dprintf((int)fd, "\tkey_mgmt=WPA-PSK WPA-PSK-SHA256\n\tieee80211w=2\n\tpsk=%s\n", k);
+        wpa_wipe(k, sizeof k);
+    }
+    dprintf((int)fd, "}\n");
+    lp_close((int)fd);
+
+    if (!net_if_is_up(IFN))
+        net_if_up(IFN);
+    long pid = lp_fork();
+    if (pid == 0) {
+        for (int f = 3; f < 256; f++)
+            lp_close(f);
+        long nul = lp_open("/dev/null", O_RDWR, 0);
+        if (nul >= 0) {
+            lp_dup2((int)nul, 0);
+            lp_dup2((int)nul, 1);
+            lp_dup2((int)nul, 2);
+        }
+        char *argv[12];
+        int a = 0;
+        argv[a++] = (char *)"wpa_supplicant";
+        argv[a++] = (char *)"-i";
+        argv[a++] = IFN;
+        argv[a++] = (char *)"-D";
+        argv[a++] = (char *)"nl80211";
+        argv[a++] = (char *)"-c";
+        argv[a++] = (char *)SAE_CONF;
+        argv[a++] = (char *)"-f";
+        argv[a++] = (char *)SAE_LOG;
+        if (trace)
+            argv[a++] = (char *)"-dd";
+        argv[a] = NULL;
+        char *envp[] = { (char *)"PATH=/usr/sbin:/usr/bin:/sbin:/bin", NULL };
+        lp_execve(SAE_SUPPLICANT, argv, envp);
+        lp_exit(127);
+    }
+    if (pid < 0) {
+        fail("internal", "could not start wpa_supplicant", NULL);
+        return;
+    }
+    DG.on = true;
+    DG.pid = pid;
+
+    char m[18];
+    mac_str(C.bssid, m);
+    JNOTE("joining \"%s\" at %s, %u MHz, %d dBm (%s) - through wpa_supplicant",
+          C.ssid, m, (unsigned)b->b.freq, C.signal,
+          sae ? "WPA3-SAE" : "WPA2-PSK with protected management frames");
+    set_state(ST_CONNECTING);
+    C.deadline = lp_monotonic_ms() + SAE_JOIN_MS;
+}
+
+static void joined(void);
+
+/* While wpa_supplicant holds the link: has it finished, given up, or
+ * gone? The link going "up" is its keys being in (the same signal dhcp
+ * waits for). */
+static void delegate_tick(s64 now)
+{
+    int st = 0;
+    if (lp_waitpid((pid_t)DG.pid, &st, WNOHANG) == (pid_t)DG.pid) {
+        DG.on = false;
+        DG.pid = 0;
+        lp_unlink(SAE_CONF);
+        if (IFX)
+            rtnl_setlink(IFX, 1, -1);
+        JNOTE("wpa_supplicant stopped by itself");
+        if (ST == ST_DHCP || ST == ST_CONNECTED) {
+            char s[80];
+            strlcpy(s, C.ssid, sizeof s);
+            set_err("lost", s, "wpa_supplicant stopped", true);
+            attempt_wipe();
+            set_state(ST_IDLE);
+            retry_at = now + 2000;
+        } else {
+            fail("wpa3_failed", C.ssid, "wpa_supplicant stopped");
+        }
+        return;
+    }
+    if (ST != ST_CONNECTING && ST != ST_HANDSHAKE)
+        return;
+    char path[64], op[16];
+    snprintf(path, sizeof path, "/sys/class/net/%s/operstate", IFN);
+    if (sys_line(path, op, sizeof op) && strcmp(op, "up") == 0) {
+        JNOTE("joined \"%s\" - the keys are in (wpa_supplicant)", C.ssid);
+        joined();
+        return;
+    }
+    /* Twice, not once: one refused confirm can be a frame lost in the air. */
+    if (sae_log_count("auth_type=3 auth_transaction=2 status_code=1") >= 2 ||
+        sae_log_count("reason=WRONG_KEY") >= 1) {
+        fail("wrong_password", C.ssid, NULL);
+        return;
+    }
+    if (now > C.deadline) {
+        char s[32];
+        snprintf(s, sizeof s, "no answer in %d s", SAE_JOIN_MS / 1000);
+        fail("wpa3_failed", C.ssid, s);
+    }
+}
+
 /* Choose what to join from the scan cache and start. */
 static void choose_and_connect(void)
 {
@@ -1211,7 +1468,7 @@ static void choose_and_connect(void)
             schedule_retry();
             return;
         }
-        if (best->refuse) {
+        if (best->refuse && !delegatable(best)) {
             REQ.on = false;
             set_err(best->refuse, s, best->detail, true);
             set_state(ST_IDLE);
@@ -1230,6 +1487,17 @@ static void choose_and_connect(void)
         if (REQ.hidden || bssid_hidden(best->b.bssid))
             n.hidden = true;
         REQ.on = false;
+        if (best->refuse) {
+            /* WPA3 needs the password itself; a network saved before
+             * this kept only the hash. Asking again is the way on. */
+            if (!delegate_has_key(best, &n)) {
+                set_err("need_password", s, NULL, true);
+                set_state(ST_IDLE);
+                return;
+            }
+            begin_delegate(best, &n, REQ.trial, REQ.uid);
+            return;
+        }
         begin_connect(best, &n, REQ.trial, REQ.uid);
         return;
     }
@@ -1250,7 +1518,10 @@ static void choose_and_connect(void)
             seen_saved++;
             if (n->pw_rejected)
                 continue;
-            if (b->refuse) { refused = b; continue; }
+            if (b->refuse && !(delegatable(b) && delegate_has_key(b, n))) {
+                refused = b;
+                continue;
+            }
             if (n->open != (b->sec == SEC_OPEN))
                 continue;
             if (!best || n->priority > bestn->priority ||
@@ -1280,7 +1551,10 @@ static void choose_and_connect(void)
                        ? IDLE_SCAN_MAX_MS : idle_scan_ms * 2;
         return;
     }
-    begin_connect(best, bestn, false, 0);
+    if (best->refuse)
+        begin_delegate(best, bestn, false, 0);
+    else
+        begin_connect(best, bestn, false, 0);
 }
 
 /* The handshake finished (or, for an open network, the association
@@ -1312,6 +1586,10 @@ static void joined(void)
         n->open = C.net.open;
         n->have_pmk = C.net.have_pmk;
         memcpy(n->pmk, C.net.pmk, WPA_PMK_LEN);
+        if (C.net.have_pass) {
+            n->have_pass = true;
+            memcpy(n->pass, C.net.pass, sizeof n->pass);
+        }
         n->disabled = false;
         changed = true;
     }
@@ -1340,6 +1618,23 @@ static void joined(void)
 
 static void on_connect_event(const nl_event_t *ev)
 {
+    if (DG.on) {
+        /* wpa_supplicant's association: watched, not acted on. */
+        if (ev->status != 0 || ev->timed_out) {
+            DG.rejects++;
+            JLOG("\"%s\": the access point refused the association (%s) -"
+                 " wpa_supplicant tries again", C.ssid, nl_status_name(ev->status));
+            return;
+        }
+        if (ev->have_bssid)
+            memcpy(C.bssid, ev->bssid, 6);
+        if (ST == ST_CONNECTING) {
+            set_state(ST_HANDSHAKE);
+            C.deadline = lp_monotonic_ms() + SAE_JOIN_MS;
+            JNOTE("associated with \"%s\" - wpa_supplicant is doing the handshake", C.ssid);
+        }
+        return;
+    }
     if (ST != ST_CONNECTING) {
         JTRACE("a CONNECT event while %s - not ours, ignored", ST_NAME[ST]);
         return;
@@ -1406,6 +1701,17 @@ static void on_disconnect_event(const nl_event_t *ev)
     char why[96];
     snprintf(why, sizeof why, "%s (reason %u)", nl_reason_name(ev->reason),
              (unsigned)ev->reason);
+
+    if (DG.on) {
+        /* wpa_supplicant joins again by itself; we only follow. */
+        if (ST == ST_DHCP || ST == ST_CONNECTED)
+            JNOTE("lost \"%s\": %s - wpa_supplicant is joining again", C.ssid, why);
+        else
+            DG.rejects++;
+        set_state(ST_CONNECTING);
+        C.deadline = lp_monotonic_ms() + SAE_JOIN_MS;
+        return;
+    }
 
     switch (ST) {
     case ST_HANDSHAKE:
@@ -1524,6 +1830,8 @@ static void describe_frame(const char *dir, const u8 *f, size_t n)
 
 static void on_eapol(const u8 *frame, size_t len, const u8 from[6])
 {
+    if (DG.on)
+        return;                     /* wpa_supplicant's handshake, not ours */
     if (memcmp(from, C.bssid, 6) != 0) {
         char m[18];
         mac_str(from, m);
@@ -1753,7 +2061,7 @@ static void status_records(void)
         OB("bssid\t%s\n", m);
         OB("freq\t%u\n", (unsigned)C.bss.b.freq);
         OB("signal\t%d\n", C.signal);
-        OB("security\t%s\n", C.net.open ? "open" : "wpa2");
+        OB("security\t%s\n", C.net.open ? "open" : C.bss.sec == SEC_WPA3 ? "wpa3" : "wpa2");
     } else if (REQ.on) {
         char h[2 * NL_SSID_MAX + 1];
         wpa_hex_encode(REQ.net.ssid, REQ.net.ssid_len, h);
@@ -1822,7 +2130,8 @@ static void scan_records(void)
                     memcmp(C.bssid, b->b.bssid, 6) == 0;
         OB("bss\t%s\t%s\t%d\t%u\t%s\t%d\t%d\t%s\t%s\n", m, h,
            bss_signal(&b->b), (unsigned)b->b.freq, SEC_NAME[b->sec],
-           saved ? 1 : 0, conn ? 1 : 0, b->refuse ? b->refuse : "-",
+           saved ? 1 : 0, conn ? 1 : 0,
+           b->refuse && !delegatable(b) ? b->refuse : "-",
            b->detail[0] ? b->detail : "-");
     }
 }
@@ -1859,6 +2168,8 @@ static void request_connect(const u8 *ssid, size_t n, const char *password,
             return;
         }
         want.have_pmk = true;
+        strlcpy(want.pass, password, sizeof want.pass);
+        want.have_pass = true;
         newpw = true;
     } else {
         net_t *s = net_find(ssid, n, false);
@@ -2355,6 +2666,7 @@ static void tick(void)
     }
     RADIO = r;
     if (RADIO != RADIO_ON) {
+        stop_delegate("the radio is off");
         if (ST != ST_IDLE) {
             attempt_wipe();
             set_state(ST_IDLE);
@@ -2369,6 +2681,11 @@ static void tick(void)
         !strcmp(err_code, "no_iface"))
         clear_err();
 
+    if (DG.on) {
+        delegate_tick(now);
+        now = lp_monotonic_ms();
+    }
+
     if (scanning && now > scan_deadline) {
         scanning = false;
         JLOG("the scan did not finish in %d s", SCAN_TIMEOUT_MS / 1000);
@@ -2382,6 +2699,8 @@ static void tick(void)
 
     switch (ST) {
     case ST_CONNECTING:
+        if (DG.on)
+            break;                  /* delegate_tick has the clock */
         if (now > C.deadline) {
             char s[16];
             snprintf(s, sizeof s, "no answer in %d s", CONNECT_TIMEOUT_MS / 1000);
@@ -2389,6 +2708,8 @@ static void tick(void)
         }
         break;
     case ST_HANDSHAKE:
+        if (DG.on)
+            break;
         if (now > C.deadline) {
             char s[8];
             if (C.sm.msg1_seen == 0) {
@@ -2643,6 +2964,7 @@ int main(int argc, char **argv)
     }
 
     JNOTE("stopping (signal %d)", stop_sig);
+    stop_delegate("stopping");
     if (IFN[0]) {
         if (ST != ST_IDLE)
             nl_disconnect(&NL, REASON_DEAUTH_LEAVING);
