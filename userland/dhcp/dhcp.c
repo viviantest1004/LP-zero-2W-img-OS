@@ -246,13 +246,64 @@ static void write_resolv_conf(u32 dns_be)
  * from a laptop to a board whose wireless is already working - it just
  * does not get to redirect the traffic of the one that was there first.
  *
- * What we cannot do is take a route back off the kernel: this libc has
- * net_add_default_route and no matching delete, and adding one is a
- * change to a file this program does not own. So the route belonging to
- * a link that has gone stays in the table until that link is configured
- * again. It costs nothing while there is only one way out of the
- * machine, which is the normal case here, and the alternative - never
- * letting a second interface install a route at all - is worse. */
+ * Two exceptions to "first come". A cable beats a radio: a laptop on
+ * Wi-Fi that is plugged into a USB-C Ethernet adapter goes out through
+ * the cable, as every other desktop does (service() decides that). And
+ * a route whose link has gone is taken back off the kernel - a carrier
+ * lost does not remove it (it only reads "linkdown"), and the kernel
+ * kept sending everything into the dead link: a laptop whose Wi-Fi had
+ * dropped got an address on the adapter and still no internet, because
+ * the new route was refused as a duplicate of the dead one (EEXIST,
+ * which below was read as "already there and already right").
+ * clear_stale_routes() removes those before the new one goes in. */
+static bool has_carrier(const char *ifname);
+static bool is_wireless(const char *ifname);
+
+/* Take every default route through ifname off the kernel. */
+static void drop_route(const char *ifname)
+{
+    for (int i = 0; i < 4 && net_del_default_route(ifname) == 0; i++)
+        ;
+}
+
+/* Before `ifname` installs the default route: remove the ones through
+ * other interfaces that cannot carry it any more (no carrier, or gone),
+ * and - when `ifname` is a cable - the radio's. A live cable's route
+ * that this program did not put there (a fixed address from
+ * /boot/network.conf) is left alone. */
+static void clear_stale_routes(const char *ifname)
+{
+    char tab[4096];
+    if (proc_read("/proc/net/route", tab, sizeof tab) <= 0)
+        return;
+    bool wired = !is_wireless(ifname);
+    char *line = strchr(tab, '\n');        /* past the header */
+    while (line && *++line) {
+        char *end = strchr(line, '\n');
+        if (end)
+            *end = '\0';
+        char dev[IFNAMSIZ];
+        size_t n = 0;
+        while (line[n] && line[n] != '\t' && line[n] != ' ')
+            n++;
+        const char *rest = line + n;
+        while (*rest == '\t' || *rest == ' ')
+            rest++;
+        /* Iface, then Destination; the mask is the eighth field, and a
+         * destination of 0 with a gateway flag is the default route. */
+        if (n > 0 && n < sizeof dev && strncmp(rest, "00000000", 8) == 0) {
+            memcpy(dev, line, n);
+            dev[n] = '\0';
+            if (strcmp(dev, ifname) != 0 &&
+                (!has_carrier(dev) || (wired && is_wireless(dev)))) {
+                printf("dhcp: %s: taking the default route from %s\n", ifname, dev);
+                drop_route(dev);
+            }
+        }
+        line = end;
+    }
+}
+
 static int apply_lease(const char *ifname, const lease_t *l,
                        const char *route_held_by)
 {
@@ -272,6 +323,7 @@ static int apply_lease(const char *ifname, const lease_t *l,
             dprintf(STDERR_FILENO, "dhcp: cannot set the netmask (%ld)\n", -rc);
     }
     if (l->router && !route_held_by) {
+        clear_stale_routes(ifname);
         rc = net_add_default_route(ifname, l->router);
         /* EEXIST is the normal answer on a renewal: the route is
          * already there and already right. */
@@ -524,6 +576,19 @@ static bool has_carrier(const char *ifname)
              strcmp(v, "dormant") == 0);
 }
 
+/* A radio: the kernel gives every wireless interface a "wireless"
+ * directory (cfg80211). Used only to let a cable win the route. */
+static bool is_wireless(const char *ifname)
+{
+    char path[96];
+    snprintf(path, sizeof path, "/sys/class/net/%s/wireless", ifname);
+    long fd = lp_open(path, O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0)
+        return false;
+    lp_close((int)fd);
+    return true;
+}
+
 /* ── Which interfaces this manages ────────────────────────────────────
  *
  * Everything under /sys/class/net that could carry DHCP at all, which
@@ -756,6 +821,20 @@ static char    route_owner[IFNAMSIZ];
  * disappears - the three ways an address stops meaning anything. */
 static void forget(iface_t *it)
 {
+    /* The route and the address it put in go with it. Left there, the
+     * route is still the kernel's way out, into a link that is not there
+     * (see apply_lease); and the address keeps its subnet's route, which
+     * on a home network is the same subnet the other link is on - the
+     * Wi-Fi and the cable both on the router's 192.168.0.0/24 - so even
+     * the router itself was looked for through the dead link. Gone with
+     * the interface, both are already gone. A link-local address (usbN)
+     * is not a lease and is left alone. */
+    if (it->have_lease) {
+        if (it->lease.router)
+            drop_route(it->name);
+        net_set_addr(it->name, 0);
+    }
+
     it->have_lease   = false;
     it->linklocal    = false;
     it->said_silence = false;
@@ -841,9 +920,12 @@ static void service(iface_t *it)
         return;
 
     /* The route and resolv.conf go to the first interface that gets an
-     * address and stay with it until its link goes away. */
+     * address and stay with it until its link goes away - except that a
+     * cable takes them from a radio (apply_lease). */
     const char *held = (route_owner[0] && strcmp(route_owner, it->name) != 0)
                        ? route_owner : NULL;
+    if (held && is_wireless(held) && !is_wireless(it->name))
+        held = NULL;
 
     lease_t fresh;
     memset(&fresh, 0, sizeof fresh);
@@ -864,8 +946,12 @@ static void service(iface_t *it)
         it->backoff_ms   = 0;
         it->renew_at     = now + renew_delay_ms(fresh.lease);
 
-        if (!held && fresh.router)
+        if (!held && fresh.router) {
+            if (route_owner[0] && strcmp(route_owner, it->name) != 0)
+                printf("dhcp: %s: the default route moves here from %s\n",
+                       it->name, route_owner);
             strlcpy(route_owner, it->name, sizeof route_owner);
+        }
         return;
     }
 
@@ -939,6 +1025,31 @@ static void pass(void)
             continue;
         }
         service(&IFTAB[i]);
+    }
+
+    /* Nobody holds the route - its link went - but another interface is
+     * still up with a lease of its own (the Wi-Fi, when the cable it
+     * gave way to is pulled out): that one takes it now, rather than at
+     * its next renewal hours from now. A cable first. */
+    if (!route_owner[0]) {
+        iface_t *best = NULL;
+        for (int i = 0; i < IFN; i++) {
+            iface_t *it = &IFTAB[i];
+            if (!it->present || !it->have_lease || !it->lease.router ||
+                !has_carrier(it->name))
+                continue;
+            if (!best || (is_wireless(best->name) && !is_wireless(it->name)))
+                best = it;
+        }
+        if (best) {
+            clear_stale_routes(best->name);
+            long rc = net_add_default_route(best->name, best->lease.router);
+            if (rc == 0 || -rc == 17) {
+                write_resolv_conf(best->lease.dns);
+                strlcpy(route_owner, best->name, sizeof route_owner);
+                printf("dhcp: %s has the default route again\n", best->name);
+            }
+        }
     }
 }
 

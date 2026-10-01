@@ -111,9 +111,13 @@ static ssize_t read_small(const char *path, char *buf, size_t n)
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
-    ssize_t r = read(fd, buf, n - 1);
+    /* /proc/net/dev and /proc/diskstats hand out about 4 KB a read;
+     * past that a single read() was a cut-off table. */
+    ssize_t r = 0, k = 0;
+    while ((size_t)r < n - 1 && (k = read(fd, buf + r, n - 1 - (size_t)r)) > 0)
+        r += k;
     close(fd);
-    if (r < 0)
+    if (r == 0 && k < 0)
         return -1;
     buf[r] = '\0';
     return r;
@@ -605,8 +609,8 @@ static void sample_disks(double secs)
         d->seen = TRUE;
         guint64 rd = f[2] * 512, wr = f[6] * 512, io = f[9];
         if (d->primed && secs > 0) {
-            d->rd = (rd - d->prev_rd) / secs;
-            d->wr = (wr - d->prev_wr) / secs;
+            d->rd = rd >= d->prev_rd ? (rd - d->prev_rd) / secs : 0;
+            d->wr = wr >= d->prev_wr ? (wr - d->prev_wr) / secs : 0;
             d->active = CLAMP((double)(io - d->prev_io_ms) / (secs * 10.0), 0.0, 100.0);
         }
         d->prev_rd = rd;
@@ -644,8 +648,10 @@ static void sample_net(double secs)
         tx += f[8];
     }
     if (S.primed && secs > 0) {
-        S.rx = (rx - S.prev_rx) / secs;
-        S.tx = (tx - S.prev_tx) / secs;
+        /* The sum drops when an interface goes (a USB adapter pulled
+         * out): that second is not a negative, wrapped-around rate. */
+        S.rx = rx >= S.prev_rx ? (rx - S.prev_rx) / secs : 0;
+        S.tx = tx >= S.prev_tx ? (tx - S.prev_tx) / secs : 0;
     }
     S.prev_rx = rx;
     S.prev_tx = tx;
@@ -1411,7 +1417,10 @@ static gboolean scan_one(int pid, guint64 total_delta)
     char *lp = strchr(buf, '('), *rp = strrchr(buf, ')');
     if (!lp || !rp)
         return FALSE;
-    char *comm = g_strndup(lp + 1, (gsize)(rp - lp - 1));
+    /* Valid UTF-8 always: the kernel cuts comm at 15 bytes, which can
+     * split a Hangul letter, and a label given bytes that are not UTF-8
+     * is a crash in GTK 4.8's accessibility code. */
+    char *comm = g_utf8_make_valid(lp + 1, (gssize)(rp - lp - 1));
     char *p = rp + 2;
     unsigned long long f[20] = { 0 };
     /* state is field 3; we want ppid(4) utime(14) stime(15) threads(20). */
@@ -1436,8 +1445,8 @@ static gboolean scan_one(int pid, guint64 total_delta)
             for (ssize_t i = 0; i < n - 1; i++)
                 if (cb[i] == '\0')
                     cb[i] = ' ';
-            pr->cmd = g_strdup(cb);
-            char *first = g_strndup(cb, strcspn(cb, " "));
+            pr->cmd = g_utf8_make_valid(cb, -1);
+            char *first = g_strndup(pr->cmd, strcspn(pr->cmd, " "));
             pr->name = g_path_get_basename(first);
             g_free(first);
         }
@@ -1463,10 +1472,12 @@ static gboolean scan_one(int pid, guint64 total_delta)
         g_list_store_append(proc_store, pr);
     }
     g_free(comm);
-    /* Share of the whole machine: the process's jiffies over all CPUs'. */
-    pr->cpu = total_delta ? 100.0 * (double)(ticks - pr->prev_ticks) / (double)total_delta : 0;
-    if (pr->cpu < 0)
-        pr->cpu = 0;
+    /* Share of the whole machine: the process's jiffies over all CPUs'.
+     * Not across a gap: the walk stops while no process page is showing,
+     * and the first one back would divide minutes by one second. */
+    gboolean stale = !fresh && pr->gen + 1 != scan_gen;
+    pr->cpu = total_delta && !stale && ticks >= pr->prev_ticks
+              ? 100.0 * (double)(ticks - pr->prev_ticks) / (double)total_delta : 0;
     pr->prev_ticks = ticks;
     pr->threads = threads;
     pr->ppid = ppid;
@@ -1486,7 +1497,8 @@ static gboolean scan_one(int pid, guint64 total_delta)
                 rb = g_ascii_strtoull(r + 11, NULL, 10);
             if (w)
                 wb = g_ascii_strtoull(w + 13, NULL, 10);
-            pr->io = pr->io_ok ? (double)(rb + wb - pr->prev_io) : 0;
+            pr->io = pr->io_ok && !stale && rb + wb >= pr->prev_io
+                     ? (double)(rb + wb - pr->prev_io) : 0;
             pr->prev_io = rb + wb;
             pr->io_ok = TRUE;
         }
@@ -2197,6 +2209,8 @@ static gboolean page_is(const char *id)
 
 static gboolean window_minimised(void)
 {
+    if (!A->win)
+        return TRUE;        /* closed: nothing to draw for */
     GtkNative *nat = GTK_NATIVE(A->win);
     GdkSurface *s = gtk_native_get_surface(nat);
     return !gtk_widget_get_mapped(A->win) ||
@@ -3598,7 +3612,8 @@ static void on_lpnet(GObject *src, GAsyncResult *res, gpointer d)
 {
     (void)d;
     char *out = NULL;
-    if (!g_subprocess_communicate_utf8_finish(G_SUBPROCESS(src), res, &out, NULL, NULL) || !out) {
+    if (!g_subprocess_communicate_utf8_finish(G_SUBPROCESS(src), res, &out, NULL, NULL) || !out ||
+        !A->win) {
         g_free(out);
         return;
     }
@@ -3895,13 +3910,53 @@ static const struct { const char *id, *icon, *en, *ko; gboolean group_before; } 
     { "battery",   "battery-full-symbolic",       "Battery",   "배터리", FALSE },
 };
 
+/* The page to open with next time is written only once the page has
+ * been on screen for a few seconds. A page that took the program down
+ * (the Memory page did, in 1.405) was otherwise the one remembered, and
+ * every start after went straight back to it and down again - Task
+ * Manager then never opened at all. Now a page that fails is never the
+ * one written, and a start on a remembered page writes "apps" first, so
+ * a failure there too is only ever one failed start. */
+static guint page_keep_id;
+
+static void page_keep_now(void)
+{
+    if (page_keep_id) {
+        g_source_remove(page_keep_id);
+        page_keep_id = 0;
+    }
+    g_key_file_set_string(A->state, "tasks", "page", A->page ? A->page : "apps");
+    lp_kit_state_save(A->state, STATE_NAME);
+}
+
+static gboolean page_keep_tick(gpointer d)
+{
+    (void)d;
+    page_keep_id = 0;
+    page_keep_now();
+    return G_SOURCE_REMOVE;
+}
+
+static void page_keep_later(void)
+{
+    if (page_keep_id)
+        g_source_remove(page_keep_id);
+    page_keep_id = g_timeout_add_seconds(4, page_keep_tick, NULL);
+}
+
+static void on_shutdown(GApplication *app, gpointer d)
+{
+    (void)app; (void)d;
+    if (page_keep_id)       /* closed normally before the page settled */
+        page_keep_now();
+}
+
 static void go_page(const char *id)
 {
     g_free(A->page);
     A->page = g_strdup(id);
     lp_kit_stack_show(GTK_STACK(A->stack), id);
-    g_key_file_set_string(A->state, "tasks", "page", id);
-    lp_kit_state_save(A->state, STATE_NAME);
+    page_keep_later();
     /* A page just arrived at should not wait a second for its numbers. */
     sample_tick(NULL);
 }
@@ -4020,6 +4075,20 @@ static void on_drive(const char *verb, const char *arg, gpointer d)
 }
 
 static char *opt_page;
+static guint tick_id;
+
+/* The second's tick and lp-net's answer stop touching the window's
+ * widgets the moment it is destroyed: either could otherwise run in the
+ * same main-loop pass as the close and read a freed widget. */
+static void on_win_destroy(GtkWidget *w, gpointer d)
+{
+    (void)w; (void)d;
+    if (tick_id) {
+        g_source_remove(tick_id);
+        tick_id = 0;
+    }
+    A->win = NULL;
+}
 
 static void on_activate(GtkApplication *app, gpointer d)
 {
@@ -4075,6 +4144,11 @@ static void on_activate(GtkApplication *app, gpointer d)
     if (!known)
         page = "apps";
     A->page = g_strdup(page);
+    if (strcmp(page, "apps") != 0) {
+        g_key_file_set_string(A->state, "tasks", "page", "apps");
+        lp_kit_state_save(A->state, STATE_NAME);
+        page_keep_later();
+    }
     gtk_stack_set_transition_duration(GTK_STACK(A->stack), 0);
     gtk_stack_set_visible_child_name(GTK_STACK(A->stack), page);
     gtk_stack_set_transition_duration(GTK_STACK(A->stack), 260);
@@ -4083,8 +4157,9 @@ static void on_activate(GtkApplication *app, gpointer d)
 
     gtk_window_present(GTK_WINDOW(A->win));
     lp_kit_drive(on_drive, NULL);
+    g_signal_connect(A->win, "destroy", G_CALLBACK(on_win_destroy), NULL);
     sample_tick(NULL);
-    g_timeout_add_seconds(1, sample_tick, NULL);
+    tick_id = g_timeout_add_seconds(1, sample_tick, NULL);
 }
 
 int main(int argc, char **argv)
@@ -4111,6 +4186,7 @@ int main(int argc, char **argv)
     S.disks = g_ptr_array_new();
     S.not_disks = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     read_cpuinfo();
+    sample_mem();           /* the Memory page's "16 GB installed" */
     find_temp();
     find_gpus();
     find_battery();
@@ -4118,6 +4194,7 @@ int main(int argc, char **argv)
 
     GtkApplication *app = gtk_application_new(APP_ID, G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
+    g_signal_connect(app, "shutdown", G_CALLBACK(on_shutdown), NULL);
     int rc = g_application_run(G_APPLICATION(app), argc, argv);
     g_object_unref(app);
     return rc;

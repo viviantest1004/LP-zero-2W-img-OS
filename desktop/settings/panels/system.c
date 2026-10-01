@@ -333,6 +333,29 @@ static void on_recovery(GtkButton *b, gpointer p)
     lp_dialog_present(d);
 }
 
+/* The build: lp-base's version from dpkg's own record ("1.409"). The
+ * name above says "linux-LP 1.0" on every build, so this is the line
+ * that tells two of them apart - which one a machine is running is the
+ * first question when something on it does not work. */
+static char *build_words(void)
+{
+    char *st = lp_slurp("/var/lib/dpkg/status");
+    if (!st)
+        return NULL;
+    char *ver = NULL;
+    char *p = strstr(st, "Package: lp-base\n");
+    if (p) {
+        char *end = strstr(p, "\n\n");
+        char *v = strstr(p, "\nVersion: ");
+        if (v && (!end || v < end)) {
+            v += 10;
+            ver = g_strndup(v, strcspn(v, "\n"));
+        }
+    }
+    g_free(st);
+    return ver;
+}
+
 /* ── building ───────────────────────────────────────────────────────── */
 
 static GtkWidget *build(void)
@@ -372,6 +395,9 @@ static GtkWidget *build(void)
         row_value(g, T("System disk", "시스템 디스크"), NULL, d);
         g_free(d);
     }
+    char *bld = build_words();
+    if (bld) row_value(g, T("Build", "빌드"), NULL, bld);
+    g_free(bld);
     g_free(cpu); g_free(mem); g_free(gpu);
 
     /* Live: what the machine is doing now, every two seconds while the

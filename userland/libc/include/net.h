@@ -47,6 +47,7 @@
 #define SIOCGIFHWADDR   0x8927
 #define SIOCGIFINDEX    0x8933
 #define SIOCADDRT       0x890B
+#define SIOCDELRT       0x890C
 
 #define IFF_UP          0x1
 #define IFF_RUNNING     0x40
@@ -139,6 +140,9 @@ long net_get_addr(const char *ifname, u32 *addr_be);
 long net_set_addr(const char *ifname, u32 addr_be);      /* network order */
 long net_set_netmask(const char *ifname, u32 mask_be);
 long net_add_default_route(const char *ifname, u32 gw_be);
+/* Remove one default route that goes out through ifname, whatever its
+ * gateway. Negative (-ESRCH) when there is none left. */
+long net_del_default_route(const char *ifname);
 
 /* ── Names ── */
 /* Resolve a host name to an IPv4 address in network byte order, by

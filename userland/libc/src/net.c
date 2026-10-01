@@ -231,49 +231,72 @@ long net_set_netmask(const char *ifname, u32 mask_be)
     return if_set_inaddr(ifname, SIOCSIFNETMASK, mask_be);
 }
 
-/* struct rtentry, for adding a route. The kernel's layout, by hand.
- *   0   unsigned long rt_pad1
- *   8   struct sockaddr rt_dst      (16 bytes)
- *   24  struct sockaddr rt_gateway  (16 bytes)
- *   40  struct sockaddr rt_genmask  (16 bytes)
- *   56  short rt_flags
- *   ... the rest can stay zero
- */
-#define RTENTRY_SIZE   120
-#define RT_DST_OFF       8
-#define RT_GATEWAY_OFF  24
-#define RT_GENMASK_OFF  40
-#define RT_FLAGS_OFF    56
-#define RT_DEV_OFF      72      /* char *rt_dev */
+/* struct rtentry, the kernel's layout (include/uapi/linux/route.h),
+ * written as a struct so the compiler places every field for the
+ * machine: rt_dev is at 88 on a 64-bit kernel and 68 on a 32-bit one.
+ * The offsets used to be written out by hand, with rt_dev at 72 - which
+ * is rt_pad4 - so the device was never named and the kernel chose one
+ * by the gateway: with a dead link and a live one on the same subnet it
+ * chose the dead one, and the new default route went into it. */
+typedef struct {
+    unsigned long  rt_pad1;
+    sockaddr_in_t  rt_dst;
+    sockaddr_in_t  rt_gateway;
+    sockaddr_in_t  rt_genmask;
+    unsigned short rt_flags;
+    short          rt_pad2;
+    unsigned long  rt_pad3;
+    void          *rt_pad4;
+    short          rt_metric;
+    const char    *rt_dev;
+    unsigned long  rt_mtu;
+    unsigned long  rt_window;
+    unsigned short rt_irtt;
+} rtentry_t;
 
 #define RTF_UP       0x0001
 #define RTF_GATEWAY  0x0002
 
 long net_add_default_route(const char *ifname, u32 gw_be)
 {
-    u8 rt[RTENTRY_SIZE];
-    memset(rt, 0, sizeof(rt));
+    rtentry_t rt;
+    memset(&rt, 0, sizeof(rt));
 
     /* The default route: destination 0.0.0.0, netmask 0.0.0.0, via the gateway. */
-    sockaddr_in_t *dst  = (sockaddr_in_t *)(rt + RT_DST_OFF);
-    sockaddr_in_t *gw   = (sockaddr_in_t *)(rt + RT_GATEWAY_OFF);
-    sockaddr_in_t *mask = (sockaddr_in_t *)(rt + RT_GENMASK_OFF);
-
-    dst->sin_family  = AF_INET;
-    dst->sin_addr    = 0;
-    mask->sin_family = AF_INET;
-    mask->sin_addr   = 0;
-    gw->sin_family   = AF_INET;
-    gw->sin_addr     = gw_be;
-
-    *(u16 *)(rt + RT_FLAGS_OFF) = RTF_UP | RTF_GATEWAY;
-    *(const char **)(rt + RT_DEV_OFF) = ifname;
+    rt.rt_dst.sin_family     = AF_INET;
+    rt.rt_genmask.sin_family = AF_INET;
+    rt.rt_gateway.sin_family = AF_INET;
+    rt.rt_gateway.sin_addr   = gw_be;
+    rt.rt_flags = RTF_UP | RTF_GATEWAY;
+    rt.rt_dev   = ifname;
 
     long fd = lp_socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0)
         return fd;
 
-    long rc = sys_call3(SYS_ioctl, (long)fd, SIOCADDRT, (long)rt);
+    long rc = sys_call3(SYS_ioctl, (long)fd, SIOCADDRT, (long)&rt);
+    lp_close((int)fd);
+    return rc;
+}
+
+long net_del_default_route(const char *ifname)
+{
+    rtentry_t rt;
+    memset(&rt, 0, sizeof(rt));
+
+    /* 0.0.0.0/0 on that device. No RTF_GATEWAY: the kernel then matches
+     * the route by destination and device alone, so the caller need not
+     * remember which gateway it went through. */
+    rt.rt_dst.sin_family     = AF_INET;
+    rt.rt_genmask.sin_family = AF_INET;
+    rt.rt_flags = RTF_UP;
+    rt.rt_dev   = ifname;
+
+    long fd = lp_socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return fd;
+
+    long rc = sys_call3(SYS_ioctl, (long)fd, SIOCDELRT, (long)&rt);
     lp_close((int)fd);
     return rc;
 }

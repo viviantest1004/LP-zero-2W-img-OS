@@ -41,6 +41,21 @@ if grep -qx 'toggle_fullscreen = <super> KEY_F' "$XDG_CONFIG_HOME/wayfire.ini" 2
         echo 'bindcode --no-warn 95 fullscreen toggle' >> "$XDG_CONFIG_HOME/sway/lp-keys.conf"
     fi
 fi
+# The touchpad's right click is two fingers pressed down (1.407). A home
+# made before that has no click_method at all, and libinput's default
+# on the XPS's clickpad is the bottom-right corner, where two fingers
+# are a left click - the right click "did not work" on an installed
+# machine while it did on a fresh one. Settings > Touch & mouse writes
+# the line when the person picks either way, so a line that is there
+# is theirs and is left as it is. GNU sed for the "a" command.
+if test -f "$XDG_CONFIG_HOME/wayfire.ini" &&
+   ! grep -q '^click_method' "$XDG_CONFIG_HOME/wayfire.ini" ; then
+    /usr/bin/sed -i '/^\[input\]$/a click_method = clickfinger' "$XDG_CONFIG_HOME/wayfire.ini"
+fi
+if test -f "$XDG_CONFIG_HOME/sway/config" &&
+   ! grep -q 'click_method' "$XDG_CONFIG_HOME/sway/config" ; then
+    /usr/bin/sed -i '/^input type:touchpad {$/a\    click_method clickfinger\n    tap_button_map lrm' "$XDG_CONFIG_HOME/sway/config"
+fi
 # 런처가 앱 목록을 여기서 읽는다. 비워 두면 fuzzel 이 아무것도 찾지
 # 못하고 빈 창이 뜬다.
 # Flatpak's exports come after /usr/local/share (LP's own overrides stay
