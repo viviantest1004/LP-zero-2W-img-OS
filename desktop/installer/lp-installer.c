@@ -1654,14 +1654,14 @@ static void activate(GtkApplication *app, gpointer d)
         if (!strcmp(page, "disks") || !strcmp(page, "confirm") ||
             !strcmp(page, "progress") || !strcmp(page, "parts")) {
             /* Filled in as a person would have, for the screenshots. */
-            gtk_editable_set_text(GTK_EDITABLE(A.acct.fullname), "Vivian Kim");
+            gtk_editable_set_text(GTK_EDITABLE(A.acct.fullname), "Alex Kim");
             gtk_editable_set_text(GTK_EDITABLE(A.acct.pw1), "example");
             gtk_editable_set_text(GTK_EDITABLE(A.acct.pw2), "example");
             su_region_suggest_host(&A.region, su_account_login(&A.acct));
             show_disks();
         }
         if (!strcmp(page, "region"))
-            su_region_suggest_host(&A.region, "vivian");
+            su_region_suggest_host(&A.region, "alex");
         if (!strcmp(page, "parts") && A.disk_j && lp_json_bool(A.disk_j, "part_ok", 0)) {
             A.mode = MODE_PART;
             show_parts();

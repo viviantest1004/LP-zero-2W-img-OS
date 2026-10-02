@@ -133,7 +133,7 @@ int main(int argc, char **argv)
                 return 1;
             }
             uid = u.uid;
-            /* "chown vivian file" with no group also moves the group to
+            /* "chown alex file" with no group also moves the group to
              * that user's own, which is what people expect and what the
              * name-only form means everywhere else. */
             if (!group) gid = u.gid;

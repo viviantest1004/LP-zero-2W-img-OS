@@ -54,7 +54,7 @@ static gboolean login_ok(const char *s)
     return TRUE;
 }
 
-/* "Vivian Kim" -> "vivian". A name written in Hangul has no ASCII in
+/* "Alex Kim" -> "alex". A name written in Hangul has no ASCII in
  * it, and then the field stays empty for the person to fill: guessing
  * a romanisation of somebody's name is not a thing to get wrong for
  * them. */
@@ -376,7 +376,7 @@ void su_region_suggest_host(SuRegion *r, const char *login)
 {
     if (r->host_edited || !login || !*login)
         return;
-    /* "vivian-xps-15-9550": whose, and which machine - the name a
+    /* "alex-xps-15-9550": whose, and which machine - the name a
      * person would pick out of a list of devices on a network. */
     char *model = NULL;
     GString *s = g_string_new(login);
