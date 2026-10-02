@@ -830,6 +830,14 @@ static void on_enabled(GObject *sw, GParamSpec *ps, gpointer p)
     int enabled = 0;
     for (guint i = 0; i < d->outs->len; i++)
         enabled += ((out_t *)g_ptr_array_index(d->outs, i))->enabled;
+    if (!on && is_internal(o)) {
+        /* The laptop's own screen: with it off, unplugging the external
+         * display (or the next start without it) left no screen at all. */
+        lp_toast(TRUE, T("The built-in screen always stays on.",
+                         "노트북 화면은 끌 수 없습니다."));
+        LP_QUIET(gtk_switch_set_active(GTK_SWITCH(sw), TRUE));
+        return;
+    }
     if (!on && enabled <= 1) {
         lp_toast(TRUE, T("This is the only display that is on; it stays on.",
                          "켜져 있는 화면이 이것 하나라서 끌 수 없습니다."));
@@ -1203,9 +1211,17 @@ static void rebuild_controls(disp_t *d)
     out_t *o = sel_out(d);
     if (!o) return;
 
-    if (d->outs->len > 1)
-        row_switch(d->controls, T("Use this display", "이 화면 사용"), NULL, o->enabled,
-                   G_CALLBACK(on_enabled), NULL);
+    if (d->outs->len > 1) {
+        /* Not for the built-in screen once it is on: it can be turned on
+         * (a home where an earlier Settings turned it off), never off. */
+        gboolean fixed = is_internal(o) && o->enabled;
+        GtkWidget *r = row_switch(d->controls, T("Use this display", "이 화면 사용"),
+                                  fixed ? T("The built-in screen always stays on",
+                                            "노트북 화면은 항상 켜져 있습니다") : NULL,
+                                  o->enabled, G_CALLBACK(on_enabled), NULL);
+        if (fixed)
+            gtk_widget_set_sensitive(row_control(r), FALSE);
+    }
     if (!o->enabled || o->cur < 0)
         return;
 

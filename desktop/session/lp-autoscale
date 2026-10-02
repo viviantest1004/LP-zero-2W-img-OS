@@ -68,7 +68,7 @@ def call(argv):
         return False
 
 
-def outputs_wlr_randr():
+def outputs_wlr_randr(every=False):
     """[{name, width, scale, transform, cur, pref, modes}] from wlr-randr's
     text (0.2 has no --json). A mode is (w, h, mHz, "WxH@HzHz").
 
@@ -106,7 +106,7 @@ def outputs_wlr_randr():
                 cur["transform"] = s.split(":", 1)[1].strip() or "normal"
             elif s.startswith("Enabled:"):
                 cur["enabled"] = s.endswith("yes")
-    return [o for o in out if o["enabled"] and o["width"]]
+    return out if every else [o for o in out if o["enabled"] and o["width"]]
 
 
 def outputs_sway():
@@ -282,7 +282,61 @@ def guess(o):
     return "2" if want == 2.0 else "1"
 
 
+INTERNAL = ("eDP", "LVDS", "DSI")
+
+
+def keep_a_screen():
+    """The laptop's own screen on, and never no screen at all.
+
+    Settings could turn the built-in panel off while an external display
+    was connected, and wrote "mode = off" for it into wayfire.ini: with
+    the external display gone - unplugged, or the next start without it -
+    the session came up with every screen dark and no way to see
+    anything. Settings no longer offers that; this puts right a home or
+    a moment where it happened anyway: a built-in panel that is off is
+    turned on, and its "off" in wayfire.ini goes back to "auto", or
+    wayfire would turn it off again the next time it reads the file. With
+    no built-in panel and nothing on, the first connected output is
+    turned on."""
+    if not shutil.which("wlr-randr"):
+        return
+    outs = outputs_wlr_randr(every=True)
+    if not outs:
+        return
+    internal = [o for o in outs if o["name"].startswith(INTERNAL)]
+    want = [o for o in internal if not o["enabled"]]
+    if not want and not any(o["enabled"] for o in outs):
+        want = outs[:1]
+    for o in want:
+        log(o["name"], "was off: on again (the built-in screen, or the only one, stays on)")
+        call(["wlr-randr", "--output", o["name"], "--on"])
+        unoff_wayfire_ini(o["name"])
+
+
+def unoff_wayfire_ini(name):
+    ini = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                       "wayfire.ini")
+    try:
+        with open(ini) as f:
+            lines = f.read().split("\n")
+    except OSError:
+        return
+    sec, changed = None, False
+    for i, l in enumerate(lines):
+        t = l.strip()
+        if t.startswith("[") and t.endswith("]"):
+            sec = t[1:-1]
+        elif sec == "output:" + name and re.match(r"mode\s*=\s*off$", t):
+            lines[i] = "mode = auto"
+            changed = True
+    if changed:
+        with open(ini + ".lp-new", "w") as f:
+            f.write("\n".join(lines))
+        os.replace(ini + ".lp-new", ini)
+
+
 def apply():
+    keep_a_screen()
     use_randr = shutil.which("wlr-randr") is not None
     outs = outputs_wlr_randr() if use_randr else outputs_sway()
     changed = False
