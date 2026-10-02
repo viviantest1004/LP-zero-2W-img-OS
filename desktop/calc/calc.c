@@ -265,9 +265,21 @@ static GtkWidget *win, *line_expr, *line_result;
 static GString *cur;            /* what has been typed */
 static long double last_ans;
 static gboolean just_answered;  /* the display shows a result of "=" */
+static char asked[160];         /* what that result answered */
 
 static void show(void)
 {
+    /* After "=": the question small above, the answer large below. It
+     * was the other way round - the answer took the question's place in
+     * the small grey line and the large one went blank. */
+    if (just_answered) {
+        char q[176];
+        g_snprintf(q, sizeof q, "%s =", asked);
+        gtk_label_set_text(GTK_LABEL(line_expr), q);
+        gtk_label_set_text(GTK_LABEL(line_result), cur->str);
+        gtk_widget_remove_css_class(line_result, "error");
+        return;
+    }
     gtk_label_set_text(GTK_LABEL(line_expr), cur->len ? cur->str : "0");
     long double v;
     const char *why;
@@ -316,6 +328,7 @@ static void press(const char *k)
             char text[96];
             format(v, text, sizeof text);
             last_ans = v;
+            g_strlcpy(asked, cur->str, sizeof asked);
             g_string_assign(cur, text);
             just_answered = TRUE;
             show();
@@ -474,12 +487,14 @@ static void on_activate(GtkApplication *app, gpointer d)
     gtk_widget_set_margin_top(box, 18);
     gtk_widget_set_margin_bottom(box, 16);
 
+    /* Neither line is selectable: a selectable label takes the focus when
+     * the window opens - "0" came up selected, and a caret stood by the
+     * answer. Ctrl+C copies the answer (on_key). */
     line_expr = gtk_label_new("0");
     gtk_widget_add_css_class(line_expr, "calc-expr");
     gtk_label_set_xalign(GTK_LABEL(line_expr), 1.0);
     gtk_label_set_wrap(GTK_LABEL(line_expr), TRUE);
     gtk_label_set_wrap_mode(GTK_LABEL(line_expr), PANGO_WRAP_CHAR);
-    gtk_label_set_selectable(GTK_LABEL(line_expr), TRUE);
     gtk_widget_set_vexpand(line_expr, TRUE);
     gtk_widget_set_valign(line_expr, GTK_ALIGN_END);
     gtk_box_append(GTK_BOX(box), line_expr);
@@ -488,7 +503,6 @@ static void on_activate(GtkApplication *app, gpointer d)
     gtk_widget_add_css_class(line_result, "calc-result");
     gtk_label_set_xalign(GTK_LABEL(line_result), 1.0);
     gtk_label_set_ellipsize(GTK_LABEL(line_result), PANGO_ELLIPSIZE_START);
-    gtk_label_set_selectable(GTK_LABEL(line_result), TRUE);
     gtk_widget_set_margin_bottom(line_result, 12);
     gtk_box_append(GTK_BOX(box), line_result);
 
