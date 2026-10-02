@@ -70,6 +70,7 @@ GtkWidget *su_stack(void);
 void su_osk_attach(GtkWidget *field);
 /* The card that moves up while the keyboard is showing. */
 void su_osk_card(GtkWidget *card);
+GtkWidget *su_card_holder(GtkWidget *card);
 /* Go to a page, sliding the right way: forward left, back right. */
 void       su_go(GtkWidget *stack, const char *name, gboolean forward);
 

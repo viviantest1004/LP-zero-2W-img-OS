@@ -268,7 +268,18 @@ def guess(o):
     # would have made it - and at 2560 wide scale 2 made it 1280 wide.
     if virtual_gpu():
         return "1"
-    return "2" if o["width"] >= 2560 else "1"
+    # The panel's own width, not the mode's: under software rendering
+    # (the setup kiosk, sway) fit_mode can put a 3840x2160 panel on
+    # 2560x1440, and scale 2 of that was a 1280x720 desktop - the setup
+    # card, up to 840 pixels tall, did not fit and was cut off. The scale
+    # that keeps the desktop the size the panel's own mode would have
+    # had: 3840 at 2 is 1920 wide, so 2560 gets 1.333.
+    native = o["pref"][0] if o.get("pref") else max([m[0] for m in o["modes"]] or [o["width"]])
+    want = 2.0 if native >= 2560 else 1.0
+    if 0 < o["width"] < native:
+        s = o["width"] * want / native
+        return "1" if s <= 1.0 else "%.3f" % s
+    return "2" if want == 2.0 else "1"
 
 
 def apply():

@@ -99,7 +99,8 @@ static const char CSS[] =
     "progressbar.su-progress progress { min-height: 12px; border-radius: 6px;\n"
     "  background-color: @su_accent; }\n"
     "dropdown.su-drop > button { min-height: 52px; font-size: 17px; }\n"
-    "scrolledwindow.su-list { background: transparent; }\n";
+    "scrolledwindow.su-list { background: transparent; }\n"
+    "scrolledwindow.su-holder, scrolledwindow.su-holder > viewport { background: transparent; }\n";
 
 static void css_error(GtkCssProvider *p, GtkCssSection *s, const GError *e,
                       gpointer name)
@@ -378,6 +379,9 @@ static guint osk_hide_id;
  * up, the card gets a bottom margin of the keyboard's height and so is
  * centred in the space left above it, moving on the sheet spring - the
  * keyboard's own - so the two travel together. */
+/* Room above and below the card in its scroller (su_card_holder). */
+#define SU_CARD_MARGIN 24
+
 static GtkWidget *osk_card;
 static LpSpring osk_lift;               /* the margin, in logical pixels */
 static LpMotion *osk_lift_m;
@@ -385,7 +389,7 @@ static LpMotion *osk_lift_m;
 static void osk_lift_frame(GtkWidget *w, gpointer data)
 {
     (void)data;
-    gtk_widget_set_margin_bottom(w, (int)MAX(0.0, osk_lift.x + 0.5));
+    gtk_widget_set_margin_bottom(w, SU_CARD_MARGIN + (int)MAX(0.0, osk_lift.x + 0.5));
 }
 
 /* The keyboard's height as lp-osk draws it: the fraction in its
@@ -455,6 +459,27 @@ static void osk_watch_start(void)
     GDataInputStream *in =
         g_data_input_stream_new(g_subprocess_get_stdout_pipe(osk_watch));
     g_data_input_stream_read_line_async(in, G_PRIORITY_DEFAULT, NULL, osk_watch_line, NULL);
+}
+
+/* The card on the window, in a scroller. The card is as tall as its page
+ * (560 to about 840 pixels) and was the window's child: on a screen less
+ * tall than that - 1366x768, or a 4K panel the kiosk drew at 2560x1440
+ * and scale 2, 1280x720 - its top and bottom, the title and the Next
+ * button, were cut off with no way to reach them. In the scroller it is
+ * centred as before when it fits and scrolls (a finger, the wheel, the
+ * touchpad) when it does not; the viewport keeps the focused field in
+ * view when the keyboard lifts the card. */
+GtkWidget *su_card_holder(GtkWidget *card)
+{
+    GtkWidget *sw = gtk_scrolled_window_new();
+    gtk_widget_add_css_class(sw, "su-holder");
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_NEVER,
+                                   GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_kinetic_scrolling(GTK_SCROLLED_WINDOW(sw), TRUE);
+    gtk_widget_set_margin_top(card, SU_CARD_MARGIN);
+    gtk_widget_set_margin_bottom(card, SU_CARD_MARGIN);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), card);
+    return sw;
 }
 
 void su_osk_card(GtkWidget *card)
