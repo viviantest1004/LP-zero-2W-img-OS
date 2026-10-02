@@ -661,9 +661,37 @@ static EFI_STATUS start_kernel(int choice)
  * installed, restarted, "Install LP?". So first it looks at the other
  * FAT partitions for an installed LP (a boot menu and a command line,
  * no installer mark) and hands over to that disk's own menu, as if the
- * firmware had started it. A key held down while the machine starts
- * keeps the installer: that is how LP is installed again.
+ * firmware had started it. Not when the stick was picked by hand from
+ * the firmware's boot menu (picked_by_hand) - that is how LP is
+ * installed again, and a person who pressed F12 and chose the stick was
+ * given the old system instead - and not when a key is down as it
+ * starts.
  */
+/* Was this start picked by hand - the firmware's one-time boot menu (F12
+ * on a Dell), or BootNext - rather than being the firmware's own first
+ * choice? BootCurrent is the entry that started us, BootOrder[0] the one
+ * it starts by itself. An install puts its own "LP" entry first, so the
+ * stick left in at the first reboot is started only when the order has
+ * lost that entry (a BIOS update, a reset) - and then it is the first
+ * choice and hands over. Picked from the menu, the stick is what the
+ * person asked for: the installer. Without the variables nothing can be
+ * told, and the old rule stands. */
+static bool picked_by_hand(void)
+{
+    static EFI_GUID gv = { 0x8be4df61, 0x93ca, 0x11d2,
+                           { 0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c } };
+    u16 cur = 0, order[64];
+    u32 attrs;
+    UINTN n = sizeof(cur);
+    if (RT->GetVariable(L"BootCurrent", &gv, &attrs, &n, &cur) != EFI_SUCCESS || n != sizeof(cur))
+        return false;
+    n = sizeof(order);
+    if (RT->GetVariable(L"BootOrder", &gv, &attrs, &n, order) != EFI_SUCCESS || n < sizeof(u16))
+        return false;
+    logf("BootCurrent %d, BootOrder[0] %d", (int)cur, (int)order[0]);
+    return order[0] != cur;
+}
+
 static void chain_installed(void)
 {
     if (!file_exists(L"\\EFI\\LP\\installer"))
@@ -671,6 +699,10 @@ static void chain_installed(void)
     EFI_INPUT_KEY key;
     if (ST->ConIn && ST->ConIn->ReadKeyStroke(ST->ConIn, &key) == EFI_SUCCESS) {
         logf("a key is down: the installer, not the installed LP");
+        return;
+    }
+    if (picked_by_hand()) {
+        logf("started from the firmware's boot menu: the installer, not the installed LP");
         return;
     }
     EFI_GUID fsg = EFI_SIMPLE_FS_GUID, dpg = EFI_DEVICE_PATH_GUID;
