@@ -240,7 +240,40 @@ mkdir -p /boot
 # account (the desktop) any of them could have read it and become root.
 # The owner still reads it from any PC: the masks are this mount's, not
 # the disk's.
-mount -L LPZERO -o ro,fmask=0077,dmask=0077 /dev/mmcblk0p1 /boot || mount -L LPZERO -o ro,fmask=0077,dmask=0077 /dev/vda1 /boot || mount -L LPZERO -o ro,fmask=0077,dmask=0077 /dev/nvme0n1p1 /boot || mount -L LPZERO -w -o ro,fmask=0077,dmask=0077 /dev/sda1 /boot || echo "[rc]   could not read the boot partition"
+# Which partition is /boot. The list at the end tries an SD card, a
+# virtual disk and NVMe before USB and takes the first that says LPZERO -
+# so the desktop started from a USB stick on a laptop with LP installed
+# took the laptop's start-up partition as its own /boot. The live system
+# then held the installed one's partition, and the installer called that
+# disk "in use" and would not erase it. First, then, the partition that
+# belongs to this root:
+#   - an installed system's fstab names it by PARTUUID (lp-install writes
+#     it), which no other disk shares: after a partition install it is
+#     not even the first partition, and on a disk shared with Windows it
+#     carries Windows' label, not LPZERO;
+#   - otherwise (the stick) the first partition of the disk / is on, when
+#     it says LPZERO.
+# The list stays for the systems in RAM, whose / is on no disk.
+fstabpart=""
+if [ -x /sbin/findfs ] && grep -q " /boot " /etc/fstab 2>/dev/null
+then
+    bootid=$(grep " /boot " /etc/fstab | grep "^PARTUUID=" | cut -d" " -f1)
+    [ -n "$bootid" ] && fstabpart=$(/sbin/findfs "$bootid" 2>/dev/null)
+fi
+diskpart=""
+rootdev=$(grep " / ext4 " /proc/mounts | grep "^/dev/" | cut -d" " -f1 | head -n 1)
+case "$rootdev" in
+    /dev/sd*|/dev/vd*|/dev/nvme*|/dev/mmcblk*) diskpart="$(echo "$rootdev" | sed 's/[0-9]*$//')1" ;;
+esac
+if [ -n "$fstabpart" ] && mount -o ro,fmask=0077,dmask=0077 "$fstabpart" /boot
+then
+    echo "[rc]   /boot is $fstabpart (this system's fstab)"
+elif [ -n "$diskpart" ] && mount -L LPZERO -o ro,fmask=0077,dmask=0077 "$diskpart" /boot
+then
+    echo "[rc]   /boot is $diskpart (the disk / is on)"
+else
+    mount -L LPZERO -o ro,fmask=0077,dmask=0077 /dev/mmcblk0p1 /boot || mount -L LPZERO -o ro,fmask=0077,dmask=0077 /dev/vda1 /boot || mount -L LPZERO -o ro,fmask=0077,dmask=0077 /dev/nvme0n1p1 /boot || mount -L LPZERO -w -o ro,fmask=0077,dmask=0077 /dev/sda1 /boot || echo "[rc]   could not read the boot partition"
+fi
 
 echo "[rc] checking the data partition"
 # Before mounting it, and before expandfs, which mounts it to resize.

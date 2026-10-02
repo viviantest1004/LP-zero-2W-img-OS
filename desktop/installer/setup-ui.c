@@ -174,11 +174,27 @@ void su_set_korean(gboolean ko)
             apply_text(g_ptr_array_index(g_texts, i));
 }
 
+/* Every label wraps, and asks for no more than SU_LABEL_CHARS across.
+ * The page stack is homogeneous in width only, and such a stack measures
+ * each page's width for that page's smallest height - for a wrapping
+ * label, the width of its whole text on one line - and takes the largest
+ * as its MINIMUM. One long line anywhere, on any page, so became the
+ * card's least width: a disk's description, or the line under "Install
+ * on a partition" on a disk that already had LP (1400 pixels in Korean),
+ * made the card wider than a screen at scale 2, and the window, which
+ * cannot be narrower than its content, ran off both sides of it - on the
+ * XPS for the whole copy. With max-width-chars that one line is no wider
+ * than this; the card is its own 760 pixels unless a page needs more,
+ * and the text wraps inside it. (A "character" is the font's average for
+ * the language, about 16 pixels with Hangul.) */
+#define SU_LABEL_CHARS 60
+
 GtkWidget *su_label(const char *en, const char *ko, const char *css)
 {
     GtkWidget *l = gtk_label_new(NULL);
     gtk_label_set_wrap(GTK_LABEL(l), TRUE);
     gtk_label_set_wrap_mode(GTK_LABEL(l), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_max_width_chars(GTK_LABEL(l), SU_LABEL_CHARS);
     gtk_label_set_xalign(GTK_LABEL(l), 0.0);
     if (css)
         gtk_widget_add_css_class(l, css);
@@ -379,7 +395,7 @@ static guint osk_hide_id;
  * up, the card gets a bottom margin of the keyboard's height and so is
  * centred in the space left above it, moving on the sheet spring - the
  * keyboard's own - so the two travel together. */
-/* Room above and below the card in its scroller (su_card_holder). */
+/* Room around the card in its scroller (su_card_holder). */
 #define SU_CARD_MARGIN 24
 
 static GtkWidget *osk_card;
@@ -468,7 +484,8 @@ static void osk_watch_start(void)
  * button, were cut off with no way to reach them. In the scroller it is
  * centred as before when it fits and scrolls (a finger, the wheel, the
  * touchpad) when it does not; the viewport keeps the focused field in
- * view when the keyboard lifts the card. */
+ * view when the keyboard lifts the card. Across, it keeps SU_CARD_MARGIN
+ * from either edge (how wide it gets at all: su_label). */
 GtkWidget *su_card_holder(GtkWidget *card)
 {
     GtkWidget *sw = gtk_scrolled_window_new();
@@ -478,7 +495,25 @@ GtkWidget *su_card_holder(GtkWidget *card)
     gtk_scrolled_window_set_kinetic_scrolling(GTK_SCROLLED_WINDOW(sw), TRUE);
     gtk_widget_set_margin_top(card, SU_CARD_MARGIN);
     gtk_widget_set_margin_bottom(card, SU_CARD_MARGIN);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), card);
+    gtk_widget_set_margin_start(card, SU_CARD_MARGIN);
+    gtk_widget_set_margin_end(card, SU_CARD_MARGIN);
+    /* Centred across by a centre box rather than by its own halign: a
+     * widget aligned to the centre is given the height it wants for the
+     * whole width offered, then drawn narrower - with wrapped lines that
+     * height is short, and the disk list lost the second line of a row.
+     * The centre box gives the card its own width first and asks its
+     * height for that. */
+    gtk_widget_set_halign(card, GTK_ALIGN_FILL);
+    GtkWidget *row = gtk_center_box_new();
+    gtk_center_box_set_center_widget(GTK_CENTER_BOX(row), card);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), row);
+    /* Taller than the screen, the card at its natural height and not its
+     * least: squeezed to the minimum, the lists on it (the disks, the
+     * plan) shrank to part of one row at 1280x720 while the scroller had
+     * all the room it needed to scroll. */
+    GtkWidget *vp = gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(sw));
+    if (GTK_IS_SCROLLABLE(vp))
+        gtk_scrollable_set_vscroll_policy(GTK_SCROLLABLE(vp), GTK_SCROLL_NATURAL);
     return sw;
 }
 
