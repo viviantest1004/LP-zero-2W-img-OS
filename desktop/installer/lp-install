@@ -1325,7 +1325,8 @@ FALLBACK = "EFI/BOOT/BOOTX64.EFI"
 # partition shared with another system, the ones this install does not
 # write again are what an earlier LP left, and are removed.
 LP_ESP_OWN = ("EFI/LP/vmlinuz.efi", "EFI/LP/lpboot.efi", "EFI/LP/initrd.img",
-              "EFI/LP/cmdline.txt", "EFI/LP/recovery.ok", "EFI/LP/installer")
+              "EFI/LP/cmdline.txt", "EFI/LP/recovery.ok", "EFI/LP/installer",
+              "EFI/LP/build")
 
 
 def mount_source_esp():
@@ -1370,7 +1371,10 @@ def esp_plan(src, shared):
         plan += [("EFI/LP/lpboot.efi", menu), (FALLBACK, menu)]
     else:
         plan += [(FALLBACK, kernel)]
-    extras = ("EFI/LP/initrd.img",) if shared else ("EFI/LP/initrd.img", "startup.nsh", "README.txt")
+    # EFI/LP/build: which build this disk is - an installer stick of a
+    # different one installs instead of handing over (lpboot.c).
+    extras = ("EFI/LP/initrd.img", "EFI/LP/build") if shared else \
+        ("EFI/LP/initrd.img", "EFI/LP/build", "startup.nsh", "README.txt")
     for extra in extras:
         if src and os.path.isfile(s(extra)):
             plan.append((extra, s(extra)))

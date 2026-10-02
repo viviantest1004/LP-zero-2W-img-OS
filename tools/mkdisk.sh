@@ -435,6 +435,16 @@ fi
 # machine instead of offering the installer again (lpboot.c,
 # chain_installed). lp-install never copies this file to a disk it
 # installs, and removes it when it installs LP where it runs.
+# The build, lp-base's version ("1.412"): the installer medium's menu
+# compares it with an installed disk's before handing over to it
+# (lpboot.c, chain_installed) - a stick of another build is there to
+# install that build. lp-install copies it to the disk it installs.
+LP_BUILD="$(awk '/^Package: lp-base$/ { p = 1 } p && /^Version: / { print $2; exit }' \
+             "$ROOTFS/var/lib/dpkg/status" 2>/dev/null)"
+if [[ -n "$LP_BUILD" ]]; then
+    printf '%s\n' "$LP_BUILD" | esp_text EFI/LP/build
+    log "EFI/LP/build: ${LP_BUILD}"
+fi
 if [[ -e "$ROOTFS/etc/lp/installer-medium" ]]; then
     printf 'This partition is an LP installer.\n' | esp_text EFI/LP/installer
     log "EFI/LP/installer (the installer medium)"

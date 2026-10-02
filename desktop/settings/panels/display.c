@@ -473,9 +473,14 @@ static void persist(const out_t *o)
 {
     char *ini = wayfire_ini();
     char *sec = g_strdup_printf("output:%s", o->name);
-    if (!o->enabled || o->cur < 0) {
+    /* Off only when it is off. An output just turned back on has no
+     * current mode in what was read before (it had none while off): it
+     * was written "off" again, wayfire re-read the file, and the external
+     * display went dark the moment it was turned on - it could not be
+     * turned back on at all. */
+    if (!o->enabled) {
         ini_set(ini, sec, "mode", "off");
-    } else if (!pinned("mode", o->name)) {
+    } else if (o->cur < 0 || !pinned("mode", o->name)) {
         ini_set(ini, sec, "mode", "auto");
     } else {
         const mode_t_ *m = &g_array_index(o->modes, mode_t_, o->cur);
@@ -844,8 +849,11 @@ static void on_enabled(GObject *sw, GParamSpec *ps, gpointer p)
         LP_QUIET(gtk_switch_set_active(GTK_SWITCH(sw), TRUE));
         return;
     }
-    const char *v[] = { "wlr-randr", "--output", o->name, on ? "--on" : "--off", NULL };
-    if (randr(v)) {
+    /* On with its preferred mode: an output that was off has no current
+     * mode, and "--on" alone left wayfire with nothing to show. */
+    const char *v_on[] = { "wlr-randr", "--output", o->name, "--on", "--preferred", NULL };
+    const char *v_off[] = { "wlr-randr", "--output", o->name, "--off", NULL };
+    if (randr(on ? v_on : v_off)) {
         o->enabled = on;
         if (on) {
             persist(o);

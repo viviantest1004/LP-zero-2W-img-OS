@@ -119,7 +119,9 @@ static const Slot slots[] = {
       "Code Editor", "코드 편집기", "geany" },
     { { "libreoffice-writer.desktop" }, "libreoffice-writer",
       "Documents", "문서", "libreoffice-writer" },
-    { { "org.gnome.Calculator.desktop" }, "gnome-calculator",
+    /* LP's own (desktop/calc): GNOME's was a package Software could
+     * remove, and the slot then opened nothing. */
+    { { "lp-calc.desktop" }, NULL,
       "Calculator", "계산기", "accessories-calculator" },
     { { "lp-software.desktop" }, NULL,
       "Software", "소프트웨어", "system-software-install" },
@@ -188,6 +190,10 @@ static GPtrArray *read_pins(void)
         char **lines = g_strsplit(text, "\n", -1);
         for (char **l = lines; *l; l++) {
             char *s = g_strstrip(*l);
+            /* The calculator's slot is LP's own now; a dock saved when it
+             * was GNOME's keeps its place with the new one. */
+            if (!strcmp(s, "org.gnome.Calculator.desktop"))
+                s = (char *)"lp-calc.desktop";
             if (*s && *s != '#')
                 g_ptr_array_add(pins, g_strdup(s));
         }

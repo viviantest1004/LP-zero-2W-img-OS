@@ -177,6 +177,25 @@ static bool exists_on(EFI_HANDLE h, CHAR16 *path)
     return f != 0;
 }
 
+/* A small text file on another partition, its first line, or "". */
+static void read_line_on(EFI_HANDLE h, CHAR16 *path, char *out, int cap)
+{
+    EFI_FILE_PROTOCOL *f = open_file_on(h, path);
+    UINTN n = (UINTN)cap - 1;
+    out[0] = 0;
+    if (!f)
+        return;
+    if (f->Read(f, &n, out) != EFI_SUCCESS)
+        n = 0;
+    f->Close(f);
+    out[n] = 0;
+    for (UINTN i = 0; i < n; i++)
+        if (out[i] == '\r' || out[i] == '\n') {
+            out[i] = 0;
+            break;
+        }
+}
+
 static int read_small(CHAR16 *path, char *out, int cap)
 {
     EFI_FILE_PROTOCOL *f = open_file(path);
@@ -705,6 +724,8 @@ static void chain_installed(void)
         logf("started from the firmware's boot menu: the installer, not the installed LP");
         return;
     }
+    char mine[32];
+    read_line_on(dev, L"\\EFI\\LP\\build", mine, sizeof(mine));
     EFI_GUID fsg = EFI_SIMPLE_FS_GUID, dpg = EFI_DEVICE_PATH_GUID;
     EFI_HANDLE *hs;
     UINTN n;
@@ -715,6 +736,28 @@ static void chain_installed(void)
             || !exists_on(hs[i], L"\\EFI\\LP\\cmdline.txt")
             || exists_on(hs[i], L"\\EFI\\LP\\installer"))
             continue;
+        /* Only the build this stick installs is handed over to: that is
+         * the stick left in at the first reboot after installing it. A
+         * stick of another build - or an LP installed before disks said
+         * which build they are - is there to install, and the installed
+         * LP of an older build was started instead: "the old image
+         * boots" from a new stick, picked from F12 or not (the Dell put
+         * the stick first in its own order, and BootCurrent said
+         * nothing). */
+        if (mine[0]) {
+            char theirs[32];
+            read_line_on(hs[i], L"\\EFI\\LP\\build", theirs, sizeof(theirs));
+            bool same = true;
+            for (int c = 0; c < (int)sizeof(theirs); c++) {
+                if (mine[c] != theirs[c]) { same = false; break; }
+                if (!mine[c]) break;
+            }
+            if (!same) {
+                logf("LP %s is installed on another disk, this stick is %s: the installer",
+                     theirs[0] ? theirs : "(of an older build)", mine);
+                continue;
+            }
+        }
         EFI_DEVICE_PATH_PROTOCOL *dp;
         if (BS->HandleProtocol(hs[i], &dpg, (void **)&dp) != EFI_SUCCESS)
             continue;

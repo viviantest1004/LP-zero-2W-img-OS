@@ -483,6 +483,16 @@ done
 for f in "$D"/*/lp-*.desktop; do
     [[ -f "$f" ]] && cp -a "$f" "$ROOT/usr/local/share/applications/"
 done
+# The calculator (desktop/calc): `calc` at a terminal is the same program
+# (/usr/local/bin comes before the boards' integer calc in /bin), and
+# GNOME's, while it is installed, is listed as the scientific one - its
+# TryExec takes the entry away when Software removes it.
+if [[ -x "$ROOT/usr/local/bin/lp-calc" ]]; then
+    ln -sf lp-calc "$ROOT/usr/local/bin/calc"
+    [[ -f "$D/calc/org.gnome.Calculator.desktop.lp" ]] &&
+        install -m 644 "$D/calc/org.gnome.Calculator.desktop.lp" \
+            "$ROOT/usr/local/share/applications/org.gnome.Calculator.desktop"
+fi
 log "$n desktop programs"
 
 # The command-line tools (desktop/cli): lp-time, lp-info, lp-hostname.
@@ -763,6 +773,15 @@ fi
 # Bluetooth: bluez's bus activation file hands the job to systemd
 # (Exec=/bin/false, SystemdService=...), so without a service line here
 # bluetoothd never ran and Settings > Bluetooth had no adapter to show.
+# usbmuxd (iPhone USB tethering, tools/desktop-packages.list): Debian
+# starts it from a udev rule through systemd, which is not here, so init
+# runs it. -f: in the foreground; -U usbmux: drops root once it has the
+# USB devices its udev rule hands to that user.
+if [[ -f "$ROOT/etc/lp/services" && -x "$ROOT/usr/sbin/usbmuxd" ]] &&
+   ! grep -q usbmuxd "$ROOT/etc/lp/services"; then
+    printf '\n# iPhone USB tethering: pairs with the phone (usbmuxd).\n?/usr/sbin/usbmuxd /usr/sbin/usbmuxd -f -U usbmux\n' \
+        >> "$ROOT/etc/lp/services"
+fi
 if [[ -f "$ROOT/etc/lp/services" && -x "$ROOT/usr/libexec/bluetooth/bluetoothd" ]] &&
    ! grep -q bluetoothd "$ROOT/etc/lp/services"; then
     printf '\n# Bluetooth (bluez). -n: stay in the foreground, init watches it.\n?/usr/libexec/bluetooth/bluetoothd /usr/libexec/bluetooth/bluetoothd -n\n' \

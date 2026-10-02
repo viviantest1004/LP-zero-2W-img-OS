@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Calculator
+Name[ko]=계산기
+GenericName=Calculator
+GenericName[ko]=계산기
+Comment=Add, subtract, multiply and divide
+Comment[ko]=더하기, 빼기, 곱하기, 나누기
+Exec=lp-calc
+Icon=accessories-calculator
+Terminal=false
+Categories=Utility;Calculator;GTK;
+Keywords=calculator;calc;arithmetic;math;
+Keywords[ko]=계산기;계산;사칙연산;수학;
+StartupNotify=true
+StartupWMClass=org.lpzero.Calculator

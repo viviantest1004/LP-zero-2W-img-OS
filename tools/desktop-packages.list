@@ -188,6 +188,14 @@ rfkill
 # WPA3 now - phones' hotspots, the ISPs' routers.
 wpasupplicant
 
+# An iPhone's USB tethering (a USB-C cable, Personal Hotspot): the phone
+# offers its network (ipheth, in the kernel) only to a computer it is
+# paired with, and usbmuxd is what pairs - the phone asks "Trust This
+# Computer?" and the interface appears. Android's tethering (RNDIS or
+# NCM, both kernel modules) needs nothing else. usbmuxd runs as a
+# service (tools/mkdesktop.sh), not through systemd.
+usbmuxd
+
 # ── hardware and power ───────────────────────────────────────────────
 pciutils
 usbutils
