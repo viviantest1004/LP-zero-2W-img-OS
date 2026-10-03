@@ -58,6 +58,9 @@ get "$D2CODING_URL"   "$D2CODING_SHA"   "$CACHE/d2coding.zip"
 # in one sixth of the space.
 unzip -j -o -q "$CACHE/pretendard.zip" \
     'public/variable/PretendardVariable.ttf' -d "$DEST/pretendard"
+# The OFL goes with the font wherever it is copied (its section 2): the
+# zip's own LICENSE.txt, beside the font.
+unzip -j -o -q "$CACHE/pretendard.zip" 'LICENSE.txt' -d "$DEST/pretendard"
 
 # Regular and Bold, not the .ttc. A collection saves a megabyte and
 # fontconfig on this base indexes the faces inside one inconsistently -
@@ -65,5 +68,8 @@ unzip -j -o -q "$CACHE/pretendard.zip" \
 unzip -j -o -q "$CACHE/d2coding.zip" \
     'D2Coding/D2Coding-Ver1.3.2-20180524.ttf' \
     'D2Coding/D2CodingBold-Ver1.3.2-20180524.ttf' -d "$DEST/d2coding"
+# D2Coding's zip carries no licence file; the repository keeps one, with
+# the copyright and licence lines the font files carry.
+cp "$(dirname "$0")/../desktop/fonts/LICENSE.D2Coding.txt" "$DEST/d2coding/LICENSE.txt"
 
 log "$(du -sh "$DEST" | cut -f1)  $DEST"

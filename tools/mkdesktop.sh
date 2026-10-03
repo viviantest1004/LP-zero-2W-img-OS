@@ -887,13 +887,48 @@ log "default applications: $(grep -c = "$ROOT/etc/xdg/mimeapps.list") types; blu
 mkdir -p "$ROOT/usr/share/lp"
 {
     for f in "$ROOT"/var/lib/dpkg/info/*.list; do
-        grep -q '^/usr/share/applications/[^/]*\.desktop$' "$f" && basename "$f" .list
+        if grep -q '^/usr/share/applications/[^/]*\.desktop$' "$f"; then
+            basename "$f" .list
+        fi
     done | sed 's/:.*$//'
     if [[ -d "$ROOT/var/lib/flatpak/app" ]]; then
         ls "$ROOT/var/lib/flatpak/app" | sed 's/^/flatpak:/'
     fi
 } | sort -u > "$ROOT/usr/share/lp/default-apps"
 log "default apps that cannot be removed: $(wc -l < "$ROOT/usr/share/lp/default-apps") packages"
+
+# The notices (after slim, which keeps nothing under /usr/share/doc but
+# the packages' copyright files): LP's own licence; THIRD-PARTY.md, what
+# else is in the image, under what terms and where its source is; every
+# Debian package with its source package and version, which is how the
+# source of each is found on snapshot.debian.org; and the kernel's
+# commit, configuration and patches, which with that commit are its
+# source. The package list is also left in dist/ beside the images, for
+# the download page.
+DOC="$ROOT/usr/share/doc/lp"
+mkdir -p "$DOC/kernel" "$DOC/compositor"
+cp "$REPO_ROOT/LICENSE" "$DOC/LICENSE"
+cp "$REPO_ROOT/THIRD-PARTY.md" "$DOC/THIRD-PARTY.md"
+{
+    echo "# LP $(in_root dpkg-query -W -f='${Version}' lp-base 2>/dev/null): the Debian packages in this image."
+    echo "# package<TAB>version<TAB>source package<TAB>source version"
+    echo "# The source of each: https://snapshot.debian.org/package/<source package>/<source version>/"
+    echo "# (lp-base is LP itself: its source is the LP repository, as THIRD-PARTY.md says.)"
+    in_root dpkg-query -W -f='${Package}\t${Version}\t${source:Package}\t${source:Version}\n' | sort
+} > "$DOC/SOURCES.txt"
+{
+    echo "Linux: https://github.com/raspberrypi/linux, branch rpi-6.12.y,"
+    echo "commit $(cat "$REPO_ROOT/kernel/linux.commit")"
+    echo "with the patches in this directory, configured with lp-zero-amd64.config,"
+    echo "lp-zero-amd64.fragment and lp-desktop-amd64.fragment (kernel/build.sh)."
+} > "$DOC/kernel/README"
+cp "$REPO_ROOT"/kernel/patches/*.patch "$REPO_ROOT"/kernel/lp-zero-amd64.config \
+   "$REPO_ROOT"/kernel/lp-zero-amd64.fragment "$REPO_ROOT"/kernel/lp-desktop-amd64.fragment \
+   "$DOC/kernel/"
+cp "$REPO_ROOT"/desktop/compositor/*.patch "$DOC/compositor/"
+mkdir -p "$REPO_ROOT/dist"
+cp "$DOC/SOURCES.txt" "$REPO_ROOT/dist/SOURCES.txt"
+log "notices: /usr/share/doc/lp ($(grep -vc '^#' "$DOC/SOURCES.txt") packages listed with their sources)"
 scrub
 leaks || die "the image would carry what the build host left in it"
 log "no proxy, CA, apt lists, machine-id, host keys, histories or logs"

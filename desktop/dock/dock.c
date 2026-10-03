@@ -1008,7 +1008,9 @@ static void on_drag_update(GtkGestureDrag *g, double dx, double dy, gpointer d)
         lp_spring_jump(&D.ga, 1.0);
     }
     lp_spring_jump(&D.gx, D.cx0 + dx);
-    lp_spring_jump(&D.gy, D.cy0 + dy);
+    /* No higher than leaves the icon and its "Remove" inside the surface:
+     * the room above the bar is all there is to draw in. */
+    lp_spring_jump(&D.gy, MAX(D.cy0 + dy, ICON_PX * 1.2 + 34));
     /* Lifted most of an item's height above the dock: off it. Only a
      * pinned app can be taken off; a running one just goes back. */
     gboolean out = it->pinned && dy < -slot_h * 0.9;
@@ -2018,7 +2020,7 @@ int main(int argc, char **argv)
      * bar. The lifted icon is drawn over all of it (ghost_draw). */
     stage = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     GtkWidget *above = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_size_request(above, -1, ICON_PX * 2);
+    gtk_widget_set_size_request(above, -1, ICON_PX * 3);
     gtk_box_pack_start(GTK_BOX(stage), above, FALSE, FALSE, 0);
     g_signal_connect_after(stage, "draw", G_CALLBACK(ghost_draw), NULL);
     gtk_container_add(GTK_CONTAINER(win), stage);

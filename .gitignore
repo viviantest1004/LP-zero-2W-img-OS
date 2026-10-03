@@ -40,6 +40,8 @@ dist/*
 !dist/*.zip
 !dist/SHA256SUMS.txt
 !dist/PI_IMAGE_SHA256.txt
+# The packages in the desktop image and their sources (THIRD-PARTY.md).
+!dist/SOURCES.txt
 # The desktop image is well over GitHub's 100MB file limit; it is handed
 # over directly, not committed.
 dist/linux-LP_desktop.img.xz
