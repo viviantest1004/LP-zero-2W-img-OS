@@ -38,10 +38,23 @@ sway both implement, so the same program serves the session on a GPU
 (wayfire) and the one without (sway). swaymsg is the fallback for a
 root without wlr-randr.
 """
-import json, os, re, select, shutil, subprocess, sys, time
+import json, math, os, re, select, shutil, subprocess, sys, time
 
 CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "lp")
 HOLD_SECS = 60
+
+# --kiosk: the setup screens (lp-setup-gate's sway, the installer and the
+# first-boot setup), not anybody's desktop. On the XPS the installer kept
+# coming up cut off - its card off both sides, then off the top and the
+# bottom - and every way there was the same: a screen far smaller than
+# the 1920x1080 a 3840x2160 panel at scale 2 gives. The kiosk runs as the
+# stick's own account, so a scale chosen in "try LP" Settings came back
+# in the installer; and on a real GPU it was put on a smaller mode (for
+# software drawing) whose fractional scale is one more thing to go wrong.
+# So in the kiosk: no pins and no holds, the panel's own mode on real
+# hardware, and a scale that leaves the card at least 1600x900 to sit in.
+KIOSK = "--kiosk" in sys.argv[1:]
+KIOSK_MIN = (1600, 900)
 
 
 def log(*a):
@@ -82,7 +95,7 @@ def outputs_wlr_randr(every=False):
     out, cur = [], None
     for line in run(["wlr-randr"]).splitlines():
         if line and not line[0].isspace():
-            cur = {"name": line.split()[0], "width": 0, "scale": 1.0, "enabled": True,
+            cur = {"name": line.split()[0], "width": 0, "height": 0, "scale": 1.0, "enabled": True,
                    "transform": "normal", "cur": None, "pref": None, "modes": []}
             out.append(cur)
         elif cur is not None:
@@ -94,6 +107,7 @@ def outputs_wlr_randr(every=False):
                 cur["modes"].append(mode)
                 if re.search(r"\bcurrent\b", s):
                     cur["width"] = mode[0]
+                    cur["height"] = mode[1]
                     cur["cur"] = mode
                 if re.search(r"\bpreferred\b", s):
                     cur["pref"] = mode
@@ -133,6 +147,8 @@ def outputs_sway():
 
 def pinned(kind, name):
     """What Settings chose for this output, or None."""
+    if KIOSK:
+        return None
     try:
         with open(os.path.join(CONF, "%s-%s" % (kind, name))) as f:
             return f.read().strip() or None
@@ -141,6 +157,8 @@ def pinned(kind, name):
 
 
 def held(name):
+    if KIOSK:
+        return False
     rt = os.environ.get("XDG_RUNTIME_DIR")
     if not rt:
         return False
@@ -221,8 +239,21 @@ def custom(w, h, mhz=60000):
     return (w, h, mhz, "%dx%d@%.3fHz" % (w, h, mhz / 1000.0))
 
 
+def in_vm():
+    """A virtual GPU, or a CPU that says it runs under a hypervisor."""
+    if virtual_gpu():
+        return True
+    try:
+        with open("/proc/cpuinfo") as f:
+            return re.search(r"^flags\s*:.*\bhypervisor\b", f.read(), re.M) is not None
+    except OSError:
+        return False
+
+
 def fit_mode(o):
     pref = o["pref"]
+    if KIOSK and not in_vm():
+        return pref
     vm = virtual_gpu()
     if not (software_rendering() or vm) or pref[0] * pref[1] <= SOFTWARE_MAX_PIXELS:
         return pref
@@ -238,9 +269,11 @@ def fit_mode(o):
         while (w // n) * (h // n) > SOFTWARE_MAX_PIXELS:
             n += 1
         best = custom(w // n // 2 * 2, h // n // 2 * 2)
-    elif fits:
-        best = max(fits, key=lambda m: (m[0] * m[1], m[2]))
     else:
+        # Never a mode of another shape. A panel's scaler stretches it to
+        # fill the glass: the XPS's 16:9 panel offered no smaller 16:9 mode,
+        # the largest that fitted was 4:3, and the installer came up
+        # stretched sideways - "cut off at both sides".
         return pref
     log(o["name"], "preferred %dx%d is too many pixels to draw here; %s instead"
         % (pref[0], pref[1], best[3]))
@@ -248,21 +281,36 @@ def fit_mode(o):
 
 
 def smaller_modes(o, tried):
-    """Offered modes smaller than `tried` ("WxH@HzHz"), largest first,
-    one refresh rate per size (the highest)."""
+    """Offered modes smaller than `tried` ("WxH@HzHz") and of its shape
+    (another shape is stretched: fit_mode), largest first, one refresh
+    rate per size (the highest)."""
     t = parse_mode(tried.replace("Hz", ""))
     if t is None:
         return []
     by_size = {}
     for m in o["modes"]:
-        if m[0] * m[1] < t[0] * t[1]:
+        if m[0] * m[1] < t[0] * t[1] and abs(m[0] / m[1] - t[0] / t[1]) < 0.02:
             k = (m[0], m[1])
             if k not in by_size or m[2] > by_size[k][2]:
                 by_size[k] = m
     return sorted(by_size.values(), key=lambda m: m[0] * m[1], reverse=True)[:8]
 
 
+def kiosk_scale(o):
+    """The largest scale, in quarters, from 1 to 2, that leaves the output
+    at least KIOSK_MIN logical pixels: 3840x2160 gets 2 (1920x1080),
+    2560x1440 1.5, 1920x1080 and anything smaller 1."""
+    w, h = o.get("width") or 0, o.get("height") or 0
+    if not w or not h:
+        return "1"
+    s = min(2.0, w / float(KIOSK_MIN[0]), h / float(KIOSK_MIN[1]))
+    s = max(1.0, math.floor(s * 4) / 4.0)
+    return "%g" % s
+
+
 def guess(o):
+    if KIOSK:
+        return kiosk_scale(o)
     # A virtual machine draws at scale 1: fit_mode already gave a large
     # window a mode of half its pixels, so the desktop is the size scale 2
     # would have made it - and at 2560 wide scale 2 made it 1280 wide.

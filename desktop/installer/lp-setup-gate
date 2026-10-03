@@ -338,7 +338,7 @@ def kiosk(mode):
             "%s"
             "for_window [app_id=\"org.lp.*\"] fullscreen enable\n"
             # The VM window resized: follow it (lp-autoscale --watch).
-            "exec /usr/local/bin/lp-autoscale --watch\n"
+            "exec /usr/local/bin/lp-autoscale --watch --kiosk\n"
             "%s"
             "exec sh -c '%s; echo $? > %s; swaymsg exit'\n"
             % (output_scale(), inc, osk, app, status))
