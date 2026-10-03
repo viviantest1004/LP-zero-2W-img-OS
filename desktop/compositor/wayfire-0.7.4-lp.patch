@@ -27,6 +27,26 @@ With the patch:
   in use and its modifiers when it begins, and the application the
   modifiers back when it ends.
 
+And the place plugin (plugins/single_plugins/place.cpp): a new window
+bigger than the work area - Chrome opens 1018 pixels tall on a 1080
+screen - is made to fit it, and no window is placed past the work area's
+top or left edge. Centred as it was, Chrome's top went under the top bar,
+and with it the tab strip's minimize, maximize and close buttons.
+
+And xdg-decoration (src/core/core.cpp): a window gets the decoration mode
+it asks for, and preferred_decoration_mode only when it asks for none.
+0.7.4 read its own pending answer in place of the request, so every window
+got preferred_decoration_mode - LP's is "client", and Chrome's pop-up
+windows (window.open, the Google sign-in), which ask for a server frame
+and draw none themselves, had no title bar and no close button.
+
+And the decoration plugin (plugins/decor), the frame wayfire draws for
+those windows and for X11 programs: the title at a header bar's size
+(it was 80% of the bar's height) with a margin and an ellipsis, and the
+minimise, maximise and close buttons as light marks on the dark bar
+(they were grey discs with a black glyph at a quarter opacity), drawn
+at twice the size so they stay sharp at scale 2.
+
 diff -ru a/src/core/seat/input-method-relay.cpp b/src/core/seat/input-method-relay.cpp
 --- a/src/core/seat/input-method-relay.cpp
 +++ b/src/core/seat/input-method-relay.cpp
@@ -245,3 +265,235 @@ diff -ru a/src/core/seat/keyboard.hpp b/src/core/seat/keyboard.hpp
      void setup_listeners();
  
      wf::signal_connection_t on_config_reload;
+diff -ru a/plugins/single_plugins/place.cpp b/plugins/single_plugins/place.cpp
+--- a/plugins/single_plugins/place.cpp
++++ b/plugins/single_plugins/place.cpp
+@@ -1,3 +1,4 @@
++#include <algorithm>
+ #include <wayfire/plugin.hpp>
+ #include <wayfire/view.hpp>
+ #include <wayfire/core.hpp>
+@@ -111,8 +112,22 @@
+     void center(wayfire_view & view, wf::geometry_t workarea)
+     {
+         wf::geometry_t window = view->get_wm_geometry();
++        /* LP: a window bigger than the room for it (Chrome opens 1018
++         * pixels tall on a 1080 screen) is made to fit, and is never
++         * placed past the room's edge: centred, it went above the top
++         * of the work area, under the top bar, with its title bar and
++         * its close button where nobody could reach them. */
++        if ((window.width > workarea.width) || (window.height > workarea.height))
++        {
++            window.width  = std::min(window.width, workarea.width);
++            window.height = std::min(window.height, workarea.height);
++            view->resize(window.width, window.height);
++        }
++
+         window.x = workarea.x + (workarea.width / 2) - (window.width / 2);
+         window.y = workarea.y + (workarea.height / 2) - (window.height / 2);
++        window.x = std::max(window.x, workarea.x);
++        window.y = std::max(window.y, workarea.y);
+         view->move(window.x, window.y);
+     }
+ 
+diff -ru a/src/core/core.cpp b/src/core/core.cpp
+--- a/src/core/core.cpp
++++ b/src/core/core.cpp
+@@ -83,7 +83,12 @@
+             default_mode = WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
+         }
+ 
+-        auto mode = decor->pending.mode;
++        /* LP: what the window asked for. pending.mode is the compositor's
++         * own not-yet-sent answer, so reading it here answered every
++         * window with preferred_decoration_mode whatever it asked -
++         * Chrome's pop-ups, which ask for a server frame and draw none,
++         * had no title bar and no close button at all. */
++        auto mode = decor->requested_mode;
+         if (mode == WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_NONE)
+         {
+             mode = default_mode;
+diff -ru a/plugins/decor/deco-button.cpp b/plugins/decor/deco-button.cpp
+--- a/plugins/decor/deco-button.cpp
++++ b/plugins/decor/deco-button.cpp
+@@ -86,10 +86,13 @@
+      * to 70% of the titlebar height. Thus we will have
+      * a very crisp image
+      */
++    /* LP: drawn at twice that, so the button is as sharp as the title on
++     * the XPS's panel at scale 2 (the title is drawn at the output's
++     * scale; the buttons were drawn at 1 and stretched). */
+     decoration_theme_t::button_state_t state = {
+-        .width  = 1.0 * theme.get_title_height(),
+-        .height = 1.0 * theme.get_title_height(),
+-        .border = 1.0,
++        .width  = 2.0 * theme.get_title_height(),
++        .height = 2.0 * theme.get_title_height(),
++        .border = 2.0,
+         .hover_progress = hover,
+     };
+ 
+diff -ru a/plugins/decor/deco-theme.cpp b/plugins/decor/deco-theme.cpp
+--- a/plugins/decor/deco-theme.cpp
++++ b/plugins/decor/deco-theme.cpp
+@@ -3,6 +3,8 @@
+ #include <wayfire/opengl.hpp>
+ #include <config.h>
+ #include <map>
++#include <algorithm>
++#include <cmath>
+ 
+ namespace wf
+ {
+@@ -59,8 +61,13 @@
+ 
+     auto cr = cairo_create(surface);
+ 
+-    const float font_scale = 0.8;
++    /* LP: the size and weight of a GTK header bar's title (15 px, semibold,
++     * on a 34 px bar), centred in the bar's height after a margin, and cut
++     * short with an ellipsis before the buttons. 0.7.4 drew it at 80% of
++     * the bar's height, from the very edge. */
++    const float font_scale = 0.44;
+     const float font_size  = height * font_scale;
++    const int margin = height * 0.35;
+ 
+     PangoFontDescription *font_desc;
+     PangoLayout *layout;
+@@ -68,11 +75,17 @@
+     // render text
+     font_desc = pango_font_description_from_string(((std::string)font).c_str());
+     pango_font_description_set_absolute_size(font_desc, font_size * PANGO_SCALE);
++    pango_font_description_set_weight(font_desc, PANGO_WEIGHT_SEMIBOLD);
+ 
+     layout = pango_cairo_create_layout(cr);
+     pango_layout_set_font_description(layout, font_desc);
+     pango_layout_set_text(layout, text.c_str(), text.size());
+-    cairo_set_source_rgba(cr, 1, 1, 1, 1);
++    pango_layout_set_width(layout, std::max(width - 2 * margin, 1) * PANGO_SCALE);
++    pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END);
++    int text_w, text_h;
++    pango_layout_get_pixel_size(layout, &text_w, &text_h);
++    cairo_move_to(cr, margin, (height - text_h) / 2.0);
++    cairo_set_source_rgba(cr, 1, 1, 1, 0.92);
+     pango_cairo_show_layout(cr, layout);
+     pango_font_description_free(font_desc);
+     g_object_unref(layout);
+@@ -98,93 +111,50 @@
+ 
+     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+ 
+-    /** A gray that looks good on light and dark themes */
+-    color_t base = {0.60, 0.60, 0.63, 0.36};
+-
+-    /**
+-     * We just need the alpha component.
+-     * r == g == b == 0.0 will be directly set
+-     */
+-    double line  = 0.27;
+-    double hover = 0.27;
+-
+-    /** Coloured base on hover/press. Don't compare float to 0 */
+-    if (fabs(state.hover_progress) > 1e-3)
++    /* LP: light marks on the bar's deep blue, as the header bars of LP's
++     * own windows have them: a faint disc that brightens under the
++     * pointer, red for close, and a white glyph. 0.7.4's grey discs with
++     * a black outline and a black glyph at a quarter opacity were hard to
++     * see on a dark bar at all. */
++    double p = std::min(fabs(state.hover_progress), 1.0);
++    color_t base = {1.0, 1.0, 1.0, 0.10 + 0.12 * p};
++    if ((button == BUTTON_CLOSE) && (p > 1e-3))
+     {
+-        switch (button)
+-        {
+-          case BUTTON_CLOSE:
+-            base = {242.0 / 255.0, 80.0 / 255.0, 86.0 / 255.0, 0.63};
+-            break;
+-
+-          case BUTTON_TOGGLE_MAXIMIZE:
+-            base = {57.0 / 255.0, 234.0 / 255.0, 73.0 / 255.0, 0.63};
+-            break;
+-
+-          case BUTTON_MINIMIZE:
+-            base = {250.0 / 255.0, 198.0 / 255.0, 54.0 / 255.0, 0.63};
+-            break;
+-
+-          default:
+-            assert(false);
+-        }
+-
+-        line *= 2.0;
++        base = {229.0 / 255.0, 72.0 / 255.0, 77.0 / 255.0, 0.35 + 0.65 * p};
+     }
+ 
+     /** Draw the base */
+-    cairo_set_source_rgba(cr,
+-        base.r + 0.0 * state.hover_progress,
+-        base.g + 0.0 * state.hover_progress,
+-        base.b + 0.0 * state.hover_progress,
+-        base.a + hover * state.hover_progress);
++    cairo_set_source_rgba(cr, base.r, base.g, base.b, base.a);
+     cairo_arc(cr, state.width / 2, state.height / 2,
+         state.width / 2, 0, 2 * M_PI);
+     cairo_fill(cr);
+ 
+-    /** Draw the border */
+-    cairo_set_line_width(cr, state.border);
+-    cairo_set_source_rgba(cr, 0.00, 0.00, 0.00, line);
+-    // This renders great on my screen (110 dpi 1376x768 lcd screen)
+-    // How this would appear on a Hi-DPI screen is questionable
+-    double r = state.width / 2 - 0.5 * state.border;
+-    cairo_arc(cr, state.width / 2, state.height / 2, r, 0, 2 * M_PI);
+-    cairo_stroke(cr);
+-
+     /** Draw the icon  */
+-    cairo_set_source_rgba(cr, 0.00, 0.00, 0.00, line / 2);
+-    cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
++    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.88);
++    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
++    const double a = 1.0 * state.width * 0.34;
++    const double b = 1.0 * state.width * 0.66;
+     switch (button)
+     {
+       case BUTTON_CLOSE:
+-        cairo_set_line_width(cr, 1.5 * state.border);
+-        cairo_move_to(cr, 1.0 * state.width / 4.0,
+-            1.0 * state.height / 4.0);
+-        cairo_line_to(cr, 3.0 * state.width / 4.0,
+-            3.0 * state.height / 4.0); // '\' part of x
+-        cairo_move_to(cr, 3.0 * state.width / 4.0,
+-            1.0 * state.height / 4.0);
+-        cairo_line_to(cr, 1.0 * state.width / 4.0,
+-            3.0 * state.height / 4.0); // '/' part of x
++        cairo_set_line_width(cr, 2.0 * state.border);
++        cairo_move_to(cr, a, a);
++        cairo_line_to(cr, b, b); // '\' part of x
++        cairo_move_to(cr, b, a);
++        cairo_line_to(cr, a, b); // '/' part of x
+         cairo_stroke(cr);
+         break;
+ 
+       case BUTTON_TOGGLE_MAXIMIZE:
+-        cairo_set_line_width(cr, 1.5 * state.border);
+-        cairo_rectangle(
+-            cr, // Context
+-            state.width / 4.0, state.height / 4.0, // (x, y)
+-            state.width / 2.0, state.height / 2.0 // w x h
+-        );
++        cairo_set_line_width(cr, 2.0 * state.border);
++        cairo_rectangle(cr, a, a, b - a, b - a);
+         cairo_stroke(cr);
+         break;
+ 
+       case BUTTON_MINIMIZE:
+-        cairo_set_line_width(cr, 1.75 * state.border);
+-        cairo_move_to(cr, 1.0 * state.width / 4.0,
+-            state.height / 2.0);
+-        cairo_line_to(cr, 3.0 * state.width / 4.0,
+-            state.height / 2.0);
++        cairo_set_line_width(cr, 2.0 * state.border);
++        cairo_move_to(cr, a, state.height / 2.0);
++        cairo_line_to(cr, b, state.height / 2.0);
+         cairo_stroke(cr);
+         break;
+ 

@@ -3,15 +3,19 @@
 # (README.md).
 #
 #   desktop/compositor/build-wayfire.sh     -> desktop/compositor/wayfire
+#                                              desktop/compositor/libplace.so
+#                                              desktop/compositor/libdecoration.so
 #
 # Same arrangement as build-wlroots.sh and build-sway.sh: the build runs in
 # a throwaway overlay of the Debian base tree ($DEB, the image's own root)
 # inside a private mount namespace, the build dependencies are
 # apt-installed into the overlay's upper layer (kept in $WORK/ovl as a
 # cache, CLEAN=1 starts over), and nothing is written to the base. Only the
-# wayfire program is rebuilt: the patch is in the core, and the plugins
-# Debian ships (/usr/lib/x86_64-linux-gnu/wayfire) load into it unchanged,
-# which is why its exported symbols are checked against Debian's program.
+# wayfire program and the plugins the patch touches (place, where a new
+# window goes; decoration, the frame wayfire draws) are rebuilt: the other
+# plugins Debian ships (/usr/lib/x86_64-linux-gnu/wayfire) load into it
+# unchanged, which is why its exported symbols are checked against
+# Debian's program.
 #
 # Environment:
 #   DEB        Debian base tree            (/home/user/kernel-work/deb)
@@ -99,10 +103,14 @@ eval "$(DEB_BUILD_MAINT_OPTIONS=hardening=+all dpkg-buildflags --export=sh)"
 meson setup b wayfire-0.7.4 --wrap-mode=nodownload --buildtype=plain --prefix=/usr \
     --sysconfdir=/etc --localstatedir=/var --libdir=lib/x86_64-linux-gnu \
     -Duse_system_wlroots=enabled -Duse_system_wfconfig=enabled -Dxwayland=enabled
-ninja -C b src/wayfire
+ninja -C b src/wayfire plugins/single_plugins/libplace.so plugins/decor/libdecoration.so
 cp b/src/wayfire /build/wayfire.out
+cp b/plugins/single_plugins/libplace.so /build/libplace.out
+cp b/plugins/decor/libdecoration.so /build/libdecoration.out
 # dh_strip
 strip --remove-section=.comment --remove-section=.note /build/wayfire.out
+strip --remove-section=.comment --remove-section=.note --strip-unneeded /build/libplace.out
+strip --remove-section=.comment --remove-section=.note --strip-unneeded /build/libdecoration.out
 INSIDE
 chmod +x "$WORK/build/inside.sh"
 
@@ -151,6 +159,18 @@ if ! diff -u "$WORK/build/needed.orig" "$WORK/build/needed.new"; then
     exit 1
 fi
 
+# The plugins export what Debian's do (the plugin entry points).
+for p in place decoration; do
+    PORIG=$DEB/usr/lib/x86_64-linux-gnu/wayfire/lib$p.so
+    if ! diff <(nm -D --defined-only "$PORIG" | awk '{print $3}' | sort) \
+              <(nm -D --defined-only "$WORK/build/lib$p.out" | awk '{print $3}' | sort) >&2; then
+        echo "build-wayfire.sh: lib$p.so exports differ from $PORIG" >&2
+        exit 1
+    fi
+done
+
 install -m 755 "$WORK/build/wayfire.out" "$OUT"
+install -m 644 "$WORK/build/libplace.out" "$HERE/libplace.so"
+install -m 644 "$WORK/build/libdecoration.out" "$HERE/libdecoration.so"
 echo "build-wayfire.sh: $OUT ($(wc -l < "$WORK/build/syms.orig") of Debian's exported symbols, all there)"
-sha256sum "$OUT"
+sha256sum "$OUT" "$HERE/libplace.so" "$HERE/libdecoration.so"

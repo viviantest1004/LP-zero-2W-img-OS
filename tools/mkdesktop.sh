@@ -405,9 +405,22 @@ if [[ -d "$D/session" ]]; then
     fi
     # LP's wayfire: keys reach the input method's keyboard grab, so lp-osk
     # types Korean into Electron, Chromium and foot from the laptop's keys
-    # (desktop/compositor/wayfire-0.7.4-lp.patch).
+    # (desktop/compositor/wayfire-0.7.4-lp.patch), and a window that asks
+    # wayfire for a frame - Chrome's pop-ups - gets one.
     if [[ -x "$D/compositor/wayfire" ]]; then
         install -m 755 "$D/compositor/wayfire" "$ROOT/usr/bin/wayfire"
+    fi
+    # ... and its place plugin: a new window bigger than the room for it is
+    # made to fit, never placed under the top bar (the same patch).
+    if [[ -f "$D/compositor/libplace.so" ]]; then
+        install -m 644 "$D/compositor/libplace.so" \
+            "$ROOT/usr/lib/x86_64-linux-gnu/wayfire/libplace.so"
+    fi
+    # ... and its decoration plugin, that frame: a header bar's title and
+    # buttons that show on the dark bar (the same patch).
+    if [[ -f "$D/compositor/libdecoration.so" ]]; then
+        install -m 644 "$D/compositor/libdecoration.so" \
+            "$ROOT/usr/lib/x86_64-linux-gnu/wayfire/libdecoration.so"
     fi
     # And LP's wlroots under both compositors: the pointer on the GPU's
     # cursor plane (a virtual machine's too) instead of a whole-screen

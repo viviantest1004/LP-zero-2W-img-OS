@@ -23,9 +23,29 @@ for a key that goes to the grab (every switch resends every client the
 keymap); and modifiers follow the keys. GTK and Qt windows keep typing
 through fcitx5, which never asks for the grab.
 
-Only the program is rebuilt - the patch is all in the core - and Debian's
-plugins load into it: build-wayfire.sh checks that every symbol Debian's
-program exports is still there (the patch adds one, and takes none).
+The same patch, for Chrome's windows:
+
+- **Pop-ups get a frame.** A window gets the xdg-decoration mode it asks
+  for; `preferred_decoration_mode` (LP's is `client`) only answers a
+  window that asks for none. 0.7.4 read its own pending answer instead
+  of the request, so Chrome's pop-ups (`window.open`, the Google sign-in
+  window), which ask for a server frame and draw none, had no title bar
+  and no close button (src/core/core.cpp).
+- **That frame** (the decoration plugin, also every X11 window's): the
+  title at a header bar's size with a margin and an ellipsis instead of
+  80% of the bar's height from its very edge, and the three buttons as
+  light marks on the dark bar, drawn at twice the size for scale 2
+  (plugins/decor).
+- **A window bigger than the room for it** - Chrome opens 1018 pixels tall
+  on a 1080 screen - is made to fit the work area, and nothing is placed
+  above or left of it: centred as it was, Chrome's top and its tab
+  strip's buttons went under the top bar (plugins/single_plugins/place.cpp).
+
+So the program and two plugins (`libplace.so`, `libdecoration.so`) are
+rebuilt, and Debian's other plugins load into the program: build-wayfire.sh
+checks that every symbol Debian's program exports is still there (the
+patch adds one, and takes none) and that the two plugins export what
+Debian's do.
 Chromium and Electron speak text-input only when started with
 `--enable-wayland-ime --wayland-text-input-version=3`, which the dock,
 the app grid and the tray add for them (desktop/common/lp-apps.c).

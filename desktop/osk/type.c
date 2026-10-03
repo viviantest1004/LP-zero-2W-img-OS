@@ -555,11 +555,30 @@ static gboolean im_route(void)
     return im && ims.active;
 }
 
+/* Whether the fields that reach us are GTK's. Under wayfire they never
+ * are - GTK and Qt type through fcitx5 there (session-run) - and what
+ * does reach us is Chromium, Electron and foot. Live text is for GTK: its
+ * deletion asks for 1, which GTK reads as a character, and Chromium reads
+ * as the protocol says, a byte - a third of a syllable, which it does not
+ * delete, so every syllable typed after a pause stayed beside the one it
+ * became ("ㅎ하한"), and a login form held the half-built syllables as
+ * text. Chromium keeps a preedit safe by itself: it makes it text when
+ * the field loses focus. So under wayfire it is preedits only. */
+static gboolean gtk_fields(void)
+{
+    static int known = -1;
+    if (known < 0) {
+        const char *d = g_getenv("XDG_CURRENT_DESKTOP");
+        known = !(d && g_ascii_strncasecmp(d, "wayfire", 7) == 0);
+    }
+    return known;
+}
+
 /* Whether this field takes live text at all (head comment 1.): it sends
  * its text, and it is one where any letter is at home. */
 static gboolean live_ok(void)
 {
-    if (!im_route() || !ims.surr_seen)
+    if (!im_route() || !ims.surr_seen || !gtk_fields())
         return FALSE;
     switch (ims.purpose) {
     case PURPOSE_NORMAL: case PURPOSE_ALPHA: case PURPOSE_URL:
