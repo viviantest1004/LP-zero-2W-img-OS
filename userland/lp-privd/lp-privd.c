@@ -123,8 +123,10 @@
  * followed through device-mapper to the real disk. Any partition that is
  * mounted, and any whole-disk operation on a disk with something
  * mounted. Any device another device is built on (a holder in sysfs).
- * Unmounting anything outside /media and /mnt. Removing a package whose
- * removal apt says would take the desktop's own packages with it.
+ * Unmounting anything outside /media and /mnt. Removing an application
+ * the image came with (/usr/share/lp/default-apps), or a package whose
+ * removal apt says would take one of those, or the desktop's own
+ * packages, with it.
  *
  * ── Every action is written down ──
  *
@@ -1556,12 +1558,39 @@ static const char *const PROTECTED[] = {
     "ca-certificates", NULL
 };
 
+/* The applications the image came with (tools/mkdesktop.sh writes the
+ * list: one package per line, "flatpak:<ID>" for a Flathub one). A
+ * default app that was removed could not be put back from the desktop -
+ * Software's catalogue does not carry them - so they stay. */
+#define DEFAULT_APPS "/usr/share/lp/default-apps"
+
+static bool is_default_app(const char *name, const char *prefix)
+{
+    static char list[65536];
+    long got = proc_read(DEFAULT_APPS, list, sizeof list - 1);
+    if (got <= 0)
+        return false;
+    list[got] = '\0';
+    size_t pl = strlen(prefix), nl = strlen(name);
+    for (char *line = list; *line; ) {
+        char *end = strchr(line, '\n');
+        size_t len = end ? (size_t)(end - line) : strlen(line);
+        if (len == pl + nl && strncmp(line, prefix, pl) == 0 &&
+            strncmp(line + pl, name, nl) == 0)
+            return true;
+        if (!end)
+            break;
+        line = end + 1;
+    }
+    return false;
+}
+
 static bool is_protected(const char *name)
 {
     for (int i = 0; PROTECTED[i]; i++)
         if (strcmp(name, PROTECTED[i]) == 0)
             return true;
-    return false;
+    return is_default_app(name, "");
 }
 
 /* A removal is only ever as small as apt decides. Ask apt what it would
@@ -1624,7 +1653,7 @@ static bool removal_is_safe(char **names, int n)
     if (remv_hit[0]) {
         char msg[200];
         snprintf(msg, sizeof msg, "removing this would also remove %s,"
-                 " which the desktop needs", remv_hit);
+                 " which came with LP and stays", remv_hit);
         failed("refused", msg);
         return false;
     }
@@ -1650,7 +1679,7 @@ static void v_apt_remove(char **a, int n)
     for (int i = 0; i < n; i++) {
         if (is_protected(a[i])) {
             char msg[160];
-            snprintf(msg, sizeof msg, "%s is part of the desktop itself", a[i]);
+            snprintf(msg, sizeof msg, "%s came with LP and cannot be removed", a[i]);
             failed("refused", msg);
             return;
         }
@@ -1794,6 +1823,14 @@ static void v_flatpak_install(char **a, int n)
  * know to remove. */
 static void v_flatpak_remove(char **a, int n)
 {
+    for (int i = 0; i < n; i++) {
+        if (is_default_app(a[i], "flatpak:")) {
+            char msg[200];
+            snprintf(msg, sizeof msg, "%s came with LP and cannot be removed", a[i]);
+            failed("refused", msg);
+            return;
+        }
+    }
     static const char *const o[] = { "uninstall", "--system", "-y", NULL };
     flatpak_with("uninstall", o, a, n, "removed");
     if (job_rc != 0)

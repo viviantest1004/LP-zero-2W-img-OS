@@ -877,6 +877,23 @@ mkdir -p "$ROOT/etc/xdg"
     for t in application/vnd.oasis.opendocument.presentation application/vnd.ms-powerpoint application/vnd.openxmlformats-officedocument.presentationml.presentation; do echo "$t=libreoffice-impress.desktop"; done
 } > "$ROOT/etc/xdg/mimeapps.list"
 log "default applications: $(grep -c = "$ROOT/etc/xdg/mimeapps.list") types; bluetoothd in init's services"
+# The applications the image comes with, by package (and Flathub ID): every
+# package that puts a .desktop file in /usr/share/applications. Software
+# shows them as "Part of LP", with no Remove, and lp-privd refuses to
+# remove one, or anything whose removal apt says would take one with it.
+# A removed default app was gone for good: Software's catalogue is the
+# recommendations and Flathub, and Firefox, Files' helpers or LibreOffice
+# were in neither, so there was no button anywhere to bring them back.
+mkdir -p "$ROOT/usr/share/lp"
+{
+    for f in "$ROOT"/var/lib/dpkg/info/*.list; do
+        grep -q '^/usr/share/applications/[^/]*\.desktop$' "$f" && basename "$f" .list
+    done | sed 's/:.*$//'
+    if [[ -d "$ROOT/var/lib/flatpak/app" ]]; then
+        ls "$ROOT/var/lib/flatpak/app" | sed 's/^/flatpak:/'
+    fi
+} | sort -u > "$ROOT/usr/share/lp/default-apps"
+log "default apps that cannot be removed: $(wc -l < "$ROOT/usr/share/lp/default-apps") packages"
 scrub
 leaks || die "the image would carry what the build host left in it"
 log "no proxy, CA, apt lists, machine-id, host keys, histories or logs"

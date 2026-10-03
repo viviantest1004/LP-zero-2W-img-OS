@@ -146,6 +146,44 @@ static LpsPkg *pkg_new(PkgSource src, const char *name)
     return p;
 }
 
+/* The applications the image came with (tools/mkdesktop.sh writes the
+ * list; lp-privd reads the same file and refuses to remove them). One that
+ * was removed could not be found here again to put back - Software's
+ * catalogue is the recommendations and Flathub - so an installed one has
+ * no Remove: it shows as part of LP, like LP's own applications. */
+static GHashTable *default_apps;
+
+static gboolean is_default_app(const LpsPkg *p)
+{
+    if (!default_apps) {
+        default_apps = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+        char *body = NULL;
+        if (g_file_get_contents("/usr/share/lp/default-apps", &body, NULL, NULL)) {
+            char **l = g_strsplit(body, "\n", -1);
+            for (int i = 0; l[i]; i++)
+                if (*g_strstrip(l[i]))
+                    g_hash_table_add(default_apps, g_strdup(l[i]));
+            g_strfreev(l);
+            g_free(body);
+        }
+    }
+    if (p->src == SRC_DEBIAN)
+        return g_hash_table_contains(default_apps, p->name);
+    if (p->src == SRC_FLATPAK) {
+        char *k = g_strconcat("flatpak:", p->name, NULL);
+        gboolean yes = g_hash_table_contains(default_apps, k);
+        g_free(k);
+        return yes;
+    }
+    return FALSE;
+}
+
+/* Kept: LP's own, or a default app that is installed. */
+static gboolean pkg_kept(const LpsPkg *p)
+{
+    return p->system || (p->installed && is_default_app(p));
+}
+
 static void pkg_changed(LpsPkg *p)
 {
     g_signal_emit(p, pkg_changed_signal, 0);
@@ -641,7 +679,7 @@ static void action_label(LpsPkg *p, GtkWidget *b, gboolean updates_page)
     } else if (updates_page) {
         gtk_button_set_label(GTK_BUTTON(b), T("Update", "업데이트"));
         gtk_widget_add_css_class(b, "suggested-action");
-    } else if (p->system) {
+    } else if (pkg_kept(p)) {
         gtk_button_set_label(GTK_BUTTON(b), T("Part of LP", "LP 기본 구성"));
         gtk_widget_set_sensitive(b, FALSE);
     } else if (p->installed) {
@@ -650,7 +688,7 @@ static void action_label(LpsPkg *p, GtkWidget *b, gboolean updates_page)
         gtk_button_set_label(GTK_BUTTON(b), T("Install", "설치"));
         gtk_widget_add_css_class(b, "suggested-action");
     }
-    if (!A->admin && !p->system && p->state == ST_IDLE)
+    if (!A->admin && !pkg_kept(p) && p->state == ST_IDLE)
         gtk_widget_set_sensitive(b, FALSE);
 }
 
