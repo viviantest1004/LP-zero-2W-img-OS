@@ -2,10 +2,36 @@
 
 LP's two compositors are Debian's: wayfire 0.7.4 where there is 3D
 graphics, sway 1.7 where there is not (desktop/session/start-desktop
-decides). Both sit on wlroots 0.15.1. Two of the three are patched here;
-the build scripts rebuild each from Debian's own source package in a
+decides). Both sit on wlroots 0.15.1. All three are patched here; the
+build scripts rebuild each from Debian's own source package in a
 throwaway overlay of the image's base, and mkdesktop.sh installs the
 result over Debian's file.
+
+## wayfire-0.7.4-lp.patch -> `wayfire` (build-wayfire.sh)
+
+Korean from the keyboard in Chromium, Electron (Claude, VS Code, Discord
+...) and foot. Those type through text-input-v3, so their Korean comes
+from the seat's input method, lp-osk (desktop/osk/type.c), which composes
+Hangul from the keys it gets through its keyboard grab. Debian's wayfire
+relays text-input and accepts the grab but never sends it a key, so
+under wayfire they typed English only. With the patch, as in sway 1.7: a
+key that no binding takes goes to the grab while an input method holds
+it, except from the input method's own virtual keyboard (that is how it
+sends back the keys it does not want); a key the application saw go
+down is let go to the application; the seat's keyboard is not switched
+for a key that goes to the grab (every switch resends every client the
+keymap); and modifiers follow the keys. GTK and Qt windows keep typing
+through fcitx5, which never asks for the grab.
+
+Only the program is rebuilt - the patch is all in the core - and Debian's
+plugins load into it: build-wayfire.sh checks that every symbol Debian's
+program exports is still there (the patch adds one, and takes none).
+Chromium and Electron speak text-input only when started with
+`--enable-wayland-ime --wayland-text-input-version=3`, which the dock,
+the app grid and the tray add for them (desktop/common/lp-apps.c).
+Checked in QEMU under wayfire: 한글 typed with Right Alt and two-beolsik
+keys in foot and in an Electron 38 window started from the dock, and the
+top bar's 한/EN kept the same between them and gedit (fcitx5).
 
 ## sway-1.7-lp.patch -> `sway` (build-sway.sh)
 

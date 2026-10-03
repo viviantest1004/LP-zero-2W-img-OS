@@ -4,10 +4,10 @@
 # Super+Space runs this under both compositors (Settings > Keyboard >
 # Shortcuts can move it; the 한/영 key, Right Alt and Shift+Space are the
 # input method's own and never come here). Under wayfire the laptop's
-# keys go through fcitx5 and the on-screen keyboard through lp-osk, so
-# both are set, to the same language, and never disagree about which
-# one comes out; under sway lp-osk is both. The top bar's EN/한 follows
-# either by itself.
+# keys go through fcitx5 in GTK and Qt windows and through lp-osk in the
+# rest and on the on-screen keyboard, so both are set, to the same
+# language, and never disagree about which one comes out; under sway
+# lp-osk is both. The top bar's EN/한 follows either by itself.
 want=${1:-toggle}
 case $want in
     toggle|en|ko) ;;

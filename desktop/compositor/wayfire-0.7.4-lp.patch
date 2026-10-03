@@ -1,0 +1,247 @@
+wayfire 0.7.4 (Debian 0.7.4-3+deb12u1) for LP: keys to the input method's
+keyboard grab, as sway 1.7 does it.
+
+wayfire 0.7.4 relays text-input-v3 to an input method (input-method-v2)
+and lets the input method grab the keyboard, but never sends the grab a
+key. LP's input method is lp-osk (desktop/osk/type.c), which types Korean
+from the laptop's keys through that grab. Without keys, every application
+that types through text-input-v3 - Electron and Chromium on Wayland, foot -
+got English only under wayfire, whatever the language was set to; GTK and
+Qt applications were not affected (they reach fcitx5 through their own
+input method modules).
+
+With the patch:
+
+- A key no binding takes goes to the grab, not to the application, while
+  an input method holds it (keyboard.cpp). The input method's own virtual
+  keyboard is left out (input_method_relay::grab_for): that is how it
+  sends back out the keys it does not want, and they are the
+  application's.
+- A key the application saw go down before the grab began is let go to
+  the application.
+- The seat's keyboard is not switched for a key that goes to the grab.
+  Each switch sends every client the keymap again, and with the input
+  method's virtual keyboard carrying keys back out it would be two
+  switches for every key.
+- Modifiers go to the grab while it is there; the grab gets the keyboard
+  in use and its modifiers when it begins, and the application the
+  modifiers back when it ends.
+
+diff -ru a/src/core/seat/input-method-relay.cpp b/src/core/seat/input-method-relay.cpp
+--- a/src/core/seat/input-method-relay.cpp
++++ b/src/core/seat/input-method-relay.cpp
+@@ -29,6 +29,7 @@
+         input_method = new_input_method;
+         on_input_method_commit.connect(&input_method->events.commit);
+         on_input_method_destroy.connect(&input_method->events.destroy);
++        on_grab_keyboard.connect(&input_method->events.grab_keyboard);
+ 
+         auto *text_input = find_focusable_text_input();
+         if (text_input)
+@@ -83,6 +84,8 @@
+ 
+         on_input_method_commit.disconnect();
+         on_input_method_destroy.disconnect();
++        on_grab_keyboard.disconnect();
++        on_grab_keyboard_destroy.disconnect();
+         input_method = nullptr;
+ 
+         auto *text_input = find_focused_text_input();
+@@ -96,6 +99,43 @@
+         }
+     });
+ 
++    /* The keyboard grab (LP): while the input method holds it, keys that no
++     * binding took go to the input method and not to the application, as
++     * in sway (keyboard.cpp sends them). The input method gets the
++     * keyboard in use now and its modifiers at once, and the application
++     * gets the modifiers back when the grab ends. */
++    on_grab_keyboard.set_callback([&] (void *data)
++    {
++        auto grab = static_cast<wlr_input_method_keyboard_grab_v2*>(data);
++        auto kbd  = wlr_seat_get_keyboard(wf::get_core().get_current_seat());
++        for (auto& dev : wf::get_core().get_input_devices())
++        {
++            auto wlr_dev = dev->get_wlr_handle();
++            if (kbd && (wlr_dev->type == WLR_INPUT_DEVICE_KEYBOARD) &&
++                (wlr_dev->keyboard == kbd) && (grab_for(wlr_dev) == grab))
++            {
++                wlr_input_method_keyboard_grab_v2_set_keyboard(grab, kbd);
++                wlr_input_method_keyboard_grab_v2_send_modifiers(grab,
++                    &kbd->modifiers);
++                break;
++            }
++        }
++
++        on_grab_keyboard_destroy.disconnect();
++        on_grab_keyboard_destroy.connect(&grab->events.destroy);
++    });
++
++    on_grab_keyboard_destroy.set_callback([&] (void *data)
++    {
++        auto grab = static_cast<wlr_input_method_keyboard_grab_v2*>(data);
++        on_grab_keyboard_destroy.disconnect();
++        if (grab->keyboard)
++        {
++            wlr_seat_keyboard_notify_modifiers(wf::get_core().get_current_seat(),
++                &grab->keyboard->modifiers);
++        }
++    });
++
+     on_text_input_new.connect(&wf::get_core().protocols.text_input->events.text_input);
+     on_input_method_new.connect(
+         &wf::get_core().protocols.input_method->events.input_method);
+@@ -103,6 +143,25 @@
+     wf::get_core().connect_signal("keyboard-focus-changed", &keyboard_focus_changed);
+ }
+ 
++wlr_input_method_keyboard_grab_v2*wf::input_method_relay::grab_for(
++    wlr_input_device *keyboard)
++{
++    if (!input_method || !input_method->keyboard_grab)
++    {
++        return nullptr;
++    }
++
++    auto grab = input_method->keyboard_grab;
++    auto vkbd = wlr_input_device_get_virtual_keyboard(keyboard);
++    if (vkbd && (wl_resource_get_client(vkbd->resource) ==
++                 wl_resource_get_client(grab->resource)))
++    {
++        return nullptr;
++    }
++
++    return grab;
++}
++
+ void wf::input_method_relay::send_im_state(wlr_text_input_v3 *input)
+ {
+     wlr_input_method_v2_send_surrounding_text(
+diff -ru a/src/core/seat/input-method-relay.hpp b/src/core/seat/input-method-relay.hpp
+--- a/src/core/seat/input-method-relay.hpp
++++ b/src/core/seat/input-method-relay.hpp
+@@ -16,7 +16,8 @@
+   private:
+ 
+     wf::wl_listener_wrapper on_text_input_new,
+-        on_input_method_new, on_input_method_commit, on_input_method_destroy;
++        on_input_method_new, on_input_method_commit, on_input_method_destroy,
++        on_grab_keyboard, on_grab_keyboard_destroy;
+     text_input *find_focusable_text_input();
+     text_input *find_focused_text_input();
+     void set_focus(wlr_surface*);
+@@ -33,6 +34,14 @@
+     wlr_input_method_v2 *input_method = nullptr;
+     std::vector<std::unique_ptr<text_input>> text_inputs;
+ 
++    /**
++     * The input method's keyboard grab, if it holds one and the keys of
++     * this keyboard belong in it: not when the keyboard is the input
++     * method's own virtual keyboard, which carries the keys it has
++     * already seen back out to the application.
++     */
++    wlr_input_method_keyboard_grab_v2 *grab_for(wlr_input_device *keyboard);
++
+     input_method_relay();
+     void send_im_state(wlr_text_input_v3*);
+     void disable_text_input(wlr_text_input_v3*);
+diff -ru a/src/core/seat/keyboard.cpp b/src/core/seat/keyboard.cpp
+--- a/src/core/seat/keyboard.cpp
++++ b/src/core/seat/keyboard.cpp
+@@ -10,6 +10,7 @@
+ #include "cursor.hpp"
+ #include "touch.hpp"
+ #include "input-manager.hpp"
++#include "input-method-relay.hpp"
+ #include "wayfire/compositor-view.hpp"
+ #include "wayfire/signal-definitions.hpp"
+ 
+@@ -27,13 +28,43 @@
+         auto mode = emit_device_event_signal("keyboard_key", ev);
+ 
+         auto& seat = wf::get_core_impl().seat;
+-        seat->set_keyboard(this);
++        /* An input method's keyboard grab (LP, as sway does it): a key no
++         * binding takes goes to the input method, which types it or sends
++         * it back out through a virtual keyboard of its own. A key the
++         * application saw go down is let go to the application. The seat
++         * keeps its keyboard meanwhile - every change of it sends every
++         * client the keymap again, and the input method's virtual
++         * keyboard would be one change for each key. */
++        auto grab = wf::get_core_impl().im_relay->grab_for(device);
++        bool to_client = !grab || ((ev->state == WLR_KEY_RELEASED) &&
++            client_keys.count(ev->keycode));
++        if (to_client)
++        {
++            seat->set_keyboard(this);
++        }
+ 
+         if (!handle_keyboard_key(ev->keycode, ev->state) &&
+             (mode != input_event_processing_mode_t::NO_CLIENT))
+         {
+-            wlr_seat_keyboard_notify_key(seat->seat,
+-                ev->time_msec, ev->keycode, ev->state);
++            if (to_client)
++            {
++                wlr_seat_keyboard_notify_key(seat->seat,
++                    ev->time_msec, ev->keycode, ev->state);
++                if (ev->state == WLR_KEY_PRESSED)
++                {
++                    client_keys.insert(ev->keycode);
++                }
++            } else
++            {
++                wlr_input_method_keyboard_grab_v2_set_keyboard(grab, handle);
++                wlr_input_method_keyboard_grab_v2_send_key(grab,
++                    ev->time_msec, ev->keycode, ev->state);
++            }
++        }
++
++        if (ev->state == WLR_KEY_RELEASED)
++        {
++            client_keys.erase(ev->keycode);
+         }
+ 
+         wlr_idle_notify_activity(wf::get_core().protocols.idle, seat->seat);
+@@ -45,8 +76,17 @@
+         auto kbd  = static_cast<wlr_keyboard*>(data);
+         auto seat = wf::get_core().get_current_seat();
+ 
+-        wlr_seat_set_keyboard(seat, this->device);
+-        wlr_seat_keyboard_send_modifiers(seat, &kbd->modifiers);
++        auto grab = wf::get_core_impl().im_relay->grab_for(device);
++        if (grab)
++        {
++            wlr_input_method_keyboard_grab_v2_set_keyboard(grab, kbd);
++            wlr_input_method_keyboard_grab_v2_send_modifiers(grab, &kbd->modifiers);
++        } else
++        {
++            wlr_seat_set_keyboard(seat, this->device);
++            wlr_seat_keyboard_send_modifiers(seat, &kbd->modifiers);
++        }
++
+         wlr_idle_notify_activity(wf::get_core().protocols.idle, seat);
+     });
+ 
+diff -ru a/src/core/seat/keyboard.hpp b/src/core/seat/keyboard.hpp
+--- a/src/core/seat/keyboard.hpp
++++ b/src/core/seat/keyboard.hpp
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <chrono>
++#include <set>
+ #include "seat.hpp"
+ #include "wayfire/util.hpp"
+ #include <wayfire/option-wrapper.hpp>
+@@ -33,6 +34,10 @@
+ 
+   private:
+     wf::wl_listener_wrapper on_key, on_modifier;
++    /** Keys down that the application was told about (LP: the release of
++     * a key pressed before an input method grabbed the keyboard is the
++     * application's, not the input method's) */
++    std::set<uint32_t> client_keys;
+     void setup_listeners();
+ 
+     wf::signal_connection_t on_config_reload;

@@ -13,6 +13,33 @@
 mkdir -p /data/log
 mkdir -p /run/lp-session
 
+# ── The memory, for Task Manager ──
+#
+# What kind it is (DDR4), how fast and in how many of the slots is in the
+# firmware's DMI tables, which only root may read; so it is read here,
+# once a boot, into a file anybody may. One line a slot, tab-separated:
+# locator, size, type, rated speed, configured speed, form factor
+# (desktop/tasks/tasks.c).
+if ! test -s /run/lp-session/memory && command -v dmidecode > /dev/null 2>&1 ; then
+    # (No awk functions: LP's own awk, first on the PATH, has none.)
+    dmidecode -q -t 17 2> /dev/null | awk -F': *' '
+        /^Memory Device/ {
+            if (dev) printf "%s\t%s\t%s\t%s\t%s\t%s\n", loc, size, type, speed, conf, form
+            dev = 1; loc = ""; size = ""; type = ""; speed = ""; conf = ""; form = ""
+            next
+        }
+        /^\tLocator:/ { loc = $2 }
+        /^\tSize:/ { size = $2 }
+        /^\tType:/ { type = $2 }
+        /^\tSpeed:/ { speed = $2 }
+        /^\tConfigured (Memory|Clock) Speed:/ { conf = $2 }
+        /^\tForm Factor:/ { form = $2 }
+        END { if (dev) printf "%s\t%s\t%s\t%s\t%s\t%s\n", loc, size, type, speed, conf, form }' \
+        > /run/lp-session/memory.new &&
+        chmod 644 /run/lp-session/memory.new &&
+        mv -f /run/lp-session/memory.new /run/lp-session/memory
+fi
+
 # ── Whose session ──
 #
 # uid 1000 at the start of the machine - or the account Settings > Users

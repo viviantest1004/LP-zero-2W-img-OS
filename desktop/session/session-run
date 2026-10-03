@@ -267,11 +267,13 @@ run_compositor() {
         log="$XDG_CACHE_HOME/lp/wayfire.log"
         test -f "$log" && mv -f "$log" "$log.old"
         # Korean from the laptop's keyboard. Under sway lp-osk is the input
-        # method for the physical keys too (osk/type.c); wayfire 0.7 never
-        # sends keys to an input method's keyboard grab, so there fcitx5
-        # (with its Hangul engine) takes them instead, through GTK's and
-        # Qt's own fcitx modules, which do not need the grab. Right Alt is
-        # the Hangul key (wayfire.ini's korean:ralt_hangul), Ctrl+Space too.
+        # method for the physical keys too (osk/type.c). Under wayfire GTK
+        # and Qt windows have fcitx5 (with its Hangul engine) instead,
+        # through their own fcitx modules; lp-osk types into the rest -
+        # Chromium, Electron, foot - through text-input and the keyboard
+        # grab, which LP's wayfire feeds (compositor/wayfire-0.7.4-lp.patch),
+        # and the top bar keeps the two on one language (panel/panel.c).
+        # Right Alt is the Hangul key (wayfire.ini's korean:ralt_hangul).
         if command -v fcitx5 > /dev/null 2>&1 ; then
             export GTK_IM_MODULE=fcitx QT_IM_MODULE=fcitx XMODIFIERS=@im=fcitx SDL_IM_MODULE=fcitx
         fi

@@ -343,6 +343,57 @@ static void read_packages(GHashTable *models)
     g_array_unref(ids);
 }
 
+
+/* All of the L3, as the maker counts it: a Ryzen's is one block per core
+ * complex (two of 4 MB on a 4650G), and cpu0 sees only its own. Each
+ * block once - the CPUs that share it give the same list of CPUs that do.
+ * (Not the cache's id: QEMU gives every virtual CPU an id of its own for
+ * the one L3 all of them share, and that counted it four times.) */
+static char *l3_total(void)
+{
+    GHashTable *seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    guint64 kb = 0;
+    GDir *d = g_dir_open("/sys/devices/system/cpu", 0, NULL);
+    const char *name;
+    while (d && (name = g_dir_read_name(d))) {
+        if (strncmp(name, "cpu", 3) != 0 || !g_ascii_isdigit(name[3]))
+            continue;
+        for (int i = 0; i < 6; i++) {
+            char p[128];
+            g_snprintf(p, sizeof p, "/sys/devices/system/cpu/%s/cache/index%d/level", name, i);
+            if (read_num(p, 0) != 3)
+                continue;
+            g_snprintf(p, sizeof p, "/sys/devices/system/cpu/%s/cache/index%d/shared_cpu_list", name, i);
+            char *who = read_word(p);
+            char *key = who ? who : g_strdup(name);
+            if (g_hash_table_contains(seen, key)) {
+                g_free(key);
+                continue;
+            }
+            g_hash_table_add(seen, key);
+            g_snprintf(p, sizeof p, "/sys/devices/system/cpu/%s/cache/index%d/size", name, i);
+            char *size = read_word(p);
+            if (size) {
+                char *end = NULL;
+                guint64 v = g_ascii_strtoull(size, &end, 10);
+                if (end && (*end == 'M' || *end == 'm'))
+                    v *= 1024;
+                kb += v;
+                g_free(size);
+            }
+        }
+    }
+    if (d)
+        g_dir_close(d);
+    g_hash_table_unref(seen);
+    if (!kb)
+        return NULL;
+    if (kb >= 1024)
+        return kb % 1024 ? g_strdup_printf("%.1f MB", kb / 1024.0)
+                         : g_strdup_printf("%" G_GUINT64_FORMAT " MB", kb / 1024);
+    return g_strdup_printf("%" G_GUINT64_FORMAT " KB", kb);
+}
+
 static void read_cpuinfo(void)
 {
     char *text = NULL;
@@ -393,14 +444,7 @@ static void read_cpuinfo(void)
         S.model = g_strdup(T("Processor", "프로세서"));
     S.max_mhz = read_num("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", 0) / 1000.0;
     S.base_mhz = read_num("/sys/devices/system/cpu/cpu0/cpufreq/base_frequency", 0) / 1000.0;
-    for (int i = 0; i < 5 && !S.l3; i++) {
-        char p[96];
-        g_snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu0/cache/index%d/level", i);
-        if (read_num(p, 0) == 3) {
-            g_snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu0/cache/index%d/size", i);
-            S.l3 = read_word(p);
-        }
-    }
+    S.l3 = l3_total();
     S.prev_total = g_new0(guint64, S.ncpu + 1);
     S.prev_idle = g_new0(guint64, S.ncpu + 1);
     S.core = g_new0(double, S.ncpu);
@@ -811,6 +855,32 @@ static int gpu_cmp(gconstpointer a, gconstpointer b)
     return card_number(x->node) - card_number(y->node);
 }
 
+/* amdgpu's shader clock: pp_dpm_sclk lists the levels it may run at,
+ * "1: 588Mhz *" being the one it is at now. (i915 has its own files,
+ * gt_act_freq_mhz and gt_max_freq_mhz.) */
+static void amd_sclk(const char *dev, int *cur, int *max)
+{
+    char p[512], b[1024];
+    g_snprintf(p, sizeof p, "%s/pp_dpm_sclk", dev);
+    if (read_small(p, b, sizeof b) <= 0)
+        return;
+    for (char *l = b, *n; l && *l; l = n) {
+        n = strchr(l, '\n');
+        if (n)
+            *n++ = '\0';
+        char *colon = strchr(l, ':');
+        if (!colon)
+            continue;
+        int mhz = atoi(colon + 1);
+        if (mhz <= 0)
+            continue;
+        if (max && mhz > *max)
+            *max = mhz;
+        if (cur && strchr(colon, '*'))
+            *cur = mhz;
+    }
+}
+
 static Gpu *gpu_new(const char *node, char *dev, char *driver, const char *ids)
 {
     Gpu *g = g_new0(Gpu, 1);
@@ -854,6 +924,8 @@ static Gpu *gpu_new(const char *node, char *dev, char *driver, const char *ids)
     g->has_rc6 = g_file_test(p, G_FILE_TEST_EXISTS);
     g_snprintf(p, sizeof p, "/sys/class/drm/%s/gt_max_freq_mhz", node);
     g->max_mhz = (int)read_num(p, 0);
+    if (!strcmp(g->driver, "amdgpu"))
+        amd_sclk(dev, NULL, &g->max_mhz);
     return g;
 }
 
@@ -1121,6 +1193,7 @@ static void sample_gpus(double secs)
             g->prev_rc6_t = t;
         }
         if (!strcmp(g->driver, "amdgpu")) {
+            amd_sclk(g->dev, &g->mhz, NULL);
             g_snprintf(p, sizeof p, "%s/gpu_busy_percent", g->dev);
             g->amd_busy = (double)read_num(p, -1);
             g_snprintf(p, sizeof p, "%s/mem_info_vram_used", g->dev);
@@ -3197,10 +3270,62 @@ static GtkWidget *legend_dot(const char *text, const char *css)
     return b;
 }
 
+/* What kind of memory, how fast, in how many slots: start-desktop reads
+ * the firmware's DMI tables as root, once a boot, into
+ * /run/lp-session/memory - a line a slot, "locator, size, type, rated
+ * speed, configured speed, form factor", tab-separated. */
+typedef struct {
+    char *type, *speed, *form;
+    int   used, slots;
+} MemInfo;
+
+static gboolean dmi_known(const char *v)
+{
+    return v && *v && strcmp(v, "Unknown") && strcmp(v, "Other") &&
+           strcmp(v, "Not Specified") && strcmp(v, "None");
+}
+
+static MemInfo mem_info(void)
+{
+    MemInfo m = { 0 };
+    char *text = NULL;
+    if (!g_file_get_contents("/run/lp-session/memory", &text, NULL, NULL))
+        return m;
+    char **lines = g_strsplit(text, "\n", -1);
+    for (char **l = lines; *l; l++) {
+        char **f = g_strsplit(*l, "\t", 6);
+        if (g_strv_length(f) == 6) {
+            m.slots++;
+            if (g_ascii_isdigit(f[1][0])) {          /* "8 GB"; not "No Module Installed" */
+                m.used++;
+                /* "RAM" is a virtual machine's: true, and no news */
+                if (!m.type && dmi_known(f[2]) && strcmp(f[2], "RAM"))
+                    m.type = g_strdup(f[2]);
+                if (!m.speed && dmi_known(f[4]))
+                    m.speed = g_strdup(f[4]);
+                if (!m.speed && dmi_known(f[3]))
+                    m.speed = g_strdup(f[3]);
+                if (!m.form && dmi_known(f[5]))
+                    m.form = g_strdup(f[5]);
+            }
+        }
+        g_strfreev(f);
+    }
+    g_strfreev(lines);
+    g_free(text);
+    return m;
+}
+
 static GtkWidget *build_memory(void)
 {
     GtkWidget *b = page_box();
+    MemInfo mi = mem_info();
     char *tot = fmt_bytes((double)S.mem_total);
+    if (mi.type) {
+        char *t2 = g_strdup_printf("%s %s", tot, mi.type);
+        g_free(tot);
+        tot = t2;
+    }
     char *sub = g_strdup_printf(T("%s installed", "%s 설치됨"), tot);
     gtk_box_append(GTK_BOX(b), page_head(T("Memory", "메모리"), sub, NULL));
     g_free(sub);
@@ -3227,6 +3352,25 @@ static GtkWidget *build_memory(void)
     gtk_box_append(GTK_BOX(b), section(T("Using the most", "가장 많이 쓰는 것")));
     A->mem_top = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_append(GTK_BOX(b), A->mem_top);
+    if (mi.type || mi.speed || mi.slots) {
+        GtkWidget *kv = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+        gtk_widget_set_margin_top(kv, 10);
+        if (mi.type)
+            kv_row(kv, T("Type", "종류"), mi.type);
+        if (mi.speed)
+            kv_row(kv, T("Speed", "속도"), mi.speed);
+        if (mi.slots) {
+            char t[64];
+            g_snprintf(t, sizeof t, T("%d of %d", "%d / %d"), mi.used, mi.slots);
+            kv_row(kv, T("Slots used", "사용 중인 슬롯"), t);
+        }
+        if (mi.form)
+            kv_row(kv, T("Form factor", "폼 팩터"), mi.form);
+        gtk_box_append(GTK_BOX(b), kv);
+    }
+    g_free(mi.type);
+    g_free(mi.speed);
+    g_free(mi.form);
     return lp_kit_scroller(b, FALSE);
 }
 
@@ -3971,11 +4115,20 @@ static void on_side(GtkListBox *lb, GtkListBoxRow *row, gpointer d)
         go_page(id);
 }
 
+/* A desktop has no battery, and a page that only ever says so is not
+ * worth a place in the list. */
+static gboolean page_shown(const char *id)
+{
+    return S.bat || strcmp(id, "battery") != 0;
+}
+
 static GtkWidget *build_sidebar(void)
 {
     GtkWidget *lb = gtk_list_box_new();
     gtk_widget_add_css_class(lb, "lp-kit-side");
     for (guint i = 0; i < G_N_ELEMENTS(PAGES); i++) {
+        if (!page_shown(PAGES[i].id))
+            continue;
         if (PAGES[i].group_before) {
             GtkWidget *g = label(T("Resources", "자원"), "lp-kit-group", 0);
             gtk_widget_set_margin_top(g, 14);
@@ -4070,7 +4223,7 @@ static const char APP_CSS[] =
 static void on_drive(const char *verb, const char *arg, gpointer d)
 {
     (void)d;
-    if (!strcmp(verb, "page"))
+    if (!strcmp(verb, "page") && page_shown(arg))
         go_page(arg), select_side(arg);
 }
 
@@ -4140,7 +4293,7 @@ static void on_activate(GtkApplication *app, gpointer d)
     const char *page = opt_page ? opt_page : saved ? saved : "apps";
     gboolean known = FALSE;
     for (guint i = 0; i < G_N_ELEMENTS(PAGES); i++)
-        known |= !strcmp(PAGES[i].id, page);
+        known |= !strcmp(PAGES[i].id, page) && page_shown(page);
     if (!known)
         page = "apps";
     A->page = g_strdup(page);

@@ -100,10 +100,12 @@
  *    forwarded as held is released then, because a key left down on a
  *    keyboard nobody types on repeats forever.
  *
- *    sway 1.7 routes physical keys to the grab. wayfire 0.7.4 accepts the
- *    grab but never sends it a key (it has no call to
- *    wlr_input_method_keyboard_grab_v2_send_key), so there the laptop
- *    keyboard stays English-only and the grab is inert, not harmful.
+ *    sway 1.7 routes physical keys to the grab. Debian's wayfire 0.7.4
+ *    accepts the grab but never sends it a key (it has no call to
+ *    wlr_input_method_keyboard_grab_v2_send_key); LP's does, the way sway
+ *    does (desktop/compositor/wayfire-0.7.4-lp.patch). GTK and Qt windows
+ *    never ask for us there - they type through fcitx5 - so under wayfire
+ *    this is Chromium's, Electron's and foot's way to Korean.
  */
 #include "osk.h"
 

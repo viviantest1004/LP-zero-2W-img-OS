@@ -500,12 +500,23 @@ static gboolean poll_bat(gpointer d)
  *
  * A click, or a choice from the right-click menu, sets both: fcitx5 for
  * the keys and lp-osk for the on-screen keyboard, so the two never
- * disagree about which language comes out. */
+ * disagree about which language comes out.
+ *
+ * Under wayfire the keys have two ways in, too: fcitx5 for GTK and Qt
+ * windows, lp-osk for the rest (Chromium, Electron, foot - their text
+ * fields reach it through text-input, desktop/compositor/wayfire-0.7.4-
+ * lp.patch). Each has its own 한/영 key handling, so this is where the
+ * two are kept together: whichever of them changes, the other is set the
+ * same. fcitx5 with no window of its own yet (State 0) has no language to
+ * give; then lp-osk's is the one shown, and the first window fcitx5 gets
+ * is given lp-osk's - the language last used, which lp-osk brings back
+ * at login. */
 
 static GDBusConnection *bus;
 static gboolean fcitx_up, fcitx_busy;
 static guint fcitx_timer;
 static int lang_now = -1;                   /* 0 EN, 1 한, -1 not known yet */
+static int fcitx_lang = -1, osk_lang = -1;  /* each one's last report, the same way */
 static GSocketConnection *osk_conn;
 static GDataInputStream *osk_in;
 static GtkWidget *lang_menu;
@@ -529,6 +540,18 @@ static void set_lang(int ko)
     paint_lang();
 }
 
+static void osk_tell(const char *lang);
+
+/* Never starts fcitx5: under sway nothing else does (lp-input-lang). */
+static void fcitx_set(int ko)
+{
+    if (fcitx_up)
+        g_dbus_connection_call(bus, "org.fcitx.Fcitx5", "/controller",
+                               "org.fcitx.Fcitx.Controller1", ko ? "Activate" : "Deactivate",
+                               NULL, NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000,
+                               NULL, NULL, NULL);
+}
+
 static void fcitx_done(GObject *src, GAsyncResult *res, gpointer d)
 {
     (void)d;
@@ -539,7 +562,21 @@ static void fcitx_done(GObject *src, GAsyncResult *res, gpointer d)
     int st = 0;
     g_variant_get(v, "(i)", &st);
     g_variant_unref(v);
-    set_lang(st == 2);                      /* 1 inactive (keys as printed), 2 active */
+    if (st != 1 && st != 2) {               /* 0: no input context yet */
+        fcitx_lang = -1;
+        if (osk_lang >= 0)
+            set_lang(osk_lang);
+        return;
+    }
+    int ko = st == 2;                       /* 1 inactive (keys as printed), 2 active */
+    if (fcitx_lang < 0 && osk_lang >= 0 && ko != osk_lang) {
+        fcitx_set(osk_lang);                /* its first window: lp-osk's language */
+        ko = osk_lang;
+    } else if (fcitx_lang >= 0 && ko != fcitx_lang && ko != osk_lang) {
+        osk_tell(ko ? "ko" : "en");         /* 한/영 pressed in a GTK or Qt window */
+    }
+    fcitx_lang = ko;
+    set_lang(ko);
 }
 
 static gboolean poll_fcitx(gpointer d)
@@ -568,6 +605,7 @@ static void fcitx_vanished(GDBusConnection *c, const char *name, gpointer d)
 {
     (void)c; (void)name; (void)d;
     fcitx_up = FALSE;
+    fcitx_lang = -1;
     if (fcitx_timer) {
         g_source_remove(fcitx_timer);
         fcitx_timer = 0;
@@ -600,8 +638,19 @@ static void osk_line(GObject *src, GAsyncResult *res, gpointer d)
         return;
     }
     LpJson *j = lp_json_parse(line);
-    if (j && !fcitx_up)
-        set_lang(g_strcmp0(lp_json_str(j, "language", "en"), "ko") == 0);
+    if (j) {
+        int ko = g_strcmp0(lp_json_str(j, "language", "en"), "ko") == 0;
+        gboolean changed = osk_lang >= 0 && ko != osk_lang;
+        osk_lang = ko;
+        if (!fcitx_up || fcitx_lang < 0) {
+            set_lang(ko);
+        } else if (changed && ko != fcitx_lang) {
+            /* 한/영 pressed in a window lp-osk types into */
+            fcitx_set(ko);
+            fcitx_lang = ko;
+            set_lang(ko);
+        }
+    }
     lp_json_free(j);
     g_free(line);
     g_data_input_stream_read_line_async(osk_in, G_PRIORITY_DEFAULT, NULL, osk_line, NULL);
@@ -657,10 +706,7 @@ static void osk_tell(const char *lang)
 
 static void choose_lang(int ko)
 {
-    if (fcitx_up)
-        g_dbus_connection_call(bus, "org.fcitx.Fcitx5", "/controller",
-                               "org.fcitx.Fcitx.Controller1", ko ? "Activate" : "Deactivate",
-                               NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 1000, NULL, NULL, NULL);
+    fcitx_set(ko);
     osk_tell(ko ? "ko" : "en");
     set_lang(ko);                           /* the next report confirms it */
 }

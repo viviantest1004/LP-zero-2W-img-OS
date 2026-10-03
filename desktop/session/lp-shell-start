@@ -209,11 +209,11 @@ if test "${LP_SAFE_MODE:-}" = 1 && have notify-send ; then
     ( sleep 5; notify-send -u critical -a LP "$t" "$b" ) &
 fi
 have lp-osk && keep osk lp-osk daemon
-# Korean from the laptop keyboard under wayfire (session-run says why):
-# fcitx5 in the foreground, so keep() can bring it back, and without its
-# Wayland input-method front end - that one needs the keyboard grab
-# wayfire does not give, and would take the seat's only input method
-# from the on-screen keyboard.
+# Korean from the laptop keyboard in GTK and Qt windows under wayfire
+# (session-run says why): fcitx5 in the foreground, so keep() can bring
+# it back, and without its Wayland input-method front end - the seat has
+# only one input method, and that is lp-osk's, for the on-screen keyboard
+# and for every window that types through text-input.
 if test "$compositor" = wayfire && have fcitx5 ; then
     keep ime fcitx5 --disable=waylandim
 fi

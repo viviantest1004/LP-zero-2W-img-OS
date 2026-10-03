@@ -35,6 +35,7 @@ PipeWire, wayfire, foot, bash, coreutils 등). 라이선스는 패키지마다 �
 | 구성요소 | 라이선스 | 소스 |
 | --- | --- | --- |
 | sway 1.7 (LP 패치) | MIT | 원본 <https://github.com/swaywm/sway/releases/tag/1.7>, 패치 [`desktop/compositor/sway-1.7-lp.patch`](desktop/compositor/sway-1.7-lp.patch), 빌드 [`desktop/compositor/build-sway.sh`](desktop/compositor/build-sway.sh) |
+| wayfire 0.7.4 (LP 패치) | MIT | 원본 <https://github.com/WayfireWM/wayfire/releases/tag/v0.7.4> (데비안 `wayfire_0.7.4-3+deb12u1`), 패치 [`desktop/compositor/wayfire-0.7.4-lp.patch`](desktop/compositor/wayfire-0.7.4-lp.patch), 빌드 [`desktop/compositor/build-wayfire.sh`](desktop/compositor/build-wayfire.sh) |
 | wlroots 0.15.1 (LP 패치) | MIT | 원본 <https://gitlab.freedesktop.org/wlroots/wlroots/-/tags/0.15.1>, 패치 [`desktop/compositor/wlroots-0.15.1-lp.patch`](desktop/compositor/wlroots-0.15.1-lp.patch), 빌드 [`desktop/compositor/build-wlroots.sh`](desktop/compositor/build-wlroots.sh) |
 
 ## LP 자체 사용자 공간에 들어간 외부 코드

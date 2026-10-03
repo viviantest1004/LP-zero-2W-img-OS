@@ -403,6 +403,12 @@ if [[ -d "$D/session" ]]; then
     if [[ -x "$D/compositor/sway" ]]; then
         install -m 755 "$D/compositor/sway" "$ROOT/usr/bin/sway"
     fi
+    # LP's wayfire: keys reach the input method's keyboard grab, so lp-osk
+    # types Korean into Electron, Chromium and foot from the laptop's keys
+    # (desktop/compositor/wayfire-0.7.4-lp.patch).
+    if [[ -x "$D/compositor/wayfire" ]]; then
+        install -m 755 "$D/compositor/wayfire" "$ROOT/usr/bin/wayfire"
+    fi
     # And LP's wlroots under both compositors: the pointer on the GPU's
     # cursor plane (a virtual machine's too) instead of a whole-screen
     # redraw for every movement (desktop/compositor/wlroots-0.15.1-lp.patch).
