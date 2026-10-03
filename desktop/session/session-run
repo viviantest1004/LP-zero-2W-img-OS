@@ -1,5 +1,6 @@
 #!/bin/sh
-# The session itself, already running as uid 1000.
+# The session itself, already running as the account at the screen
+# (uid 1000, or whoever start-desktop signed in instead).
 #
 # ── 계정 이름이 lp 에서 user 로 바뀐 이유 ──
 #
@@ -12,7 +13,8 @@
 # The account is read from /etc/passwd rather than assumed: the
 # installer names it after the person (and leaves /home/user as a link,
 # which made every path here work while Files titled the home "user").
-LP_ENT=$(awk -F: '$3 == 1000 { print $1 ":" $6 ":" $7; exit }' /etc/passwd)
+LP_UID=$(id -u)
+LP_ENT=$(awk -F: -v u="$LP_UID" '$3 == u { print $1 ":" $6 ":" $7; exit }' /etc/passwd)
 LP_USER=${LP_ENT%%:*}
 LP_HOME=${LP_ENT#*:}; LP_HOME=${LP_HOME%%:*}
 LP_SHELL=${LP_ENT##*:}
@@ -22,7 +24,7 @@ export USER=$LP_USER LOGNAME=$LP_USER
 # /bin before /usr/bin: at the prompt a person gets our commands, and
 # GNU's stay reachable as /usr/bin/X (tools/lp-base/fixup.sh).
 export PATH=/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/sbin
-export XDG_RUNTIME_DIR=/run/user/1000
+export XDG_RUNTIME_DIR=/run/user/$LP_UID
 export HOME=$LP_HOME
 export XDG_CONFIG_HOME=$LP_HOME/.config
 export XDG_DATA_HOME=$LP_HOME/.local/share
@@ -170,7 +172,11 @@ export SHELL=$LP_SHELL
 # LC_MESSAGES 까지 같이 내보내는 이유는 fuzzel 과 GTK 가 .desktop 의
 # Name[ko] 를 고를 때 그것을 보기 때문이다. LANG 만 두면 비어 있는
 # LC_MESSAGES 가 C 로 확정되는 경로가 있어서, 앱 이름만 영어로 남는다.
+# An account with no choice of its own yet (one made in Settings > Users)
+# gets the machine's language, the one the installer was given.
 LP_LOCALE=en_US.UTF-8
+lp_sys_locale=$(sed -n 's/^LANG=//p' /etc/default/locale 2> /dev/null | tr -d '"' | head -n 1)
+test -n "$lp_sys_locale" && LP_LOCALE=$lp_sys_locale
 if test -s "$LP_HOME/.config/lp/locale" ; then
     read LP_LOCALE < "$LP_HOME/.config/lp/locale"
 fi

@@ -417,6 +417,8 @@ if [[ -d "$D/session" ]]; then
     for s in lp-audio-start lp-idle lp-autoscale lp-shell-start lp-lock lp-logout lp-admin-run lp-input-lang lp-screenshot; do
         [[ -f "$D/session/$s" ]] && cp -a "$D/session/$s" "$ROOT/usr/local/bin/$s"
     done
+    [[ -f "$D/session/lp-seat-own" ]] &&
+        install -D -m 755 "$D/session/lp-seat-own" "$ROOT/usr/lib/lp/lp-seat-own"
     if [[ -d "$D/session/fcitx5" ]]; then
         mkdir -p "$H/.config/fcitx5"
         cp -a "$D/session/fcitx5/profile" "$D/session/fcitx5/config" "$H/.config/fcitx5/"
@@ -623,6 +625,15 @@ XDG_VIDEOS_DIR="$HOME/Videos"
 XDG_TEMPLATES_DIR="$HOME"
 XDG_PUBLICSHARE_DIR="$HOME"
 DIRS
+# What an account made later starts with (start-desktop copies it into a
+# home that has no wayfire.ini yet, at its first sign-in): this home as
+# it is now, less the language - that account gets the machine's
+# (/etc/default/locale) until it picks its own.
+rm -rf "$ROOT/usr/share/lp/home"
+mkdir -p "$ROOT/usr/share/lp"
+cp -a "$H" "$ROOT/usr/share/lp/home"
+chown -R 0:0 "$ROOT/usr/share/lp/home"
+chmod 755 "$ROOT/usr/share/lp/home"
 printf 'en_US.UTF-8\n' > "$H/.config/lp/locale"
 chown -R 1000:1000 "$H"
 chmod 750 "$H"
@@ -789,16 +800,18 @@ if [[ -f "$ROOT/etc/lp/services" && -x "$ROOT/usr/libexec/bluetooth/bluetoothd" 
 fi
 # The seat's devices belong to the desktop account (uid 1000) as well as
 # to their groups - what logind's uaccess does for the person at the
-# screen, here for the one account the session runs as. A keyboard, a
+# screen, here for the account the session runs as. A keyboard, a
 # mouse or a USB sound card plugged in later is theirs the same way;
 # before, the session opened every node to every user (0666), which
-# let any process on the machine read the keyboard.
+# let any process on the machine read the keyboard. When another account
+# has signed in, lp-seat-own gives the device to that one instead
+# (start-desktop says whose session it is in /run/lp-session/seat-uid).
 mkdir -p "$ROOT/etc/udev/rules.d"
 cat > "$ROOT/etc/udev/rules.d/71-lp-seat.rules" <<'RULES'
 # LP: the desktop account owns the seat's devices (tools/mkdesktop.sh).
-SUBSYSTEM=="input", KERNEL=="event*", OWNER="1000", MODE="0660"
-SUBSYSTEM=="drm", KERNEL=="card[0-9]*|renderD*", OWNER="1000", MODE="0660"
-SUBSYSTEM=="sound", OWNER="1000", MODE="0660"
+SUBSYSTEM=="input", KERNEL=="event*", OWNER="1000", MODE="0660", RUN+="/usr/lib/lp/lp-seat-own $devnode"
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*|renderD*", OWNER="1000", MODE="0660", RUN+="/usr/lib/lp/lp-seat-own $devnode"
+SUBSYSTEM=="sound", OWNER="1000", MODE="0660", RUN+="/usr/lib/lp/lp-seat-own $devnode"
 RULES
 # Undoing the last update: apt keeps what each run replaces
 # (desktop/system/lp-rollback-save), `sudo lp-rollback` puts it back -

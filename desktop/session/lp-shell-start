@@ -108,11 +108,19 @@ fi
 #    screen, where the password was typed a moment ago. A session that
 #    starts again within the same boot (the compositor died) locks too:
 #    nobody has unlocked it since the boot.
+#
+#    Not locked either: an account that was just signed in at the sign-in
+#    screen of another account's session (start-desktop leaves its uid in
+#    /run/lp-session/signed-in, which only root can write) - its password
+#    was typed a moment ago.
 lp_lock_now=0
 lp_first=1
 test -e "${XDG_RUNTIME_DIR}/lp-session-started" && lp_first=0
 : > "${XDG_RUNTIME_DIR}/lp-session-started"
-if test -e "${XDG_RUNTIME_DIR}/lp-logout" ; then
+lp_signed_in=$(sed -n 1p /run/lp-session/signed-in 2> /dev/null)
+if test -n "$lp_signed_in" && test "$lp_signed_in" = "$(id -u)" ; then
+    rm -f "${XDG_RUNTIME_DIR}/lp-logout"
+elif test -e "${XDG_RUNTIME_DIR}/lp-logout" ; then
     rm -f "${XDG_RUNTIME_DIR}/lp-logout"
     lp_lock_now=1
 else

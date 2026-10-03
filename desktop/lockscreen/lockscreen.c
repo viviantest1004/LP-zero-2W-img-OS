@@ -34,6 +34,21 @@
  * root. The check runs in a thread - pam_unix waits two seconds after a
  * wrong password - and the buffer is wiped after it.
  *
+ * ── Another account ──
+ *
+ * With more than one account on the machine, the sign-in screen (--login:
+ * the start of the machine, and after a log out) has the accounts under
+ * the box, and a tap on one makes the box that account's. The lock
+ * screen over a session that is in use does not. Its password cannot
+ * be checked from here: pam_unix lets an ordinary account check only its
+ * own (this runs as the account whose session it is). So it goes to
+ * lp-privd, root's daemon, as `switch-user <name> <password as hex>`
+ * over its socket - never on a command line, where any process could
+ * read it - and lp-privd checks it against /etc/shadow, with the same
+ * growing wait after a wrong one, and leaves the account for
+ * start-desktop. This session then ends (lp-logout --switch) with the
+ * screen still locked, and the next one is that account's, unlocked.
+ *
  * The PAM declarations are written out below rather than taken from
  * <security/pam_appl.h>: the base has libpam but not its headers, and
  * these few are Linux-PAM's stable ABI.
@@ -48,6 +63,9 @@
 #include <unistd.h>
 #include <pwd.h>
 #include <math.h>
+#include <stdio.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 #include "lp-shell.h"
 #include "lp-i18n.h"
@@ -87,6 +105,15 @@ typedef struct {
     GtkWidget  *power;
 } Screen;
 
+/* An account one can sign in as: uid 1000 and up, with a login shell
+ * and a home. */
+typedef struct {
+    char       *login;
+    char       *display;      /* the full name, or the login */
+    GdkPixbuf  *face;         /* ~/.face, when this account may read it */
+    GtkWidget  *chip;
+} Person;
+
 static struct {
     gboolean    login;
     GPtrArray  *screens;      /* Screen* */
@@ -105,6 +132,10 @@ static struct {
     guint       armed_id;
     struct zwlr_input_inhibit_manager_v1 *inhibit_mgr;
     struct zwlr_input_inhibitor_v1 *inhibitor;
+    GPtrArray  *people;       /* Person*; the session's own account first */
+    Person     *target;       /* whose password the box is for */
+    GtkWidget  *name_lbl, *avatar;
+    gboolean    switching;    /* another account is signing in */
 } L;
 
 /* ── input inhibitor ─────────────────────────────────────────────── */
@@ -182,6 +213,78 @@ static void check_thread(GTask *task, gpointer src, gpointer data, GCancellable 
     if (h)
         pam_end(h, rc);
     g_task_return_boolean(task, rc == PAM_SUCCESS);
+}
+
+/* switch-user, to lp-privd (see "Another account" at the top). The
+ * answer is "ok", "wrong", or "say\t<what to tell the person>". */
+static char *privd_switch(const char *login, const char *pw)
+{
+    size_t n = strlen(pw);
+    if (n == 0 || n > 200)
+        return g_strdup("wrong");
+    size_t reqn = strlen("switch-user\t") + strlen(login) + 1 + 2 * n + 2;
+    char *req = g_malloc(reqn);
+    int k = snprintf(req, reqn, "switch-user\t%s\t", login);
+    for (size_t i = 0; i < n; i++)
+        k += snprintf(req + k, reqn - k, "%02x", (unsigned char)pw[i]);
+    req[k++] = '\n';
+
+    char *ans = NULL;
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+    strncpy(a.sun_path, "/run/lp-privd.sock", sizeof a.sun_path - 1);
+    if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof a) < 0) {
+        ans = g_strdup_printf("say\t%s", T("Signing in as another account is not available right now.",
+                                            "지금은 다른 계정으로 로그인할 수 없습니다."));
+    } else {
+        size_t off = 0;
+        while (off < (size_t)k) {
+            ssize_t w = write(fd, req + off, k - off);
+            if (w <= 0)
+                break;
+            off += (size_t)w;
+        }
+        GString *got = g_string_new(NULL);
+        char buf[512];
+        ssize_t r;
+        while ((r = read(fd, buf, sizeof buf)) > 0 && got->len < 8192)
+            g_string_append_len(got, buf, r);
+        /* The last line is the verdict: "done ..." or "fail <why> <text>". */
+        char **lines = g_strsplit(got->str, "\n", -1);
+        const char *last = NULL;
+        for (int i = 0; lines[i]; i++)
+            if (g_str_has_prefix(lines[i], "done") || g_str_has_prefix(lines[i], "fail"))
+                last = lines[i];
+        if (last && g_str_has_prefix(last, "done"))
+            ans = g_strdup("ok");
+        else if (last && g_str_has_prefix(last, "fail auth wrong"))
+            ans = g_strdup("wrong");
+        else if (last && g_str_has_prefix(last, "fail auth wait")) {
+            int secs = 0;
+            sscanf(last, "fail auth wait %d", &secs);
+            ans = lp_korean()
+                ? g_strdup_printf("say\t암호가 여러 번 틀렸습니다. %d초 뒤에 다시 입력하세요.", secs)
+                : g_strdup_printf("say\tToo many wrong passwords. Try again in %d seconds.", secs);
+        } else if (last && g_str_has_prefix(last, "fail denied"))
+            ans = g_strdup_printf("say\t%s", T("This account has no password, so it cannot sign in here.",
+                                                "이 계정은 암호가 없어 여기서 로그인할 수 없습니다."));
+        else
+            ans = g_strdup_printf("say\t%s", T("Could not sign in to that account.",
+                                                "그 계정으로 로그인하지 못했습니다."));
+        g_strfreev(lines);
+        g_string_free(got, TRUE);
+    }
+    if (fd >= 0)
+        close(fd);
+    explicit_bzero(req, reqn);
+    g_free(req);
+    return ans;
+}
+
+static void switch_thread(GTask *task, gpointer src, gpointer data, GCancellable *c)
+{
+    (void)src; (void)c;
+    g_task_return_pointer(task, privd_switch(L.target->login, data), g_free);
 }
 
 static void wipe(char *s)
@@ -307,6 +410,25 @@ static void go_busy(gboolean busy)
     }
 }
 
+/* The box ready for another try, with `say` under it (or the usual
+ * "wrong password"). */
+static void try_again(const char *say)
+{
+    go_busy(FALSE);
+    gtk_widget_set_sensitive(L.entry, TRUE);
+    gtk_widget_set_sensitive(L.go, TRUE);
+    gtk_entry_set_text(GTK_ENTRY(L.entry), "");
+    gtk_widget_grab_focus(L.entry);
+    if (!say) {
+        L.fails++;
+        say = L.fails > 2 ? T("Wrong password. Check the keyboard layout and Caps Lock.",
+                              "암호가 틀렸습니다. 키보드 언어와 Caps Lock 을 확인하세요.")
+                          : T("Wrong password. Try again.", "암호가 틀렸습니다. 다시 입력하세요.");
+    }
+    set_msg(say, "lp-lock-error");
+    shake();
+}
+
 static void checked(GObject *src, GAsyncResult *res, gpointer data)
 {
     (void)src; (void)data;
@@ -317,17 +439,31 @@ static void checked(GObject *src, GAsyncResult *res, gpointer data)
         unlocked();
         return;
     }
-    L.fails++;
-    go_busy(FALSE);
-    gtk_widget_set_sensitive(L.entry, TRUE);
-    gtk_widget_set_sensitive(L.go, TRUE);
-    gtk_entry_set_text(GTK_ENTRY(L.entry), "");
-    gtk_widget_grab_focus(L.entry);
-    set_msg(L.fails > 2 ? T("Wrong password. Check the keyboard layout and Caps Lock.",
-                            "암호가 틀렸습니다. 키보드 언어와 Caps Lock 을 확인하세요.")
-                        : T("Wrong password. Try again.", "암호가 틀렸습니다. 다시 입력하세요."),
-            "lp-lock-error");
-    shake();
+    try_again(NULL);
+}
+
+/* lp-privd said yes: this session ends - still locked, the spinner still
+ * turning - and the next one is that account's. Nothing here unlocks. */
+static void switched(GObject *src, GAsyncResult *res, gpointer data)
+{
+    (void)src; (void)data;
+    char *ans = g_task_propagate_pointer(G_TASK(res), NULL);
+    L.checking = FALSE;
+    if (ans && !strcmp(ans, "ok")) {
+        L.switching = TRUE;
+        L.checking = TRUE;          /* no second try while the session ends */
+        char *m = g_strdup_printf(T("Signing in as %s…", "%s (으)로 로그인하는 중…"),
+                                  L.target->display);
+        set_msg(m, "lp-lock-busy");
+        g_free(m);
+        const char *argv[] = { "lp-logout", "--switch", NULL };
+        lp_spawn(argv);
+    } else if (ans && g_str_has_prefix(ans, "say\t")) {
+        try_again(ans + 4);
+    } else {
+        try_again(NULL);
+    }
+    g_free(ans);
 }
 
 static void submit(void)
@@ -346,9 +482,10 @@ static void submit(void)
     go_busy(TRUE);
     set_msg(L.login ? T("Signing in…", "로그인하는 중…") : T("Checking…", "확인하는 중…"),
             "lp-lock-busy");
-    GTask *t = g_task_new(NULL, NULL, checked, NULL);
+    gboolean other = L.target && strcmp(L.target->login, L.user) != 0;
+    GTask *t = g_task_new(NULL, NULL, other ? switched : checked, NULL);
     g_task_set_task_data(t, g_strdup(pw), (GDestroyNotify)wipe);
-    g_task_run_in_thread(t, check_thread);
+    g_task_run_in_thread(t, other ? switch_thread : check_thread);
     g_object_unref(t);
 }
 
@@ -429,7 +566,10 @@ static gboolean draw_bg(GtkWidget *w, cairo_t *cr, gpointer d)
  * theme's teal - the first character of the name, Hangul included. */
 static gboolean draw_avatar(GtkWidget *w, cairo_t *cr, gpointer d)
 {
-    GdkPixbuf *face = d;
+    /* The card's own avatar is whoever the box is for; a chip's is its. */
+    Person *who = d ? d : L.target;
+    GdkPixbuf *face = who ? who->face : NULL;
+    const char *nm = who ? who->display : L.name;
     int S = MIN(gtk_widget_get_allocated_width(w), gtk_widget_get_allocated_height(w));
     double r = S / 2.0;
     cairo_arc(cr, r, r, r, 0, 2 * G_PI);
@@ -451,8 +591,8 @@ static gboolean draw_avatar(GtkWidget *w, cairo_t *cr, gpointer d)
     cairo_pattern_destroy(p);
 
     char initial[8] = "?";
-    if (L.name && *L.name) {
-        gunichar c = g_unichar_toupper(g_utf8_get_char(L.name));
+    if (nm && *nm) {
+        gunichar c = g_unichar_toupper(g_utf8_get_char(nm));
         initial[g_unichar_to_utf8(c, initial)] = '\0';
     }
     PangoLayout *lay = gtk_widget_create_pango_layout(w, initial);
@@ -531,6 +671,114 @@ static GtkWidget *label(const char *text, const char *cls)
     return l;
 }
 
+/* ── the accounts ────────────────────────────────────────────────── */
+
+static Person *person_new(const char *login, const char *display, const char *home)
+{
+    Person *p = g_new0(Person, 1);
+    p->login = g_strdup(login);
+    p->display = g_strdup(display && *display ? display : login);
+    char *fp = g_build_filename(home, ".face", NULL);
+    p->face = gdk_pixbuf_new_from_file_at_scale(fp, 256, 256, TRUE, NULL);
+    g_free(fp);
+    return p;
+}
+
+/* Everybody one could sign in as, straight from /etc/passwd: uid 1000
+ * up to 59999, a login shell, a home that exists. The session's own
+ * account first, under the name the rest of the desktop shows. */
+static void load_people(void)
+{
+    L.people = g_ptr_array_new();
+    struct passwd *me = getpwuid(getuid());
+    g_ptr_array_add(L.people, person_new(L.user, L.name, me ? me->pw_dir : g_get_home_dir()));
+    FILE *f = fopen("/etc/passwd", "re");
+    if (!f)
+        return;
+    char line[1024];
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\n")] = '\0';
+        char **fl = g_strsplit(line, ":", 7);
+        if (g_strv_length(fl) == 7) {
+            long uid = strtol(fl[2], NULL, 10);
+            const char *sh = strrchr(fl[6], '/');
+            sh = sh ? sh + 1 : fl[6];
+            gboolean login_sh = *fl[6] && strcmp(sh, "nologin") && strcmp(sh, "false");
+            if (uid >= 1000 && uid < 60000 && login_sh && strcmp(fl[0], L.user) &&
+                g_file_test(fl[5], G_FILE_TEST_IS_DIR)) {
+                char *full = g_strdup(fl[4]);
+                char *comma = strchr(full, ',');
+                if (comma) *comma = '\0';
+                g_ptr_array_add(L.people, person_new(fl[0], g_strstrip(full), fl[5]));
+                g_free(full);
+            }
+        }
+        g_strfreev(fl);
+    }
+    fclose(f);
+}
+
+static void pick(GtkButton *b, gpointer d)
+{
+    (void)b;
+    Person *p = d;
+    if (L.checking || p == L.target)
+        return;
+    L.target = p;
+    for (guint i = 0; i < L.people->len; i++) {
+        Person *q = g_ptr_array_index(L.people, i);
+        GtkStyleContext *sc = gtk_widget_get_style_context(q->chip);
+        if (q == p)
+            gtk_style_context_add_class(sc, "lp-lock-person-on");
+        else
+            gtk_style_context_remove_class(sc, "lp-lock-person-on");
+    }
+    gtk_label_set_text(GTK_LABEL(L.name_lbl), p->display);
+    gboolean other = strcmp(p->login, L.user) != 0;
+    char *hint = other ? g_strdup_printf(T("Enter the password for %s to sign in.",
+                                           "%s 의 암호를 입력해 로그인하세요."), p->display)
+                       : g_strdup(L.login ? T("Enter your password to sign in.", "암호를 입력해 로그인하세요.")
+                                          : T("Locked. Enter your password to unlock.",
+                                              "잠겨 있습니다. 암호를 입력해 잠금을 해제하세요."));
+    gtk_label_set_text(GTK_LABEL(L.hint), hint);
+    g_free(hint);
+    gtk_widget_queue_draw(L.avatar);
+    gtk_entry_set_text(GTK_ENTRY(L.entry), "");
+    set_msg("", NULL);
+    L.fails = 0;
+    gtk_widget_grab_focus(L.entry);
+}
+
+/* One tap target per account: its picture or initial, and its name. */
+static GtkWidget *people_row(void)
+{
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_widget_set_halign(row, GTK_ALIGN_CENTER);
+    gtk_style_context_add_class(gtk_widget_get_style_context(row), "lp-lock-people");
+    for (guint i = 0; i < L.people->len; i++) {
+        Person *p = g_ptr_array_index(L.people, i);
+        GtkWidget *b = gtk_button_new();
+        GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+        GtkWidget *av = gtk_drawing_area_new();
+        gtk_widget_set_size_request(av, 36, 36);
+        gtk_widget_set_valign(av, GTK_ALIGN_CENTER);
+        g_signal_connect(av, "draw", G_CALLBACK(draw_avatar), p);
+        gtk_container_add(GTK_CONTAINER(box), av);
+        GtkWidget *l = gtk_label_new(p->display);
+        gtk_label_set_ellipsize(GTK_LABEL(l), PANGO_ELLIPSIZE_END);
+        gtk_label_set_max_width_chars(GTK_LABEL(l), 14);
+        gtk_container_add(GTK_CONTAINER(box), l);
+        gtk_container_add(GTK_CONTAINER(b), box);
+        gtk_style_context_add_class(gtk_widget_get_style_context(b), "lp-lock-person");
+        if (p == L.target)
+            gtk_style_context_add_class(gtk_widget_get_style_context(b), "lp-lock-person-on");
+        g_signal_connect(b, "clicked", G_CALLBACK(pick), p);
+        p->chip = b;
+        gtk_container_add(GTK_CONTAINER(row), b);
+    }
+    return row;
+}
+
 static GtkWidget *build_card(void)
 {
     GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -538,17 +786,15 @@ static GtkWidget *build_card(void)
     gtk_widget_set_valign(card, GTK_ALIGN_CENTER);
     gtk_style_context_add_class(gtk_widget_get_style_context(card), "lp-lock-card");
 
-    char *fp = g_build_filename(g_get_home_dir(), ".face", NULL);
-    GdkPixbuf *face = gdk_pixbuf_new_from_file_at_scale(fp, 256, 256, TRUE, NULL);
-    g_free(fp);
     GtkWidget *av = gtk_drawing_area_new();
     gtk_widget_set_size_request(av, 104, 104);
     gtk_widget_set_halign(av, GTK_ALIGN_CENTER);
-    g_signal_connect(av, "draw", G_CALLBACK(draw_avatar), face);
+    g_signal_connect(av, "draw", G_CALLBACK(draw_avatar), NULL);
     gtk_container_add(GTK_CONTAINER(card), av);
+    L.avatar = av;
 
-    GtkWidget *name = label(L.name, "lp-lock-name");
-    gtk_container_add(GTK_CONTAINER(card), name);
+    L.name_lbl = label(L.target ? L.target->display : L.name, "lp-lock-name");
+    gtk_container_add(GTK_CONTAINER(card), L.name_lbl);
     L.hint = label(L.login ? T("Enter your password to sign in.", "암호를 입력해 로그인하세요.")
                            : T("Locked. Enter your password to unlock.",
                                "잠겨 있습니다. 암호를 입력해 잠금을 해제하세요."),
@@ -596,6 +842,12 @@ static GtkWidget *build_card(void)
     gtk_label_set_max_width_chars(GTK_LABEL(L.msg), 40);
     gtk_label_set_justify(GTK_LABEL(L.msg), GTK_JUSTIFY_CENTER);
     gtk_container_add(GTK_CONTAINER(card), L.msg);
+    /* At sign-in only (the start of the machine, after a log out), not
+     * on a screen locked over somebody's open work: signing in another
+     * account ends this session, and knowing one's own password must not
+     * be enough to close everybody else's windows. */
+    if (L.login && L.people && L.people->len > 1)
+        gtk_container_add(GTK_CONTAINER(card), people_row());
     return card;
 }
 
@@ -754,6 +1006,13 @@ static const char *CSS =
     ".lp-lock label.lp-lock-msg.lp-lock-error { color: #FF9A7A; font-weight: 600; }"
     ".lp-lock label.lp-lock-msg.lp-lock-busy { color: rgba(234,242,248,0.75); }"
     ".lp-lock label.lp-lock-caps { color: #FFD27A; }"
+    ".lp-lock-people { margin-top: 26px; }"
+    ".lp-lock-person { background-image: none; background-color: rgba(255,255,255,0.08);"
+    "  border: 1px solid rgba(255,255,255,0.14); border-radius: 26px; padding: 6px 16px 6px 6px;"
+    "  min-height: 36px; box-shadow: none; }"
+    ".lp-lock-person:hover { background-color: rgba(255,255,255,0.16); }"
+    ".lp-lock-person label { font-size: 15px; font-weight: 500; }"
+    ".lp-lock-person.lp-lock-person-on { background-color: rgba(31,181,168,0.30); border-color: #1FB5A8; }"
     ".lp-lock-powerbox { margin: 0 40px 36px 0; }"
     ".lp-lock-power { background-image: none; background-color: rgba(255,255,255,0.10);"
     "  border: 1px solid rgba(255,255,255,0.16); border-radius: 16px; padding: 12px 16px;"
@@ -839,6 +1098,8 @@ int main(int argc, char **argv)
     struct passwd *pw = getpwuid(getuid());
     L.user = g_strdup(pw ? pw->pw_name : g_get_user_name());
     L.name = lp_user_display_name();
+    load_people();
+    L.target = g_ptr_array_index(L.people, 0);
     L.wall = load_wallpaper();
     L.screens = g_ptr_array_new();
 

@@ -10,7 +10,11 @@
 #
 # The compositor is asked to stop with SIGTERM (or swaymsg exit), never
 # SIGKILL: a killed compositor leaves the VT in graphics mode.
-: > "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/lp-logout"
+#
+# --switch: the sign-in screen signed another account in (lp-privd left
+# it for start-desktop); no marker - that account's session starts
+# unlocked, and this one's account is not coming back now.
+test "${1:-}" = --switch || : > "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/lp-logout"
 case "${XDG_CURRENT_DESKTOP:-}" in
     *wayfire*|*Wayfire*)
         pid=$(pidof wayfire)

@@ -1,0 +1,17 @@
+#!/bin/sh
+# lp-seat-own DEVNODE - udev's RUN for the seat's devices
+# (/etc/udev/rules.d/71-lp-seat.rules, tools/mkdesktop.sh).
+#
+# The rule makes a device plugged in later uid 1000's, the account at the
+# screen until another one signs in. start-desktop writes the uid of the
+# account whose session it is to /run/lp-session/seat-uid; a keyboard, a
+# mouse or a USB sound card that arrives during another account's
+# session is given to that account instead - it could not use it
+# otherwise - and never to everybody.
+uid=$(sed -n 1p /run/lp-session/seat-uid 2>/dev/null)
+test -n "$uid" || exit 0
+test "$uid" = 1000 && exit 0
+test -c "$1" || exit 0
+# A number and nothing else; awk, not a shell pattern.
+echo "$uid" | awk '!/^[0-9]+$/ { exit 1 }' || exit 0
+chown "$uid" "$1"

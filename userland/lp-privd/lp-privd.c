@@ -88,6 +88,22 @@
  * recovery shell, which is root by design, must be able to use this
  * without one.
  *
+ * ── Signing in as somebody else ──
+ *
+ * The sign-in and lock screen run inside the session of the account at
+ * the screen, and pam_unix lets an ordinary account check only its own
+ * password. So when the person picks another account there,
+ * `switch-user <name> <password as hex>` asks this daemon: it checks
+ * that account's password against /etc/shadow like auth does (with the
+ * same wait after a wrong one, counted for the caller), and on a match
+ * writes the account's uid to /run/lp-session/next-user. The screen then
+ * ends the session, and start-desktop, which runs as root and reads
+ * that file, starts the next one as that account. Only a person's
+ * account (uid 1000 and up, with a login shell) can be named, and only a
+ * person's account may ask; /run/lp-session is root's, so nothing but
+ * this daemon can write the file. The request is logged as
+ * "switch-user <name> ***".
+ *
  * ── What a request can contain ──
  *
  * One line, at most 1024 bytes, fields separated by TAB. The first field
@@ -2700,12 +2716,95 @@ static void answer_auth(u32 uid, const char *user, const char *who,
     fail(code, text);
 }
 
+/* switch-user (see "Signing in as somebody else" at the top). */
+#define NEXT_USER_DIR  "/run/lp-session"
+#define NEXT_USER_FILE "/run/lp-session/next-user"
+
+static bool login_shell(const char *sh)
+{
+    const char *b = strrchr(sh, '/');
+    b = b ? b + 1 : sh;
+    return *sh && strcmp(b, "nologin") != 0 && strcmp(b, "false") != 0;
+}
+
+static void answer_switch(u32 uid, const char *who, const char *name, char *hex)
+{
+    keep_t *k = keep_for(uid, true);
+    s64 now = boottime_ms();
+    char line[300], msg[160];
+    k->used = now;
+
+    if (now < k->not_before) {
+        long secs = (long)((k->not_before - now + 999) / 1000);
+        snprintf(line, sizeof line, "%s: switch-user %s *** -> auth (waiting, %lds left)",
+                 who, name, secs);
+        audit(line);
+        snprintf(msg, sizeof msg, "wait %ld s: too soon after a wrong password", secs);
+        fail("auth", msg);
+        wipe_mem(hex, strlen(hex));
+        return;
+    }
+
+    lp_user_t u;
+    if (!lp_user_by_name(name, &u) || u.uid < 1000 || u.uid >= 60000 ||
+        !login_shell(u.shell)) {
+        wipe_mem(hex, strlen(hex));
+        snprintf(line, sizeof line, "%s: switch-user %s *** -> denied (not a person's account)",
+                 who, name);
+        audit(line);
+        fail("denied", "there is no such account to sign in to");
+        return;
+    }
+
+    char pw[LP_CRYPT6_PW_MAX];
+    bool shaped = hex_decode(hex, pw, sizeof pw);
+    wipe_mem(hex, strlen(hex));
+    int r = shaped ? lp_shadow_check(NULL, name, pw) : LP_SHADOW_WRONG;
+    wipe_mem(pw, sizeof pw);
+
+    if (r == LP_SHADOW_WRONG) {
+        k->fails++;
+        s64 wait = (s64)WAIT_STEP_MS * k->fails;
+        k->not_before = now + (wait > WAIT_MAX_MS ? WAIT_MAX_MS : wait);
+        snprintf(line, sizeof line, "%s: switch-user %s *** -> wrong password (%d in a row)",
+                 who, name, k->fails);
+        audit(line);
+        fail("auth", "wrong password");
+        return;
+    }
+    if (r != LP_SHADOW_OK) {
+        snprintf(line, sizeof line, "%s: switch-user %s *** -> denied (no usable password)",
+                 who, name);
+        audit(line);
+        fail("denied", "this account has no password to sign in with");
+        return;
+    }
+    k->fails = 0;
+    k->not_before = 0;
+
+    char body[24];
+    int n = snprintf(body, sizeof body, "%u\n", (unsigned)u.uid);
+    lp_mkdir(NEXT_USER_DIR, 0755);
+    if (!lp_write_file_atomic(NEXT_USER_FILE, body, (size_t)n)) {
+        snprintf(line, sizeof line, "%s: switch-user %s *** -> failed (cannot write %s)",
+                 who, name, NEXT_USER_FILE);
+        audit(line);
+        fail("failed", "cannot write " NEXT_USER_FILE);
+        return;
+    }
+    snprintf(line, sizeof line, "%s: switch-user %s *** -> ok, uid %u next", who, name,
+             (unsigned)u.uid);
+    audit(line);
+    snprintf(msg, sizeof msg, "%s signs in when this session ends", name);
+    reply("done", msg);
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * The table of verbs
  * ═══════════════════════════════════════════════════════════════════ */
 
 typedef enum { ARG_DEBIAN, ARG_LPPKG, ARG_FLATPAK, ARG_DEV, ARG_DISK, ARG_PART,
-               ARG_FS, ARG_SIZE, ARG_LABEL, ARG_HEX } argkind_t;
+               ARG_FS, ARG_SIZE, ARG_LABEL, ARG_HEX, ARG_USER } argkind_t;
 
 typedef struct {
     const char *verb;
@@ -2723,6 +2822,7 @@ static const verb_t VERBS[] = {
     { "auth",        false, false, 1, 1,  {ARG_HEX}, NULL, "<password as hex>: allow changes for 5 minutes" },
     { "forget",      false, false, 0, 0,  {0}, NULL, "end those 5 minutes now" },
     { "probe",       false, false, 0, 1,  {ARG_DEV}, NULL, "filesystems, labels and tables of block devices" },
+    { "switch-user", false, false, 2, 2,  {ARG_USER, ARG_HEX}, NULL, "<user> <password as hex>: sign that account in when this session ends" },
     { "apt-update",  true,  false, 0, 0,  {0}, v_apt_update, "refresh the package lists" },
     { "apt-install", true,  false, 1, 32, {ARG_DEBIAN}, v_apt_install, "install Debian packages" },
     { "apt-remove",  true,  false, 1, 32, {ARG_DEBIAN}, v_apt_remove, "remove Debian packages" },
@@ -2799,6 +2899,18 @@ static bool arg_ok(argkind_t k, const char *s, fstype_t fs, char *why,
         snprintf(why, whyn, "the password is sent as hex, 1 to %d bytes",
                  LP_CRYPT6_PW_MAX - 1);
         return false;
+    case ARG_USER: {
+        /* A login name as useradd makes them: a lower-case letter, then
+         * lower-case letters, digits, - and _, at most 31. */
+        size_t n = strlen(s);
+        bool ok = n >= 1 && n <= 31 && s[0] >= 'a' && s[0] <= 'z';
+        for (size_t i = 1; ok && i < n; i++)
+            ok = (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9') ||
+                 s[i] == '-' || s[i] == '_';
+        if (ok) return true;
+        snprintf(why, whyn, "not a user name");
+        return false;
+    }
     case ARG_LABEL:
         if (label_ok(s, fs != FS_NONE ? label_max(fs) : 32)) return true;
         snprintf(why, whyn, "a label is letters, digits, space, _ . - and at"
@@ -2987,9 +3099,15 @@ static void handle(int fd)
      * exception: what follows the verb is a password, and it is never
      * copied anywhere, the log included. */
     char printable[MAX_REQ];
-    if (starts(req, "auth\t") || strcmp(req, "auth") == 0)
+    if (starts(req, "auth\t") || strcmp(req, "auth") == 0) {
         strlcpy(printable, "auth ***", sizeof printable);
-    else
+    } else if (starts(req, "switch-user\t")) {
+        /* The name stays (ASCII, at most a line); the password goes. */
+        strlcpy(printable, req, sizeof printable);
+        char *t = strchr(printable + 12, '\t');
+        if (t)
+            strlcpy(t, "\t***", sizeof printable - (size_t)(t - printable));
+    } else
         strlcpy(printable, req, sizeof printable);
     for (char *q = printable; *q; q++)
         if (*q == '\t') *q = ' ';
@@ -3085,6 +3203,9 @@ static void handle(int fd)
         fail(code, why[0] ? why : verdict);
         if (v && strcmp(v->verb, "auth") == 0 && nargs > 0)
             wipe_mem(args[0], strlen(args[0]));
+        if (v && strcmp(v->verb, "switch-user") == 0)
+            for (int i = 1; i < nargs; i++)
+                wipe_mem(args[i], strlen(args[i]));
         return;
     }
 
@@ -3103,6 +3224,10 @@ static void handle(int fd)
             return;
         }
         answer_auth(uid, user, who, args[0]);
+        return;
+    }
+    if (strcmp(v->verb, "switch-user") == 0) {
+        answer_switch(uid, who, args[0], args[1]);
         return;
     }
     if (strcmp(v->verb, "forget") == 0) {

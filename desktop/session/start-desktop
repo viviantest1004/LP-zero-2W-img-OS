@@ -10,11 +10,32 @@
 # What logind would normally do and nothing here does: hand that account
 # the graphics card and the input devices. There is no logind, so the
 # permissions are set here, once, on the devices that exist.
-mkdir -p /run/user/1000
-chown 1000:1000 /run/user/1000
-chmod 700 /run/user/1000
 mkdir -p /data/log
-# The devices go to uid 1000 - owner, read and write - and to their own
+mkdir -p /run/lp-session
+
+# ── Whose session ──
+#
+# uid 1000 at the start of the machine - or the account Settings > Users
+# named for automatic sign-in - and after that whoever signed in last.
+# The sign-in and lock screen can sign in another account: it asks
+# lp-privd, which checks that account's password (the screen runs as the
+# account at the screen and cannot), and lp-privd leaves the uid in
+# /run/lp-session/next-user for the loop at the bottom. Logging out
+# brings the same account back at the sign-in screen, where the others
+# are a tap away. Everything below that hands the machine to "the
+# desktop account" hands it to SEAT_UID.
+person_uid() {
+    awk -F: -v u="$1" 'BEGIN { if (u !~ /^[0-9]+$/ || u + 0 < 1000 || u + 0 >= 60000) exit }
+                       $3 == u { f = 1 } END { exit !f }' /etc/passwd
+}
+SEAT_UID=1000
+lp_auto=$(sed -n 1p /etc/lp/autologin 2>/dev/null)
+if test -n "$lp_auto" ; then
+    lp_auto_uid=$(awk -F: -v n="$lp_auto" '$1 == n { print $3; exit }' /etc/passwd)
+    person_uid "$lp_auto_uid" && SEAT_UID=$lp_auto_uid
+fi
+# The devices go to the account at the screen (SEAT_UID; uid 1000 unless
+# another signed in) - owner, read and write - and to their own
 # groups, never to everybody. They were once opened 0666: any account,
 # any daemon on the machine could then read every key typed, passwords
 # included. udev does the same for anything plugged in later
@@ -23,17 +44,11 @@ mkdir -p /data/log
 seat_dev() {
     for d in "$@"; do
         test -c "$d" || continue
-        chown 1000 "$d" 2>/dev/null
+        chown "$SEAT_UID" "$d" 2>/dev/null
         chmod 0660 "$d" 2>/dev/null
     done
 }
-seat_dev /dev/dri/card* /dev/dri/renderD*
-# Every event node, not the first six: the XPS has more input devices
-# than that (keyboard, touchpad, touchscreen, pen, lid, buttons, the
-# video bus), and the touchscreen was often past event5 - lp-osk could
-# then not see that the last touch came from a finger, and never showed.
-seat_dev /dev/input/event*
-# The virtual terminals are also given to uid 1000, not only opened to
+# The virtual terminals are also given to the account, not only opened to
 # everyone: libseat's built-in backend opens /dev/tty1 for its VT, and a
 # mode alone does not hold. init puts a root shell on tty1 at about the
 # moment the session starts, that shell reads Debian's /root/.profile,
@@ -42,8 +57,6 @@ seat_dev /dev/input/event*
 # failed "Could not open target tty: Permission denied" three times, and
 # an installed machine came up at a root prompt instead of the desktop.
 # `mesg` never touches the owner's bits, so owning the node survives it.
-chown 1000 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
-chmod 0620 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
 
 # The keyboard of the VT under the session is switched off here, and
 # the VT put in graphics mode - the two things libseat's built-in
@@ -89,7 +102,24 @@ vt_keyboard off
 # 여기에 logind 가 없어서 그룹 소속이 세션마다 갱신되지 않기
 # 때문이다. 모두에게 여는 것(0666)은 하지 않는다 - 다른 계정이 마이크를
 # 열 수 있게 된다.
-seat_dev /dev/snd/*
+
+# All of the above, for SEAT_UID; again for each session, since the
+# account at the screen can change between two. The event nodes are
+# every one there is, not the first six: the XPS has more input devices
+# than that (keyboard, touchpad, touchscreen, pen, lid, buttons, the
+# video bus), and the touchscreen was often past event5 - lp-osk could
+# then not see that the last touch came from a finger, and never showed.
+# A device plugged in later is given to the same account by udev
+# (71-lp-seat.rules, lp-seat-own), which reads /run/lp-session/seat-uid.
+seat_take() {
+    mkdir -p "/run/user/$SEAT_UID"
+    chown "$SEAT_UID:$SEAT_GID" "/run/user/$SEAT_UID"
+    chmod 700 "/run/user/$SEAT_UID"
+    echo "$SEAT_UID" > /run/lp-session/seat-uid
+    seat_dev /dev/dri/card* /dev/dri/renderD* /dev/input/event* /dev/snd/*
+    chown "$SEAT_UID" /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
+    chmod 0620 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
+}
 
 # Which compositor: wayfire where there is 3D graphics, sway where
 # there is not.
@@ -161,17 +191,43 @@ write_compositor() {
 }
 write_compositor
 
-# The desktop account is whoever has uid 1000: "user" in the image as
-# built, the name the person chose once the installer has run (it keeps
-# /home/user as a link to the real home, for scripts written against the
-# old name).
-LP_HOME=$(awk -F: '$3 == 1000 { print $6; exit }' /etc/passwd)
-test -n "$LP_HOME" || LP_HOME=/home/user
-
+# The account's home. uid 1000 is "user" in the image as built and the
+# name the person chose once the installer has run (it keeps /home/user
+# as a link to the real home, for scripts written against the old name).
+#
 # 홈이 root 소유로 남아 있으면 세션이 설정 하나 저장하지 못한다.
 # 이미지를 만들 때 맞춰 두지만, 첫 부팅에서 expandfs 가 파티션을
 # 늘리고 나면 새로 생기는 것들이 있어 여기서 한 번 더 맞춘다.
-chown -R 1000:1000 "$LP_HOME/" 2>/dev/null
+#
+# An account made later (Settings > Users: useradd) starts with a home
+# that has none of the desktop's own files - no wayfire.ini, so wayfire
+# came up with none of LP's shortcuts, panels or plugins. The first time
+# it signs in, it gets what the image's own account started with
+# (/usr/share/lp/home, tools/mkdesktop.sh), copying nothing over a file
+# that is already there.
+seat_home() {
+    SEAT_GID=$(awk -F: -v u="$SEAT_UID" '$3 == u { print $4; exit }' /etc/passwd)
+    test -n "$SEAT_GID" || SEAT_GID=$SEAT_UID
+    LP_HOME=$(awk -F: -v u="$SEAT_UID" '$3 == u { print $6; exit }' /etc/passwd)
+    test -n "$LP_HOME" || LP_HOME=/home/user
+    if ! test -e "$LP_HOME/.config/wayfire.ini" && test -d /usr/share/lp/home ; then
+        mkdir -p "$LP_HOME"
+        /usr/bin/cp -an /usr/share/lp/home/. "$LP_HOME/" 2>/dev/null
+    fi
+    chown -R "$SEAT_UID:$SEAT_GID" "$LP_HOME/" 2>/dev/null
+}
+
+# Every process the account that leaves still has - pipewire holding the
+# sound card, a download, a terminal's shell - ends before the next
+# account's session starts: the devices are about to become the next
+# account's, and its pipewire could not open a card the last one still
+# held. Sent as that account, so it can reach nothing else.
+end_account() {
+    test -x /usr/bin/setpriv || return 0
+    gid=$(awk -F: -v u="$1" '$3 == u { print $4; exit }' /etc/passwd)
+    /usr/bin/setpriv --reuid="$1" --regid="${gid:-$1}" --clear-groups \
+        /bin/sh -c 'kill -TERM -1 2>/dev/null; sleep 2; kill -KILL -1 2>/dev/null' 2>/dev/null
+}
 
 # The session gets the account's groups - sudo, audio, video, ... - the
 # way a login would. dropprivs clears them (right for a network daemon,
@@ -187,10 +243,10 @@ chown -R 1000:1000 "$LP_HOME/" 2>/dev/null
 # down then, and /data/log/session.log has what it printed.
 run_session() {
     if test -x /usr/bin/setpriv; then
-        /usr/bin/setpriv --reuid=1000 --regid=1000 --init-groups \
+        /usr/bin/setpriv --reuid="$SEAT_UID" --regid="$SEAT_GID" --init-groups \
             --reset-env /bin/session-run
     else
-        dropprivs 1000:1000 /bin/session-run
+        dropprivs "$SEAT_UID:$SEAT_GID" /bin/session-run
     fi
 }
 # The boot screen (/bin/splash: the PC maker's logo, ours under it and a
@@ -200,11 +256,31 @@ run_session() {
 test -x /bin/splash && /bin/splash stop
 
 quick=0
+rm -f /run/lp-session/next-user /run/lp-session/signed-in
 while :; do
+    # Another account signed in at the sign-in screen (lp-privd checked
+    # its password): its session next, and not locked again - the
+    # password was typed a moment ago (lp-shell-start reads signed-in).
+    if test -s /run/lp-session/next-user; then
+        read -r lp_next < /run/lp-session/next-user
+        rm -f /run/lp-session/next-user
+        if person_uid "$lp_next" ; then
+            if test "$lp_next" != "$SEAT_UID" ; then
+                echo "start-desktop: uid $SEAT_UID signed out, uid $lp_next signs in" >> /data/log/session.log
+                end_account "$SEAT_UID"
+                SEAT_UID=$lp_next
+            fi
+            echo "$SEAT_UID" > /run/lp-session/signed-in
+            chmod 644 /run/lp-session/signed-in
+        fi
+    fi
+    seat_home
+    seat_take
     read -r t0 _ < /proc/uptime
     run_session >> /data/log/session.log 2>&1
     read -r t1 _ < /proc/uptime
-    if test -e /run/user/1000/lp-logout; then
+    rm -f /run/lp-session/signed-in
+    if test -e "/run/user/$SEAT_UID/lp-logout" || test -s /run/lp-session/next-user; then
         quick=0
         continue
     fi
