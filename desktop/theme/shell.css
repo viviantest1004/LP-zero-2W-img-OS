@@ -252,6 +252,17 @@ menu.lp-menu, .lp-menu menu, .lp-menu {
   border-radius: 12px;
 }
 
+/* An icon lifted off the dock, or on its way out of it: the dock draws
+ * the icon itself (shrinking, or over the bar), and its button shows
+ * nothing - no hover, no press - under the others sliding past. */
+.lp-dock button.lp-dock-item.lp-dragging,
+.lp-dock button.lp-dock-item.lp-leaving {
+  background-color: transparent;
+  background-image: none;
+  border-color: transparent;
+  box-shadow: none;
+}
+
 /* A mockup app with nothing installed behind it yet. Present, so the
  * dock is the shape the owner drew, and dim, so nobody expects it to
  * open. A tap says which package would fill it. */

@@ -29,9 +29,11 @@
  * ── pinning ──
  *
  * The pinned list is ~/.config/lp/dock, one desktop id per line, in
- * dock order. It is written only when the person pins or unpins
- * something, so until then the defaults below are the dock, and a
- * later change to the defaults reaches everyone who never touched it.
+ * dock order. It is written only when the person pins, unpins or
+ * rearranges something, so until then the defaults below are the dock,
+ * and a later change to the defaults reaches everyone who never touched
+ * it. Rearranging is dragging an icon along the dock; dragging it up off
+ * the dock and letting go unpins it (see "the row").
  * The app grid pins and unpins by writing the same file; a file monitor
  * (inotify - no polling) brings the dock along.
  *
@@ -64,6 +66,11 @@
  *   running     the dot beside the icon grows in on the insert spring,
  *               with its 4.5% overshoot, and stretches into the taller
  *               accent bar when the app takes focus
+ *   in, out     an icon pinned or opened grows in on the insert spring
+ *               and the others slide aside; one unpinned or closed
+ *               shrinks away and they close up (see "the row")
+ *   dragging    the icon lifts and follows the pointer, a gap opens
+ *               where it would land, and it glides into place
  *
  * Each item has one tick callback for its springs, and it is removed
  * when they rest: a still dock costs no wakeups.
@@ -145,6 +152,13 @@ typedef struct {
     LpMotion *motion;
     gboolean launching;
     guint give_up;
+    char *pin_id;           /* the line in ~/.config/lp/dock that pins it */
+    LpSpring pres;          /* 0 gone .. 1 in its place (see "the row") */
+    LpSpring off;           /* px from its place, springing back to 0 */
+    gboolean leaving;       /* on its way out: shrinks, then is destroyed */
+    gboolean drag_eaten;    /* a drag ended on it: the release is no tap */
+    double lay_x;           /* its place in the row, this frame */
+    int put_x;              /* where the GtkFixed has it */
 } Item;
 
 static GtkWindow *win;
@@ -153,8 +167,59 @@ static GtkWidget *grid_button;
 static GPtrArray *items;         /* Item* in dock order */
 static GFileMonitor *pin_monitor;
 static guint rebuild_id;
+static GtkWidget *stage;         /* the window's content: room to lift an icon, then the bar */
 
 static void rebuild(void);
+
+/* ── the row: where every item is, and how it moves ──────────────────
+ *
+ * The items sit in a fixed container, each at a place worked out every
+ * frame from the ones before it: an item's room is its width times its
+ * presence (0 gone .. 1 there). An item that comes in - pinned from the
+ * menu or the app grid, an app that starts - grows out of nothing while
+ * the ones after it slide over to make room, and one that goes out -
+ * unpinned, closed - shrinks away while they close up behind it; the
+ * bar, centred, narrows and widens from both ends with them. An item
+ * that changes place keeps where it was drawn as an offset that springs
+ * back to nothing: it slides there instead of jumping.
+ *
+ * Dragging one (mouse or finger) lifts it out of the row: it follows the
+ * pointer, slightly larger, and a gap opens where it would land while
+ * the one it left closes. Let go and it glides into the gap - the new
+ * order is the pinned list from then on. Lifted well above the dock it
+ * shrinks and says "Remove": letting go there unpins it, and it goes in
+ * a puff, the others closing up. An app that is running but not pinned
+ * is pinned by dropping it among the pinned ones. */
+typedef struct { int at; LpSpring w; } Gap;
+static GPtrArray *gaps;           /* Gap*: room opened while dragging */
+static LpMotion *lay;             /* the row's springs and the dragged icon's */
+static double slot_w, slot_h;     /* one item's room */
+static int row_w, row_h;          /* the row's size, as the container reports it */
+static gboolean built_once, rebuild_after_drag;
+static guint reap_id;
+
+static struct {
+    Item *it;            /* lifted, or gliding back to its place */
+    gboolean active;     /* moved past the threshold: a drag, not a tap */
+    gboolean settling;   /* let go: the icon glides to its place (or puffs) */
+    gboolean out;        /* lifted off the dock: letting go unpins */
+    gboolean removing;   /* let go off the dock: the puff */
+    int from;            /* its place in the row when it was lifted */
+    double cx0, cy0;     /* the icon's centre at the press, stage coordinates */
+    LpSpring gx, gy, gs, ga;
+} D;
+
+#define DRAG_START 8     /* px the pointer moves before a press is a drag */
+
+static gboolean item_hidden(const Item *it)
+{
+    return D.it == it && (D.active || D.settling);
+}
+
+static gboolean in_row(const Item *it)
+{
+    return !(D.it == it && D.active);
+}
 
 /* ── the pinned list ─────────────────────────────────────────────── */
 
@@ -353,6 +418,10 @@ static void on_item(GtkWidget *b, gpointer d)
     Item *it = d;
     if (lp_hold_consumed(b))
         return;
+    if (it->drag_eaten) {
+        it->drag_eaten = FALSE;
+        return;
+    }
     if (!it->info) {
         show_missing(it);
         return;
@@ -524,31 +593,46 @@ static cairo_surface_t *breath_surface(GtkWidget *w)
     return s;
 }
 
+/* How far an item's drawing is from its widget's centre: the middle of
+ * the room it has now, which is narrower than the widget while it comes
+ * in or goes out (the widget keeps its full size; the room is what the
+ * next item is placed after). */
+static double room_shift(const Item *it)
+{
+    double pr = CLAMP(it->pres.x, 0.0, 1.0);
+    return -slot_w * (1.0 - pr) / 2.0;
+}
+
 static gboolean img_draw(GtkWidget *w, cairo_t *cr, gpointer d)
 {
     Item *it = d;
+    if (item_hidden(it))
+        return TRUE;            /* the lifted icon is drawn over the dock */
     double p = CLAMP(it->pulse.x, 0.0, 1.0);
-    if (p < 0.001) {
+    double pr = CLAMP(it->pres.x, 0.0, 1.08);
+    if (p < 0.001 && fabs(pr - 1.0) < 0.002) {
         g_object_set_data(G_OBJECT(w), "lp-breath", NULL);
         return FALSE;
     }
+    if (pr < 0.01)
+        return TRUE;
     cairo_surface_t *s = breath_surface(w);
     if (!s)
         return FALSE;
     double W = gtk_widget_get_allocated_width(w), H = gtk_widget_get_allocated_height(w);
-    double sc = 1.0 - 0.08 * p;
-    cairo_translate(cr, W / 2, H / 2);
+    double sc = pr * (1.0 - 0.08 * p);
+    cairo_translate(cr, W / 2 + room_shift(it), H / 2);
     cairo_scale(cr, sc, sc);
     cairo_set_source_surface(cr, s, -ICON_PX / 2.0, -ICON_PX / 2.0);
-    cairo_paint_with_alpha(cr, 1.0 - 0.45 * p);
+    cairo_paint_with_alpha(cr, MIN(pr, 1.0) * (1.0 - 0.45 * p));
     return TRUE;
 }
 
 static gboolean dot_draw(GtkWidget *w, cairo_t *cr, gpointer d)
 {
     Item *it = d;
-    double r = it->run.x;
-    if (r < 0.01)
+    double r = it->run.x * CLAMP(it->pres.x, 0.0, 1.0);
+    if (r < 0.01 || item_hidden(it))
         return TRUE;
     double W = gtk_widget_get_allocated_width(w), H = gtk_widget_get_allocated_height(w);
     GtkStyleContext *sc = gtk_widget_get_style_context(w);
@@ -559,7 +643,7 @@ static gboolean dot_draw(GtkWidget *w, cairo_t *cr, gpointer d)
     /* Under the icon: a round dot, stretched sideways into a short bar
      * when the app is the one in front. */
     double dh = 5.0 * r, dw = (5.0 + 11.0 * it->focus.x) * r;
-    double x = (W - dw) / 2, y = (H - dh) / 2, rad = dh / 2;
+    double x = (W - dw) / 2 + room_shift(it), y = (H - dh) / 2, rad = dh / 2;
     cairo_set_source_rgba(cr, a.red + (b.red - a.red) * f, a.green + (b.green - a.green) * f,
                           a.blue + (b.blue - a.blue) * f, CLAMP(r, 0, 1));
     cairo_new_sub_path(cr);
@@ -595,19 +679,31 @@ static void item_free(gpointer p)
     if (it->give_up)
         g_source_remove(it->give_up);
     lp_motion_free(it->motion);
+    lp_motion_remove(lay, &it->pres);
+    lp_motion_remove(lay, &it->off);
     g_free(it->id);
+    g_free(it->pin_id);
     g_clear_object(&it->info);
     g_free(it);
 }
 
-static Item *add_item(const char *id, GDesktopAppInfo *info, const Slot *slot,
-                      gboolean pinned)
+static void on_drag_begin(GtkGestureDrag *g, double x, double y, gpointer d);
+static void on_drag_update(GtkGestureDrag *g, double dx, double dy, gpointer d);
+static void on_drag_end(GtkGestureDrag *g, double dx, double dy, gpointer d);
+static void on_drag_cancel(GtkGesture *g, GdkEventSequence *seq, gpointer d);
+
+/* A new item, in the container but not yet in the row (rebuild_now puts
+ * it there). */
+static Item *item_new(const char *id, GDesktopAppInfo *info, const Slot *slot,
+                      gboolean pinned, const char *pin_id)
 {
     Item *it = g_new0(Item, 1);
     it->id = g_strdup(id);
     it->info = info;
     it->slot = slot;
     it->pinned = pinned;
+    it->pin_id = g_strdup(pin_id ? pin_id : id);
+    it->put_x = G_MININT;
 
     it->button = gtk_button_new();
     GtkStyleContext *sc = gtk_widget_get_style_context(it->button);
@@ -643,15 +739,459 @@ static Item *add_item(const char *id, GDesktopAppInfo *info, const Slot *slot,
                                                  : lp_app_name(G_APP_INFO(info)));
     lp_on_tap(it->button, (LpTapFn)on_item, it);
     lp_on_hold(it->button, on_hold, it);
-    gtk_box_pack_start(GTK_BOX(list), it->button, FALSE, FALSE, 0);
-    g_ptr_array_add(items, it);
+    /* Bubble phase, after the tap and long-press gestures (capture) have
+     * seen the press: it claims the sequence only once the pointer has
+     * travelled DRAG_START, which cancels those two - so a drag is never
+     * also a tap, a long press never also a drag. */
+    GtkGesture *dg = gtk_gesture_drag_new(it->button);
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(dg), GDK_BUTTON_PRIMARY);
+    gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(dg), FALSE);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(dg), GTK_PHASE_BUBBLE);
+    g_signal_connect(dg, "drag-begin", G_CALLBACK(on_drag_begin), it);
+    g_signal_connect(dg, "drag-update", G_CALLBACK(on_drag_update), it);
+    g_signal_connect(dg, "drag-end", G_CALLBACK(on_drag_end), it);
+    g_signal_connect(dg, "cancel", G_CALLBACK(on_drag_cancel), it);
+    g_object_set_data_full(G_OBJECT(it->button), "lp-dock-drag", dg, g_object_unref);
+
+    lp_spring_init(&it->pres, LP_SPRING_INSERT, 0.0);
+    lp_spring_init(&it->off, LP_SPRING_SLIDE, 0.0);
+    lp_motion_add(lay, &it->pres);
+    lp_motion_add(lay, &it->off);
+    gtk_fixed_put(GTK_FIXED(list), it->button, 0, 0);
+    gtk_widget_show_all(it->button);
+    if (slot_w <= 0) {
+        int mn, nat;
+        gtk_widget_get_preferred_width(it->button, &mn, &nat);
+        slot_w = nat;
+        gtk_widget_get_preferred_height(it->button, &mn, &nat);
+        slot_h = nat;
+        row_h = (int)slot_h;
+    }
     return it;
 }
 
-/* Dot state carried across a rebuild, so an item that is destroyed and
- * made again (the pin file changed, an unpinned app opened) does not
- * grow its dot in a second time. */
-static GHashTable *dot_memory;   /* id -> packed run/focus */
+/* ── the row ─────────────────────────────────────────────────────── */
+
+/* The container: a GtkFixed that is exactly as wide as the row says,
+ * not as wide as its children reach - an item going out at the end is
+ * still full width in there while its room shrinks, and the bar has to
+ * narrow with the room. */
+typedef struct { GtkFixed parent; } LpRow;
+typedef struct { GtkFixedClass parent; } LpRowClass;
+G_DEFINE_TYPE(LpRow, lp_row, GTK_TYPE_FIXED)
+
+static void row_pref_w(GtkWidget *w, int *min, int *nat) { (void)w; *min = *nat = row_w; }
+static void row_pref_h(GtkWidget *w, int *min, int *nat) { (void)w; *min = *nat = row_h; }
+static void lp_row_class_init(LpRowClass *c)
+{
+    GTK_WIDGET_CLASS(c)->get_preferred_width = row_pref_w;
+    GTK_WIDGET_CLASS(c)->get_preferred_height = row_pref_h;
+}
+static void lp_row_init(LpRow *r) { (void)r; }
+
+static double gaps_at(int k, gboolean and_after)
+{
+    double w = 0;
+    for (guint g = 0; gaps && g < gaps->len; g++) {
+        Gap *gp = g_ptr_array_index(gaps, g);
+        if (gp->at == k || (and_after && gp->at > k))
+            w += slot_w * MAX(gp->w.x, 0.0);
+    }
+    return w;
+}
+
+/* Every item's place this frame (lay_x); the row's width. */
+static double layout_compute(void)
+{
+    double x = 0;
+    int k = 0;
+    for (guint i = 0; i < items->len; i++) {
+        Item *it = g_ptr_array_index(items, i);
+        if (!in_row(it))
+            continue;
+        x += gaps_at(k, FALSE);
+        it->lay_x = x;
+        x += slot_w * MAX(it->pres.x, 0.0);
+        k++;
+    }
+    return x + gaps_at(k, TRUE);
+}
+
+static void update_input(void);
+
+static gboolean reap(gpointer d)
+{
+    (void)d;
+    reap_id = 0;
+    for (guint i = items->len; i-- > 0;) {
+        Item *it = g_ptr_array_index(items, i);
+        if (it->leaving && it->pres.x < 0.01 && !it->pres.moving && D.it != it) {
+            gtk_widget_destroy(it->button);
+            g_ptr_array_remove_index(items, i);
+        }
+    }
+    for (guint g = gaps ? gaps->len : 0; g-- > 0;) {
+        Gap *gp = g_ptr_array_index(gaps, g);
+        if (gp->w.target < 0.5 && gp->w.x < 0.01 && !gp->w.moving) {
+            lp_motion_remove(lay, &gp->w);
+            g_ptr_array_remove_index(gaps, g);
+        }
+    }
+    return G_SOURCE_REMOVE;
+}
+
+/* The centre of an item's icon, in the stage's coordinates. */
+static void icon_centre(const Item *it, double *x, double *y)
+{
+    int lx = 0, ly = 0;
+    gtk_widget_translate_coordinates(list, stage, 0, 0, &lx, &ly);
+    GtkAllocation ia, ba;
+    gtk_widget_get_allocation(it->img, &ia);
+    gtk_widget_get_allocation(it->button, &ba);
+    *x = lx + it->lay_x + slot_w * CLAMP(it->pres.x, 0.0, 1.0) / 2.0;
+    *y = ly + (ia.y - ba.y) + ia.height / 2.0;
+}
+
+static void drag_done(void);
+
+/* Every frame anything in the row moves. */
+static void layout_apply(void)
+{
+    if (slot_w <= 0)
+        return;
+    double w = layout_compute();
+    for (guint i = 0; i < items->len; i++) {
+        Item *it = g_ptr_array_index(items, i);
+        /* The lifted one's widget stays where the press was: the drag's
+         * offsets are measured in its coordinates. */
+        if (!in_row(it))
+            continue;
+        int x = (int)lround(it->lay_x + it->off.x);
+        if (x != it->put_x) {
+            gtk_fixed_move(GTK_FIXED(list), it->button, x, 0);
+            it->put_x = x;
+        }
+    }
+    int wi = (int)ceil(w - 0.01);
+    if (wi != row_w) {
+        row_w = MAX(wi, 0);
+        gtk_widget_queue_resize(list);
+    }
+    if (D.it && D.settling && !D.removing) {
+        double tx, ty;
+        icon_centre(D.it, &tx, &ty);
+        if (fabs(tx - D.gx.target) > 0.5) lp_spring_set_target(&D.gx, tx);
+        if (fabs(ty - D.gy.target) > 0.5) lp_spring_set_target(&D.gy, ty);
+    }
+    if (D.it && D.settling && !D.gx.moving && !D.gy.moving && !D.ga.moving && !D.gs.moving)
+        drag_done();
+    gtk_widget_queue_draw(stage);
+    if (!reap_id)
+        reap_id = g_idle_add(reap, NULL);
+}
+
+static void layout_frame(GtkWidget *w, gpointer d)
+{
+    (void)w; (void)d;
+    layout_apply();
+}
+
+/* ── dragging ────────────────────────────────────────────────────── */
+
+static int row_index(const Item *it)
+{
+    int k = 0;
+    for (guint i = 0; i < items->len; i++) {
+        Item *o = g_ptr_array_index(items, i);
+        if (o == it)
+            return k;
+        if (in_row(o))
+            k++;
+    }
+    return k;
+}
+
+static Gap *gap_open(int k, gboolean full)
+{
+    if (!gaps)
+        gaps = g_ptr_array_new_with_free_func(g_free);
+    Gap *gp = NULL;
+    for (guint g = 0; g < gaps->len; g++)
+        if (((Gap *)g_ptr_array_index(gaps, g))->at == k)
+            gp = g_ptr_array_index(gaps, g);
+    if (!gp) {
+        gp = g_new0(Gap, 1);
+        gp->at = k;
+        lp_spring_init(&gp->w, LP_SPRING_INSERT, full ? 1.0 : 0.0);
+        lp_motion_add(lay, &gp->w);
+        g_ptr_array_add(gaps, gp);
+    }
+    if (full)
+        lp_spring_jump(&gp->w, 1.0);
+    else
+        lp_spring_set_target(&gp->w, 1.0);
+    return gp;
+}
+
+/* The gap to be at k (or nowhere, k < 0); every other one closes. */
+static void gap_move_to(int k)
+{
+    for (guint g = 0; gaps && g < gaps->len; g++) {
+        Gap *gp = g_ptr_array_index(gaps, g);
+        if (gp->at != k && gp->w.target > 0.5)
+            lp_spring_set_target_out(&gp->w, 0.0);
+    }
+    if (k >= 0)
+        gap_open(k, FALSE);
+    lp_motion_kick(lay);
+}
+
+/* Where the lifted icon would land: counted on the row as it would be
+ * without any gap, so the gap opening does not move the answer. Pinned
+ * apps first: an icon dropped past the last pinned one lands after it -
+ * except a running, unpinned app over the unpinned ones, which stays
+ * where it was. */
+static int drop_index(double stage_x)
+{
+    int lx = 0, ly = 0;
+    gtk_widget_translate_coordinates(list, stage, 0, 0, &lx, &ly);
+    double x = stage_x - lx, cum = 0;
+    int k = 0, n = 0, pinned_end = 0;
+    for (guint i = 0; i < items->len; i++) {
+        Item *it = g_ptr_array_index(items, i);
+        if (!in_row(it))
+            continue;
+        double room = slot_w * CLAMP(it->pres.target, 0.0, 1.0);
+        if (cum + room / 2 < x)
+            k = n + 1;
+        cum += room;
+        n++;
+        if (it->pinned && !it->leaving)
+            pinned_end = n;
+    }
+    if (D.it->pinned)
+        return MIN(k, pinned_end);
+    return k > pinned_end ? D.from : k;
+}
+
+static void on_drag_begin(GtkGestureDrag *g, double x, double y, gpointer d)
+{
+    (void)x; (void)y;
+    Item *it = d;
+    if (D.it || it->leaving || slot_w <= 0) {
+        gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_DENIED);
+        return;
+    }
+    D.it = it;
+    D.active = D.settling = D.out = D.removing = FALSE;
+    icon_centre(it, &D.cx0, &D.cy0);
+}
+
+static void on_drag_update(GtkGestureDrag *g, double dx, double dy, gpointer d)
+{
+    Item *it = d;
+    if (D.it != it || D.settling)
+        return;
+    if (!D.active) {
+        if (hypot(dx, dy) < DRAG_START)
+            return;
+        /* A drag now: the tap and the long press are off. */
+        gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
+        it->drag_eaten = TRUE;
+        D.from = row_index(it);
+        D.active = TRUE;
+        gtk_style_context_add_class(gtk_widget_get_style_context(it->button), "lp-dragging");
+        /* Its room stays, as a gap of the same width: nothing moves yet. */
+        gap_open(D.from, TRUE);
+        lp_spring_jump(&D.gs, 1.0);
+        lp_spring_set_target(&D.gs, 1.12);
+        lp_spring_jump(&D.ga, 1.0);
+    }
+    lp_spring_jump(&D.gx, D.cx0 + dx);
+    lp_spring_jump(&D.gy, D.cy0 + dy);
+    /* Lifted most of an item's height above the dock: off it. Only a
+     * pinned app can be taken off; a running one just goes back. */
+    gboolean out = it->pinned && dy < -slot_h * 0.9;
+    if (out != D.out) {
+        D.out = out;
+        lp_spring_set_target(&D.gs, out ? 0.8 : 1.12);
+        lp_spring_set_target(&D.ga, out ? 0.6 : 1.0);
+    }
+    gap_move_to(out ? -1 : drop_index(D.cx0 + dx));
+    layout_apply();
+}
+
+/* The pinned list in the dock's order, written down. */
+static void save_order(void)
+{
+    GPtrArray *pins = g_ptr_array_new_with_free_func(g_free);
+    for (guint i = 0; i < items->len; i++) {
+        Item *it = g_ptr_array_index(items, i);
+        if (it->pinned && !it->leaving)
+            g_ptr_array_add(pins, g_strdup(it->pin_id));
+    }
+    write_pins(pins);
+    g_ptr_array_unref(pins);
+}
+
+static void drop(gboolean cancelled)
+{
+    Item *it = D.it;
+    D.active = FALSE;
+    D.settling = TRUE;
+    if (D.out && !cancelled) {
+        /* Off the dock: unpinned, in a puff where it was let go. Its gap
+         * is already closing; it comes back (at the end) only if it is
+         * running. */
+        D.removing = TRUE;
+        it->leaving = TRUE;
+        it->pinned = FALSE;
+        lp_spring_jump(&it->pres, 0.0);
+        gap_move_to(-1);
+        lp_spring_set_target_out(&D.gs, 0.25);
+        lp_spring_set_target_out(&D.ga, 0.0);
+        save_order();
+        lp_motion_kick(lay);
+        return;
+    }
+    /* Into the gap: the item takes its place in the row, starting at the
+     * gap's width so nothing beside it jumps. */
+    Gap *gp = NULL;
+    for (guint g = 0; gaps && g < gaps->len; g++) {
+        Gap *o = g_ptr_array_index(gaps, g);
+        if (o->w.target > 0.5)
+            gp = o;
+    }
+    int k = gp ? gp->at : D.from;
+    double w0 = gp ? gp->w.x : 0.0;
+    if (gp) {
+        lp_motion_remove(lay, &gp->w);
+        g_ptr_array_remove(gaps, gp);
+    }
+    for (guint g = 0; gaps && g < gaps->len; g++) {
+        Gap *o = g_ptr_array_index(gaps, g);
+        if (o->at > k)
+            o->at++;
+    }
+    /* Out of the array, and back in as the k-th item of the row. */
+    g_ptr_array_set_free_func(items, NULL);
+    g_ptr_array_remove(items, it);
+    g_ptr_array_set_free_func(items, item_free);
+    guint pos = items->len;
+    int n = 0;
+    for (guint i = 0; i < items->len; i++) {
+        if (n == k) {
+            pos = i;
+            break;
+        }
+        if (in_row(g_ptr_array_index(items, i)))
+            n++;
+    }
+    g_ptr_array_insert(items, pos, it);
+    lp_spring_jump(&it->pres, w0);
+    lp_spring_set_target(&it->pres, 1.0);
+    lp_spring_jump(&it->off, 0.0);
+    it->put_x = G_MININT;
+    lp_spring_set_target(&D.gs, 1.0);
+    lp_spring_set_target(&D.ga, 1.0);
+    layout_compute();
+    double tx, ty;
+    icon_centre(it, &tx, &ty);
+    lp_spring_set_target(&D.gx, tx);
+    lp_spring_set_target(&D.gy, ty);
+    gboolean moved = k != D.from;
+    if (!cancelled && moved) {
+        if (!it->pinned) {
+            /* A running app dropped among the pinned ones: pinned there. */
+            it->pinned = TRUE;
+            g_free(it->pin_id);
+            it->pin_id = g_strdup(it->id);
+        }
+        save_order();
+    }
+    lp_motion_kick(lay);
+    layout_apply();
+}
+
+static void drag_done(void)
+{
+    Item *it = D.it;
+    D.it = NULL;
+    D.settling = D.removing = D.out = FALSE;
+    if (it)
+        gtk_style_context_remove_class(gtk_widget_get_style_context(it->button), "lp-dragging");
+    gtk_widget_queue_draw(stage);
+    if (rebuild_after_drag) {
+        rebuild_after_drag = FALSE;
+        rebuild();
+    }
+}
+
+static void on_drag_end(GtkGestureDrag *g, double dx, double dy, gpointer d)
+{
+    (void)g; (void)dx; (void)dy;
+    Item *it = d;
+    if (D.it != it || D.settling)
+        return;
+    if (!D.active) {
+        D.it = NULL;            /* a tap: the tap gesture has it */
+        return;
+    }
+    drop(FALSE);
+}
+
+static void on_drag_cancel(GtkGesture *g, GdkEventSequence *seq, gpointer d)
+{
+    (void)g; (void)seq;
+    Item *it = d;
+    if (D.it != it || D.settling)
+        return;
+    if (!D.active) {
+        D.it = NULL;
+        return;
+    }
+    drop(TRUE);
+}
+
+/* The lifted icon, over everything in the dock's surface; and "Remove"
+ * over it while it is off the dock. */
+static gboolean ghost_draw(GtkWidget *w, cairo_t *cr, gpointer d)
+{
+    (void)d;
+    if (!D.it || !(D.active || D.settling))
+        return FALSE;
+    cairo_surface_t *s = breath_surface(D.it->img);
+    if (!s)
+        return FALSE;
+    double a = CLAMP(D.ga.x, 0.0, 1.0), sc = MAX(D.gs.x, 0.0);
+    cairo_save(cr);
+    cairo_translate(cr, D.gx.x, D.gy.x);
+    cairo_scale(cr, sc, sc);
+    cairo_set_source_surface(cr, s, -ICON_PX / 2.0, -ICON_PX / 2.0);
+    cairo_paint_with_alpha(cr, a);
+    cairo_restore(cr);
+    if (D.out && D.active) {
+        PangoLayout *pl = gtk_widget_create_pango_layout(w, T("Remove", "고정 해제"));
+        PangoFontDescription *fd = pango_font_description_from_string("Pretendard Variable Semi-Bold 10");
+        pango_layout_set_font_description(pl, fd);
+        int tw, th;
+        pango_layout_get_pixel_size(pl, &tw, &th);
+        double bx = D.gx.x - tw / 2.0 - 10, by = D.gy.x - ICON_PX * sc / 2 - th - 14;
+        double bw = tw + 20, bh = th + 8, r = bh / 2;
+        cairo_new_sub_path(cr);
+        cairo_arc(cr, bx + r, by + r, r, G_PI / 2, 3 * G_PI / 2);
+        cairo_arc(cr, bx + bw - r, by + r, r, -G_PI / 2, G_PI / 2);
+        cairo_close_path(cr);
+        cairo_set_source_rgba(cr, 0.06, 0.13, 0.20, 0.92);
+        cairo_fill(cr);
+        cairo_set_source_rgba(cr, 0.92, 0.95, 0.97, 1.0);
+        cairo_move_to(cr, bx + 10, by + 4);
+        pango_cairo_show_layout(cr, pl);
+        pango_font_description_free(fd);
+        g_object_unref(pl);
+    }
+    return FALSE;
+}
 
 static void paint_dots(gboolean animate)
 {
@@ -687,26 +1227,52 @@ static gboolean owned_by_items(const char *app_id)
 {
     for (guint i = 0; i < items->len; i++) {
         Item *it = g_ptr_array_index(items, i);
-        if (it->info && lp_app_owns(it->info, app_id))
+        if (!it->leaving && it->info && lp_app_owns(it->info, app_id))
             return TRUE;
     }
     return FALSE;
 }
 
+/* What the dock should show, in order: the pinned list, then the running
+ * apps that are not pinned. */
+typedef struct {
+    char *use;               /* the desktop id the item is for */
+    GDesktopAppInfo *info;   /* owned; NULL for a slot nothing fills */
+    const Slot *slot;
+    gboolean pinned;
+    char *pin_id;
+} Want;
+
+static void want_free(gpointer p)
+{
+    Want *w = p;
+    g_free(w->use);
+    g_free(w->pin_id);
+    g_clear_object(&w->info);
+    g_free(w);
+}
+
+static gboolean wanted_owns(GPtrArray *want, const char *app_id)
+{
+    for (guint i = 0; i < want->len; i++) {
+        Want *w = g_ptr_array_index(want, i);
+        if (w->info && lp_app_owns(w->info, app_id))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* The dock brought up to date without starting over: items that stay are
+ * the same widgets (their dots and springs carry on), new ones grow in,
+ * gone ones shrink out where they are, and any that changed place slide
+ * there (see "the row"). */
 static void rebuild_now(void)
 {
-    g_hash_table_remove_all(dot_memory);
-    for (guint i = 0; i < items->len; i++) {
-        Item *it = g_ptr_array_index(items, i);
-        g_hash_table_insert(dot_memory, g_strdup(it->id),
-            GINT_TO_POINTER(1 + (it->run.target > 0.5) + 2 * (it->focus.target > 0.5)));
+    if (D.it) {
+        rebuild_after_drag = TRUE;     /* after the dragged icon has landed */
+        return;
     }
-    GList *kids = gtk_container_get_children(GTK_CONTAINER(list));
-    for (GList *l = kids; l; l = l->next)
-        gtk_widget_destroy(l->data);
-    g_list_free(kids);
-    g_ptr_array_set_size(items, 0);
-
+    GPtrArray *want = g_ptr_array_new_with_free_func(want_free);
     GPtrArray *pins = read_pins();
     for (guint i = 0; i < pins->len; i++) {
         const char *id = g_ptr_array_index(pins, i);
@@ -722,34 +1288,131 @@ static void rebuild_now(void)
             if (!info)
                 continue;       /* uninstalled and unknown: nothing to draw */
         }
-        add_item(use, info, slot, TRUE);
+        Want *w = g_new0(Want, 1);
+        w->use = g_strdup(use);
+        w->info = info;
+        w->slot = slot;
+        w->pinned = TRUE;
+        w->pin_id = g_strdup(id);
+        g_ptr_array_add(want, w);
     }
     g_ptr_array_unref(pins);
-
     /* Running applications that are not pinned, after the pinned ones,
      * in the order they were opened. */
     for (GList *l = lp_toplevels(); l; l = l->next) {
         LpToplevel *t = l->data;
-        if (!t->done || !t->app_id || owned_by_items(t->app_id))
+        if (!t->done || !t->app_id || wanted_owns(want, t->app_id))
             continue;
         GDesktopAppInfo *info = lp_app_for_id(t->app_id);
         if (!info)
             continue;
-        add_item(g_app_info_get_id(G_APP_INFO(info)), info, NULL, FALSE);
+        Want *w = g_new0(Want, 1);
+        w->use = g_strdup(g_app_info_get_id(G_APP_INFO(info)));
+        w->info = info;
+        w->pin_id = g_strdup(w->use);
+        g_ptr_array_add(want, w);
     }
-    gtk_widget_show_all(list);
-    /* Items that existed before start where they were; new ones start
-     * empty, and then everything moves to where it now belongs. */
+
+    /* Where everything is drawn now, to slide what changes place. */
+    layout_compute();
     for (guint i = 0; i < items->len; i++) {
         Item *it = g_ptr_array_index(items, i);
-        int m = GPOINTER_TO_INT(g_hash_table_lookup(dot_memory, it->id));
-        if (m) {
-            lp_spring_jump(&it->run, (m - 1) & 1 ? 1.0 : 0.0);
-            lp_spring_jump(&it->focus, (m - 1) & 2 ? 1.0 : 0.0);
+        it->lay_x += it->off.x;          /* drawn position, kept below */
+    }
+
+    GPtrArray *next = g_ptr_array_new();
+    GHashTable *fresh = g_hash_table_new(NULL, NULL);
+    for (guint i = 0; i < want->len; i++) {
+        Want *w = g_ptr_array_index(want, i);
+        Item *it = NULL;
+        for (guint j = 0; j < items->len && !it; j++) {
+            Item *o = g_ptr_array_index(items, j);
+            /* Same app, and still the same kind of thing: a dim slot that
+             * got its app installed is a new icon, not the old one lit. */
+            if (!o->leaving && strcmp(o->id, w->use) == 0 && !o->info == !w->info &&
+                !g_ptr_array_find(next, o, NULL))
+                it = o;
+        }
+        if (it) {
+            it->pinned = w->pinned;
+            g_free(it->pin_id);
+            it->pin_id = g_strdup(w->pin_id);
+            g_clear_object(&w->info);
+        } else {
+            it = item_new(w->use, w->info, w->slot, w->pinned, w->pin_id);
+            w->info = NULL;              /* the item has it */
+            g_hash_table_add(fresh, it);
+        }
+        g_ptr_array_add(next, it);
+    }
+    /* What is not wanted any more goes out from where it is. */
+    int last = -1;
+    for (guint i = 0; i < items->len; i++) {
+        Item *o = g_ptr_array_index(items, i);
+        guint pos;
+        if (g_ptr_array_find(next, o, &pos)) {
+            last = (int)pos;
+            continue;
+        }
+        if (!o->leaving) {
+            o->leaving = TRUE;
+            o->pinned = FALSE;
+            gtk_style_context_add_class(gtk_widget_get_style_context(o->button), "lp-leaving");
+            if (built_once && !lp_motion_reduced())
+                lp_spring_set_target_out(&o->pres, 0.0);
+            else
+                lp_spring_jump(&o->pres, 0.0);
+        }
+        g_ptr_array_insert(next, last + 1, o);
+        last++;
+    }
+    g_ptr_array_set_free_func(items, NULL);
+    g_ptr_array_set_size(items, 0);
+    for (guint i = 0; i < next->len; i++)
+        g_ptr_array_add(items, g_ptr_array_index(next, i));
+    g_ptr_array_set_free_func(items, item_free);
+    g_ptr_array_unref(next);
+    g_ptr_array_unref(want);
+
+    /* New ones grow in - all at once, without growing, at the start. */
+    gboolean animate = built_once && !lp_motion_reduced();
+    for (guint i = 0; i < items->len; i++) {
+        Item *it = g_ptr_array_index(items, i);
+        if (!g_hash_table_contains(fresh, it))
+            continue;
+        if (animate)
+            lp_spring_set_target(&it->pres, 1.0);
+        else
+            lp_spring_jump(&it->pres, 1.0);
+    }
+    /* The ones that stay keep their drawn position and slide from it. */
+    GArray *was = g_array_new(FALSE, FALSE, sizeof(double));
+    for (guint i = 0; i < items->len; i++) {
+        Item *it = g_ptr_array_index(items, i);
+        double x = it->lay_x;
+        g_array_append_val(was, x);
+    }
+    layout_compute();
+    for (guint i = 0; i < items->len; i++) {
+        Item *it = g_ptr_array_index(items, i);
+        if (g_hash_table_contains(fresh, it))
+            continue;
+        double d = g_array_index(was, double, i) - it->lay_x;
+        if (!animate) {
+            lp_spring_jump(&it->off, 0.0);
+        } else if (fabs(d - it->off.x) > 0.5) {
+            it->off.x = d;
+            lp_spring_set_target(&it->off, 0.0);
         }
     }
+    g_array_unref(was);
+    g_hash_table_unref(fresh);
+
+    built_once = TRUE;
     paint_dots(TRUE);
     publish_pins();
+    layout_apply();
+    lp_motion_kick(lay);
 }
 
 static gboolean rebuild_idle(gpointer d)
@@ -789,6 +1452,8 @@ static void on_toplevels(gpointer d)
     /* And an unpinned item whose last window closed has to go. */
     for (guint i = 0; i < items->len; i++) {
         Item *it = g_ptr_array_index(items, i);
+        if (it->leaving)
+            continue;
         GList *w = it->pinned ? NULL : windows_of(it);
         gboolean gone = !it->pinned && !w;
         g_list_free(w);
@@ -947,13 +1612,14 @@ static void reserve_room(void)
 {
     if (!spacer)
         return;
-    int h = gtk_widget_get_allocated_height(GTK_WIDGET(win));
+    int h = dock_bar ? gtk_widget_get_allocated_height(dock_bar) : 0;
     if (h <= 1)
         return;
     /* The bar's own height and the gap under it, not the surface's: the
-     * surface is taller by the room above the bar for its shadow, and a
-     * maximised window stopped that far above the dock - a strip of
-     * wallpaper between the two. It meets the bar's top edge now. */
+     * surface is taller by the room above the bar for its shadow (and for
+     * an icon being dragged), and a maximised window stopped that far
+     * above the dock - a strip of wallpaper between the two. It meets
+     * the bar's top edge now. */
     if (dock_bar) {
         GtkBorder m = { 0 };
         GtkStyleContext *sc = gtk_widget_get_style_context(dock_bar);
@@ -1227,26 +1893,42 @@ static gboolean recentre(gpointer d)
     /* Its height is known only now: a dock that had to be away from the
      * start (a full-screen window already there) is put away here. */
     place_dock();
-    GdkDisplay *dpy = gdk_display_get_default();
-    GdkWindow *gw = gtk_widget_get_window(GTK_WIDGET(win));
-    GdkMonitor *mon = gw ? gdk_display_get_monitor_at_window(dpy, gw) : NULL;
-    if (!mon)
-        mon = gdk_display_get_monitor(dpy, 0);
-    if (!mon)
-        return G_SOURCE_REMOVE;
-    GdkRectangle geo;
-    gdk_monitor_get_geometry(mon, &geo);
-    int w = gtk_widget_get_allocated_width(GTK_WIDGET(win));
-    int m = MAX(0, (geo.width - w) / 2);
-    if (gtk_layer_get_margin(win, GTK_LAYER_SHELL_EDGE_LEFT) != m)
-        gtk_layer_set_margin(win, GTK_LAYER_SHELL_EDGE_LEFT, m);
+    update_input();
     return G_SOURCE_REMOVE;
+}
+
+/* The surface is as wide as the screen, and transparent but for the bar:
+ * only the bar takes the pointer and the fingers, and everything else
+ * goes through to the windows under it. (It used to be as wide as the
+ * bar and centred by a margin; a bar that narrows and widens every frame
+ * then meant a new surface size and a new margin every frame, and the
+ * two never land in the same one - the bar shook.) */
+static void update_input(void)
+{
+    static GdkRectangle last = { -1, -1, -1, -1 };
+    if (!dock_bar || !gtk_widget_get_realized(GTK_WIDGET(win)))
+        return;
+    GtkAllocation a;
+    gtk_widget_get_allocation(dock_bar, &a);
+    GtkBorder m = { 0 };
+    GtkStyleContext *sc = gtk_widget_get_style_context(dock_bar);
+    gtk_style_context_get_margin(sc, gtk_style_context_get_state(sc), &m);
+    GdkRectangle r = { a.x + m.left, a.y + m.top, a.width - m.left - m.right,
+                       a.height - m.top - m.bottom };
+    if (r.width <= 0 || r.height <= 0)
+        return;
+    if (r.x == last.x && r.y == last.y && r.width == last.width && r.height == last.height)
+        return;
+    last = r;
+    cairo_region_t *reg = cairo_region_create_rectangle((cairo_rectangle_int_t *)&r);
+    gtk_widget_input_shape_combine_region(GTK_WIDGET(win), reg);
+    cairo_region_destroy(reg);
 }
 
 static void on_dock_allocate(GtkWidget *w, GdkRectangle *a, gpointer d)
 {
     (void)w; (void)a; (void)d;
-    /* Not from inside the allocation itself: a margin change asks the
+    /* Not from inside the allocation itself: a zone change asks the
      * compositor for a new configure. */
     g_idle_add(recentre, NULL);
 }
@@ -1288,16 +1970,28 @@ int main(int argc, char **argv)
         return 0;
     lp_shell_init(&argc, &argv);
     items = g_ptr_array_new_with_free_func(item_free);
-    dot_memory = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 
-    /* Anchored to the bottom edge only: the compositor centres it
-     * across, and it is as wide as its icons. The exclusive zone is its
-     * height plus the gap under it, so windows stop above it. */
-    /* Anchored bottom and left, and centred by a left margin worked out
-     * from its own width: wayfire 0.7 does not centre a surface anchored
-     * to one edge (sway does), and the dock came up in the corner. */
+    /* The size, and a watch on it (see icon_px): before anything is
+     * built, since the room above the bar is measured in icons. */
+    char *conf = lp_config_path("dock.conf");
+    char *cs = NULL;
+    if (g_file_get_contents(conf, &cs, NULL, NULL)) {
+        if (strstr(cs, "size=small")) icon_px = 30;
+        else if (strstr(cs, "size=large")) icon_px = 48;
+        g_free(cs);
+    }
+    GFile *cf = g_file_new_for_path(conf);
+    GFileMonitor *conf_monitor = g_file_monitor_file(cf, G_FILE_MONITOR_NONE, NULL, NULL);
+    if (conf_monitor)
+        g_signal_connect(conf_monitor, "changed", G_CALLBACK(on_conf_changed), NULL);
+    g_object_unref(cf);
+    g_free(conf);
+
+    /* Along the whole bottom edge, transparent, with the bar centred in
+     * it and the input region the bar's (update_input says why). The
+     * exclusive zone is the spacer's. */
     win = lp_layer_window("lp-dock", GTK_LAYER_SHELL_LAYER_TOP,
-                          LP_EDGE_BOTTOM | LP_EDGE_LEFT);
+                          LP_EDGE_BOTTOM | LP_EDGE_LEFT | LP_EDGE_RIGHT);
     gtk_layer_set_margin(win, GTK_LAYER_SHELL_EDGE_BOTTOM, DOCK_MARGIN);
     /* Its own zone would be ignored (a corner); the spacer reserves it.
      * -1, not 0: a surface with zone 0 is laid out inside the room the
@@ -1320,10 +2014,21 @@ int main(int argc, char **argv)
     g_signal_connect_swapped(gdk_screen_get_default(), "size-changed",
                              G_CALLBACK(recentre), NULL);
 
+    /* Room above the bar for an icon lifted off it (the drag), then the
+     * bar. The lifted icon is drawn over all of it (ghost_draw). */
+    stage = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *above = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_size_request(above, -1, ICON_PX * 2);
+    gtk_box_pack_start(GTK_BOX(stage), above, FALSE, FALSE, 0);
+    g_signal_connect_after(stage, "draw", G_CALLBACK(ghost_draw), NULL);
+    gtk_container_add(GTK_CONTAINER(win), stage);
+
     GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_style_context_add_class(gtk_widget_get_style_context(outer), "lp-dock");
-    gtk_container_add(GTK_CONTAINER(win), outer);
+    gtk_widget_set_halign(outer, GTK_ALIGN_CENTER);
+    gtk_box_pack_start(GTK_BOX(stage), outer, FALSE, FALSE, 0);
     dock_bar = outer;
+    g_signal_connect(outer, "size-allocate", G_CALLBACK(on_dock_allocate), NULL);
 
     /* The items sit straight in the bar, which is as wide as they are.
      * (A GtkScrolledWindow around them, for a dock wider than the
@@ -1331,8 +2036,18 @@ int main(int argc, char **argv)
      * which is none: the dock came up as the grid button alone.) Ten
      * slots at 62 px is 620 px, well inside the narrowest screen this
      * runs on at its scale. */
-    list = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    list = g_object_new(lp_row_get_type(), NULL);
+    gtk_widget_set_valign(list, GTK_ALIGN_CENTER);
     gtk_box_pack_start(GTK_BOX(outer), list, FALSE, FALSE, 0);
+    lay = lp_motion_new(list, layout_frame, NULL);
+    lp_spring_init(&D.gx, LP_SPRING_SHEET, 0.0);
+    lp_spring_init(&D.gy, LP_SPRING_SHEET, 0.0);
+    lp_spring_init(&D.gs, LP_SPRING_MENU, 1.0);
+    lp_spring_init(&D.ga, LP_SPRING_MENU, 1.0);
+    lp_motion_add(lay, &D.gx);
+    lp_motion_add(lay, &D.gy);
+    lp_motion_add(lay, &D.gs);
+    lp_motion_add(lay, &D.ga);
 
     gtk_box_pack_start(GTK_BOX(outer),
                        gtk_separator_new(GTK_ORIENTATION_VERTICAL),
@@ -1359,21 +2074,6 @@ int main(int argc, char **argv)
             lp_wfshell_hotspot(m, LP_WF_EDGE_BOTTOM, 2, 150, on_wf_hotspot, NULL);
         }
     }
-
-    /* The size, and a watch on it (see icon_px). */
-    char *conf = lp_config_path("dock.conf");
-    char *cs = NULL;
-    if (g_file_get_contents(conf, &cs, NULL, NULL)) {
-        if (strstr(cs, "size=small")) icon_px = 30;
-        else if (strstr(cs, "size=large")) icon_px = 48;
-        g_free(cs);
-    }
-    GFile *cf = g_file_new_for_path(conf);
-    GFileMonitor *conf_monitor = g_file_monitor_file(cf, G_FILE_MONITOR_NONE, NULL, NULL);
-    if (conf_monitor)
-        g_signal_connect(conf_monitor, "changed", G_CALLBACK(on_conf_changed), NULL);
-    g_object_unref(cf);
-    g_free(conf);
 
     char *path = lp_config_path("dock");
     GFile *f = g_file_new_for_path(path);
