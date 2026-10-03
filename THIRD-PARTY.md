@@ -59,7 +59,7 @@ PipeWire, wayfire, foot, bash, coreutils 등). 라이선스는 패키지마다 �
 
 ## 펌웨어
 
-무선랜·블루투스·그래픽 칩을 움직이는 펌웨어(Intel i915·마이크로코드, Qualcomm ath10k,
+무선랜·블루투스·그래픽 칩을 움직이는 펌웨어(Intel i915·마이크로코드, AMD 마이크로코드, Qualcomm ath10k,
 Broadcom 블루투스, 무선 규제 데이터베이스)는 linux-firmware 에서 가져온 것으로, 각
 제조사의 재배포 라이선스를 따릅니다. 저장소에는 넣지 않고 빌드할 때
 [`tools/fetch-pc-fw.sh`](tools/fetch-pc-fw.sh) 가 받으며, 라이선스 전문은 이미지와

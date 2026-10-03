@@ -30,6 +30,12 @@
 #                                          kernel (kernel/build.sh), which
 #                                          is how Linux loads it early
 #                                          without an initrd of its own.
+#             amd-ucode/microcode_amd_fam{17h,19h,1ah}.bin
+#                                          Ryzen and the like (Zen 1-2,
+#                                          Zen 3-4, Zen 5): the same, for
+#                                          a desktop with an AMD CPU (a
+#                                          Ryzen 5 PRO 4650G is family
+#                                          17h), built in beside Intel's.
 #
 # plus regulatory.db and its signature, which built-in cfg80211 asks for
 # once at boot and, if it is missing, never again: the radio then stays
@@ -135,6 +141,9 @@ fw  bf4cfc23ee952a3d82ef33a0f5f87853201c98f1bed034876a910f354f37862d brcm/brcmfm
 fw  5691d1e0ceb70baf18efb7a0ec6cb84feb9edd2d0700c525b42930c4e7e4b845 brcm/brcmfmac4350-pcie.bin                      brcm/brcmfmac4350-pcie.bin                      lf
 fw  e526fd12cd3529b7e01c0076f69189b7e2d9a0124a91e7583c6ddefecdbe0599 brcm/BCM20703A1-0a5c-6410.hcd                   brcm/BCM20703A1-0a5c-6410.hcd                   bt
 fw  15e96637a89012390e2c254effad092fc9535912b709ffa316069fc5606efb65 intel-ucode/06-5e-03                            intel-ucode/06-5e-03                            mc
+fw  966e4b796ec689c618868d08f8a37f347b0e7bfce4ae9df793e08471d363b7d0 amd-ucode/microcode_amd_fam17h.bin              amd-ucode/microcode_amd_fam17h.bin              lf
+fw  c614d6db8056c5c67a9189b225124127d56990a190305bcb3927d50e132de7dd amd-ucode/microcode_amd_fam19h.bin              amd-ucode/microcode_amd_fam19h.bin              lf
+fw  605aecca9583a3710efb482b4940fe3dd1f96b1cea19818e766f298d8ba06a5d amd-ucode/microcode_amd_fam1ah.bin              amd-ucode/microcode_amd_fam1ah.bin              lf
 fw  f0d15f6d7c4ce17270c951287222699c0909bea9028ecb84d2e8be6fa364691e qca/rampatch_usb_00000302.bin                   qca/rampatch_usb_00000302.bin                   lf
 fw  9ee2cff5bd51523b65c941b72ecf05a8b5e7b9e280c79fa08c70ade7205088a5 qca/nvm_usb_00000302.bin                        qca/nvm_usb_00000302.bin                        lf
 fw  7e236caecd939c8ec98be4870bf30422f28ffef2565a38aaaa2d9ddabd0c2641 regulatory.db                                   regulatory.db                                   rd
@@ -147,6 +156,7 @@ doc b16056fc91b82a0e3e8de8f86c2dac98201aa9dc3cbd33e8d38f1b087fcec30d LICENSES/LI
 doc 678b0df753c86198fc496d1f1033429bbd57f101472132ee7eaaf9f5e0a7fae1 LICENSES/LICENSE.wireless-regdb                 LICENSE                                         rd
 doc a12e372fee6d54196c189d85b8a7b52221042c8585c048def2b32ee7294f95b9 LICENSES/LICENSE.broadcom_bcm20702             LICENSE.broadcom_bcm20702                       bt
 doc 03efb1491c7e899feb2665fa299363e64035e5444c1b8bc1f6ebed30de964e12 LICENSES/LICENSE.intel-ucode                    license                                         mc
+doc 2103bd999f77522c5ab5fd35df0579ed00e2a6b885f6f8ebd444e97ffa482991 LICENSES/LICENSE.amd-ucode                      LICENSES/LICENSE.amd-ucode                      lf
 "
 
 die() { printf 'fetch-pc-fw: %s\n' "$*" >&2; exit 1; }

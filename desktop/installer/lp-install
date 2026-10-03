@@ -30,8 +30,8 @@ What an install writes (the disk layout contract, COMMON.md):
           2  LP-RECOVERY  ext4    ~1.3 GiB  the recovery system (sized to it)
           3  LP-ROOT      ext4      rest    this system, copied
 
-    --partition   one partition of a GPT disk, erased; the rest of the
-                  disk (Windows, somebody's data) left as it is:
+    --partition   one partition of a GPT or MBR disk, erased; the rest of
+                  the disk (Windows, somebody's data) left as it is:
           n  LP-ROOT      ext4    as it was this system, copied; the
                                             partition keeps its PARTUUID
           +  the disk's own EFI System Partition gets \\EFI\\LP\\ - no
@@ -57,7 +57,18 @@ What an install writes (the disk layout contract, COMMON.md):
 
     A partition install makes no LP-RECOVERY: there is no room that is
     LP's to take for it, and the boot menu offers Recovery only on a
-    disk that has one (\\EFI\\LP\\recovery.ok). Every install names its root
+    disk that has one (\\EFI\\LP\\recovery.ok).
+
+    An MBR disk (a laptop that ran Windows in legacy BIOS mode) takes a
+    partition or free-space install too, with three differences: every
+    partition LP uses or makes is a primary one - LP-ESP of type EF, the
+    root of type 83 - because the firmware looks for an EFI System
+    Partition only there and preinit reads only the four primary slots;
+    so it needs a free slot for each partition it makes (the window says
+    when the four are taken); there are no partition names and so no
+    LP-RECOVERY; and the firmware entry names the EFI partition by the
+    disk's 32-bit signature, HD(n,MBR,...). The PARTUUIDs are the
+    kernel's for MBR, "1a2b3c4d-02". Every install names its root
     by PARTUUID in \\EFI\\LP\\cmdline.txt and its recovery by PARTUUID in
     recovery.ok, so a disk with several LP partitions, or a stick with
     the same labels plugged in beside it, boots the one installed.
@@ -116,8 +127,9 @@ Why it is built the way it is:
     the fallback \\EFI\\BOOT\\BOOTX64.EFI only when there is none, because
     on a Windows disk that file is how the firmware finds Windows once
     its NVRAM entry is gone. What is refused is refused before a byte is
-    written: an MBR disk (the EFI boot path needs GPT), a partition
-    mounted, swapped on or held, the EFI partition itself, one smaller
+    written: a disk with no partition table (only a whole-disk install
+    makes one), a partition mounted, swapped on or held, the EFI
+    partition itself, a logical partition of an MBR disk, one smaller
     than a copy needs, an EFI partition without the room for the kernel.
 
   - Two firmware settings on the Dell XPS 15 9550 stop an install before
@@ -176,7 +188,30 @@ TYPE_NAMES = {
     "21686148-6449-6E6F-744E-656564454649": "BIOS boot",
     "48465300-0000-11AA-AA11-00306543ECAC": "Apple HFS+",
     "7C3457EF-0000-11AA-AA11-00306543ECAC": "Apple APFS",
+    # An MBR partition's type is one byte; table_entries gives the two
+    # that matter here as the GPT types above, the rest as "MBR-xx".
+    "MBR-01": "FAT12",
+    "MBR-04": "FAT16",
+    "MBR-06": "FAT16",
+    "MBR-07": "NTFS / exFAT",
+    "MBR-0B": "FAT32",
+    "MBR-0C": "FAT32",
+    "MBR-0E": "FAT16",
+    "MBR-05": "Extended",
+    "MBR-0F": "Extended",
+    "MBR-85": "Extended",
+    "MBR-12": "Recovery",
+    "MBR-17": "Hidden NTFS",
+    "MBR-27": "Windows recovery",
+    "MBR-82": "Linux swap",
+    "MBR-8E": "Linux LVM",
+    "MBR-FD": "Linux RAID",
+    "MBR-A5": "FreeBSD",
+    "MBR-AF": "Apple HFS+",
 }
+# What an MBR type byte is as one of the GPT types above.
+MBR_TYPES = {0xEF: TYPE_ESP, 0x83: TYPE_LINUX}
+MBR_EXTENDED = (0x05, 0x0F, 0x85)
 # The GPT names of LP's partitions (the layout contract). On a disk that
 # carries them already, a partition or free-space install names its own
 # LP-ROOT-2 and so on (lp_name) rather than a second LP-ROOT.
@@ -378,6 +413,65 @@ def gpt_entries(disk):
     return out
 
 
+def mbr_table(disk):
+    """An MBR disk's table, as sfdisk reads it (logical partitions
+    included): {"id": the disk signature, "entries": number -> (type,
+    PARTUUID, "", first, last) for every partition but an extended one,
+    "extended": (first, last) of that or None, "free_slots": the empty
+    primary slots 1-4}. None for a disk that is not MBR.
+
+    The PARTUUID of an MBR partition is the kernel's and blkid's:
+    the signature and the number, "1a2b3c4d-02"."""
+    try:
+        r = subprocess.run([tool("sfdisk"), "--json", "/dev/" + disk], text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
+        t = json.loads(r.stdout)["partitiontable"]
+    except (Refused, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        return None
+    if t.get("label") != "dos":
+        return None
+    sig = int(t.get("id", "0"), 16)
+    out = {"id": sig, "entries": {}, "extended": None, "free_slots": []}
+    used = set()
+    for p in t.get("partitions", []):
+        m = re.search(r"(\d+)$", p.get("node", ""))
+        if not m:
+            continue
+        n = int(m.group(1))
+        typ = int(p.get("type", "0"), 16)
+        first, size = int(p["start"]), int(p["size"])
+        if n <= 4:
+            used.add(n)
+        if typ in MBR_EXTENDED:
+            out["extended"] = (first, first + size - 1)
+            continue
+        out["entries"][n] = (MBR_TYPES.get(typ, "MBR-%02X" % typ),
+                             "%08x-%02x" % (sig, n), "", first, first + size - 1)
+    out["free_slots"] = [n for n in range(1, 5) if n not in used]
+    return out
+
+
+def table_entries(disk):
+    """gpt_entries on a GPT disk, and the same for an MBR one: number ->
+    (type, PARTUUID, name, first, last), the name empty (MBR has none)."""
+    out = gpt_entries(disk)
+    if out:
+        return out
+    mbr = mbr_table(disk)
+    return mbr["entries"] if mbr else {}
+
+
+def table_geometry(disk):
+    """(logical block size, first usable LBA, last usable LBA): GPT's
+    header says; on MBR everything after the first MiB, to the end."""
+    geo = gpt_geometry(disk)
+    if geo or disk_table(disk) != "dos":
+        return geo
+    bs = int(read("/sys/block/%s/queue/logical_block_size" % disk, "512"))
+    n = int(read("/sys/block/%s/size" % disk, "0")) * 512 // bs
+    return (bs, ALIGN // bs, n - 1) if n else None
+
+
 def disk_of_majmin(majmin):
     """The whole disk a partition (or disk) with this dev number is on."""
     try:
@@ -392,10 +486,11 @@ def disk_of_majmin(majmin):
 def disk_table(disk):
     """"gpt", "dos" (an MBR table, or anything else with the 55 AA mark
     where one would be), "" for no table at all, "?" when the disk cannot
-    be read (not root). Only GPT takes a partition install: the firmware
-    starts LP from an EFI System Partition, and an MBR disk on this
-    machine is a disk Windows booted in legacy mode, whose boot path LP
-    would have to rebuild rather than join."""
+    be read (not root). Both tables take a partition or free-space
+    install. On MBR the firmware starts LP from a primary partition of
+    type EF (the UEFI rule for an EFI System Partition on MBR), and LP's
+    root is a primary partition too: preinit reads the four primary
+    slots and not the logical partitions behind an extended one."""
     bs = int(read("/sys/block/%s/queue/logical_block_size" % disk, "512"))
     try:
         with open("/dev/" + disk, "rb") as f:
@@ -426,16 +521,21 @@ def gpt_geometry(disk):
 
 
 def free_regions(disk):
-    """The unallocated stretches of a GPT disk, [(first LBA, LBAs)],
-    each trimmed to whole MiB at both ends - largest first. The gaps
-    that alignment leaves between partitions (under a MiB) are not
-    space anybody could use and are not reported."""
-    geo = gpt_geometry(disk)
+    """The unallocated stretches of a disk, [(first LBA, LBAs)], each
+    trimmed to whole MiB at both ends - largest first. The gaps that
+    alignment leaves between partitions (under a MiB) are not space
+    anybody could use and are not reported. On MBR, space inside an
+    extended partition is not free: only logical partitions go there,
+    and LP's must be primary."""
+    geo = table_geometry(disk)
     if not geo:
         return []
     bs, first, last = geo
     al = max(1, ALIGN // bs)
-    used = sorted((e[3], e[4]) for e in gpt_entries(disk).values())
+    used = sorted((e[3], e[4]) for e in table_entries(disk).values())
+    mbr = mbr_table(disk) if disk_table(disk) == "dos" else None
+    if mbr and mbr["extended"]:
+        used = sorted(used + [mbr["extended"]])
     out = []
     cur = first
     for s, e in used + [(last + 1, last + 1)]:
@@ -449,10 +549,10 @@ def free_regions(disk):
 
 
 def part_region(disk, entry):
-    """A GPT entry's sectors as a region free_layout can fill once the
+    """A table entry's sectors as a region free_layout can fill once the
     partition is gone: (first LBA, LBAs), trimmed to whole MiB at both
     ends, as free_regions trims unallocated space. None without an entry."""
-    geo = gpt_geometry(disk)
+    geo = table_geometry(disk)
     if not geo or not entry:
         return None
     al = max(1, ALIGN // geo[0])
@@ -468,7 +568,7 @@ def partuuid_dev(guid):
     for d in sorted(os.listdir("/sys/block")):
         if d.startswith(SKIP_PREFIX):
             continue
-        for n, e in gpt_entries(d).items():
+        for n, e in table_entries(d).items():
             if e[1].lower() == guid:
                 return part_path(d, n)
     return ""
@@ -598,7 +698,10 @@ def shared_layout(d, parts, mounts, disk_reason):
       running     the disk LP is running from
       in-use      held by device-mapper (LUKS, LVM) - the partition or disk
       read-only   the disk is read-only
-      not-gpt     an MBR disk, or no partition table
+      not-gpt     no partition table at all
+      mbr-logical a logical partition of an MBR disk (LP's must be primary)
+      mbr-extended an MBR disk's extended partition, which holds others
+      mbr-slots   an MBR disk with no free primary slot for what LP makes
       esp         this is the EFI System Partition; LP only adds to it
       mounted     mounted (the "mount" field says where)
       swap        swapped on
@@ -609,9 +712,13 @@ def shared_layout(d, parts, mounts, disk_reason):
       esp-full    the EFI partition has no room for LP's boot files"""
     need = root_need()
     table = disk_table(d)
-    gpt = gpt_entries(d) if table == "gpt" else {}
+    gpt = table_entries(d) if table in ("gpt", "dos") else {}
+    # MBR: four primary slots, and LP's partitions must each have one.
+    mbr = mbr_table(d) if table == "dos" else None
+    slots = len(mbr["free_slots"]) if mbr else 99
     out = {
         "table": table,
+        "free_slots": slots if mbr else -1,
         "root_need": need,
         "root_need_text": human(need),
         "parts": [],
@@ -629,18 +736,20 @@ def shared_layout(d, parts, mounts, disk_reason):
         "part_ok": False,
         "free_ok": False,
     }
-    if not disk_reason and table != "gpt":
+    if not disk_reason and table not in ("gpt", "dos"):
         disk_reason = "not-gpt"
     out["shared_reason"] = disk_reason
-    esp_no = next((n for n in sorted(gpt) if gpt[n][0] == TYPE_ESP), None)
+    # On MBR only a primary partition is an EFI System Partition.
+    esp_no = next((n for n in sorted(gpt) if gpt[n][0] == TYPE_ESP
+                   and (not mbr or n <= 4)), None)
     esp_reason = ""
     if esp_no is None:
         # A partition install on a disk with no EFI partition makes one,
         # LP-ESP, in the smallest stretch of free space that holds it -
         # and is refused when there is none.
         esp_reason = "no-esp"
-        if not disk_reason:
-            geo = gpt_geometry(d)
+        if not disk_reason and slots >= 1:
+            geo = table_geometry(d)
             bs = geo[0] if geo else 512
             fits = [r for r in free_regions(d) if r[1] * bs >= ESP_MIB * 1024 ** 2]
             if fits:
@@ -672,11 +781,17 @@ def shared_layout(d, parts, mounts, disk_reason):
         where = mounts.get(p["dev"], "")
         hp = "/sys/block/%s/%s/holders" % (d, p["name"])
         held = os.path.isdir(hp) and bool(os.listdir(hp))
+        extended = bool(mbr and mbr["extended"] and p["number"] <= 4
+                        and p["number"] not in gpt)
+        if extended:
+            t = "MBR-05"
         reason = (disk_reason or
-                  ("esp" if t == TYPE_ESP else
+                  ("mbr-extended" if extended else
+                   "esp" if t == TYPE_ESP else
                    "swap" if where == "[swap]" else
                    "mounted" if where else
                    "in-use" if held else
+                   "mbr-logical" if mbr and p["number"] > 4 else
                    "too-small" if p["size"] < need else esp_reason))
         # The disk's EFI partition cannot start LP - too full (Windows
         # makes it 100 MB), unreadable, mounted, or there is none and no
@@ -685,12 +800,16 @@ def shared_layout(d, parts, mounts, disk_reason):
         # is erased anyway, so it gives LP an EFI partition of its own:
         # LP-ESP at its start, LP-RECOVERY when there is room, LP-ROOT in
         # the rest - what a free-space install makes, in its place.
+        # On MBR that is two partitions where there was one: it needs a
+        # free primary slot, and makes no LP-RECOVERY (the recovery system
+        # finds its partitions by their GPT names).
         split = None
-        region = part_region(d, gpt.get(p["number"])) if reason == esp_reason and reason else None
+        region = part_region(d, gpt.get(p["number"])) \
+            if reason == esp_reason and reason and slots >= 1 else None
         if region:
-            geo = gpt_geometry(d)
+            geo = table_geometry(d)
             split = free_layout(region[1] * geo[0], need, False,
-                                recovery=not out["lp_names"])
+                                recovery=not out["lp_names"] and not mbr)
             if split:
                 reason = ""
         out["parts"].append({
@@ -716,17 +835,21 @@ def shared_layout(d, parts, mounts, disk_reason):
             "split": split,
             "region": list(region) if split else None,
         })
-    if table == "gpt":
-        geo = gpt_geometry(d)
+    if table in ("gpt", "dos"):
+        geo = table_geometry(d)
         bs = geo[0] if geo else 512
         for start, n in free_regions(d):
             # No LP-RECOVERY where LP's names are taken already: the
             # recovery system finds its partitions by name on its disk,
-            # and two of each would leave it to pick one.
-            lay = free_layout(n * bs, need, out["esp_usable"], recovery=not out["lp_names"])
+            # and two of each would leave it to pick one. Nor on MBR,
+            # which has no names.
+            lay = free_layout(n * bs, need, out["esp_usable"],
+                              recovery=not out["lp_names"] and not mbr)
             if not lay:
                 continue
             reason = disk_reason
+            if not reason and (1 if lay["new_esp"] else 0) + 1 > slots:
+                reason = "mbr-slots"
             out["free"].append(dict(lay, **{
                 "start": start,
                 "sectors": n,
@@ -739,7 +862,7 @@ def shared_layout(d, parts, mounts, disk_reason):
     # unallocated stretch there is: the window says "no free space of X
     # or more (the largest is Y)" rather than leaving the way out.
     fneed = need + (0 if out["esp_usable"] else ESP_MIB * 1024 ** 2)
-    geo = gpt_geometry(d) if table == "gpt" else None
+    geo = table_geometry(d) if table in ("gpt", "dos") else None
     largest = max((r[1] for r in free_regions(d)), default=0) * geo[0] if geo else 0
     out.update(free_need=fneed, free_need_text=human(fneed),
                free_largest=largest, free_largest_text=human(largest) if largest else "")
@@ -1456,7 +1579,8 @@ def esp_room(esp_dev, shared):
             # The root the LP already here starts: root=PARTUUID=... in
             # its command line. When that partition still exists, this
             # EFI partition is how that LP starts.
-            m = re.search(r"(?:^|\s)root=PARTUUID=([0-9A-Fa-f-]{36})(?:\s|$)",
+            m = re.search(r"(?:^|\s)root=PARTUUID=([0-9A-Fa-f-]{36}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{2})"
+                          r"(?:\s|$)",
                           read(os.path.join(mnt, "EFI/LP/cmdline.txt")))
             out["lp_root"] = m.group(1) if m else ""
             if free < need:
@@ -1618,9 +1742,16 @@ def efivar_delete(name):
 
 
 def load_option(desc, part_no, first_lba, n_lba, part_guid, loader, args):
-    """EFI_LOAD_OPTION: HD(n,GPT,guid,start,size)/File(loader)/End."""
-    hd = struct.pack("<BBHIQQ16sBB", 4, 1, 42, part_no, first_lba, n_lba,
-                     uuid.UUID(part_guid).bytes_le, 2, 2)
+    """EFI_LOAD_OPTION: HD(n,GPT,guid,start,size)/File(loader)/End - or,
+    for an MBR partition (PARTUUID "1a2b3c4d-02"), HD(n,MBR,signature,
+    start,size): partition format 1, signature type 1, the disk's 32-bit
+    signature in the first four bytes of the signature field."""
+    if re.match(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{2}$", part_guid):
+        sig = struct.pack("<I", int(part_guid[:8], 16)) + bytes(12)
+        hd = struct.pack("<BBHIQQ16sBB", 4, 1, 42, part_no, first_lba, n_lba, sig, 1, 1)
+    else:
+        hd = struct.pack("<BBHIQQ16sBB", 4, 1, 42, part_no, first_lba, n_lba,
+                         uuid.UUID(part_guid).bytes_le, 2, 2)
     fname = (loader + "\0").encode("utf-16-le")
     fp = struct.pack("<BBH", 4, 4, 4 + len(fname)) + fname
     end = struct.pack("<BBH", 0x7F, 0xFF, 4)
@@ -1632,7 +1763,8 @@ def load_option(desc, part_no, first_lba, n_lba, part_guid, loader, args):
 
 
 def option_part_guid(data):
-    """The partition GUID an existing Boot#### points at, or None."""
+    """The partition an existing Boot#### points at, as its PARTUUID - a
+    GUID, or "1a2b3c4d-02" on MBR - or None."""
     try:
         plen = struct.unpack_from("<H", data, 4)[0]
         off = 6
@@ -1643,6 +1775,10 @@ def option_part_guid(data):
         while off + 4 <= end:
             t, s, ln = struct.unpack_from("<BBH", data, off)
             if t == 4 and s == 1 and ln >= 42:
+                if data[off + 41] == 1:                 # MBR signature
+                    num = struct.unpack_from("<I", data, off + 4)[0]
+                    sig = struct.unpack_from("<I", data, off + 24)[0]
+                    return "%08x-%02x" % (sig, num)
                 return str(uuid.UUID(bytes_le=bytes(data[off + 24:off + 40])))
             if t == 0x7F or ln < 4:
                 break
@@ -1665,7 +1801,7 @@ def option_desc(data):
 def boot_entry(disk, esp_no, esp_guid, root_uuid, have_menu):
     if not ensure_efivars():
         return None
-    first, last = gpt_entries(disk)[esp_no][3:5]
+    first, last = table_entries(disk)[esp_no][3:5]
     if have_menu:
         loader, args = "\\EFI\\LP\\lpboot.efi", ""
     else:
@@ -1677,7 +1813,9 @@ def boot_entry(disk, esp_no, esp_guid, root_uuid, have_menu):
     # and LP entries for disks that are merely unplugged, stay.
     present = set()
     for d in os.listdir("/sys/block"):
-        for (_t, g, _n, _f, _l) in gpt_entries(d).values():
+        if d.startswith(SKIP_PREFIX):
+            continue
+        for (_t, g, _n, _f, _l) in table_entries(d).values():
             present.add(g.lower())
     order = efivar_read("BootOrder") or b""
     nums = list(struct.unpack("<%dH" % (len(order) // 2), order[:len(order) // 2 * 2]))
@@ -1971,8 +2109,17 @@ def shared_refusal(reason, what, disk):
         "running": "%s is on the disk LP is running from" % what,
         "in-use": "%s is in use by device-mapper (LUKS or LVM)" % what,
         "read-only": "%s is read-only" % what,
-        "not-gpt": "%s is not a GPT disk: LP can go into a partition or free space only"
-                   " on GPT (an MBR disk can only be erased whole, --disk)" % disk["path"],
+        "not-gpt": "%s has no partition table: it can only be erased whole (--disk)"
+                   % disk["path"],
+        "mbr-logical": "%s is a logical partition of an MBR disk: LP goes only into a"
+                       " primary one, the kind the firmware and LP's start read" % what,
+        "mbr-extended": "%s is the MBR disk's extended partition, which holds others" % what,
+        "mbr-slots": "%s is an MBR disk with %s free of its four primary partition slots:"
+                     " LP needs one for itself%s" % (
+                         disk["path"], "none" if disk.get("free_slots", 0) <= 0 else
+                         "only %d" % disk["free_slots"],
+                         ", and one more for its EFI partition" if not disk["esp_usable"]
+                         else ""),
         "esp": "%s is the EFI System Partition: LP adds its boot files to it, but"
                " cannot live on it" % what,
         "mounted": "%s is mounted; unmount it first" % what,
@@ -2211,6 +2358,13 @@ def shared_esp_rows(disk, rows, esp_shared):
     return rows
 
 
+def mbr_add(dev, slot, start, cnt, mbr_type):
+    """One new primary partition, in MBR slot `slot` (sfdisk -N: that
+    slot alone is written, every other one is left as it is)."""
+    run([tool("sfdisk"), "-q", "--no-reread", "--no-tell-kernel", "-N", str(slot), dev],
+        input="start=%d, size=%d, type=%s\n" % (start, cnt, mbr_type))
+
+
 def install_partition(a, pwhash, info, disks):
     """LP into one partition of a GPT disk, the rest of the disk as it
     was: --partition /dev/nvme0n1p3. LP starts from the disk's own EFI
@@ -2232,7 +2386,8 @@ def install_partition(a, pwhash, info, disks):
     if part["own_esp"]:
         return install_partition_split(a, pwhash, disk, part)
     name, number = disk["name"], part["number"]
-    bs = gpt_geometry(name)[0]
+    bs = table_geometry(name)[0]
+    mbr = disk["table"] == "dos"
     # The names the other partitions have: ours is LP-ROOT unless one of
     # them is called that already (another LP on this disk, whose
     # recovery system finds its root by that name).
@@ -2286,17 +2441,21 @@ def install_partition(a, pwhash, info, disks):
     umount_all(WORK)
     say("STEP", "partition", "Preparing %s" % part["dev"])
     progress(1, "partition")
-    before = gpt_entries(name)
+    before = table_entries(name)
     mine = {number}
     if new_esp:
         # 1a. LP-ESP, appended in the free space found for it; every entry
-        # that is there stays as it is (check_others).
+        # that is there stays as it is (check_others). On MBR, in the
+        # first free primary slot, type EF.
         start = disk["esp_new"][0]
         cnt = ESP_MIB * 1024 ** 2 // bs
-        run([tool("sfdisk"), "-q", "--append", "--no-reread", "--no-tell-kernel",
-             disk["path"]], input="start=%d, size=%d, type=%s, name=\"%s\"\n"
-                                  % (start, cnt, TYPE_ESP, esp_name))
-        after = gpt_entries(name)
+        if mbr:
+            mbr_add(disk["path"], mbr_table(name)["free_slots"][0], start, cnt, "ef")
+        else:
+            run([tool("sfdisk"), "-q", "--append", "--no-reread", "--no-tell-kernel",
+                 disk["path"]], input="start=%d, size=%d, type=%s, name=\"%s\"\n"
+                                      % (start, cnt, TYPE_ESP, esp_name))
+        after = table_entries(name)
         check_others(before, after, set())
         esp_no = next((k for k in after if k not in before and after[k][3] == start), None)
         if esp_no is None:
@@ -2310,18 +2469,24 @@ def install_partition(a, pwhash, info, disks):
         before = after
         mine.add(esp_no)
     else:
-        esp_no = next(n for n in sorted(before) if before[n][0] == TYPE_ESP)
+        esp_no = next(n for n in sorted(before) if before[n][0] == TYPE_ESP
+                      and (not mbr or n <= 4))
 
     # 1. Its entry in the table: the name the layout contract gives LP's
     # root, the Linux type. Both in place, one field each - the other
     # entries, the disk's GUID and this partition's own (its PARTUUID,
     # which the boot is about to name) are not rewritten. The kernel is
-    # not asked to re-read a table whose partitions did not move.
-    for opt, value in (("--part-label", root_name), ("--part-type", TYPE_LINUX)):
+    # not asked to re-read a table whose partitions did not move. MBR has
+    # no names: the type alone (83), and the PARTUUID stays because the
+    # disk's signature and the partition's number do.
+    fields = ((("--part-type", "83"),) if mbr else
+              (("--part-label", root_name), ("--part-type", TYPE_LINUX)))
+    for opt, value in fields:
         run([tool("sfdisk"), "-q", "--no-reread", "--no-tell-kernel", opt,
              disk["path"], str(number), value])
-    gpt = gpt_entries(name)
-    if (gpt.get(number, ("",))[0] != TYPE_LINUX or gpt[number][2] != root_name
+    gpt = table_entries(name)
+    if (gpt.get(number, ("",))[0] != TYPE_LINUX
+            or gpt[number][2] != ("" if mbr else root_name)
             or gpt[number][1].lower() != part["partuuid"].lower()):
         raise RuntimeError("the partition table did not take %s's name and type" % root_name)
     check_others(before, gpt, mine)
@@ -2337,8 +2502,9 @@ def install_partition_split(a, pwhash, disk, part):
     install makes (free_layout, worked out by shared_layout). The disk's
     own EFI partition is not touched."""
     name, number = disk["name"], part["number"]
-    bs = gpt_geometry(name)[0]
+    bs = table_geometry(name)[0]
     mib = ALIGN // bs
+    mbr = disk["table"] == "dos"
     lay = part["split"]
     start, n = part["region"]
     esp_n = lay["esp_size"] // bs
@@ -2384,12 +2550,12 @@ def install_partition_split(a, pwhash, disk, part):
     # 1. The entry goes, and the kernel forgets the partition; every other
     # entry is proved unchanged (check_others) before and after LP's are
     # appended in its sectors.
-    before = gpt_entries(name)
+    before = table_entries(name)
     run([tool("sfdisk"), "-q", "--no-reread", "--no-tell-kernel", "--delete", dev,
          str(number)])
     subprocess.run([tool("partx"), "-d", "--nr", str(number), dev],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    gone = gpt_entries(name)
+    gone = table_entries(name)
     if number in gone:
         raise RuntimeError("%s is still in the table after it was deleted" % part["dev"])
     check_others(before, gone, {number})
@@ -2407,9 +2573,19 @@ def install_partition_split(a, pwhash, disk, part):
         at += cnt
     if at > start + n:
         raise RuntimeError("LP's partitions do not fit where %s was (a bug)" % part["dev"])
-    run([tool("sfdisk"), "-q", "--append", "--no-reread", "--no-tell-kernel", dev],
-        input=script)
-    after = gpt_entries(name)
+    if mbr:
+        # The slot the partition had, and a free one (shared_layout made
+        # sure there is one): LP-ESP and LP-ROOT, both primary.
+        free = mbr_table(name)["free_slots"]
+        if len(free) < len(starts):
+            raise RuntimeError("no free primary slot for LP's partitions (a bug)")
+        for (key, at0), slot in zip(sorted(starts.items(), key=lambda kv: kv[1]), free):
+            cnt = esp_n if key == "esp" else rec_n if key == "rec" else root_n
+            mbr_add(dev, slot, at0, cnt, "ef" if key == "esp" else "83")
+    else:
+        run([tool("sfdisk"), "-q", "--append", "--no-reread", "--no-tell-kernel", dev],
+            input=script)
+    after = table_entries(name)
     check_others(gone, after, set())
     new = {after[k][3]: k for k in after if k not in gone}
     nums = {key: new.get(lba) for key, lba in starts.items()}
@@ -2461,7 +2637,10 @@ def install_free_space(a, pwhash, info, disks):
                          " (the largest is %s)" % disk["free_largest_text"]
                          if disk["free_largest"] else ""))
     region = disk["free"][0]                    # the largest
-    bs = gpt_geometry(name)[0]
+    if region["reason"]:
+        raise Refused(region["reason"], shared_refusal(region["reason"], disk["path"], disk))
+    bs = table_geometry(name)[0]
+    mbr = disk["table"] == "dos"
     mib = ALIGN // bs
     mib_b = 1024 ** 2
     start, n = region["start"], region["sectors"]
@@ -2470,7 +2649,7 @@ def install_free_space(a, pwhash, info, disks):
         raise Refused("too-small", "%s MiB is too small: LP needs at least %s"
                       % (a.size, disk["root_need_text"]))
     lay = free_layout(n * bs, disk["root_need"], disk["esp_usable"], size,
-                      recovery=not a.no_recovery and not disk["lp_names"])
+                      recovery=not a.no_recovery and not disk["lp_names"] and not mbr)
     if not lay:
         raise Refused("too-big", "%s MiB does not fit: the free space on %s holds %s"
                       % (a.size, disk["path"], region["size_text"]))
@@ -2532,7 +2711,7 @@ def install_free_space(a, pwhash, info, disks):
     # works while another partition of the disk is in use).
     say("STEP", "partition", "Making partitions in the free space of %s" % dev)
     progress(1, "partition")
-    before = gpt_entries(name)
+    before = table_entries(name)
     script = ""
     at = start
     starts = {}
@@ -2546,16 +2725,26 @@ def install_free_space(a, pwhash, info, disks):
         at += cnt
     if at > start + n:
         raise RuntimeError("the new partitions do not fit the free space (a bug)")
-    run([tool("sfdisk"), "-q", "--append", "--no-reread", "--no-tell-kernel", dev],
-        input=script)
-    after = gpt_entries(name)
+    if mbr:
+        # Each a primary partition in a slot of its own, type EF or 83.
+        free = mbr_table(name)["free_slots"]
+        if len(free) < len(starts):
+            raise Refused("mbr-slots", shared_refusal("mbr-slots", disk["path"], disk))
+        for (key, at0), slot in zip(sorted(starts.items(), key=lambda kv: kv[1]), free):
+            cnt = esp_n if key == "esp" else rec_n if key == "rec" else root_n
+            mbr_add(dev, slot, at0, cnt, "ef" if key == "esp" else "83")
+    else:
+        run([tool("sfdisk"), "-q", "--append", "--no-reread", "--no-tell-kernel", dev],
+            input=script)
+    after = table_entries(name)
     check_others(before, after, set())
     new = {after[k][3]: k for k in after if k not in before}
     nums = {key: new.get(lba) for key, lba in starts.items()}
     if None in nums.values() or len(new) != len(starts):
         raise RuntimeError("the new partitions are not in the table as they were written")
     root_no, rec_no = nums["root"], nums.get("rec")
-    esp_no = nums.get("esp") or next(k for k in sorted(after) if after[k][0] == TYPE_ESP)
+    esp_no = nums.get("esp") or next(k for k in sorted(after) if after[k][0] == TYPE_ESP
+                                     and (not mbr or k <= 4))
     paths = [part_path(name, k) for k in nums.values()]
     for k in nums.values():
         subprocess.run([tool("partx"), "-a", "--nr", str(k), dev],
@@ -2576,7 +2765,7 @@ def install_into(a, pwhash, disk, root_no, esp_no, new_esp, mode, t0, rec_no=Non
     partition esp_no (made here too when new_esp; otherwise the disk's
     own, shared, where only \\EFI\\LP\\ is LP's), the firmware entry."""
     name = disk["name"]
-    gpt = gpt_entries(name)
+    gpt = table_entries(name)
     root_guid, esp_guid = gpt[root_no][1], gpt[esp_no][1]
     rec_guid = gpt[rec_no][1] if rec_no else None
     p_root, p_esp = part_path(name, root_no), part_path(name, esp_no)

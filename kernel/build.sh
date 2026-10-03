@@ -239,9 +239,11 @@ GEN="${BUILD_DIR}/lp-zero-generated.config"
     # initrd, or from the kernel's built-in firmware - and these kernels
     # are started by UEFI with no initrd at all, so built in it is. The
     # XPS 9550's BIOS leaves its i7-6700HQ at revision 0xd6; this brings
-    # it to the one Ubuntu loads (0xf0) before anything else runs.
+    # it to the one Ubuntu loads (0xf0) before anything else runs. AMD's
+    # the same way: the kernel's AMD loader looks for
+    # amd-ucode/microcode_amd_fam<family>h.bin among the built-in files.
     if [[ -n "$EARLY_FW_LIST" ]]; then
-        UCODE=$("${REPO_ROOT}/tools/fetch-pc-fw.sh" --list | grep '^intel-ucode/' | tr '\n' ' ')
+        UCODE=$("${REPO_ROOT}/tools/fetch-pc-fw.sh" --list | grep -E '^(intel|amd)-ucode/' | tr '\n' ' ')
         if [[ -n "$UCODE" ]]; then
             echo "CONFIG_EXTRA_FIRMWARE=\"${UCODE% }\""
             echo "CONFIG_EXTRA_FIRMWARE_DIR=\"${FW_DIR}\""

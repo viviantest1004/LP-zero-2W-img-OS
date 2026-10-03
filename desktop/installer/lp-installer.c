@@ -362,8 +362,26 @@ static void reason_words(const char *r, LpJson *disk, const char *mount,
         *en = g_strdup("The disk has no partitions yet");
         *ko = g_strdup("이 디스크에는 아직 파티션이 없습니다");
     } else if (!strcmp(r, "not-gpt")) {
-        *en = g_strdup("An MBR disk: LP can share only a GPT disk");
-        *ko = g_strdup("MBR 디스크입니다. 다른 시스템과 함께 쓰려면 GPT 디스크여야 합니다");
+        *en = g_strdup("The disk has no partition table");
+        *ko = g_strdup("이 디스크에는 파티션 표가 없습니다");
+    } else if (!strcmp(r, "mbr-logical")) {
+        /* An MBR disk is shared too, but LP goes only into a primary
+         * partition: the firmware and LP's start read those four. */
+        *en = g_strdup("A logical partition: on an MBR disk LP goes only into a primary one");
+        *ko = g_strdup("논리 파티션입니다. MBR 디스크에서는 주 파티션에만 설치할 수 있습니다");
+    } else if (!strcmp(r, "mbr-extended")) {
+        *en = g_strdup("The extended partition, which holds the logical ones");
+        *ko = g_strdup("논리 파티션들을 담고 있는 확장 파티션입니다");
+    } else if (!strcmp(r, "mbr-slots")) {
+        gboolean esp = lp_json_bool(disk, "esp_usable", FALSE);
+        *en = g_strdup(esp ? "An MBR disk has four primary partitions at most, and all four "
+                             "are taken: LP needs one"
+                           : "An MBR disk has four primary partitions at most: LP needs two "
+                             "(itself and its start-up partition), and fewer are free");
+        *ko = g_strdup(esp ? "MBR 디스크는 주 파티션이 4개까지인데 모두 쓰고 있습니다. LP 에 "
+                             "하나가 필요합니다"
+                           : "MBR 디스크는 주 파티션이 4개까지입니다. LP 와 시작 파티션에 두 "
+                             "개가 필요한데 남은 자리가 모자랍니다");
     } else if (!strcmp(r, "esp")) {
         *en = g_strdup("The EFI system partition the computer starts from: LP only "
                        "adds its start-up files to it");
