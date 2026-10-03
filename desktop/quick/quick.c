@@ -73,10 +73,13 @@
  *
  * Each one asks first, in a dialog that dims the screen. Restart into
  * Recovery is there only when the boot-recovery track's
- * lp-reboot-recovery is installed, and it asks for nothing itself: that
- * command goes through lp-privd, and lp-privd is what asks for the
- * person's password (COMMON.md, Administrator rights). A button that
- * could reboot into a root shell without that would be the hole.
+ * lp-reboot-recovery is installed. That command needs root, and it was
+ * started here as the person: it said "only the administrator can" to
+ * nobody, and the machine did not restart. It goes through lp-admin-run
+ * now, which asks for the administrator's password and runs it through
+ * sudo, as Settings > System's button does (COMMON.md, Administrator
+ * rights). A button that could reboot into a root shell without that
+ * would be the hole.
  *
  * Commands (lp-quick is one process; running it again hands it argv):
  *   lp-quick [toggle [MON]] | show [MON] | hide | daemon | refresh
@@ -967,8 +970,12 @@ static void on_go(GtkButton *b, gpointer d)
         const char *a[] = { "lp-power", "off", NULL };
         lp_spawn(a);
     } else if (g_strcmp0(w, "recovery") == 0) {
-        /* lp-privd asks for the password; this only asks for the reboot. */
-        const char *a[] = { "lp-reboot-recovery", NULL };
+        /* Root's to do: the administrator's password first (above). */
+        const char *a[] = { "lp-admin-run",
+                            "--why", T("Restarting into Recovery needs the administrator's password",
+                                       "복구 모드로 다시 시작하려면 관리자 암호가 필요합니다"),
+                            "--ok", T("Restart", "다시 시작"),
+                            "lp-reboot-recovery", NULL };
         lp_spawn(a);
     }
     dialog_close();

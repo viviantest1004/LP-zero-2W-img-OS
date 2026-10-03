@@ -71,7 +71,7 @@ fi
 seat_dev() {
     for d in "$@"; do
         test -c "$d" || continue
-        chown "$SEAT_UID" "$d" 2>/dev/null
+        chown "$SEAT_UID" "$d" > /dev/null 2>&1
         chmod 0660 "$d" 2>/dev/null
     done
 }
@@ -140,11 +140,11 @@ vt_keyboard off
 # (71-lp-seat.rules, lp-seat-own), which reads /run/lp-session/seat-uid.
 seat_take() {
     mkdir -p "/run/user/$SEAT_UID"
-    chown "$SEAT_UID:$SEAT_GID" "/run/user/$SEAT_UID"
+    chown "$SEAT_UID:$SEAT_GID" "/run/user/$SEAT_UID" > /dev/null
     chmod 700 "/run/user/$SEAT_UID"
     echo "$SEAT_UID" > /run/lp-session/seat-uid
     seat_dev /dev/dri/card* /dev/dri/renderD* /dev/input/event* /dev/snd/*
-    chown "$SEAT_UID" /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
+    chown "$SEAT_UID" /dev/tty0 /dev/tty1 /dev/tty2 > /dev/null 2>&1
     chmod 0620 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
 }
 
@@ -241,14 +241,24 @@ seat_home() {
         mkdir -p "$LP_HOME"
         /usr/bin/cp -an /usr/share/lp/home/. "$LP_HOME/" 2>/dev/null
     fi
-    chown -R "$SEAT_UID:$SEAT_GID" "$LP_HOME/" 2>/dev/null
+    # LP's chown names every file it changes (-q would not, but GNU's
+    # chown has no -q): the whole home, a browser profile's thousands of
+    # files, went line by line to the console at every sign-in.
+    chown -R "$SEAT_UID:$SEAT_GID" "$LP_HOME/" > /dev/null 2>&1
 }
 
-# Every process the account that leaves still has - pipewire holding the
-# sound card, a download, a terminal's shell - ends before the next
-# account's session starts: the devices are about to become the next
-# account's, and its pipewire could not open a card the last one still
-# held. Sent as that account, so it can reach nothing else.
+# Every process the account still has when its session ends - pipewire
+# holding the sound card, a download, a terminal's shell, and the shell's
+# own loops (lp-shell-start) - ends before the next session starts, the
+# same account's or another's. Logging out is every window closing, and
+# what was left ran on into the next session: lp-shell-start's loops tell
+# that the compositor is gone by its socket, and the next session's
+# compositor makes one of the same name, so after each logout the last
+# session's loops started their bar, dock, input methods (fcitx5 three
+# times over after two logouts) into the new one beside its own. And the
+# devices are about to become the next account's, whose pipewire could
+# not open a card the last one still held. Sent as that account, so it
+# can reach nothing else.
 end_account() {
     test -x /usr/bin/setpriv || return 0
     gid=$(awk -F: -v u="$1" '$3 == u { print $4; exit }' /etc/passwd)
@@ -294,7 +304,6 @@ while :; do
         if person_uid "$lp_next" ; then
             if test "$lp_next" != "$SEAT_UID" ; then
                 echo "start-desktop: uid $SEAT_UID signed out, uid $lp_next signs in" >> /data/log/session.log
-                end_account "$SEAT_UID"
                 SEAT_UID=$lp_next
             fi
             echo "$SEAT_UID" > /run/lp-session/signed-in
@@ -306,6 +315,7 @@ while :; do
     read -r t0 _ < /proc/uptime
     run_session >> /data/log/session.log 2>&1
     read -r t1 _ < /proc/uptime
+    end_account "$SEAT_UID"
     rm -f /run/lp-session/signed-in
     if test -e "/run/user/$SEAT_UID/lp-logout" || test -s /run/lp-session/next-user; then
         quick=0

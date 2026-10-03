@@ -8,17 +8,41 @@
 # session again when this one ends, and the marker below has
 # lp-shell-start lock it before anything else is on the screen.
 #
+# The windows are asked to close first, by the dock (lp-dock end-session,
+# desktop/dock/dock.c): an app whose display goes away under it does not
+# quit, it dies, and Chrome came back from every logout with "Chrome
+# didn't shut down correctly". The dock runs "lp-logout --now" when the
+# last window has gone, or after five seconds; this one waits for that
+# and ends the session itself if it never comes (no dock, or a dock that
+# is stuck) - start-desktop ends this process with the rest of the
+# account's when the session is over.
+#
 # The compositor is asked to stop with SIGTERM (or swaymsg exit), never
 # SIGKILL: a killed compositor leaves the VT in graphics mode.
 #
 # --switch: the sign-in screen signed another account in (lp-privd left
 # it for start-desktop); no marker - that account's session starts
 # unlocked, and this one's account is not coming back now.
-test "${1:-}" = --switch || : > "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/lp-logout"
-case "${XDG_CURRENT_DESKTOP:-}" in
-    *wayfire*|*Wayfire*)
-        pid=$(pidof wayfire)
-        test -n "$pid" && kill -TERM $pid ;;
-    *)
-        swaymsg exit ;;
+case "${1:-}" in
+    --now|--switch) ;;
+    *) : > "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/lp-logout" ;;
 esac
+
+case "${XDG_CURRENT_DESKTOP:-}" in
+    *wayfire*|*Wayfire*) comp=$(pidof wayfire) ;;
+    *) comp= ;;
+esac
+
+stop() {
+    case "${XDG_CURRENT_DESKTOP:-}" in
+        *wayfire*|*Wayfire*)
+            test -n "$comp" && kill -TERM $comp 2> /dev/null ;;
+        *)
+            swaymsg exit ;;
+    esac
+}
+
+if test "${1:-}" != --now && lp-dock end-session > /dev/null 2>&1; then
+    sleep 8
+fi
+stop

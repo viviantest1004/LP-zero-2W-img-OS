@@ -1433,9 +1433,54 @@ static void rebuild(void)
 
 static void update_away(void);
 
+/* ── ending the session ──
+ *
+ * lp-logout used to stop the compositor with every window still open, and
+ * an app that loses its display does not quit, it dies: Chrome came back
+ * from every logout with "Chrome didn't shut down correctly". Now
+ * lp-logout asks the dock (lp-dock end-session), which has the list of
+ * windows: each is asked to close, as its own close button would, and
+ * the session ends a moment after the last has gone - the moment is the
+ * app writing what it keeps on the way out - or after five seconds,
+ * because a window that asks "save changes?" has nobody to answer it
+ * (the logout dialog said that unsaved work is lost). lp-logout ends the
+ * session itself if the dock never does. */
+static gboolean ending, ended;
+
+static gboolean end_session_now(gpointer d)
+{
+    (void)d;
+    if (!ended) {
+        ended = TRUE;
+        const char *a[] = { "lp-logout", "--now", NULL };
+        lp_spawn(a);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static void end_session(void)
+{
+    if (ending)
+        return;
+    ending = TRUE;
+    for (GList *l = lp_toplevels(); l; l = l->next)
+        lp_toplevel_close(l->data);
+    if (!lp_toplevels())
+        end_session_now(NULL);
+    else
+        g_timeout_add_seconds(5, end_session_now, NULL);
+}
+
 static void on_toplevels(gpointer d)
 {
     (void)d;
+    if (ending && !lp_toplevels() && !ended) {
+        static gboolean last_gone;
+        if (!last_gone) {
+            last_gone = TRUE;
+            g_timeout_add(1500, end_session_now, NULL);
+        }
+    }
     update_away();
     /* A window of an app not yet in the dock needs a new item; anything
      * else is only a dot. Rebuilding for every title change would redraw
@@ -1950,6 +1995,8 @@ static void on_command(int argc, char **argv, gpointer d)
     (void)d;
     if (argc >= 2 && strcmp(argv[1], "refresh") == 0)
         rebuild();
+    else if (argc >= 2 && strcmp(argv[1], "end-session") == 0)
+        end_session();
     else if (argc >= 3 && strcmp(argv[1], "pin") == 0)
         set_pinned(argv[2], TRUE);
     else if (argc >= 3 && strcmp(argv[1], "unpin") == 0)
@@ -1970,6 +2017,10 @@ int main(int argc, char **argv)
 {
     if (!lp_single_instance("dock", argc, argv, on_command, NULL))
         return 0;
+    /* No dock was running to hear it: nobody has the windows, and
+     * lp-logout ends the session without them. */
+    if (argc >= 2 && strcmp(argv[1], "end-session") == 0)
+        return 1;
     lp_shell_init(&argc, &argv);
     items = g_ptr_array_new_with_free_func(item_free);
 

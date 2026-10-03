@@ -63,11 +63,26 @@ def start(prog, password):
 
 
 def main():
-    prog = sys.argv[1:]
+    # --why TEXT and --ok LABEL: what the window says and its button says,
+    # for an action rather than a program to open (the power menu's
+    # Restart into Recovery).
+    args = sys.argv[1:]
+    why = ok_label = None
+    while len(args) >= 2 and args[0] in ("--why", "--ok"):
+        if args[0] == "--why":
+            why = args[1]
+        else:
+            ok_label = args[1]
+        args = args[2:]
+    prog = args
     if not prog:
-        print("usage: lp-admin-run PROGRAM [ARGS...]", file=sys.stderr)
+        print("usage: lp-admin-run [--why TEXT] [--ok LABEL] PROGRAM [ARGS...]", file=sys.stderr)
         return 2
     name = os.path.basename(prog[0])
+    # The window's own app id: GTK's default is the program's name, and
+    # the top bar and the dock took "lp-admin-run" for the app whose
+    # menu entry starts with it - this window was "GParted" up there.
+    GLib.set_prgname("lp-admin-password")
 
     win = Gtk.Window(title=T("Administrator password", "관리자 암호"))
     win.set_default_size(420, -1)
@@ -80,15 +95,16 @@ def main():
 
     title = Gtk.Label(xalign=0)
     title.set_markup("<b>%s</b>" % GLib.markup_escape_text(
-        T("%s needs the administrator's password" % name,
-          "%s 을(를) 열려면 관리자 암호가 필요합니다" % name)))
+        why or T("%s needs the administrator's password" % name,
+                 "%s 을(를) 열려면 관리자 암호가 필요합니다" % name)))
     title.set_line_wrap(True)
     box.pack_start(title, False, False, 0)
-    note = Gtk.Label(label=T("It changes this computer itself, so it runs as root.",
-                             "이 컴퓨터 자체를 바꾸는 프로그램이라 관리자 권한으로 실행됩니다."),
-                     xalign=0)
-    note.set_line_wrap(True)
-    box.pack_start(note, False, False, 0)
+    if not why:
+        note = Gtk.Label(label=T("It changes this computer itself, so it runs as root.",
+                                 "이 컴퓨터 자체를 바꾸는 프로그램이라 관리자 권한으로 실행됩니다."),
+                         xalign=0)
+        note.set_line_wrap(True)
+        box.pack_start(note, False, False, 0)
 
     entry = Gtk.Entry()
     entry.set_visibility(False)
@@ -101,7 +117,7 @@ def main():
     buttons = Gtk.Box(spacing=8)
     buttons.set_halign(Gtk.Align.END)
     cancel = Gtk.Button(label=T("Cancel", "취소"))
-    ok = Gtk.Button(label=T("Open", "열기"))
+    ok = Gtk.Button(label=ok_label or T("Open", "열기"))
     ok.get_style_context().add_class("suggested-action")
     buttons.pack_start(cancel, False, False, 0)
     buttons.pack_start(ok, False, False, 0)
@@ -127,7 +143,14 @@ def main():
         entry.set_sensitive(True)
         ok.set_sensitive(True)
         entry.grab_focus()
-        status.set_text(T("That password was not accepted.", "암호가 맞지 않습니다."))
+        if "sudoers" in why or "may not run sudo" in why:
+            # The password was never the question: this account is not an
+            # administrator (the USB stick's own account is not one; the
+            # installed machine's owner is).
+            status.set_text(T("This account is not an administrator.",
+                              "이 계정은 관리자가 아닙니다."))
+        else:
+            status.set_text(T("That password was not accepted.", "암호가 맞지 않습니다."))
 
     ok.connect("clicked", go)
     entry.connect("activate", go)
