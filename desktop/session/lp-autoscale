@@ -96,7 +96,7 @@ def outputs_wlr_randr(every=False):
     for line in run(["wlr-randr"]).splitlines():
         if line and not line[0].isspace():
             cur = {"name": line.split()[0], "width": 0, "height": 0, "scale": 1.0, "enabled": True,
-                   "transform": "normal", "cur": None, "pref": None, "modes": []}
+                   "transform": "normal", "cur": None, "pref": None, "modes": [], "x": 0, "y": 0}
             out.append(cur)
         elif cur is not None:
             s = line.strip()
@@ -120,6 +120,10 @@ def outputs_wlr_randr(every=False):
                 cur["transform"] = s.split(":", 1)[1].strip() or "normal"
             elif s.startswith("Enabled:"):
                 cur["enabled"] = s.endswith("yes")
+            elif s.startswith("Position:"):
+                m = re.match(r"Position:\s*(-?\d+),\s*(-?\d+)", s)
+                if m:
+                    cur["x"], cur["y"] = int(m.group(1)), int(m.group(2))
     return out if every else [o for o in out if o["enabled"] and o["width"]]
 
 
@@ -361,7 +365,8 @@ def keep_a_screen():
         unoff_wayfire_ini(o["name"])
 
 
-def unoff_wayfire_ini(name):
+def unoff_wayfire_ini(name, position=None):
+    """Its "mode = off" back to "auto" - and its position, when given."""
     ini = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
                        "wayfire.ini")
     try:
@@ -377,10 +382,50 @@ def unoff_wayfire_ini(name):
         elif sec == "output:" + name and re.match(r"mode\s*=\s*off$", t):
             lines[i] = "mode = auto"
             changed = True
+        elif sec == "output:" + name and position and re.match(r"position\s*=", t):
+            lines[i] = "position = %d,%d" % position
+            changed = True
     if changed:
         with open(ini + ".lp-new", "w") as f:
             f.write("\n".join(lines))
         os.replace(ini + ".lp-new", ini)
+
+
+def logical(o):
+    w, h = o["width"] or 1920, o["height"] or 1080
+    if o["transform"] in ("90", "270", "flipped-90", "flipped-270"):
+        w, h = h, w
+    sc = o["scale"] if o["scale"] > 0 else 1.0
+    return w / sc, h / sc
+
+
+def replugged(before):
+    """An external display that is off when it is plugged in comes on.
+
+    Settings > Display can turn an external display off, and wayfire
+    keeps that ("mode = off" in wayfire.ini) for as long as the file says
+    so - through unplugging it and plugging it back in, and every start
+    after. Plugging a display in is asking for it: one that arrives off
+    is turned on, to the right of the screens that are on, and its "off"
+    goes back to "auto". Only for a display that was not connected a
+    moment before; one that is connected and off stays as it was put."""
+    if not shutil.which("wlr-randr"):
+        return set()
+    outs = outputs_wlr_randr(every=True)
+    names = {o["name"] for o in outs}
+    if before is None:
+        return names
+    on = [o for o in outs if o["enabled"] and o["width"]]
+    for o in outs:
+        if o["name"] in before or o["enabled"] or o["name"].startswith(INTERNAL):
+            continue
+        right = max((e["x"] + int(round(logical(e)[0])) for e in on), default=0)
+        top = min((e["y"] for e in on), default=0)
+        log(o["name"], "plugged in while off: on again, at %d,%d" % (right, top))
+        call(["wlr-randr", "--output", o["name"], "--on", "--preferred",
+              "--pos", "%d,%d" % (right, top)])
+        unoff_wayfire_ini(o["name"], (right, top))
+    return names
 
 
 def apply():
@@ -549,6 +594,7 @@ def watch():
             return None
 
     seen = ini_stamp()
+    connected = replugged(None)
     while True:
         ready, _, _ = select.select([p.stdout], [], [], 2.0)
         if mine is not None and compositor_socket() != mine:
@@ -563,6 +609,7 @@ def watch():
                 return
             if b" change " in chunk:
                 time.sleep(0.5)
+                connected = replugged(connected)
                 apply()
                 fit_windows()
             continue
@@ -570,6 +617,10 @@ def watch():
         if now != seen:
             seen = now
             time.sleep(1.0)        # wayfire applies it first
+            # What is connected now is not "plugged in" at the next change:
+            # a display Settings just turned off must stay off.
+            if shutil.which("wlr-randr"):
+                connected = {o["name"] for o in outputs_wlr_randr(every=True)}
             apply()
 
 

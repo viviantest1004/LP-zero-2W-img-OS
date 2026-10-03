@@ -114,6 +114,9 @@ typedef struct {
     GtkWidget *res_dd, *rate_dd;
     GPtrArray *res_list;             /* "WxH" strings in the drop-down */
     GArray    *rate_list;            /* mhz values in the drop-down */
+    GListModel *mons;                /* GDK's monitors, watched for changes */
+    gulong     mons_sig;
+    guint      mons_later;           /* the reload after a change, pending */
 } disp_t;
 
 static disp_t *DP;
@@ -134,6 +137,11 @@ static void out_free(gpointer p)
 static void disp_free(gpointer p)
 {
     disp_t *d = p;
+    if (d->mons_later) g_source_remove(d->mons_later);
+    if (d->mons) {
+        g_signal_handler_disconnect(d->mons, d->mons_sig);
+        g_object_unref(d->mons);
+    }
     g_ptr_array_free(d->outs, TRUE);
     if (d->res_list) g_ptr_array_free(d->res_list, TRUE);
     if (d->rate_list) g_array_free(d->rate_list, TRUE);
@@ -825,6 +833,57 @@ static void on_scale(GObject *dd, GParamSpec *ps, gpointer p)
     }
 }
 
+/* Where an output being turned on goes, and at what scale: what
+ * wayfire.ini kept for it when it was turned off (persist() writes its
+ * position and scale then), unless that spot is now taken by a display
+ * that is on; then to the right of everything that is on. *scale is 0
+ * when nothing was kept (lp-autoscale chooses). */
+static void place_turned_on(disp_t *d, const out_t *o, int *x, int *y, double *scale)
+{
+    char *ini = wayfire_ini();
+    char *sec = g_strdup_printf("output:%s", o->name);
+    char *pos = ini_get(ini, sec, "position");
+    char *sc = ini_get(ini, sec, "scale");
+    double s = sc ? g_ascii_strtod(sc, NULL) : 0;
+    *scale = s >= 0.5 && s <= 4 ? s : 0;
+
+    int pw = 1920, ph = 1080;
+    for (guint i = 0; i < o->modes->len; i++) {
+        const mode_t_ *m = &g_array_index(o->modes, mode_t_, i);
+        if (m->preferred || i == 0) { pw = m->w; ph = m->h; }
+        if (m->preferred) break;
+    }
+    double w = pw / (*scale > 0 ? *scale : 1), h = ph / (*scale > 0 ? *scale : 1);
+    if (!strcmp(o->transform, "90") || !strcmp(o->transform, "270") ||
+        g_str_has_suffix(o->transform, "-90") || g_str_has_suffix(o->transform, "-270")) {
+        double t = w; w = h; h = t;
+    }
+
+    int kx, ky;
+    gboolean kept = pos && sscanf(pos, "%d,%d", &kx, &ky) == 2;
+    int right = 0, top = G_MAXINT;
+    gboolean any = FALSE;
+    for (guint i = 0; i < d->outs->len; i++) {
+        const out_t *e = g_ptr_array_index(d->outs, i);
+        if (e == o || !e->enabled) continue;
+        double ew, eh;
+        logical_size(e, &ew, &eh);
+        if (kept && kx < e->x + ew && e->x < kx + w && ky < e->y + eh && e->y < ky + h)
+            kept = FALSE;
+        right = MAX(right, e->x + (int)lround(ew));
+        top = MIN(top, e->y);
+        any = TRUE;
+    }
+    if (kept) {
+        *x = kx;
+        *y = ky;
+    } else {
+        *x = right;
+        *y = any ? top : 0;
+    }
+    g_free(pos); g_free(sc); g_free(sec); g_free(ini);
+}
+
 static void on_enabled(GObject *sw, GParamSpec *ps, gpointer p)
 {
     (void)ps; (void)p;
@@ -850,12 +909,29 @@ static void on_enabled(GObject *sw, GParamSpec *ps, gpointer p)
         return;
     }
     /* On with its preferred mode: an output that was off has no current
-     * mode, and "--on" alone left wayfire with nothing to show. */
-    const char *v_on[] = { "wlr-randr", "--output", o->name, "--on", "--preferred", NULL };
+     * mode, and "--on" alone left wayfire with nothing to show. And where
+     * it was, at the scale it had: wlr-randr reads an output that is off
+     * as sitting at 0,0 at scale 1, and "--on" alone put the external
+     * display there - on top of the laptop's screen, where the pointer
+     * and windows never reached it and it showed nothing but a dark
+     * colour - and then wrote 0,0 into wayfire.ini, so it went back there
+     * every time. It looked as though it could not be turned on again. */
+    int px = 0, py = 0;
+    double psc = 0;
+    if (on) place_turned_on(d, o, &px, &py, &psc);
+    char pos[32], sc[32];
+    g_snprintf(pos, sizeof pos, "%d,%d", px, py);
+    g_ascii_formatd(sc, sizeof sc, "%.6f", psc > 0 ? psc : 1.0);
+    const char *v_on[] = { "wlr-randr", "--output", o->name, "--on", "--preferred",
+                           "--pos", pos, "--scale", sc, NULL };
+    if (psc <= 0) v_on[7] = NULL;           /* no kept scale: lp-autoscale's */
     const char *v_off[] = { "wlr-randr", "--output", o->name, "--off", NULL };
     if (randr(on ? v_on : v_off)) {
         o->enabled = on;
         if (on) {
+            o->x = px;
+            o->y = py;
+            if (psc > 0) o->scale = psc;
             persist(o);
             lp_toast(FALSE, T("%s is on", "%s 을(를) 켰습니다"), o->name);
         } else {
@@ -949,6 +1025,13 @@ static void drag_begin(GtkGestureDrag *g, double x, double y, gpointer p)
         if (d->sel != d->drag) {
             d->sel = d->drag;
             rebuild_controls(d);
+            /* The "Display" drop-down too: it kept naming the display
+             * chosen before while the switch under it was this one's. */
+            GtkWidget *pick = g_object_get_data(G_OBJECT(d->page), "lp-pick");
+            GtkWidget *row = pick ? gtk_widget_get_first_child(pick) : NULL;
+            GtkWidget *dd = row ? row_control(row) : NULL;
+            if (dd && GTK_IS_DROP_DOWN(dd))
+                LP_QUIET(gtk_drop_down_set_selected(GTK_DROP_DOWN(dd), d->sel));
         }
     }
 }
@@ -1397,6 +1480,30 @@ static void reload(disp_t *d)
     lp_run_async(v, NULL, d->page, on_randr, d);
 }
 
+/* A display plugged in or pulled, or turned on or off by something else
+ * (lp-autoscale turns on one that is plugged in while off): read them
+ * again. The page went on saying "off" for a display that was on. Once
+ * things have settled, and not in the middle of a drag. */
+static gboolean mons_reload(gpointer p)
+{
+    disp_t *d = p;
+    d->mons_later = 0;
+    if (d->drag >= 0) {
+        d->mons_later = g_timeout_add(500, mons_reload, d);
+        return G_SOURCE_REMOVE;
+    }
+    reload(d);
+    return G_SOURCE_REMOVE;
+}
+
+static void on_mons_changed(GListModel *m, guint pos, guint removed, guint added, gpointer p)
+{
+    (void)m; (void)pos; (void)removed; (void)added;
+    disp_t *d = p;
+    if (d->mons_later) g_source_remove(d->mons_later);
+    d->mons_later = g_timeout_add(1500, mons_reload, d);
+}
+
 static void on_tune(int st, const char *out, const char *err, gpointer p)
 {
     (void)err;
@@ -1425,6 +1532,8 @@ static GtkWidget *build(void)
     d->outs = g_ptr_array_new_with_free_func(out_free);
     d->page = page_new(T("Display", "화면"), T("Reading the displays…", "화면을 읽는 중…"));
     g_object_set_data_full(G_OBJECT(d->page), "lp-display", d, disp_free);
+    d->mons = g_object_ref(gdk_display_get_monitors(gdk_display_get_default()));
+    d->mons_sig = g_signal_connect(d->mons, "items-changed", G_CALLBACK(on_mons_changed), d);
 
     GtkWidget *head = gtk_label_new(T("Arrangement - drag a display to where it sits on the desk",
                                       "배치 - 책상 위에 놓인 자리로 화면을 끌어 옮기십시오"));
