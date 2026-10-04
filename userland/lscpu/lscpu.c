@@ -99,19 +99,32 @@ int main(int argc, char **argv)
     printf("CPU(s):                  %d\n", cpus);
     printf("  On-line CPU(s) list:   0-%d\n", cpus - 1);
 
+    /* ARM reports a part number rather than a name, and the part comes
+     * before "Model": that line is the machine's (a Raspberry Pi kernel
+     * adds it from the device tree), not the processor's, and under
+     * QEMU or UTM it read "Model name: linux,dummy-virt". */
+    static const struct { const char *part, *name; } arm_parts[] = {
+        { "0xd03", "Cortex-A53" }, { "0xd04", "Cortex-A35" },
+        { "0xd05", "Cortex-A55" }, { "0xd07", "Cortex-A57" },
+        { "0xd08", "Cortex-A72" }, { "0xd09", "Cortex-A73" },
+        { "0xd0a", "Cortex-A75" }, { "0xd0b", "Cortex-A76" },
+        { "0xd0c", "Neoverse-N1" }, { "0xd0d", "Cortex-A77" },
+        { "0xd41", "Cortex-A78" }, { "0xd44", "Cortex-X1" },
+        { "0xd46", "Cortex-A510" }, { "0xd47", "Cortex-A710" },
+        { "0xd48", "Cortex-X2" }, { "0xd4f", "Neoverse-V2" },
+    };
     if (field("model name", v, sizeof v))
         printf("Model name:              %s\n", v);
-    else if (field("Model", v, sizeof v))
-        printf("Model name:              %s\n", v);
     else if (field("CPU part", v, sizeof v)) {
-        /* ARM reports a part number rather than a name. The common ones
-         * are worth spelling out; the rest print as the number. */
         const char *name = NULL;
-        if (strcmp(v, "0xd03") == 0) name = "Cortex-A53";
-        else if (strcmp(v, "0xd08") == 0) name = "Cortex-A72";
-        else if (strcmp(v, "0xd0b") == 0) name = "Cortex-A76";
+        for (size_t k = 0; k < sizeof arm_parts / sizeof arm_parts[0]; k++)
+            if (strcmp(v, arm_parts[k].part) == 0) name = arm_parts[k].name;
         printf("Model name:              %s\n", name ? name : v);
-    }
+    } else if (field("Model", v, sizeof v))
+        printf("Model name:              %s\n", v);
+    if (field("CPU part", v, sizeof v) && field("Model", v, sizeof v))
+        printf("Machine:                 %s\n",
+               strcmp(v, "linux,dummy-virt") == 0 ? "QEMU virt (UTM, QEMU)" : v);
 
     if (field("vendor_id", v, sizeof v))     printf("  Vendor ID:             %s\n", v);
     if (field("cpu family", v, sizeof v))    printf("  CPU family:            %s\n", v);

@@ -660,7 +660,11 @@ typedef struct {
 
 /* Running in a virtual machine: the CPU says so (the hypervisor flag
  * every x86 hypervisor sets, KVM, UTM and QEMU's emulator included), or
- * the firmware's maker does (/sys/class/dmi/id). */
+ * the firmware's maker does (/sys/class/dmi/id), or - an ARM machine,
+ * whose CPU has no such flag - QEMU's own device tree does. UTM on an
+ * iPhone boots this system's kernel straight, with no firmware to give a
+ * maker: the tree's "linux,dummy-virt" is all there is, and without it
+ * UTM's stop button suspended a machine nobody could wake. */
 static bool virtual_machine(void)
 {
     static int known = -1;
@@ -679,6 +683,9 @@ static bool virtual_machine(void)
                 known = 1;
     if (!known && rd("/sys/class/dmi/id/product_name", v, sizeof v) &&
         strstr(v, "Virtual Machine"))              /* Hyper-V */
+        known = 1;
+    if (!known && rd("/proc/device-tree/compatible", v, sizeof v) &&
+        strcmp(v, "linux,dummy-virt") == 0)        /* QEMU's virt */
         known = 1;
     return known;
 }
@@ -963,7 +970,13 @@ static void do_action(const char *act, const conf_t *c)
 
 /* Find input devices by the names the ACPI button driver gives them.
  * /proc/bus/input/devices lists each device as a block of lines; the
- * N: line has the name and the H: line the event handler. */
+ * N: line has the name and the H: line the event handler.
+ *
+ * "gpio-keys" too: an ARM virtual machine booted from a device tree (UTM
+ * starting the kernel itself, QEMU's -kernel) has its power button on a
+ * GPIO line, and the kernel names that device after its driver. Only a
+ * KEY_POWER from it does anything below, so another button wired the
+ * same way on some board is read and ignored. */
 static int find_inputs(int *fds, int max, int *kinds)
 {
     char p[512];
@@ -976,7 +989,8 @@ static int find_inputs(int *fds, int max, int *kinds)
     while (readline((int)fd, line, sizeof line) >= 0 && n < max) {
         if (strncmp(line, "N: Name=", 8) == 0)
             kind = strstr(line, "\"Lid Switch\"")   ? 1
-                 : strstr(line, "\"Power Button\"") ? 2 : 0;
+                 : strstr(line, "\"Power Button\"") ? 2
+                 : strstr(line, "\"gpio-keys\"")    ? 2 : 0;
         else if (kind && strncmp(line, "H: Handlers=", 12) == 0) {
             char *ev = strstr(line, "event");
             if (ev) {

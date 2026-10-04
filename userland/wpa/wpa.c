@@ -162,7 +162,8 @@ static char journal[JOURNAL_LINES][JOURNAL_LEN];
 static int  journal_next, journal_count;
 static bool trace;                      /* every EAPOL frame described   */
 
-static void jlog_raw(const char *msg, bool important)
+/* In the journal (`wifi log`) and nowhere else. */
+static void jlog_quiet(const char *msg)
 {
     s64 t = lp_time();
     lp_tm_t tm;
@@ -172,6 +173,12 @@ static void jlog_raw(const char *msg, bool important)
     journal_next = (journal_next + 1) % JOURNAL_LINES;
     if (journal_count < JOURNAL_LINES)
         journal_count++;
+}
+
+/* In the journal and on the console (the daemon's stdout). */
+static void jlog_raw(const char *msg, bool important)
+{
+    jlog_quiet(msg);
     printf("wpa: %s\n", msg);
     if (important)
         lp_log("wpa", msg);
@@ -895,6 +902,8 @@ static void set_err(const char *code, const char *a1, const char *a2,
         wpa_msg_format(m, sizeof m, code, err_a1, err_a2, "", false);
         if (failed)
             JNOTE("stopped: %s", m);
+        else if (strcmp(code, "no_iface") == 0)
+            jlog_quiet(m);      /* a VM's serial console is the shell's */
         else
             JLOG("%s", m);
     }

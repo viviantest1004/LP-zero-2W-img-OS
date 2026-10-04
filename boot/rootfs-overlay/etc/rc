@@ -354,7 +354,7 @@ echo "[rc] storage"
 # partition of its own - so there is nothing to mount and the whole
 # chain of candidate device names would be four failures and a
 # misleading "continuing in RAM".
-expandfs /dev/mmcblk0 /dev/mmcblk0p2 || expandfs /dev/vda /dev/vda2 || expandfs /dev/nvme0n1 /dev/nvme0n1p2 || expandfs -w /dev/sda /dev/sda2 || echo "[rc]   nothing to expand"
+expandfs -q /dev/mmcblk0 /dev/mmcblk0p2 || expandfs -q /dev/vda /dev/vda2 || expandfs -q /dev/nvme0n1 /dev/nvme0n1p2 || expandfs -w /dev/sda /dev/sda2 || echo "[rc]   nothing to expand"
 if grep -q " / ext4 " /proc/mounts
 then
     mkdir -p /data || echo "[rc]   cannot make /data on the root"

@@ -117,7 +117,11 @@ else
   rm -f /data/fake-kernel.img /data/fake-kernel.img.sig
   cp $KIMG /data/fake-kernel.img
   update /data/fake-kernel.img > /tmp/t4 2>&1
-  if grep -q signed /tmp/t4 ; then echo "PASS  update refuses an unsigned image" ; else echo "FAIL  unsigned image was NOT refused: `head -1 /tmp/t4`" ; fi
+  # Two ways to be refused: a build with a key wants the signature ("not
+  # signed"), and a build without one cannot tell who made the image and
+  # asks for its hash instead. Only the first was looked for, so a build
+  # made without keys/ reported its refusal as a failure.
+  if grep -q "signed\|who made this image" /tmp/t4 ; then echo "PASS  update refuses an unsigned image" ; else echo "FAIL  unsigned image was NOT refused: `tail -1 /tmp/t4`" ; fi
   rm -f /data/fake-kernel.img
 fi
 rm -f /data/.update.sig

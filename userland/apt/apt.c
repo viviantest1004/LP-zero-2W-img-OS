@@ -600,6 +600,39 @@ static void usage(void)
     printf("touched by it. Removing that directory removes all of it.\n");
 }
 
+/* Whether apt has any package lists yet: a file in var/lib/apt/lists
+ * whose name has "_Packages" in it. A tree just unpacked has none - the
+ * base image ships with its lists removed - and Debian's apt then answers
+ * every install with "Unable to locate package", which is what the very
+ * first `apt install htop` on a new machine said. */
+#define LISTS ROOT "/var/lib/apt/lists"
+#define DIRENT_RECLEN 16
+#define DIRENT_NAME   19
+
+static bool have_lists(void)
+{
+    long fd = lp_open(LISTS, O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0)
+        return false;
+    bool found = false;
+    char buf[4096];
+    for (;;) {
+        long n = sys_getdents((int)fd, buf, sizeof buf);
+        if (n <= 0)
+            break;
+        for (long off = 0; off < n && !found; ) {
+            char *rec = buf + off;
+            off += *(u16 *)(rec + DIRENT_RECLEN);
+            if (strstr(rec + DIRENT_NAME, "_Packages"))
+                found = true;
+        }
+        if (found)
+            break;
+    }
+    lp_close((int)fd);
+    return found;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2 || strcmp(argv[1], "-h") == 0 ||
@@ -677,6 +710,27 @@ int main(int argc, char **argv)
             args[n++] = argv[i];
     }
     args[n] = NULL;
+
+    /* Anything that looks packages up needs the lists. Fetching them on
+     * the way, once, instead of failing: the command still does what was
+     * asked, as setting the tree up on first use does above. `apt update`
+     * itself, `run`, `shell` and `remove` (which reads the installed
+     * database, not the lists) go straight through. */
+    if ((strcmp(cmd, "install") == 0 || strcmp(cmd, "search") == 0 ||
+         strcmp(cmd, "show") == 0 || strcmp(cmd, "upgrade") == 0 ||
+         strcmp(cmd, "full-upgrade") == 0 || strcmp(cmd, "list") == 0) &&
+        !have_lists()) {
+        printf("%s: no package lists yet - running `apt update` first.\n\n", me);
+        char *up[] = { (char *)"/usr/bin/apt", (char *)"update", NULL };
+        int urc = call_in_debian(up);
+        if (urc != 0) {
+            dprintf(STDERR_FILENO,
+                    "%s: `apt update` failed - `net` says whether this"
+                    " machine can reach the mirror.\n", me);
+            return urc;
+        }
+        printf("\n");
+    }
 
     int rc = call_in_debian(args);
 

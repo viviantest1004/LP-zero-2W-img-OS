@@ -122,6 +122,7 @@ passes `tests/selftest.sh` with nothing failing on each. More in
 | `dist/linux-LP_arm64_Zero2W.img.xz` | **Raspberry Pi Zero 2 W hardware and arm64 VMs alike.** One image does both: an uncompressed kernel for the Pi's GPU and an EFI executable for UEFI |
 | `dist/linux-LP_armv6_ZeroW.img.xz` | **Raspberry Pi Zero / Zero W hardware.** ARM1176, ARMv6, 32-bit: a different instruction set from the Zero 2 W, so a separate image |
 | `dist/linux-LP_amd64.img.xz` | **Ordinary PCs and desktop VMs.** VMware, VirtualBox, QEMU/KVM, Hyper-V |
+| `dist/linux-LP_arm64_UTM.zip` | **UTM SE on an iPhone or iPad, and UTM on a Mac.** One ready-made `LP-zero.utm` - 512MB of RAM, a shell, `apt`. [Below](#iphone-and-ipad-utm-se) |
 | `dist/test_a_123_LPzero2W_linux-utm.zip` | **arm64 VMs only.** Unzip and double-click; UTM opens it |
 
 Check what you downloaded — a truncated image fails in confusing ways
@@ -183,6 +184,47 @@ Decompress, attach as a disk, set **UEFI boot** — the MBR bootstrap is
 deliberately empty. `truncate -s 16G` the image for a bigger disk; it is
 sparse, and `/data` grows into it. Full QEMU command lines are in
 [`GUIDE/USAGE.txt`](GUIDE/USAGE.txt).
+
+### iPhone and iPad (UTM SE)
+
+It runs as it is in **UTM SE** from the App Store. `dist/linux-LP_arm64_UTM.zip`
+(25MB) holds `LP-zero.utm` with everything set: arm64, 512MB of RAM, one CPU,
+no display, one terminal.
+
+1. Paste this into Safari's address bar; UTM downloads it and adds it to the list.
+
+   ```
+   utm://downloadVM?url=https://raw.githubusercontent.com/viviantest1004/LP-zero-2W-img-OS/refs/heads/claude/hohho-xvzof5/dist/linux-LP_arm64_UTM.zip
+   ```
+
+   (Or download the zip, unzip it in Files, and share `LP-zero.utm` to UTM.)
+2. Press ▶ and the terminal shows `root@lpzero:~#`. There is no login to type.
+3. Debian packages: `apt install htop` (the first time also fetches the 28MB
+   Debian base into `/data/debian` and the package lists), `apt run htop` to
+   run it, `apt shell` for a Debian shell. Python is `apt install python3`.
+4. First time: set the time zone, `timezone Asia/Seoul` (kept across reboots).
+
+Commands you will want:
+
+| Command | What it does |
+|---|---|
+| `date` · `date -s "2026-10-04 16:00"` | show · set the date and time (the VM's clock too) |
+| `timezone` · `timezone Asia/Seoul` · `timezone list` | show · set the time zone (`UTC+9` and `seoul` work too) |
+| `calc 9/4` · `calc "0xff >> 4"` | calculator - exact decimals (0.1+0.2 = 0.3), hex and binary for whole numbers |
+| `uptime` | how long it has been up, and the load |
+| `hwinfo` · `hwinfo cpu` | the hardware in detail - machine, CPU and caches, memory, disks, network, PCI, clock |
+| `info` · `lscpu` | the whole system - OS, kernel, memory in use, disks, network |
+| `battery` · `battery -p` | charge, time left and health (a VM has no battery and says so) |
+| `help` | every command |
+
+UTM SE has no JIT and interprets every instruction, so it is much slower than a
+Mac. That is why this VM skips the firmware (UTM starts the kernel itself) and
+uses a serial terminal instead of a screen. The time comes from the VM's clock
+(RTC) at boot, and UTM's stop button is the power button, which shuts down
+cleanly. The toolbar's zoom button makes UTM send `stty cols N rows N`, so
+`edit`, `top` and `htop` fit the window. SSH: from an SSH app on the same
+phone, `localhost` port **2222** (after `authkey new`). The disk is 8GB and
+takes only what is written.
 
 ---
 

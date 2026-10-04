@@ -119,6 +119,7 @@ glibc 바이너리, 그래픽, 보안, 오류 경로, 리다이렉션, 로깅, �
 | `dist/linux-LP_arm64_Zero2W.img.xz` | **라즈베리파이 제로 2 W 실기와 arm64 가상머신 양쪽.** 파이 GPU 가 읽는 압축 안 된 커널과 UEFI 가 읽는 EFI 실행 파일을 둘 다 담았습니다 |
 | `dist/linux-LP_armv6_ZeroW.img.xz` | **라즈베리파이 제로 W (1세대) 실기.** ARM1176 / ARMv6 32비트 - 제로 2 W 와 명령어 집합이 다른 기계라서 별개의 이미지입니다 |
 | `dist/linux-LP_amd64.img.xz` | **일반 PC 와 데스크톱 가상머신.** VMware, VirtualBox, QEMU/KVM, Hyper-V |
+| `dist/linux-LP_arm64_UTM.zip` | **아이폰·아이패드의 UTM SE, 맥의 UTM.** 설정까지 다 된 `LP-zero.utm` 하나 - 램 512MB, 셸, `apt`. [아래](#아이폰아이패드-utm-se) |
 | `dist/test_a_123_LPzero2W_linux-utm.zip` | **arm64 가상머신 전용.** 압축 풀고 더블클릭하면 UTM 이 엽니다 |
 | `dist/desktop/` (`get.sh` 로 받기) | **데스크탑 LP.** Dell XPS 15 9550 같은 x86-64 PC, 그리고 UTM/QEMU. 최소 사양: **2코어, 램 4GB, 디스크 16GB** |
 
@@ -197,6 +198,48 @@ xz -d < linux-LP_arm64_Zero2W.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync stat
 부트스트랩은 일부러 비워두었습니다. 디스크를 키우려면 이미지 파일을
 `truncate -s 16G` 하면 됩니다. QEMU 명령줄 전문은
 [`GUIDE/USAGE.txt`](GUIDE/USAGE.txt) 에 있습니다.
+
+### 아이폰·아이패드 (UTM SE)
+
+App Store 의 **UTM SE** 에서 그대로 돕니다. `dist/linux-LP_arm64_UTM.zip`
+(25MB) 안에 설정까지 끝난 `LP-zero.utm` 이 들어 있습니다 - arm64, 램
+512MB, CPU 1개, 화면 없이 터미널 하나.
+
+1. 사파리 주소창에 아래 한 줄을 붙여 넣고 열면 UTM 이 받아서 바로
+   목록에 넣습니다.
+
+   ```
+   utm://downloadVM?url=https://raw.githubusercontent.com/viviantest1004/LP-zero-2W-img-OS/refs/heads/claude/hohho-xvzof5/dist/linux-LP_arm64_UTM.zip
+   ```
+
+   (또는 zip 을 받아 파일 앱에서 풀고 `LP-zero.utm` 을 UTM 으로 공유.)
+2. ▶ 를 누르면 터미널에 `root@lpzero:~#` 가 뜹니다. 로그인은 자동입니다.
+3. 데비안 패키지: `apt install htop` (처음 한 번은 데비안 기본 파일
+   28MB 와 패키지 목록을 받아 `/data/debian` 에 풉니다), 실행은 `apt run htop`,
+   데비안 셸은 `apt shell`. 파이썬은 `apt install python3`.
+4. 처음이면 시간대부터: `timezone Asia/Seoul` (재부팅해도 유지).
+
+자주 쓰는 명령어:
+
+| 명령어 | 하는 일 |
+|---|---|
+| `date` · `date -s "2026-10-04 16:00"` | 날짜·시간 보기 · 설정 (VM 시계에도 저장) |
+| `timezone` · `timezone Asia/Seoul` · `timezone list` | 시간대 보기 · 설정 (`UTC+9`, `seoul` 도 됨) |
+| `calc 9/4` · `calc "0xff >> 4"` | 계산기 - 소수는 정확히(0.1+0.2 = 0.3), 정수는 16진·2진도 |
+| `uptime` | 켜진 지 얼마나 됐는지, 부하 |
+| `hwinfo` · `hwinfo cpu` | 하드웨어 자세히 - 기계, CPU·캐시, 메모리, 디스크, 네트워크, PCI, 시계 |
+| `info` · `lscpu` | 시스템 전체 - OS·커널·메모리 사용량·디스크·네트워크 |
+| `battery` · `battery -p` | 배터리 잔량·남은 시간·수명 (VM 에는 배터리가 없어 그렇다고 알려 줌) |
+| `help` | 전체 명령어 목록 |
+
+UTM SE 는 JIT 없이 명령어를 하나씩 해석하므로 맥보다 훨씬 느립니다.
+그래서 이 VM 은 펌웨어(UEFI)를 건너뛰고 UTM 이 커널을 바로 올리며, 화면
+대신 시리얼 터미널만 씁니다. 시간은 VM 의 시계(RTC)에서 바로 맞춰지고,
+UTM 의 정지 버튼은 전원 버튼이라 정상 종료됩니다. 툴바의 확대 버튼을 누르면
+UTM 이 `stty cols N rows N` 을 보내 `edit`·`top`·`htop` 이 창 크기에
+맞춰집니다. SSH 는 아이폰 안의 SSH 앱에서 `localhost` 포트 **2222** 로
+(`authkey new` 로 키를 만든 뒤). 디스크는 8GB 이고 쓴 만큼만 공간을
+차지합니다.
 
 ---
 

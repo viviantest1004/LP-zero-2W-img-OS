@@ -45,6 +45,7 @@
 #include "stdio.h"
 #include "stdlib.h"
 #include "unistd.h"
+#include "tz.h"
 #include "net.h"
 #include "disk.h"
 
@@ -234,8 +235,13 @@ static const char *arch_name(void)
  * virtual machine do not, and get an empty string. */
 static bool board_model(char *out, size_t n)
 {
-    return slurp("/proc/device-tree/model", out, n) ||
-           slurp("/sys/firmware/devicetree/base/model", out, n);
+    if (!slurp("/proc/device-tree/model", out, n) &&
+        !slurp("/sys/firmware/devicetree/base/model", out, n))
+        return false;
+    /* QEMU's virt machine - UTM's too - names itself only this */
+    if (strcmp(out, "linux,dummy-virt") == 0)
+        strlcpy(out, "QEMU virt machine (UTM or QEMU)", n);
+    return true;
 }
 
 /* One line of /proc/mounts, found either by its device or by where it
@@ -367,16 +373,16 @@ static void show_os(void)
         P(L "%s   (1, 5 and 15 minutes)", "load", buf);
     }
 
-    /* When the kernel started, from /proc/stat's btime. Printed in UTC
-     * because that is what the clock here keeps; date(1) owns the local
-     * offset and this command does not read it. */
+    /* When the kernel started, from /proc/stat's btime, in the zone
+     * `timezone` set - the same clock `date` shows. */
     if (proc_read("/proc/stat", scratch, sizeof scratch) > 0) {
         const char *b = strstr(scratch, "btime ");
         if (b) {
+            s64 bt = strtol(b + 6, NULL, 10);
             lp_tm_t tm;
-            lp_gmtime(strtol(b + 6, NULL, 10), &tm);
-            P(L "%d-%02d-%02d %02d:%02d:%02d UTC", "booted at",
-              tm.year, tm.mon, tm.day, tm.hour, tm.min, tm.sec);
+            lp_localtime(bt, &tm);
+            P(L "%d-%02d-%02d %02d:%02d:%02d %s", "booted at",
+              tm.year, tm.mon, tm.day, tm.hour, tm.min, tm.sec, lp_tz_label(bt));
         }
     }
 
@@ -995,6 +1001,9 @@ static bool wifi_ssid(char *out, size_t n)
         if (!e)
             continue;
         *e = '\0';
+        /* the card's template, never filled in */
+        if (strcmp(s, "YOUR_NETWORK_NAME") == 0)
+            continue;
         strlcpy(out, s, n);
         return out[0] != '\0';
     }
@@ -1226,6 +1235,8 @@ static void show_network(void)
           !has          ? "but wlan0 is down or not present"
         : carrier == 1  ? "and associated"
                         : "but not associated - wrong password, or out of range");
+    } else if (lp_access("/sys/class/net/wlan0", F_OK) != 0) {
+        P(L "%s", "wifi", "no wireless interface here");
     } else {
         P(L "%s", "wifi", "no network configured - `net wifi <name> <password>`");
     }

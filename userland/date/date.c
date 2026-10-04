@@ -8,7 +8,7 @@
  *   date -u / -R / -I[FMT] / --rfc-3339=FMT
  *   date -s "2026-09-01 12:34:56"   set the clock; MMDDhhmm[[CC]YY][.ss] too
  *   date -e                         unix seconds only (ours, not GNU's)
- *   date -z [ZONE|list]             the zone (ours; timedatectl does the work)
+ *   date -z [ZONE|list]             the zone (ours; timedatectl, or timezone, does the work)
  *
  * ── The -d language ──
  *
@@ -151,10 +151,23 @@ static int set_clock(s64 t, long ns, const char *fmt)
     return rc;
 }
 
-/* ══ -z: the zone, handed to timedatectl ═════════════════════════════ */
+/* ══ -z: the zone, handed to timedatectl ═════════════════════════════
+ *
+ * Or to `timezone`, where there is no timedatectl: a Pi, or LP-zero in
+ * UTM on an iPhone, has neither it nor the zone files it writes, and
+ * `date -z Asia/Seoul` there was "cannot run timedatectl" and nothing
+ * else. timezone keeps the zone in /data/timezone, a line the libc reads
+ * without zone files. */
 
 static int do_zone(int argc, char **argv, int at)
 {
+    if (lp_access("/bin/timedatectl", X_OK) != 0) {
+        char *targs[3] = { (char *)"timezone", NULL, NULL };
+        if (at < argc) targs[1] = argv[at];
+        lp_execve("/bin/timezone", targs, environ);
+        dprintf(STDERR_FILENO, "%s: cannot run timezone\n", prog);
+        return 1;
+    }
     if (at >= argc) {
         s64 now = lp_time();
         lp_tm_t tm;

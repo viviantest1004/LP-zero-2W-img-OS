@@ -429,6 +429,32 @@ static bool grow_partition(u64 *new_bytes_out)
  * e2fsck and mke2fs, and boot_tool() checks its SHA-256 against the
  * list compiled into the kernel before running it as root.
  */
+/* How big the ext4 on a partition already is, from its superblock (1024
+ * bytes in): the block count, low half at 0x04 and - with the 64bit
+ * feature (0x80 in the incompatible set at 0x60) - high half at 0x150,
+ * times 1024 << the log at 0x18. 0 when it is not ext2/3/4 or cannot be
+ * read, which only means the question is left to resize2fs. */
+static u64 ext4_bytes(const char *dev)
+{
+    u8 sb[1024];
+    long fd = lp_open(dev, O_RDONLY, 0);
+    if (fd < 0)
+        return 0;
+    bool ok = lp_lseek((int)fd, 1024, 0) == 1024 &&
+              lp_read((int)fd, sb, sizeof sb) == (long)sizeof sb;
+    lp_close((int)fd);
+    if (!ok || sb[0x38] != 0x53 || sb[0x39] != 0xEF)
+        return 0;
+    u32 lo   = (u32)sb[0x04] | (u32)sb[0x05] << 8 | (u32)sb[0x06] << 16 | (u32)sb[0x07] << 24;
+    u32 hi   = (u32)sb[0x150] | (u32)sb[0x151] << 8 | (u32)sb[0x152] << 16 | (u32)sb[0x153] << 24;
+    u32 incompat = (u32)sb[0x60] | (u32)sb[0x61] << 8 | (u32)sb[0x62] << 16 | (u32)sb[0x63] << 24;
+    u32 logb = (u32)sb[0x18];
+    if (logb > 6)
+        return 0;
+    u64 blocks = lo | ((incompat & 0x80) ? (u64)hi << 32 : 0);
+    return blocks * ((u64)1024 << logb);
+}
+
 static bool grow_offline(void)
 {
     char tool[128];
@@ -558,11 +584,13 @@ static bool wait_for_dev(const char *path, long timeout_ms)
 
 int main(int argc, char **argv)
 {
-    bool wait = false;
+    bool wait = false, quiet_missing = false;
 
-    /* -w: the device may not be there yet. Only worth passing for USB. */
-    if (argc >= 2 && strcmp(argv[1], "-w") == 0) {
-        wait = true;
+    /* -w: the device may not be there yet. Only worth passing for USB.
+     * -q: say nothing when the disk is not there at all. */
+    while (argc >= 2 && (strcmp(argv[1], "-w") == 0 || strcmp(argv[1], "-q") == 0)) {
+        if (argv[1][1] == 'w') wait = true;
+        else                   quiet_missing = true;
         argc--;
         argv++;
     }
@@ -572,14 +600,24 @@ int main(int argc, char **argv)
         dev_part = argv[2];
     } else if (argc == 2) {
         dprintf(STDERR_FILENO,
-                "usage: expandfs [-w] [disk partition]\n"
+                "usage: expandfs [-w] [-q] [disk partition]\n"
                 "  e.g.  expandfs /dev/mmcblk0 /dev/mmcblk0p2\n"
-                "  -w    wait up to 4s for the device (USB takes a moment)\n");
+                "  -w    wait up to 4s for the device (USB takes a moment)\n"
+                "  -q    no message when the disk is not there at all\n");
         return 2;
     }
 
     if (wait && !wait_for_dev(DEV_PART, WAIT_MS))
         return 1;
+
+    /* rc tries the SD card, then a virtual disk, then NVMe, then USB, and
+     * only one of them is ever there: a missing one is the normal answer
+     * there, not an error to print at every boot (UTM has no mmcblk0). */
+    if (!lp_exists(DEV_DISK)) {
+        if (!quiet_missing)
+            dprintf(STDERR_FILENO, "expandfs: there is no %s\n", DEV_DISK);
+        return 1;
+    }
 
     /* Before anything is written: is this ours? */
     int owned = check_label(DEV_PART);
@@ -633,6 +671,18 @@ int main(int argc, char **argv)
      * This is the normal boot path: /etc/rc runs expandfs before it
      * mounts /data, exactly so that this can happen. */
     (void)mounted_here;
+
+    /* Already filling it - every boot after the first. This used to go
+     * on to resize2fs regardless, and resize2fs refuses a filesystem that
+     * has been mounted since its last full check ("Please run 'e2fsck
+     * -f' first"), which this one always has: from the second boot on,
+     * every start printed that, and an error that says what to type
+     * about something that needs nothing done. */
+    u64 fs_bytes = ext4_bytes(DEV_PART);
+    if (fs_bytes && fs_bytes + (u64)MIN_GROW_MB * 1024 * 1024 > part_bytes) {
+        printf("expandfs: the filesystem already fills the partition\n");
+        return 0;
+    }
 
     /* Growing a large filesystem can outlast the 120 seconds /etc/rc
      * arms the watchdog for, and a reset partway through leaves the

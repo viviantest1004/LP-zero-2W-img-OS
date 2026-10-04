@@ -119,7 +119,7 @@ elif [[ "$MODE" == "linux" ]]; then
     CONFIG_SRC="${REPO_ROOT}/boot/config-linux.txt"
     DTB="${KERNEL_OUT_DIR}/bcm2710-rpi-zero-2-w.dtb"
     [[ -f "$KERNEL" ]] || die "kernel/out/Image 가 없습니다. 'make kernel' 을 먼저 실행하세요."
-    [[ -f "$DTB" ]]    || die "kernel/out 에 Zero 2 W DTB 가 없습니다."
+    [[ -f "$DTB" ]] || $UEFI_ONLY || die "kernel/out 에 Zero 2 W DTB 가 없습니다."
 else
     KERNEL="${REPO_ROOT}/firmware/${KERNEL_IMAGE}"
     KERNEL_NAME="$KERNEL_IMAGE"
@@ -131,6 +131,16 @@ fi
 # config.txt 의 kernel= 과 실제 파일명이 다르면 GPU 가 커널을 못 찾는다.
 # 그 경우 화면도 시리얼도 아무 것도 안 나와서 원인 찾기가 매우 어렵다.
 # 이미지를 굽기 전에 여기서 잡는다.
+# --uefi-only: nothing the Pi's GPU reads goes on - no Broadcom blobs, no
+# config.txt, no device tree, no cmdline.txt. A virtual machine's UEFI
+# (or QEMU, booting the kernel itself) makes its own description of the
+# machine, and asking for the Pi's files here only meant a VM image could
+# not be built without first downloading a Raspberry Pi's firmware.
+if $UEFI_ONLY; then
+    CONFIG_SRC=""
+    DTB=""
+fi
+
 if [[ -n "$CONFIG_SRC" ]]; then
 CFG_KERNEL="$(sed -n 's/^[[:space:]]*kernel=\(.*\)$/\1/p' "$CONFIG_SRC" \
               | tail -1 | tr -d '"'"'[:space:]'"'"')"
@@ -143,7 +153,7 @@ if [[ "$CFG_KERNEL" != "$KERNEL_NAME" ]]; then
 fi
 
 # Broadcom GPU firmware, and only a Pi has one.
-if [[ "$LP_ARCH" == "amd64" ]]; then
+if [[ "$LP_ARCH" == "amd64" ]] || $UEFI_ONLY; then
     BLOBS=()
 else
     BLOBS=(bootcode.bin start.elf fixup.dat)
