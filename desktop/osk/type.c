@@ -1151,6 +1151,26 @@ static void grab_key(void *data, struct zwp_input_method_keyboard_grab_v2 *g,
         ralt_time = time;
         return;
     }
+    /* A modifier going down ends nothing: Shift is half of ㅆ ㄲ ㄸ ㅃ
+     * ㅉ ㅒ ㅖ, and handing over the syllable here made 했 come out as
+     * 해ㅆ. The key it modifies decides (a Ctrl or Alt chord still hands
+     * over first, below, as `command`). While a syllable is being built
+     * the key itself is kept from the application too - a key sent to a
+     * field in the middle of a composition is one it may take as the end
+     * of it - and the application still learns that Shift is down,
+     * from the modifier state grab_modifiers forwards. */
+    switch (key) {
+    case KEY_LEFTSHIFT: case KEY_RIGHTSHIFT: case KEY_LEFTCTRL: case KEY_RIGHTCTRL:
+    case KEY_LEFTALT: case KEY_RIGHTALT: case KEY_LEFTMETA: case KEY_RIGHTMETA:
+    case KEY_CAPSLOCK:
+        if (type_composing()) {
+            consume(key);
+            return;
+        }
+        pass_key(time, key, state);
+        flush();
+        return;
+    }
     if (!command && type_lang() == LANG_KO) {
         uint32_t j = 0;
         if (sym >= XKB_KEY_a && sym <= XKB_KEY_z)

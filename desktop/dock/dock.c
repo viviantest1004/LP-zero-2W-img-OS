@@ -1950,9 +1950,11 @@ static gboolean recentre(gpointer d)
  * bar and centred by a margin; a bar that narrows and widens every frame
  * then meant a new surface size and a new margin every frame, and the
  * two never land in the same one - the bar shook.) */
+static GdkRectangle input_last = { -1, -1, -1, -1 };
+
 static void update_input(void)
 {
-    static GdkRectangle last = { -1, -1, -1, -1 };
+    GdkRectangle last = input_last;
     if (!dock_bar || !gtk_widget_get_realized(GTK_WIDGET(win)))
         return;
     GtkAllocation a;
@@ -1966,10 +1968,24 @@ static void update_input(void)
         return;
     if (r.x == last.x && r.y == last.y && r.width == last.width && r.height == last.height)
         return;
-    last = r;
+    input_last = r;
     cairo_region_t *reg = cairo_region_create_rectangle((cairo_rectangle_int_t *)&r);
     gtk_widget_input_shape_combine_region(GTK_WIDGET(win), reg);
     cairo_region_destroy(reg);
+}
+
+/* move_to_layer hides and shows the dock each time the app grid opens or
+ * closes and around every full-screen window, and the dock comes back
+ * from that taking input over its whole surface. The bar's rectangle had
+ * not changed, so update_input kept quiet, and from the first time the
+ * grid was opened the strip above and beside the bar - three icons high,
+ * the screen's width - ate every click meant for the windows and the
+ * desktop under it. So each map sends the region again. */
+static void on_dock_map(GtkWidget *w, gpointer d)
+{
+    (void)w; (void)d;
+    input_last = (GdkRectangle){ -1, -1, -1, -1 };
+    update_input();
 }
 
 static void on_dock_allocate(GtkWidget *w, GdkRectangle *a, gpointer d)
@@ -2058,6 +2074,7 @@ int main(int argc, char **argv)
     g_signal_connect(spacer, "realize", G_CALLBACK(spacer_realized), NULL);
     gtk_widget_show(GTK_WIDGET(spacer));
     g_signal_connect(win, "size-allocate", G_CALLBACK(on_dock_allocate), NULL);
+    g_signal_connect_after(win, "map", G_CALLBACK(on_dock_map), NULL);
     gtk_widget_add_events(GTK_WIDGET(win), GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
     g_signal_connect(win, "enter-notify-event", G_CALLBACK(on_dock_enter), NULL);
     g_signal_connect(win, "leave-notify-event", G_CALLBACK(on_dock_leave), NULL);
