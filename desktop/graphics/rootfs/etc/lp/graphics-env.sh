@@ -46,12 +46,18 @@
 #
 # On a scale-2 output an Xwayland window is rendered at 1x and stretched,
 # so it is blurry. A native Wayland window is rendered at 2x. These make
-# each toolkit pick Wayland first. The X11 fallbacks after the comma only
-# matter if Xwayland is ever turned on (it is off in wayfire.ini).
+# each toolkit pick Wayland first, with X11 (Xwayland, on in wayfire.ini
+# and sway) after the comma for a program that cannot.
+#
+# Not SDL. SDL_VIDEODRIVER=wayland has no fallback in the SDL most games
+# carry (before 2.0.22 it is one name, not a list): a game with an SDL
+# built without Wayland - much of Steam's library - found no video
+# device and did not start, and Steam's own client, which reads it too,
+# is X11 only. Left unset, every SDL picks for itself and lands on X11
+# where it must.
 export MOZ_ENABLE_WAYLAND=1                 # Firefox (the default since 121, kept explicit)
 export GDK_BACKEND=wayland,x11              # GTK 3 and 4
 export QT_QPA_PLATFORM='wayland;xcb'        # Qt 5 needs qtwayland5 for this, Qt 6 qt6-wayland
-export SDL_VIDEODRIVER=wayland              # SDL 2 games
 export CLUTTER_BACKEND=wayland
 export ELECTRON_OZONE_PLATFORM_HINT=auto    # Electron 28+: Wayland when WAYLAND_DISPLAY is set
 export _JAVA_AWT_WM_NONREPARENTING=1        # Java/AWT draws blank windows without it

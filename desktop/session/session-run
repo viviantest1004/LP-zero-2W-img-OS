@@ -256,6 +256,11 @@ run_sway() {
     export WLR_RENDERER_ALLOW_SOFTWARE=1
     export LIBGL_ALWAYS_SOFTWARE=1
     export GSK_RENDERER=cairo
+    # Xwayland without GL as well (/usr/lib/lp/xwayland-sw says why):
+    # with it, every X11 program - Steam's client is one - failed to open.
+    if test -x /usr/lib/lp/xwayland-sw ; then
+        export WLR_XWAYLAND=/usr/lib/lp/xwayland-sw
+    fi
     kvm_cursor_plane pixman
     exec /usr/bin/sway
 }

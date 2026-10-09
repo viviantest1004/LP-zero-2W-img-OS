@@ -1,0 +1,15 @@
+#!/bin/sh
+# xwayland-sw - Xwayland for a session the CPU draws (sway with pixman:
+# safe mode, and virtual machines without 3D). session-run points
+# wlroots at it (WLR_XWAYLAND) there and nowhere else.
+#
+# Started as wlroots starts it, Xwayland sets up glamor - its GL - on the
+# render node, and under LIBGL_ALWAYS_SOFTWARE, which the same session
+# sets, Mesa crashes in that setup (driCreateNewScreen3, "Not allowed to
+# force software rendering when API explicitly selects a hardware
+# device"). Xwayland died before its first client, the X11 socket was
+# never there, and no X11 program could open a window at all - Steam
+# among them, whose client is X11 only. XWAYLAND_NO_GLAMOR is read after
+# that setup, too late; -shm keeps Xwayland off GL from the start, which
+# is how everything else in this session draws anyway.
+exec /usr/bin/Xwayland "$@" -shm

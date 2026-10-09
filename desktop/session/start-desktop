@@ -143,7 +143,8 @@ seat_take() {
     chown "$SEAT_UID:$SEAT_GID" "/run/user/$SEAT_UID" > /dev/null
     chmod 700 "/run/user/$SEAT_UID"
     echo "$SEAT_UID" > /run/lp-session/seat-uid
-    seat_dev /dev/dri/card* /dev/dri/renderD* /dev/input/event* /dev/snd/*
+    seat_dev /dev/dri/card* /dev/dri/renderD* /dev/input/event* /dev/snd/* \
+        /dev/hidraw* /dev/uinput
     chown "$SEAT_UID" /dev/tty0 /dev/tty1 /dev/tty2 > /dev/null 2>&1
     chmod 0620 /dev/tty0 /dev/tty1 /dev/tty2 2>/dev/null
 }

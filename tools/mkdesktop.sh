@@ -867,12 +867,19 @@ fi
 # let any process on the machine read the keyboard. When another account
 # has signed in, lp-seat-own gives the device to that one instead
 # (start-desktop says whose session it is in /run/lp-session/seat-uid).
+# Game controllers too, as Debian's steam-devices does it with uaccess:
+# hidraw (the pads' own protocol) and uinput (the virtual pad Steam Input
+# makes). Without them Steam (Flathub) warned "Missing permissions for
+# input devices" and no controller worked through it. Nothing new is
+# opened: the event nodes this account owns can already be written.
 mkdir -p "$ROOT/etc/udev/rules.d"
 cat > "$ROOT/etc/udev/rules.d/71-lp-seat.rules" <<'RULES'
 # LP: the desktop account owns the seat's devices (tools/mkdesktop.sh).
 SUBSYSTEM=="input", KERNEL=="event*", OWNER="1000", MODE="0660", RUN+="/usr/lib/lp/lp-seat-own $devnode"
 SUBSYSTEM=="drm", KERNEL=="card[0-9]*|renderD*", OWNER="1000", MODE="0660", RUN+="/usr/lib/lp/lp-seat-own $devnode"
 SUBSYSTEM=="sound", OWNER="1000", MODE="0660", RUN+="/usr/lib/lp/lp-seat-own $devnode"
+SUBSYSTEM=="hidraw", OWNER="1000", MODE="0660", RUN+="/usr/lib/lp/lp-seat-own $devnode"
+SUBSYSTEM=="misc", KERNEL=="uinput", OWNER="1000", MODE="0660", RUN+="/usr/lib/lp/lp-seat-own $devnode"
 RULES
 # Undoing the last update: apt keeps what each run replaces
 # (desktop/system/lp-rollback-save), `sudo lp-rollback` puts it back -
@@ -1021,6 +1028,7 @@ cmp -s "$ROOT/sbin/init" "$OURS/bin/init" || fail+=("/sbin/init is not ours")
 [[ "$(readlink "$ROOT/usr/sbin/reboot")" == /bin/poweroff ]] || fail+=("/usr/sbin/reboot is not ours")
 [[ "$(in_root /bin/cron -l 2>&1 | head -1)" == "/etc/crontab - 4 jobs" ]] || fail+=("cron does not read /etc/crontab as 4 jobs")
 grep -qE '^[^#].*[[:space:]]root[[:space:]]' "$ROOT/etc/crontab" && fail+=("/etc/crontab has a user field")
+[[ -x "$ROOT/usr/lib/lp/xwayland-sw" && -x "$ROOT/usr/bin/Xwayland" ]] || fail+=("no Xwayland for sway (/usr/lib/lp/xwayland-sw)")
 [[ "$(in_root getent services ssh | awk '{ print $2 }')" == 22/tcp ]] ||
     fail+=("/etc/services is not the port table (getent services ssh)")
 [[ -f "$ROOT/etc/lp/services" ]] || fail+=("no /etc/lp/services for init")
