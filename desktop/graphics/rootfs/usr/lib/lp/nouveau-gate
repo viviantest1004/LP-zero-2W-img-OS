@@ -1,0 +1,89 @@
+#!/usr/bin/dash
+# nouveau-gate - load nouveau only for an NVIDIA GPU that draws something.
+#
+# modprobe runs this in place of loading nouveau (/etc/modprobe.d/
+# lp-nouveau.conf), which is every time udev finds an NVIDIA GPU.
+#
+# ── Why the second GPU of a laptop gets no driver ──
+#
+# The XPS 15 9550 froze, at random and often, and some starts stopped on
+# the boot screen with the spinner frozen. Both are the moments nouveau
+# is busy with the GTX 960M: it is loaded during the boot screen, and it
+# wakes the GPU every time a program opens it - Chrome's and Firefox's
+# GPU processes enumerate every render node, nouveau's included. The
+# GPU waking through that laptop's PCIe bridge (8086:1901) is the bug
+# nouveau_drm.c's quirk_broken_nv_runpm works around, and the work-around
+# is still nouveau driving a GPU that has nothing to show: the panel,
+# HDMI and Thunderbolt are all wired to the Intel GPU (lp-gpu-run).
+#
+# Without a driver the GPU is switched off all the same. The PCI core
+# leaves an unbound device in D0 and lets the bridge above it suspend
+# (pci-driver.c, pci_pm_runtime_suspend: "it may go to D3cold when the
+# bridge above it runtime suspends") - which is what the quirk arranges
+# by hiding the GPU's PM capability: D0 underneath, D3cold from the
+# bridge's _PR3. All it needs is runtime PM allowed on the GPU, which a
+# driver would have done and is done here instead. Then nothing opens
+# the GPU, so nothing wakes it.
+#
+# ── What still loads it ──
+#
+#   - an NVIDIA GPU that is the boot display (boot_vga), or that is the
+#     only display device: a desktop with one NVIDIA card needs it to
+#     draw at all;
+#   - /etc/lp/nouveau saying "on" (lp-gpu-run says how): the 960M then
+#     behaves as before, for whoever wants it;
+#   - "off" there keeps nouveau out even for a display GPU.
+#
+# LP_SYSFS, LP_NOUVEAU_CONF, LP_MODPROBE and LP_KMSG point it elsewhere
+# for the tests (tests/nouveau-gate.sh).
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+SYS=${LP_SYSFS:-/sys}
+CONF=${LP_NOUVEAU_CONF:-/etc/lp/nouveau}
+MODPROBE=${LP_MODPROBE:-modprobe}
+KMSG=${LP_KMSG:-/dev/kmsg}
+
+load() {
+    exec $MODPROBE --ignore-install nouveau "$@"
+}
+
+want=auto
+[ -r "$CONF" ] && read -r want < "$CONF"
+
+case "$want" in
+on)  load "$@" ;;
+off) why="/etc/lp/nouveau says off" ;;
+*)
+    nv_display=0
+    other_display=0
+    for dev in "$SYS"/bus/pci/devices/*; do
+        [ -r "$dev/vendor" ] && [ -r "$dev/class" ] || continue
+        read -r vendor < "$dev/vendor"
+        read -r class < "$dev/class"
+        case "$class" in 0x03*) ;; *) continue ;; esac
+        boot=0
+        [ -r "$dev/boot_vga" ] && read -r boot < "$dev/boot_vga"
+        [ "$boot" = 1 ] || continue
+        if [ "$vendor" = 0x10de ]; then nv_display=1; else other_display=1; fi
+    done
+    if [ "$nv_display" = 1 ] || [ "$other_display" = 0 ]; then
+        load "$@"
+    fi
+    why="a second GPU with no screen of its own (the screen is on the other one)"
+    ;;
+esac
+
+# Not loaded: let the PCI core switch every NVIDIA display function off.
+for dev in "$SYS"/bus/pci/devices/*; do
+    [ -r "$dev/vendor" ] && [ -r "$dev/class" ] || continue
+    read -r vendor < "$dev/vendor"
+    read -r class < "$dev/class"
+    case "$vendor:$class" in
+    0x10de:0x03*)
+        [ -w "$dev/power/control" ] && echo auto > "$dev/power/control"
+        echo "lp: nouveau not loaded for ${dev##*/}: $why; it is switched off instead (lp-gpu-run --status)" \
+            > "$KMSG" 2>/dev/null
+        ;;
+    esac
+done
+exit 0

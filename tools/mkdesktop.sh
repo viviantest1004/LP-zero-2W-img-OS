@@ -215,6 +215,24 @@ fi
 ln -sfn sbin/init "$ROOT/init"
 log "$(ls "$ROOT/bin" | wc -l) entries in /bin"
 
+# reboot, poweroff and halt typed in a terminal. sudo's PATH has /usr/sbin
+# and /sbin before /bin, and there the base has systemd's links to
+# systemctl, which answered `sudo reboot` with "System has not been booted
+# with systemd" and did nothing - and a machine that will not restart is
+# one that gets switched off at the button. Ours asks init, which stops
+# everything and unmounts first (userland/poweroff). Diverted, so an
+# upgrade of systemd-sysv does not put its links back.
+for d in /sbin /usr/sbin; do
+    [[ -d "$ROOT$d" && ! -L "$ROOT$d" ]] || continue
+    for n in reboot poweroff halt; do
+        if [[ -e "$ROOT$d/$n" || -L "$ROOT$d/$n" ]] &&
+           ! in_root dpkg-divert --list "$d/$n" | grep -q .; then
+            in_root dpkg-divert --quiet --local --rename --divert "$d/$n.systemd" --add "$d/$n"
+        fi
+        ln -sfn /bin/poweroff "$ROOT$d/$n"
+    done
+done
+
 # ── 2. /bin/sh ───────────────────────────────────────────────────────
 step "/bin/sh"
 BINSH="${LP_BINSH:-}"
@@ -976,6 +994,7 @@ case "$(readlink -f "$ROOT/bin/sh")" in
 esac
 cmp -s "$ROOT/bin/ls" "$OURS/bin/ls" || fail+=("/bin/ls is not ours")
 cmp -s "$ROOT/sbin/init" "$OURS/bin/init" || fail+=("/sbin/init is not ours")
+[[ "$(readlink "$ROOT/usr/sbin/reboot")" == /bin/poweroff ]] || fail+=("/usr/sbin/reboot is not ours")
 [[ "$(in_root getent services ssh | awk '{ print $2 }')" == 22/tcp ]] ||
     fail+=("/etc/services is not the port table (getent services ssh)")
 [[ -f "$ROOT/etc/lp/services" ]] || fail+=("no /etc/lp/services for init")

@@ -292,6 +292,48 @@ run_session() {
 # stopped drawing, leaving its last frame up for the compositor to replace.
 test -x /bin/splash && /bin/splash stop
 
+# ── the desktop came up, or it did not ──
+#
+# From here until the compositor draws, the screen is the splash's last
+# frame - the logo, no spinner. A compositor that died left it there for
+# a second; one that hung (a graphics driver that never answered) left it
+# there for good, at every start: "the logo, and nothing after it". And
+# /etc/rc had already told the boot menu that the start had worked, so
+# the menu never offered Recovery either.
+#
+# So each session is watched until lp-shell-start, the first thing the
+# compositor runs, says it is up ($XDG_RUNTIME_DIR/lp-desktop-up). Then
+# the start is confirmed to the boot menu (once a boot). A session that
+# does not get there in time is ended and started again in safe mode
+# (sway drawing on the CPU), as after three quick deaths; if safe mode
+# does not come up either, the console is given back.
+#
+# The time: a desktop is up in a few seconds on any real machine, so a
+# minute is a hang. A virtual machine without KVM (UTM emulating a PC on
+# a Mac) runs every instruction through QEMU and can take minutes, so a
+# guest gets five.
+up_limit=60
+grep -qw hypervisor /proc/cpuinfo 2>/dev/null && up_limit=300
+boot_confirmed=0
+desktop_came_up() {
+    lp_waited=0
+    while kill -0 "$1" 2>/dev/null; do
+        if test -e "/run/user/$SEAT_UID/lp-desktop-up"; then
+            if test $boot_confirmed = 0; then
+                lp-reboot-recovery --boot-ok > /dev/null 2>&1
+                boot_confirmed=1
+            fi
+            return 0
+        fi
+        if test $lp_waited -ge $up_limit; then
+            return 1
+        fi
+        sleep 1
+        lp_waited=$((lp_waited + 1))
+    done
+    return 0        # it ended by itself: counted below like any end
+}
+
 quick=0
 rm -f /run/lp-session/next-user /run/lp-session/signed-in
 while :; do
@@ -312,11 +354,42 @@ while :; do
     fi
     seat_home
     seat_take
+    rm -f "/run/user/$SEAT_UID/lp-desktop-up"
     read -r t0 _ < /proc/uptime
-    run_session >> /data/log/session.log 2>&1
+    run_session >> /data/log/session.log 2>&1 &
+    lp_session=$!
+    hung=0
+    if desktop_came_up $lp_session; then
+        wait $lp_session
+    else
+        hung=1
+        echo "start-desktop: the desktop did not come up within ${up_limit}s; ending it" >> /data/log/session.log
+        end_account "$SEAT_UID"
+        # A process stuck inside a driver ignores even SIGKILL; it is not
+        # waited for past ten seconds.
+        lp_waited=0
+        while kill -0 $lp_session 2>/dev/null && test $lp_waited -lt 10; do
+            sleep 1
+            lp_waited=$((lp_waited + 1))
+        done
+        kill -0 $lp_session 2>/dev/null || wait $lp_session
+    fi
     read -r t1 _ < /proc/uptime
     end_account "$SEAT_UID"
     rm -f /run/lp-session/signed-in
+    if test $hung = 1; then
+        if ! test -e /run/lp-session/safe; then
+            echo "start-desktop: starting it in safe mode" >> /data/log/session.log
+            comp=sway; why="safe mode (the desktop did not come up within ${up_limit}s)"
+            echo auto > /run/lp-session/safe
+            write_compositor
+            quick=0
+            continue
+        fi
+        echo "start-desktop: safe mode did not come up either; not starting it again" >> /data/log/session.log
+        vt_keyboard on
+        exit 1
+    fi
     if test -e "/run/user/$SEAT_UID/lp-logout" || test -s /run/lp-session/next-user; then
         quick=0
         continue

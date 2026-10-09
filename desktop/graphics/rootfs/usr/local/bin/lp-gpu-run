@@ -9,10 +9,16 @@
 # Thunderbolt are all wired to the Intel HD 530, and the GTX 960M has no
 # outputs of its own. The desktop therefore always draws on Intel
 # (graphics-env.sh pins the compositor to that card with WLR_DRM_DEVICES),
-# and the NVIDIA GPU is powered off - nouveau runtime-suspends it five
-# seconds after the last user and the firmware's _PR3 power resources cut
-# it to D3cold. That is the default because on battery the 960M costs
-# watts whenever it is merely on.
+# and the NVIDIA GPU is powered off: by default it has no driver at all
+# (/usr/lib/lp/nouveau-gate - nouveau on this GPU was where the laptop
+# froze), runtime PM is allowed on it, and the bridge above it goes to
+# D3cold through the firmware's _PR3 power resources. On battery the 960M
+# costs watts whenever it is merely on.
+#
+# To use it at all, nouveau has to be let in first:
+#     echo on | sudo tee /etc/lp/nouveau      then restart
+# and then nouveau runtime-suspends it five seconds after the last user,
+# as it did before the gate.
 #
 # This wrapper is the way to use it on purpose: it sets DRI_PRIME to the
 # NVIDIA GPU's PCI address, Mesa then renders that one program on it
@@ -98,7 +104,9 @@ status() {
     [ -r "$dgpu/power_state" ] && read -r ps < "$dgpu/power_state"
     echo "discrete GPU ${dgpu##*/}: driver $drv, runtime_status $rs, power_state $ps"
     case "$drv:$rs" in
-    none:*)       echo "  no driver bound: nothing can switch it off, it stays in D0 and draws power" ;;
+    none:suspended) echo "  switched off, with no driver - the default here (/usr/lib/lp/nouveau-gate);" \
+                         "to use it: echo on | sudo tee /etc/lp/nouveau, then restart" ;;
+    none:*)       echo "  no driver bound and not switched off - it stays in D0 and draws power" ;;
     *:suspended)  echo "  asleep - this is the normal state" ;;
     *:active)     echo "  AWAKE - something is using it (a program run with lp-gpu-run, or a" \
                        "process holding /dev/dri for it open); it sleeps again ~5 s after the last user" ;;
@@ -142,7 +150,7 @@ nvidia)
     exec "$@"
     ;;
 *)
-    echo "$me: the NVIDIA GPU has no driver bound (see lp-gpu-run --status)," \
+    echo "$me: the NVIDIA GPU has no driver (it is switched off - see lp-gpu-run --status);" \
          "running $1 on the integrated GPU" >&2
     exec "$@"
     ;;

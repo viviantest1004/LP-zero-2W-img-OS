@@ -842,7 +842,13 @@ integrity || echo "[rc]   run 'integrity -u' if that change was yours"
 # offers LP Recovery first once two in a row have not said this; without
 # it every ordinary start counted, and the second restart after installing
 # went to Recovery by itself. Quiet and harmless where there is no UEFI.
-lp-reboot-recovery --boot-ok 2>/dev/null
+#
+# Where there is a desktop, not yet: the start has come up when the
+# desktop has, and start-desktop says so then. Saying it here confirmed
+# starts that went on to hang on the boot screen - a compositor that
+# never drew - so the menu never offered Recovery after them, and the
+# machine stopped at the logo at every start.
+test -x /bin/start-desktop || lp-reboot-recovery --boot-ok 2>/dev/null
 
 # 데스크탑.
 #

@@ -43,6 +43,7 @@ static const char *log_path = DEFAULT_PATH;
 static long        max_bytes = DEFAULT_KB * 1024;
 static long        written   = 0;
 static int         out_fd    = -1;
+static bool        dirty;       /* written since the last fsync */
 
 static void open_log(void)
 {
@@ -203,6 +204,7 @@ static void emit(const char *tag, const char *msg, size_t len)
         lp_write(out_fd, "\n", 1);
 
     written += hlen + (long)len + 1;
+    dirty = true;
     if (written >= max_bytes)
         rotate();
 
@@ -304,6 +306,7 @@ int main(int argc, char **argv)
     /* Poll both sources. Neither is busy, so a short sleep between
      * passes costs nothing and keeps this off the CPU. */
     char buf[2048];
+    s64 last_sync = 0;
     for (;;) {
         bool did = false;
 
@@ -327,6 +330,21 @@ int main(int argc, char **argv)
                 emit("system", buf, (size_t)r);
                 did = true;
             }
+        }
+
+        /* Onto the disk within about a second. The lines that matter
+         * most are the last ones before a machine froze - and a frozen
+         * machine is switched off at the button, which takes with it
+         * whatever was still in the page cache: up to half a minute of
+         * it, the dirty-page expiry, which was every line about the
+         * freeze. So a burst (a boot) is synced once a second, and the
+         * end of one at once. A few small syncs a second at most; most
+         * of the time there is nothing to sync at all. */
+        s64 now = lp_monotonic_ms();
+        if (dirty && out_fd >= 0 && (!did || now - last_sync >= 1000)) {
+            lp_fsync(out_fd);
+            dirty = false;
+            last_sync = now;
         }
 
         lp_sleep_ms(did ? 50 : 500);

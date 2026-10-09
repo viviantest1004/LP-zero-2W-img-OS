@@ -455,9 +455,12 @@ def setup_lang():
 
 def boot_ok():
     """Tell the boot menu this boot came up (lpboot.efi's LPBootCount: two
-    unconfirmed boots in a row and it preselects Recovery). Here, because
-    this is the last thing /etc/rc starts: a boot that got this far has a
-    root, an init and a working userland."""
+    unconfirmed boots in a row and it preselects Recovery). Here for the
+    installer and the first-boot screen: a boot that got this far has a
+    root, an init and a working userland. The ordinary desktop says it
+    itself, once it is on the screen (start-desktop): a start that hung
+    on the boot screen after this point was confirmed all the same, and
+    the menu never offered Recovery after it."""
     exe = first_existing("/bin/lp-reboot-recovery", "/usr/local/bin/lp-reboot-recovery",
                          "/usr/local/sbin/lp-reboot-recovery")
     if exe:
@@ -478,7 +481,6 @@ def splash_stop():
 
 def main():
     set_hostname()
-    boot_ok()
     if os.path.exists(MEDIUM):
         mode = "installer"
     elif os.path.exists(FIRSTBOOT):
@@ -486,6 +488,7 @@ def main():
     else:
         to_session()
         return
+    boot_ok()
 
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     os.makedirs(RUN, exist_ok=True)

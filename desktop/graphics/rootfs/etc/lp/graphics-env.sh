@@ -26,9 +26,11 @@
 # Intel GPU), and a compositor holding it open with a GL context keeps it
 # out of runtime suspend - the dGPU would sit in D0 drawing watts for as
 # long as the desktop runs. Naming only the card the firmware lit the
-# screen with (boot_vga) keeps the compositor off the NVIDIA GPU entirely,
-# so nouveau can put it in D3cold five seconds after boot. lp-gpu-run is
-# the way to use it on purpose.
+# screen with (boot_vga) keeps the compositor off the NVIDIA GPU entirely.
+# (Since 1.418 such a GPU has no driver at all unless asked for - see
+# /usr/lib/lp/nouveau-gate - and is switched off from boot; this stays for
+# a machine where nouveau is let in.) lp-gpu-run is the way to use it on
+# purpose.
 #
 # Constructs. /bin/sh on this system is our own shell, and the build of it
 # this was tested with has no `return`, no `command -v`, no bracket

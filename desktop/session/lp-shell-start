@@ -117,6 +117,10 @@ lp_lock_now=0
 lp_first=1
 test -e "${XDG_RUNTIME_DIR}/lp-session-started" && lp_first=0
 : > "${XDG_RUNTIME_DIR}/lp-session-started"
+# The compositor is up and running its clients: start-desktop waits for
+# this before it tells the boot menu the start worked, and gives up on a
+# compositor that never gets this far.
+: > "${XDG_RUNTIME_DIR}/lp-desktop-up"
 lp_signed_in=$(sed -n 1p /run/lp-session/signed-in 2> /dev/null)
 if test -n "$lp_signed_in" && test "$lp_signed_in" = "$(id -u)" ; then
     rm -f "${XDG_RUNTIME_DIR}/lp-logout"

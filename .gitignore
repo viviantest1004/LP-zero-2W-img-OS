@@ -3,6 +3,8 @@ build/
 userland/bin/
 *.o
 *.d
+# ...but not a config directory that happens to end in .d
+!desktop/graphics/rootfs/etc/modprobe.d/
 *.elf
 *.map
 *.img
