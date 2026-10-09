@@ -475,7 +475,7 @@ if [[ -d "$D/session" ]]; then
     if [[ -f "$D/csd/liblp-csd.so" ]]; then
         install -D -m 755 "$D/csd/liblp-csd.so" "$ROOT/usr/local/lib/liblp-csd.so"
     fi
-    for s in lp-audio-start lp-idle lp-autoscale lp-shell-start lp-lock lp-logout lp-admin-run lp-input-lang lp-screenshot; do
+    for s in lp-audio-start lp-idle lp-autoscale lp-shell-start lp-lock lp-logout lp-admin-run lp-input-lang lp-screenshot lp-screen-share; do
         [[ -f "$D/session/$s" ]] && cp -a "$D/session/$s" "$ROOT/usr/local/bin/$s"
     done
     [[ -f "$D/session/lp-seat-own" ]] &&
@@ -539,6 +539,10 @@ done
 # The lock screen checks passwords through PAM, as its own service.
 [[ -f "$D/lockscreen/pam.lp-lockscreen" ]] &&
     install -D -m 644 "$D/lockscreen/pam.lp-lockscreen" "$ROOT/etc/pam.d/lp-lockscreen"
+# Screen sharing asks which screen in a window (the file says why).
+[[ -f "$D/session/xdg-desktop-portal-wlr.config" ]] &&
+    install -D -m 644 "$D/session/xdg-desktop-portal-wlr.config" \
+        "$ROOT/etc/xdg/xdg-desktop-portal-wlr/config"
 # Sound: WirePlumber without logind (the file says why it must be).
 [[ -f "$D/session/wireplumber-no-logind.lua" ]] &&
     install -D -m 644 "$D/session/wireplumber-no-logind.lua" \
@@ -1029,6 +1033,8 @@ cmp -s "$ROOT/sbin/init" "$OURS/bin/init" || fail+=("/sbin/init is not ours")
 [[ "$(in_root /bin/cron -l 2>&1 | head -1)" == "/etc/crontab - 4 jobs" ]] || fail+=("cron does not read /etc/crontab as 4 jobs")
 grep -qE '^[^#].*[[:space:]]root[[:space:]]' "$ROOT/etc/crontab" && fail+=("/etc/crontab has a user field")
 [[ -x "$ROOT/usr/lib/lp/xwayland-sw" && -x "$ROOT/usr/bin/Xwayland" ]] || fail+=("no Xwayland for sway (/usr/lib/lp/xwayland-sw)")
+grep -q '^chooser_cmd=/usr/local/bin/lp-screen-share$' "$ROOT/etc/xdg/xdg-desktop-portal-wlr/config" 2>/dev/null &&
+    [[ -x "$ROOT/usr/local/bin/lp-screen-share" ]] || fail+=("screen sharing has no chooser (lp-screen-share)")
 [[ "$(in_root getent services ssh | awk '{ print $2 }')" == 22/tcp ]] ||
     fail+=("/etc/services is not the port table (getent services ssh)")
 [[ -f "$ROOT/etc/lp/services" ]] || fail+=("no /etc/lp/services for init")

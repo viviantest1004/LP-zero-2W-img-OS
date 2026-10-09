@@ -1,0 +1,158 @@
+#!/usr/bin/python3
+"""lp-screen-share - which screen to share, asked in a window.
+
+A program that shares the screen - Discord, a browser, OBS, anything that
+goes through the desktop portal - gets it from xdg-desktop-portal-wlr,
+which runs this to ask which screen (/etc/xdg/xdg-desktop-portal-wlr/
+config). The screens' names come on standard input, one per line; the
+chosen one is printed. Printing nothing is a refusal, and the program
+is told the person said no.
+
+Before, the portal's own default asked through slurp: the pointer turned
+into a crosshair and nothing on the screen said why, or that a click on
+a screen was the answer. Sharing in Discord looked like it had hung, and
+Escape - the natural reaction - refused it.
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib  # noqa: E402
+
+KO = os.environ.get("LANG", "").startswith("ko")
+
+
+def T(en, ko):
+    return ko if KO else en
+
+
+def kind(name):
+    """What a connector is called where people can read it."""
+    n = name.upper()
+    if n.startswith(("EDP", "LVDS", "DSI")):
+        return T("Built-in display", "내장 화면")
+    if n.startswith("HDMI"):
+        return "HDMI"
+    if n.startswith("DP"):
+        return "DisplayPort"
+    if n.startswith(("DVI", "VGA")):
+        return n.split("-")[0]
+    return T("Screen", "화면")
+
+
+def modes():
+    """{name: "3840×2400"}, the current mode of each screen, from
+    wlr-randr (both compositors speak wlr-output-management); empty when
+    it cannot say."""
+    out = {}
+    if not shutil.which("wlr-randr"):
+        return out
+    try:
+        text = subprocess.run(["wlr-randr"], capture_output=True, text=True,
+                              timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return out
+    name = None
+    for line in text.splitlines():
+        if line and not line[0].isspace():
+            name = line.split()[0]
+        elif name and "current" in line:
+            m = re.search(r"(\d+)x(\d+)", line)
+            if m:
+                out[name] = "%s×%s" % m.groups()
+    return out
+
+
+def main():
+    names = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]
+    if not names:
+        return 0
+    size = modes()
+    GLib.set_prgname("lp-screen-share")
+
+    win = Gtk.Window(title=T("Share your screen", "화면 공유"))
+    win.set_default_size(420, -1)
+    win.set_position(Gtk.WindowPosition.CENTER)
+    win.set_resizable(False)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+    for side in ("top", "bottom", "start", "end"):
+        getattr(box, "set_margin_" + side)(20)
+    win.add(box)
+
+    title = Gtk.Label(xalign=0)
+    title.set_markup("<b>%s</b>" % GLib.markup_escape_text(
+        T("A program wants to share your screen",
+          "프로그램이 화면을 공유하려고 합니다")))
+    title.set_line_wrap(True)
+    box.pack_start(title, False, False, 0)
+    note = Gtk.Label(label=T("Everything on the screen you choose can be seen until the "
+                             "program stops sharing.",
+                             "고른 화면에 보이는 모든 것이, 프로그램이 공유를 멈출 때까지 "
+                             "상대에게 보입니다."),
+                     xalign=0)
+    note.set_line_wrap(True)
+    box.pack_start(note, False, False, 0)
+
+    def label(name):
+        text = kind(name)
+        if name in size:
+            text += "  ·  " + size[name]
+        return "%s  (%s)" % (text, name)
+
+    # One screen: it is named, and the question is only yes or no. More:
+    # one choice each, the first already chosen.
+    radios = []
+    if len(names) == 1:
+        only = Gtk.Label(xalign=0)
+        only.set_markup("<b>%s</b>" % GLib.markup_escape_text(label(names[0])))
+        box.pack_start(only, False, False, 0)
+    else:
+        group = None
+        for n in names:
+            r = Gtk.RadioButton.new_with_label_from_widget(group, label(n))
+            group = group or r
+            radios.append((r, n))
+            box.pack_start(r, False, False, 0)
+
+    buttons = Gtk.Box(spacing=8)
+    buttons.set_halign(Gtk.Align.END)
+    cancel = Gtk.Button(label=T("Cancel", "취소"))
+    share = Gtk.Button(label=T("Share", "공유"))
+    share.get_style_context().add_class("suggested-action")
+    share.set_can_default(True)
+    buttons.pack_start(cancel, False, False, 0)
+    buttons.pack_start(share, False, False, 0)
+    box.pack_start(buttons, False, False, 0)
+
+    chosen = {}
+
+    def go(*_):
+        chosen["name"] = names[0] if not radios else \
+            next(n for r, n in radios if r.get_active())
+        Gtk.main_quit()
+
+    def key(_w, ev):
+        if ev.keyval == 0xff1b:     # Escape: no
+            Gtk.main_quit()
+            return True
+        return False
+
+    share.connect("clicked", go)
+    cancel.connect("clicked", lambda *_: Gtk.main_quit())
+    win.connect("key-press-event", key)
+    win.connect("destroy", lambda *_: Gtk.main_quit())
+    win.show_all()
+    share.grab_default()
+    share.grab_focus()
+    Gtk.main()
+    if "name" in chosen:
+        print(chosen["name"], flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

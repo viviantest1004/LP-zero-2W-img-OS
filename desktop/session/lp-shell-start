@@ -223,7 +223,23 @@ have lp-audio-start && keep audio lp-audio-start
 
 # 3. What applications talk to: file choosers and screen sharing
 #    (portals), notifications.
-test -x /usr/libexec/xdg-desktop-portal-wlr && keep portal-wlr /usr/libexec/xdg-desktop-portal-wlr
+#
+# The screen-sharing portal connects to PipeWire as it starts and exits
+# if PipeWire is not listening yet ("couldn't connect to context") -
+# which, started beside lp-audio-start, it often was not. keep() brought
+# it back, but five such exits within a minute (a slow first boot from
+# USB) left it down, and sharing in Discord or a browser then did
+# nothing. So it waits for PipeWire's socket, ten seconds at most.
+portal_wlr() {
+    i=0
+    while ! test -S "$XDG_RUNTIME_DIR/pipewire-0" && test $i -lt 50 ; do
+        sleep 0.2
+        i=$((i + 1))
+    done
+    # Not exec: keep() runs this inside its own loop, which would go too.
+    /usr/libexec/xdg-desktop-portal-wlr
+}
+test -x /usr/libexec/xdg-desktop-portal-wlr && keep portal-wlr portal_wlr
 test -x /usr/libexec/xdg-desktop-portal && keep portal /usr/libexec/xdg-desktop-portal
 have mako && keep mako mako
 
