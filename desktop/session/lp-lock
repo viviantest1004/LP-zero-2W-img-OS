@@ -71,4 +71,10 @@ set -- -f --show-failed-attempts --indicator-idle-visible \
 test -r "$WALL" && set -- "$@" -i "$WALL" -s fill
 # swaylock does not tell the boot's loading cover it is up; told here.
 command -v lp-splash-fade > /dev/null 2>&1 && lp-splash-fade done
-exec swaylock "$@"
+# -f: swaylock returns once it holds the screen (and stays, detached), so
+# lp-lock-up - what lp-shell-start waits for before it starts the bar and
+# the dock, as lp-lockscreen leaves it - is true when it is written.
+swaylock "$@"
+lp_rc=$?
+test $lp_rc = 0 && : > "${XDG_RUNTIME_DIR:-/tmp}/lp-lock-up"
+exit $lp_rc

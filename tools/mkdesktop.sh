@@ -233,6 +233,30 @@ for d in /sbin /usr/sbin; do
     done
 done
 
+# /etc/crontab. Debian's names a user in a sixth field ("17 * * * * root
+# cd / && run-parts ..."); our cron has one table, five fields and the
+# command, every line run as root (`cron -h`). It ran "root" as the
+# command - "/bin/sh: 1: root: not found" on the console every hour at
+# :17 - and Debian's hourly, daily (logrotate, dpkg's backup, man-db,
+# plocate) and weekly jobs never ran. Debian's table is diverted and this
+# one runs the same directories. Times are UTC, as everything this cron
+# does; Sunday is 0, not 7. The PATH is Debian's table's: the jobs call
+# start-stop-daemon and friends by name.
+if [[ -e "$ROOT/etc/crontab" ]] && ! in_root dpkg-divert --list /etc/crontab | grep -q .; then
+    in_root dpkg-divert --quiet --local --rename --divert /etc/crontab.debian --add /etc/crontab
+fi
+cat > "$ROOT/etc/crontab" <<'EOF'
+# LP's cron reads this table (`cron -h`): MIN HOUR DAY MONTH WEEKDAY
+# command - no user field, every line runs as root, times are UTC. A
+# table of your own goes in with `crontab` (/data/crontab) and replaces
+# this one.
+17 * * * * cd / && PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin run-parts --report /etc/cron.hourly
+25 6 * * * cd / && PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin run-parts --report /etc/cron.daily
+47 6 * * 0 cd / && PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin run-parts --report /etc/cron.weekly
+52 6 1 * * cd / && PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin run-parts --report /etc/cron.monthly
+EOF
+chmod 644 "$ROOT/etc/crontab"
+
 # ── 2. /bin/sh ───────────────────────────────────────────────────────
 step "/bin/sh"
 BINSH="${LP_BINSH:-}"
@@ -995,6 +1019,8 @@ esac
 cmp -s "$ROOT/bin/ls" "$OURS/bin/ls" || fail+=("/bin/ls is not ours")
 cmp -s "$ROOT/sbin/init" "$OURS/bin/init" || fail+=("/sbin/init is not ours")
 [[ "$(readlink "$ROOT/usr/sbin/reboot")" == /bin/poweroff ]] || fail+=("/usr/sbin/reboot is not ours")
+[[ "$(in_root /bin/cron -l 2>&1 | head -1)" == "/etc/crontab - 4 jobs" ]] || fail+=("cron does not read /etc/crontab as 4 jobs")
+grep -qE '^[^#].*[[:space:]]root[[:space:]]' "$ROOT/etc/crontab" && fail+=("/etc/crontab has a user field")
 [[ "$(in_root getent services ssh | awk '{ print $2 }')" == 22/tcp ]] ||
     fail+=("/etc/services is not the port table (getent services ssh)")
 [[ -f "$ROOT/etc/lp/services" ]] || fail+=("no /etc/lp/services for init")

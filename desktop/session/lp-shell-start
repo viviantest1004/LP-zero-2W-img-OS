@@ -79,6 +79,19 @@ case "${XDG_CURRENT_DESKTOP:-}" in
     *wayfire*|*Wayfire*) compositor=wayfire ;;
 esac
 
+# Under sway no shortcut works until it is known whether the sign-in
+# screen comes and, if it does, until it holds the keyboard (lp_unhold,
+# after step 0's wait): sway.config's empty "lp-locked" mode. Super+Enter
+# opened a terminal in the seconds before the sign-in screen was up.
+lp_held=0
+if test "$compositor" = sway && have swaymsg ; then
+    swaymsg -q mode lp-locked > /dev/null 2>&1 && lp_held=1
+fi
+lp_unhold() {
+    test $lp_held = 1 && swaymsg -q mode default > /dev/null 2>&1
+    lp_held=0
+}
+
 # The loading cover: the boot screen's picture - the PC maker's logo,
 # ours under it, the spinner turning - over everything while the shell
 # assembles itself underneath (lp-splash-fade, drawn by the splash's own
@@ -136,10 +149,38 @@ else
         fi
     fi
 fi
-if test $lp_lock_now = 1 ; then
+lp_lock_pid=
+if test $lp_lock_now = 1 && have lp-lock ; then
     # --login: the lock screen worded as signing in (lp-lockscreen).
-    have lp-lock && lp-lock --login > "$LOGDIR/lock.log" 2>&1 &
+    # lp-lock-up is how it says it holds the input and is on the screen
+    # (lp_wait_lock, before step 4).
+    rm -f "${XDG_RUNTIME_DIR}/lp-lock-up"
+    lp-lock --login > "$LOGDIR/lock.log" 2>&1 &
+    lp_lock_pid=$!
 fi
+
+# The bar, the dock and the desktop are started only once the sign-in
+# screen is up. Started before it, they were on the screen and took
+# clicks for the seconds it took to come up - under sway, where nothing
+# covers the desktop, anybody could open a terminal in them; under
+# wayfire the boot cover hid them but let the clicks through. Not
+# forever: if lp-lock gives up (the account has no password after all)
+# or a minute passes, they start anyway, as they always did.
+lp_wait_lock() {
+    test -n "$lp_lock_pid" || return 0
+    lp_waited=0
+    while ! test -e "${XDG_RUNTIME_DIR}/lp-lock-up" ; do
+        kill -0 "$lp_lock_pid" 2> /dev/null || break
+        if test $lp_waited -ge 600 ; then
+            echo "lp-shell-start: the sign-in screen is not up after a minute; starting the shell anyway" >&2
+            break
+        fi
+        sleep 0.1
+        lp_waited=$((lp_waited + 1))
+    done
+}
+# With nobody to sign in, the shortcuts come back now.
+test -n "$lp_lock_pid" || lp_unhold
 
 # Animations: on under wayfire, where the graphics card draws them. Under
 # sway every frame is drawn by the CPU (and, in a VM, sent whole to the
@@ -185,6 +226,11 @@ have lp-audio-start && keep audio lp-audio-start
 test -x /usr/libexec/xdg-desktop-portal-wlr && keep portal-wlr /usr/libexec/xdg-desktop-portal-wlr
 test -x /usr/libexec/xdg-desktop-portal && keep portal /usr/libexec/xdg-desktop-portal
 have mako && keep mako mako
+
+# The sign-in screen first (lp_wait_lock), then the shortcuts and the
+# shell under it.
+lp_wait_lock
+lp_unhold
 
 # 4. The shell. lp-desktop draws the wallpaper under everything (and the
 #    icons of ~/Desktop, and the menu a long press or right click on the

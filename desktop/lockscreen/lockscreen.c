@@ -1044,9 +1044,19 @@ static GdkPixbuf *load_wallpaper(void)
  * Signing in at boot, the screen under this one is the boot's loading
  * cover (lp-splash-fade: the maker's logo, ours, the spinner), and the
  * sign-in screen fades in over it - then the cover is told it can go,
- * underneath, unseen. A lock of a running session comes up at once. */
+ * underneath, unseen. A lock of a running session comes up at once.
+ *
+ * Then $XDG_RUNTIME_DIR/lp-lock-up: the input is ours and the screen is
+ * drawn. lp-shell-start waits for it before it starts the bar, the dock
+ * and the desktop - started first, they were on the screen and took
+ * clicks for the seconds this took to come up (under sway, with nothing
+ * covering them). */
 static void cover_done(void)
 {
+    char *up = g_build_filename(g_get_user_runtime_dir(), "lp-lock-up", NULL);
+    g_file_set_contents(up, "", 0, NULL);
+    g_free(up);
+
     const char *argv[] = { "lp-splash-fade", "done", NULL };
     g_spawn_async(NULL, (char **)argv, NULL, G_SPAWN_SEARCH_PATH |
                   G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
