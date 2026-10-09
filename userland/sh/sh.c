@@ -5558,7 +5558,59 @@ int main(int argc, char **argv)
      * nor if, so there is no other way to check first. */
     int  first = 1;
     bool quiet = false;
-    if (argc > 1 && strcmp(argv[1], "-q") == 0) { quiet = true; first = 2; }
+
+    /* ── The options other programs start a shell with ──
+     *
+     * A terminal built into another program starts the account's shell
+     * ($SHELL) the way it would start bash: Claude's desktop app runs
+     * `$SHELL -l` for the terminal of its Code tab, VS Code reads the
+     * login environment with `$SHELL -i -l -c ...`, others say --login.
+     * Each of those was taken for the name of a script - "sh: -l: cannot
+     * open" - and the terminal closed as soon as it opened. So the usual
+     * ones are understood, alone or run together (-lc, -il):
+     *   -l, --login   a login shell: /etc/profile and ~/.profile are read
+     *                 (an interactive shell reads them anyway)
+     *   -i            interactive        -s   commands from standard input
+     *   -e, -x        as `set -e`, `set -x`
+     *   --noprofile   neither profile    --norc   accepted, nothing to skip
+     * Anything else is refused by name rather than opened as a file. A
+     * shell whose argv[0] starts with '-' - how login starts it - is a
+     * login shell too. */
+    bool login    = argv[0] && argv[0][0] == '-';
+    bool want_c   = false, want_i = false, want_s = false;
+    bool profiles = true;
+    for (; first < argc; first++) {
+        const char *a = argv[first];
+        if (strcmp(a, "-") == 0) { first++; want_s = true; break; }
+        if (strcmp(a, "--") == 0) { first++; break; }
+        if (a[0] != '-')
+            break;
+        if (a[1] == '-') {
+            if (strcmp(a, "--login") == 0)
+                login = true;
+            else if (strcmp(a, "--noprofile") == 0)
+                profiles = false;
+            else if (strcmp(a, "--norc") != 0) {
+                dprintf(STDERR_FILENO, "sh: %s: no such option\n", a);
+                return 2;
+            }
+            continue;
+        }
+        for (const char *f = a + 1; *f; f++) {
+            switch (*f) {
+            case 'q': quiet = true;       break;
+            case 'c': want_c = true;      break;
+            case 'l': login = true;       break;
+            case 'i': want_i = true;      break;
+            case 's': want_s = true;      break;
+            case 'e': opt_errexit = true; break;
+            case 'x': opt_xtrace = true;  break;
+            default:
+                dprintf(STDERR_FILENO, "sh: -%c: no such option\n", *f);
+                return 2;
+            }
+        }
+    }
 
     /* ── sh -c '<commands>' ──
      *
@@ -5571,20 +5623,32 @@ int main(int argc, char **argv)
      * inside whatever library was calling, a long way from the cause.
      *
      * Everything after the command string is $0, $1, ... which is what
-     * makes `sh -c 'echo $1' x y` behave the way it does everywhere
-     * else. Signals stay at their defaults: this is not an interactive
-     * shell, and a caller that sends SIGINT to what it started means it
-     * for the command. */
-    if (argc > first && strcmp(argv[first], "-c") == 0) {
-        if (argc <= first + 1) {
+     * makes `sh -c 'echo $1' x y` print y, as it does everywhere else
+     * (it printed x: the first word went to $1). Signals stay at their
+     * defaults: this is not an interactive shell, and a caller that
+     * sends SIGINT to what it started means it for the command. With
+     * -l (`$SHELL -lc '...'`, how programs ask for the login PATH) the
+     * profiles are read first, as bash and dash do. */
+    if (want_c) {
+        if (argc <= first) {
             dprintf(STDERR_FILENO, "sh: -c needs something to run\n");
             return 2;
         }
 
-        strlcpy(script_name, "sh", sizeof script_name);
+        strlcpy(script_name, argc > first + 1 ? argv[first + 1] : "sh",
+                sizeof script_name);
         shell_interactive = false;
         for (int i = first + 2; i < argc && pos_count < MAX_POSITIONAL; i++)
             strlcpy(pos_args[pos_count++], argv[i], 256);
+
+        if (login && profiles) {
+            const char *home = getenv("HOME");
+            char rc[512];
+            source_file("/etc/profile");
+            snprintf(rc, sizeof rc, "%s/.profile",
+                     (home && *home) ? home : HOME_DIR);
+            source_file(rc);
+        }
 
         /* The string may hold newlines AND semicolons, and both are
          * statement separators: `sh -c 'while true; do :; done'` is one
@@ -5607,7 +5671,7 @@ int main(int argc, char **argv)
          * `find` result away. Doing part of a destructive command is
          * the worst of the available outcomes. */
         char work[MAX_LINE];
-        if (strlcpy(work, argv[first + 1], sizeof work) >= sizeof work) {
+        if (strlcpy(work, argv[first], sizeof work) >= sizeof work) {
             dprintf(STDERR_FILENO,
                     "sh: -c: command is longer than %d bytes - refusing to"
                     " run part of it\n", MAX_LINE - 1);
@@ -5642,7 +5706,17 @@ int main(int argc, char **argv)
         return last_status;
     }
 
-    if (argc > first) {
+    if (want_s) {
+        /* -s: the commands come on standard input and every word left
+         * is $1, $2, ... A pipe is read as a script is; a terminal (or
+         * -i) still gets the prompt. */
+        for (int i = first; i < argc && pos_count < MAX_POSITIONAL; i++)
+            strlcpy(pos_args[pos_count++], argv[i], 256);
+        if (!want_i && !lp_isatty(STDIN_FILENO)) {
+            interactive = false;
+            shell_interactive = false;
+        }
+    } else if (argc > first) {
         long fd = lp_open(argv[first], O_RDONLY, 0);
         if (fd < 0) {
             if (quiet)
@@ -5665,7 +5739,15 @@ int main(int argc, char **argv)
 
     /* An interactive shell is somebody sitting at a terminal: start where
      * their files are, remember what they type, and know the machine's
-     * name for the prompt. A shell running /etc/rc gets none of this. */
+     * name for the prompt. A shell running /etc/rc gets none of this.
+     *
+     * "Where their files are" is home only when the shell was started
+     * nowhere in particular - at / (init, a terminal opened from the
+     * dock) or in a directory it cannot name. A program that opens a
+     * terminal in a folder means that folder: Claude's Code tab opens it
+     * in the project, a file manager in the folder on screen, and every
+     * one of them used to land in ~ instead. login has already gone home
+     * by itself. */
     static block_line_t block[MAX_BLOCK];
     int  nblock = 0;
 
@@ -5693,8 +5775,13 @@ int main(int argc, char **argv)
 
         read_hostname();
         hist_load();
-        if (lp_is_dir(home_dir()))
-            lp_chdir(home_dir());
+        {
+            char here[512];
+            bool nowhere = lp_getcwd(here, sizeof here) < 0 ||
+                           strcmp(here, "/") == 0;
+            if (nowhere && lp_is_dir(home_dir()))
+                lp_chdir(home_dir());
+        }
         {
             char cwd[512];
             if (lp_getcwd(cwd, sizeof cwd) >= 0)
@@ -5707,9 +5794,10 @@ int main(int argc, char **argv)
         alias_set("l", "ls");
 
         /* Read after chdir, so a profile that does something relative to
-         * the home directory means what it looks like it means. */
-        source_file("/etc/profile");
-        {
+         * the home directory means what it looks like it means.
+         * --noprofile skips both. */
+        if (profiles) {
+            source_file("/etc/profile");
             const char *home = getenv("HOME");
             char rc[512];
             snprintf(rc, sizeof rc, "%s/.profile",
